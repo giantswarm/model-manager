@@ -196,6 +196,36 @@ kserve:
     # -- ttlSecondsAfterFinished of download Jobs.
     jobTTL: 1h
   inventory:
+    # -- How the per-node cache contents are read. `pod`: a short-lived scan
+    # pod per cache node whenever the inventory is older than `ttl` (no
+    # long-running pods, but pod churn in the serving namespace). `daemonset`:
+    # the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the
+    # serving namespace running `model-manager cache-agent`, which mounts the
+    # cache claim read-only and serves its contents over HTTP; model-manager
+    # asks the agent on the node instead of creating pods. Requires
+    # `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart
+    # cannot read the discovery ConfigMap). Deletes still use a one-shot pod.
+    mode: pod
+    agent:
+      # -- Port the cache agent listens on.
+      port: 8081
+      # -- Node selector of the DaemonSet. A node-local cache claim (static
+      # local PV, local-path) can only be mounted on its node: select it.
+      nodeSelector: {}  # @schema additionalProperties: true
+      # -- Tolerations of the agent pods (GPU node taints).
+      tolerations: []  # @schema item: object ; itemProperties: {key: {type: string}, operator: {type: string}, value: {type: string}, effect: {type: string}, tolerationSeconds: {type: integer}}
+      # -- Resources of the agent container (a scan walks file metadata only).
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      # -- Annotations on the agent pods.
+      podAnnotations: {}  # @schema additionalProperties: true
+      # -- Extra labels on the agent pods.
+      podLabels: {}  # @schema additionalProperties: true
     # -- Image that creates cache directories (download Job init container)
     # and scans / cleans the cache (short-lived pods); needs sh, find, stat,
     # awk (busybox).
@@ -205,7 +235,7 @@ kserve:
       tag: 3.22.1
     # -- How long one cache scan is reused before a node is scanned again.
     ttl: 2m
-    # -- Time budget of one scan pod.
+    # -- Time budget of one scan (scan pod, or cache-agent request).
     timeout: 2m
   budget:
     # -- Node memory budget for fit checks: `auto` (GPU memory from the

@@ -302,6 +302,87 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                        "agent": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "nodeSelector": {
+                                    "type": "object",
+                                    "description": "Node selector of the DaemonSet. A node-local cache claim (static local PV, local-path) can only be mounted on its node: select it.",
+                                    "additionalProperties": true
+                                },
+                                "podAnnotations": {
+                                    "type": "object",
+                                    "description": "Annotations on the agent pods.",
+                                    "additionalProperties": true
+                                },
+                                "podLabels": {
+                                    "type": "object",
+                                    "description": "Extra labels on the agent pods.",
+                                    "additionalProperties": true
+                                },
+                                "port": {
+                                    "type": "integer",
+                                    "description": "Port the cache agent listens on."
+                                },
+                                "resources": {
+                                    "type": "object",
+                                    "description": "Resources of the agent container (a scan walks file metadata only).",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "limits": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "cpu": {
+                                                    "type": "string"
+                                                },
+                                                "memory": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        },
+                                        "requests": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "cpu": {
+                                                    "type": "string"
+                                                },
+                                                "memory": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "tolerations": {
+                                    "type": "array",
+                                    "description": "Tolerations of the agent pods (GPU node taints).",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {
+                                            "effect": {
+                                                "type": "string"
+                                            },
+                                            "key": {
+                                                "type": "string"
+                                            },
+                                            "operator": {
+                                                "type": "string"
+                                            },
+                                            "tolerationSeconds": {
+                                                "type": "integer"
+                                            },
+                                            "value": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         "image": {
                             "type": "object",
                             "description": "Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox).",
@@ -318,9 +399,13 @@
                                 }
                             }
                         },
+                        "mode": {
+                            "type": "string",
+                            "description": "How the per-node cache contents are read. `pod`: a short-lived scan pod per cache node whenever the inventory is older than `ttl` (no long-running pods, but pod churn in the serving namespace). `daemonset`: the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the serving namespace running `model-manager cache-agent`, which mounts the cache claim read-only and serves its contents over HTTP; model-manager asks the agent on the node instead of creating pods. Requires `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart cannot read the discovery ConfigMap). Deletes still use a one-shot pod."
+                        },
                         "timeout": {
                             "type": "string",
-                            "description": "Time budget of one scan pod."
+                            "description": "Time budget of one scan (scan pod, or cache-agent request)."
                         },
                         "ttl": {
                             "type": "string",

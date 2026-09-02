@@ -85,6 +85,11 @@ spec:
             - --kserve-init-image={{ $k.inventory.image.registry }}/{{ $k.inventory.image.name }}:{{ $k.inventory.image.tag }}
             - --kserve-inventory-ttl={{ $k.inventory.ttl }}
             - --kserve-inventory-timeout={{ $k.inventory.timeout }}
+            - --kserve-inventory-mode={{ $k.inventory.mode }}
+            {{- if eq $k.inventory.mode "daemonset" }}
+            - --kserve-inventory-agent-selector={{ include "model-manager.cacheAgentSelector" . }}
+            - --kserve-inventory-agent-port={{ $k.inventory.agent.port }}
+            {{- end }}
             - --kserve-budget-source={{ $k.budget.source }}
             - --kserve-default-overhead-gib={{ $k.budget.defaultOverheadGiB }}
             - --kserve-ready-timeout={{ $k.readyTimeout }}

@@ -792,4 +792,5 @@ components:
             bytesUsed: { type: integer, format: int64 }
             scannedAt: { type: string, format: date-time }
             shared: { type: boolean, description: network storage visible from every node }
-            error: { type: string, description: last scan failure; contents may be stale }
+            inventory: { type: string, enum: [pod, daemonset], description: how the contents were read — a short-lived scan pod on the node, or the cache-agent DaemonSet pod there (kserve.inventory.mode) }
+            error: { type: string, description: last scan failure (e.g. no cache-agent pod on the node); contents may be stale }

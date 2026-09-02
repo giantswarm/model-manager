@@ -82,12 +82,19 @@ cache claim and preset selector; the `ServingPreset` ConfigMaps
 PersistentVolumeClaim in the serving namespace. Every discovered value can be
 overridden by a flag (`model-manager serve --help`, `--kserve-*`).
 
-- **Inventory** — the cache contents per node (a short-lived pod mounts the
-  claim read-only and walks `<claim>/<dir>`; the node comes from the bound
-  PersistentVolume's node affinity) plus the InferenceServices of the serving
-  namespace (readiness from conditions/`modelStatus`, node from the predictor
-  pod, GPU request, predictor URL). `GET /api/v1/nodes` says which nodes hold a
-  cache at all and what their memory budget is.
+- **Inventory** — the cache contents per node plus the InferenceServices of
+  the serving namespace (readiness from conditions/`modelStatus`, node from the
+  predictor pod, GPU request, predictor URL). The cache is read in one of two
+  ways (`kserve.inventory.mode`): a **short-lived scan pod** per cache node
+  mounts the claim read-only and walks `<claim>/<dir>` whenever the inventory
+  is older than the TTL (default), or a **DaemonSet** of `model-manager
+  cache-agent` pods (same image) mounts the claim on each selected node and
+  serves the same walk at `GET /inventory`, which model-manager reads from
+  the agent on the node — no pod churn, and `nodes[].cache.inventory` says
+  which mode produced the numbers. A node without a ready agent reports
+  `cache.error`. The node holding the cache comes from the bound
+  PersistentVolume's node affinity. `GET /api/v1/nodes` says which nodes hold
+  a cache at all and what their memory budget is.
 - **Import** — `search` proxies the Hugging Face Hub; `fit-check` resolves the
   weight size (`model.safetensors.index.json`, else the file tree, else the
   preset), adds the preset's `overheadGiB` (default 30) and compares with the
@@ -120,6 +127,18 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   model-manager created or that carry the `agent-platform.giantswarm.io/preset`
   label (the portal's serve flow) can be unloaded here; hand-written ones are
   inventory only (`409 conflict` on unload; `managedBy` says who owns them).
+
+## Jobs, restarts and replicas
+
+Jobs (`GET /api/v1/jobs`) live in process memory: the chart runs one replica
+and clients poll one server. A restart loses the job list, not the work —
+kserve pulls are Kubernetes Jobs that model-manager re-adopts on start
+(`GET /api/v1/jobs` lists them again as running pulls), a kserve `load` is
+recovered by the reconcile loop that wires ready InferenceServices without a
+job, and an ollama pull simply is re-issued (Ollama resumes the layers it has).
+A persistent job store is deliberately not built until a second replica or a
+job history across restarts is needed; until then, treat the job list as a
+progress view, and the backend (Jobs, InferenceServices, Ollama) as the truth.
 
 ## Running
 

@@ -43,8 +43,15 @@ can stay empty.
   overrides one node's budget, e.g. a unified-memory node without GPU memory
   labels). Gated repositories need `kserve.hf.tokenSecret` (a Secret in the
   serving namespace).
-- The cache inventory runs a short-lived pod per cache node
-  (`kserve.inventory.*`); results are reused for `kserve.inventory.ttl`.
+- The cache inventory (`kserve.inventory.*`) reads each cache node either with
+  a short-lived scan pod (`mode: pod`, the default; results are reused for
+  `kserve.inventory.ttl`) or, with `mode: daemonset`, through a DaemonSet in
+  the serving namespace that runs `model-manager cache-agent` — the same
+  image, mounting the claim read-only and serving its contents over HTTP — so
+  no pods are created per read. Daemonset mode needs `kserve.cache.claimName`
+  and usually `kserve.inventory.agent.nodeSelector` (a node-local claim mounts
+  on its node only); `networkPolicy.enabled` then also allows model-manager →
+  agent traffic. Deletes keep using a one-shot pod.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
   discovery/preset namespace when it differs, and a ClusterRole for nodes and
   PersistentVolumes.

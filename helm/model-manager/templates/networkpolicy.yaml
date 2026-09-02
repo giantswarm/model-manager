@@ -50,4 +50,47 @@ spec:
         - ipBlock:
             cidr: {{ . }}
     {{- end }}
+    {{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+    # The cache-agent pods of the DaemonSet inventory, in the serving namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "model-manager.kserveNamespace" . }}
+          podSelector:
+            matchLabels:
+              {{- include "model-manager.cacheAgentSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.kserve.inventory.agent.port }}
+    {{- end }}
+{{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+---
+# The cache-agent pods accept model-manager only (kubelet probes come from
+# the node and are not subject to NetworkPolicy in the common implementations).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "model-manager.fullname" . }}-cache-agent
+  namespace: {{ include "model-manager.kserveNamespace" . }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-agent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "model-manager.cacheAgentSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "model-manager.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.kserve.inventory.agent.port }}
+{{- end }}
 {{- end }}
