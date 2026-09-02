@@ -10,7 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/giantswarm/model-manager/internal/backend"
 )
 
 func TestDNSLabelAndRevisions(t *testing.T) {
@@ -218,4 +221,26 @@ func TestBudgetOfAnnotationWinsOverEverySource(t *testing.T) {
 	nb := budgetOf(n, DefaultGPUResourceName, budgetSourceAllocatable)
 	assert.Equal(t, budgetSourceAllocatable, nb.BudgetSource, "infinite values are ignored")
 	assert.Contains(t, nb.Message, "1e400")
+}
+
+// pssBaselineCapabilities is the Pod Security "baseline" allow-list of added
+// capabilities; the serving namespace commonly enforces that profile.
+var pssBaselineCapabilities = map[corev1.Capability]bool{
+	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
+	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "SETFCAP": true, "SETGID": true,
+	"SETPCAP": true, "SETUID": true, "SYS_CHROOT": true,
+}
+
+func TestCachePodStaysWithinPodSecurityBaseline(t *testing.T) {
+	b := &Backend{opts: backend.KServeOptions{InitImage: "alpine:3"}}
+	pod := b.cachePod("scan", settings{Namespace: "serving"}, "node-a", "true", true)
+	for _, c := range pod.Spec.Containers {
+		require.NotNil(t, c.SecurityContext)
+		require.NotNil(t, c.SecurityContext.Capabilities)
+		assert.Equal(t, []corev1.Capability{"ALL"}, c.SecurityContext.Capabilities.Drop)
+		for _, cap := range c.SecurityContext.Capabilities.Add {
+			assert.True(t, pssBaselineCapabilities[cap], "capability %s is not allowed by the baseline profile", cap)
+		}
+		assert.False(t, *c.SecurityContext.AllowPrivilegeEscalation)
+	}
 }
