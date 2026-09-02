@@ -70,11 +70,19 @@ type Capabilities struct {
 
 // Info is the backend identity and health as reported by the driver.
 type Info struct {
-	Backend  Name   `json:"backend"`
-	Version  string `json:"version,omitempty"`
+	Backend Name   `json:"backend"`
+	Version string `json:"version,omitempty"`
+	// Endpoint is the backend as reached by model-manager.
 	Endpoint string `json:"endpoint,omitempty"`
-	Healthy  bool   `json:"healthy"`
-	Message  string `json:"message,omitempty"`
+	// AgentEndpoint is the backend as reached by agent pods — the host the
+	// driver writes into ModelConfigs (ollama: the agent host, which may
+	// differ from Endpoint). Empty when the backend has no single agent-facing
+	// endpoint (kserve: every served model has its own predictor URL).
+	// Clients that match ModelConfigs to models by hostname compare against
+	// this, not Endpoint.
+	AgentEndpoint string `json:"agentEndpoint,omitempty"`
+	Healthy       bool   `json:"healthy"`
+	Message       string `json:"message,omitempty"`
 }
 
 // Model is a downloaded model in the backend's inventory.

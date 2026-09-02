@@ -33,8 +33,9 @@ ollama:
   # network gateway (for example http://172.21.0.1:11434 — agentlab sets it);
   # Docker Desktop resolves host.docker.internal.
   endpoint: http://host.docker.internal:11434
-  # -- Ollama host written into kagent ModelConfigs, as reached by agent pods.
-  # Empty means the same as `ollama.endpoint`.
+  # -- Ollama host written into kagent ModelConfigs, as reached by agent pods;
+  # reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same
+  # as `ollama.endpoint`.
   agentHost: ""
 
 kagent:
