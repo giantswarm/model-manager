@@ -27,6 +27,7 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.True(t, info.Healthy, info.Message)
 	assert.Equal(t, "serving.kserve.io/v1beta1", info.Version)
 	assert.Contains(t, info.Endpoint, testServingNS)
+	assert.Empty(t, info.AgentEndpoint, "no single agent-facing endpoint: every served model has its own predictor URL")
 	assert.Empty(t, info.Message, "discovery found")
 
 	s := f.b.cfg.settings(ctx)

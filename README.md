@@ -64,6 +64,14 @@ Capability flags: `pull`, `pullProgress`, `delete`, `load`, `unload`,
 `loadedModels`, `wire` (Kubernetes access present), `presets`, `fitCheck`,
 `nodeInventory`, `search` (the last four are kserve concerns and false on ollama).
 
+`GET /api/v1/backend` reports two addresses: `endpoint`, the backend as
+model-manager dials it, and `agentEndpoint`, the backend as **agent pods** dial
+it — the host written into ModelConfigs (ollama: `--ollama-agent-host`,
+defaulting to the endpoint). A client that matches ModelConfigs it did not
+create to models by hostname (the portal's "Used by") compares against
+`agentEndpoint`. kserve omits it: every served model has its own predictor URL
+(`running.endpoint`, `modelConfig.endpoint`).
+
 ## The kserve backend
 
 The driver consumes the `modelServing` contract of `agent-platform-standalone`:

@@ -175,6 +175,8 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.True(t, info.Healthy)
 	assert.Equal(t, "0.33.2", info.Version)
 	assert.Equal(t, backend.NameOllama, info.Backend)
+	assert.Equal(t, "http://172.21.0.1:11434", info.AgentEndpoint, "the host agents dial, as written into ModelConfigs")
+	assert.NotEqual(t, info.Endpoint, info.AgentEndpoint, "model-manager and agents dial different addresses here")
 	caps := b.Capabilities()
 	assert.True(t, caps.Pull && caps.PullProgress && caps.Delete && caps.Load && caps.Unload && caps.LoadedModels)
 	assert.False(t, caps.Presets || caps.FitCheck || caps.NodeInventory || caps.Search, "kserve-only flags stay off")
@@ -187,6 +189,7 @@ func TestInfoUnhealthy(t *testing.T) {
 	info := b.Info(context.Background())
 	assert.False(t, info.Healthy)
 	assert.NotEmpty(t, info.Message)
+	assert.Equal(t, "http://127.0.0.1:1", info.AgentEndpoint, "agent endpoint defaults to the endpoint and is reported even when Ollama is down")
 }
 
 func TestListAndGetModels(t *testing.T) {

@@ -486,7 +486,7 @@
             "properties": {
                 "agentHost": {
                     "type": "string",
-                    "description": "Ollama host written into kagent ModelConfigs, as reached by agent pods. Empty means the same as `ollama.endpoint`."
+                    "description": "Ollama host written into kagent ModelConfigs, as reached by agent pods; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `ollama.endpoint`."
                 },
                 "endpoint": {
                     "type": "string",

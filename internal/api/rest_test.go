@@ -43,7 +43,7 @@ func newFakeBackend() *fakeBackend {
 func (f *fakeBackend) Name() backend.Name                 { return backend.NameOllama }
 func (f *fakeBackend) Capabilities() backend.Capabilities { return f.caps }
 func (f *fakeBackend) Info(context.Context) backend.Info {
-	return backend.Info{Backend: backend.NameOllama, Version: "fake", Endpoint: "http://fake:11434", Healthy: true}
+	return backend.Info{Backend: backend.NameOllama, Version: "fake", Endpoint: "http://fake:11434", AgentEndpoint: "http://172.21.0.1:11434", Healthy: true}
 }
 func (f *fakeBackend) ListModels(context.Context) ([]backend.Model, error) {
 	f.mu.Lock()
@@ -245,6 +245,8 @@ func TestBackendEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "ollama", body["backend"])
 	assert.Equal(t, true, body["healthy"])
+	assert.Equal(t, "http://fake:11434", body["endpoint"])
+	assert.Equal(t, "http://172.21.0.1:11434", body["agentEndpoint"], "the host agents dial is reported next to the one model-manager dials")
 	caps := body["capabilities"].(map[string]any)
 	assert.Equal(t, true, caps["pull"])
 	assert.Equal(t, true, caps["wire"])

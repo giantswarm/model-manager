@@ -72,7 +72,11 @@ paths:
   /api/v1/backend:
     get:
       tags: [backend]
-      summary: Backend identity, health and capability flags
+      summary: Backend identity, health, capability flags and endpoints
+      description: |
+        `endpoint` is the backend as model-manager dials it; `agentEndpoint`
+        the backend as agent pods dial it (what ModelConfigs point at), when
+        the backend has one. Render controls per capability flag.
       operationId: getBackend
       x-mcp-tool: get_backend
       responses:
@@ -573,6 +577,16 @@ components:
           enum: [ollama, kserve]
         version: { type: string, description: backend server version }
         endpoint: { type: string, description: backend endpoint as reached by model-manager }
+        agentEndpoint:
+          type: string
+          description: |
+            Backend endpoint as reached by agent pods — the host written into
+            ModelConfigs (ollama: `--ollama-agent-host`, defaulting to
+            `endpoint`). Clients that match ModelConfigs to models by hostname
+            compare against this, not `endpoint`. Absent when the backend has
+            no single agent-facing endpoint (kserve: every served model has its
+            own predictor URL in `running.endpoint` / `modelConfig.endpoint`).
+          example: http://172.21.0.1:11434
         healthy: { type: boolean }
         message: { type: string }
         capabilities: { $ref: "#/components/schemas/Capabilities" }

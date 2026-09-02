@@ -79,9 +79,10 @@ func (b *Backend) Capabilities() backend.Capabilities {
 	}
 }
 
-// Info implements backend.Backend.
+// Info implements backend.Backend. AgentEndpoint is the host agents dial (the
+// one written into ModelConfigs), Endpoint the one model-manager dials.
 func (b *Backend) Info(ctx context.Context) backend.Info {
-	info := backend.Info{Backend: backend.NameOllama, Endpoint: b.endpoint}
+	info := backend.Info{Backend: backend.NameOllama, Endpoint: b.endpoint, AgentEndpoint: b.agentHost}
 	v, err := b.client.Version(ctx)
 	if err != nil {
 		info.Message = err.Error()
