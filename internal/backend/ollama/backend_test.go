@@ -181,6 +181,8 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.Equal(t, backend.NameOllama, info.Backend)
 	assert.Equal(t, "http://172.21.0.1:11434", info.AgentEndpoint, "the host agents dial, as written into ModelConfigs")
 	assert.NotEqual(t, info.Endpoint, info.AgentEndpoint, "model-manager and agents dial different addresses here")
+	assert.Equal(t, backend.Loading{OnDemand: true, IdleEviction: true, KeepAliveDefault: DefaultKeepAlive, KeepAliveScope: backend.KeepAliveScopeRequest}, info.Loading,
+		"ollama loads on the first request, evicts idle models, and every request re-arms the keep-alive")
 	caps := b.Capabilities()
 	assert.True(t, caps.Pull && caps.PullProgress && caps.Delete && caps.Load && caps.Unload && caps.LoadedModels)
 	assert.True(t, caps.NodeInventory, "the proxied host is reported as a node")
@@ -195,6 +197,7 @@ func TestInfoUnhealthy(t *testing.T) {
 	assert.False(t, info.Healthy)
 	assert.NotEmpty(t, info.Message)
 	assert.Equal(t, "http://127.0.0.1:1", info.AgentEndpoint, "agent endpoint defaults to the endpoint and is reported even when Ollama is down")
+	assert.True(t, info.Loading.OnDemand && info.Loading.IdleEviction, "load semantics are a property of the driver, not of its health")
 }
 
 func TestListAndGetModels(t *testing.T) {

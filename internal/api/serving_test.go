@@ -58,6 +58,7 @@ func (f *fakeServing) ListLoaded(ctx context.Context) ([]backend.LoadedModel, er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range loaded {
+		loaded[i].ExpiresAt = nil // kserve knows no keep-alive
 		loaded[i].Status = "Pending"
 		if f.ready[loaded[i].Name] {
 			loaded[i].Status = "Ready"
@@ -161,6 +162,11 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	status, body := f.do(t, http.MethodGet, Prefix+"/backend", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "kserve", body["backend"])
+	loading := body["loading"].(map[string]any)
+	assert.Equal(t, false, loading["onDemand"], "a stopped InferenceService does not come back on request")
+	assert.Equal(t, false, loading["idleEviction"], "a running InferenceService stays until unloaded")
+	assert.NotContains(t, loading, "keepAliveDefault", "no keep-alive on kserve")
+	assert.NotContains(t, loading, "keepAliveScope", "no keep-alive on kserve")
 	caps := body["capabilities"].(map[string]any)
 	for _, flag := range []string{"presets", "fitCheck", "nodeInventory", "search", "wire"} {
 		assert.Equal(t, true, caps[flag], flag)

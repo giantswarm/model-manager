@@ -72,11 +72,14 @@ paths:
   /api/v1/backend:
     get:
       tags: [backend]
-      summary: Backend identity, health, capability flags and endpoints
+      summary: Backend identity, health, capability flags, endpoints and load semantics
       description: |
         `endpoint` is the backend as model-manager dials it; `agentEndpoint`
         the backend as agent pods dial it (what ModelConfigs point at), when
-        the backend has one. Render controls per capability flag.
+        the backend has one. Render controls per capability flag. `loading`
+        says how the backend brings models into memory and lets them go —
+        use it to word a not-loaded model ("loads on first request" versus
+        "not serving"), never the backend name.
       operationId: getBackend
       x-mcp-tool: get_backend
       responses:
@@ -227,7 +230,13 @@ paths:
       tags: [models]
       summary: Load a model into memory / start serving it
       description: |
-        ollama: a keep-alive load. kserve: fit-checks the model, composes an
+        ollama: a keep-alive load that pre-warms the model — Ollama re-arms
+        the eviction timer on every later request with that request's own
+        keep-alive (or the server's `OLLAMA_KEEP_ALIVE` when it sends none),
+        so the `keepAlive` given here holds only until the next inference
+        request (`loading.keepAliveScope: request`). The response is the
+        loaded model with `running.expiresAt`, the deadline Ollama reports
+        right after the load. kserve: fit-checks the model, composes an
         InferenceService from the preset (the only way to serve on kserve) and
         creates it; the response has `loaded=true` with `running.status`
         `Pending` until the predictor is ready, and a `load` job (see
@@ -245,7 +254,11 @@ paths:
                 model: { type: string, description: model reference; required unless preset is given }
                 keepAlive:
                   type: string
-                  description: ollama keep-alive after the last request (duration such as 10m; -1 = forever). Default = server default (5m).
+                  description: |
+                    ollama keep-alive after this load (duration such as 10m; -1 = forever).
+                    Default = model-manager's `--default-keep-alive`, reported as
+                    `loading.keepAliveDefault`. Later inference requests replace it
+                    with their own keep-alive.
                 preset:
                   type: string
                   description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
@@ -254,7 +267,7 @@ paths:
                   description: kserve — pin the predictor to this node.
       responses:
         "200":
-          description: model after load (loaded=true)
+          description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; kserve with `status` Pending)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Model" }
@@ -594,7 +607,7 @@ components:
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
-      required: [backend, healthy, capabilities]
+      required: [backend, healthy, capabilities, loading]
       properties:
         backend:
           type: string
@@ -614,6 +627,7 @@ components:
         healthy: { type: boolean }
         message: { type: string }
         capabilities: { $ref: "#/components/schemas/Capabilities" }
+        loading: { $ref: "#/components/schemas/Loading" }
         wiring:
           type: object
           description: present when wire=true
@@ -621,6 +635,41 @@ components:
             namespace: { type: string }
             apiVersion: { type: string, example: v1alpha2 }
             autoWire: { type: boolean }
+    Loading:
+      type: object
+      description: |
+        How the backend brings models into memory and lets them go. A client
+        explains a not-loaded model from these flags — "loads on first
+        request" when `onDemand`, "not serving, agents fail" when not — and
+        never from the backend name. ollama: `onDemand` and `idleEviction`
+        true, `keepAliveScope: request`. kserve: both false, no keep-alive
+        fields. Older model-managers omit the block: treat that as unknown.
+      required: [onDemand, idleEviction]
+      properties:
+        onDemand:
+          type: boolean
+          description: the backend loads a model on the first inference request naming it (ollama); false means it must be loaded / served explicitly before agents can use it (kserve)
+        idleEviction:
+          type: boolean
+          description: the backend evicts idle models on its own (ollama keep-alive); false means a loaded model stays until unloaded (kserve)
+        keepAliveDefault:
+          type: string
+          description: |
+            model-manager's default keep-alive for `POST /api/v1/models/load`
+            when the request carries none (the configured
+            `--default-keep-alive`). NOT the host's own default for inference
+            traffic (Ollama's `OLLAMA_KEEP_ALIVE`, 5m unless set) — that is not
+            observable through the API, and it is what agent requests re-arm.
+            Absent when the backend has no keep-alive.
+          example: 5m
+        keepAliveScope:
+          type: string
+          enum: [request, server]
+          description: |
+            `request` — every inference request re-arms the eviction timer with
+            its own keep-alive, or the server default when it sends none, so a
+            Load only pre-warms (ollama). `server` — a fixed server-side timer
+            requests do not change. Absent when the backend has no keep-alive.
     Model:
       type: object
       required: [name, sizeBytes, loaded]
@@ -793,7 +842,7 @@ components:
         budgetBytes: { type: integer, format: int64 }
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo], description: how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node; `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama) }
         message: { type: string, description: a budget derivation note — an ignored, unparsable budget annotation (kserve), or what the host figures mean and whether /proc/meminfo could be read (ollama) }
-        reservedBytes: { type: integer, format: int64, description: memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps) }
+        reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps)" }
         freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
         cache:
           type: object

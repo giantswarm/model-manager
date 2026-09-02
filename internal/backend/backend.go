@@ -70,6 +70,41 @@ type Capabilities struct {
 	Search bool `json:"search"`
 }
 
+// Keep-alive scopes a driver reports in Loading.KeepAliveScope.
+const (
+	// KeepAliveScopeRequest means every inference request re-arms the
+	// eviction timer with its own keep-alive — or the server's default when
+	// it sends none — so a Load only pre-warms (ollama).
+	KeepAliveScopeRequest = "request"
+	// KeepAliveScopeServer means the eviction timer is fixed server-side and
+	// requests do not change it.
+	KeepAliveScopeServer = "server"
+)
+
+// Loading describes how the backend brings models into memory and lets them
+// go. Clients need it to explain a not-loaded model — "loads on the first
+// request" versus "not serving, agents will fail" — without keying off the
+// backend name.
+type Loading struct {
+	// OnDemand is true when the backend loads a model on the first inference
+	// request naming it (ollama): agents work on a not-loaded model, the first
+	// turn pays the cold start. False means a model must be loaded / served
+	// explicitly before agents can use it (kserve).
+	OnDemand bool `json:"onDemand"`
+	// IdleEviction is true when the backend evicts idle models on its own
+	// (ollama keep-alive). False means a loaded model stays until unloaded.
+	IdleEviction bool `json:"idleEviction"`
+	// KeepAliveDefault is model-manager's default keep-alive for a Load
+	// request that carries none (ollama, the configured --default-keep-alive).
+	// It is NOT the backend's own default for inference traffic (Ollama's
+	// OLLAMA_KEEP_ALIVE), which the API cannot observe. Empty when the
+	// backend has no keep-alive.
+	KeepAliveDefault string `json:"keepAliveDefault,omitempty"`
+	// KeepAliveScope says whose keep-alive wins: KeepAliveScopeRequest or
+	// KeepAliveScopeServer. Empty when the backend has no keep-alive.
+	KeepAliveScope string `json:"keepAliveScope,omitempty"`
+}
+
 // Info is the backend identity and health as reported by the driver.
 type Info struct {
 	Backend Name   `json:"backend"`
@@ -85,6 +120,9 @@ type Info struct {
 	AgentEndpoint string `json:"agentEndpoint,omitempty"`
 	Healthy       bool   `json:"healthy"`
 	Message       string `json:"message,omitempty"`
+	// Loading is how the backend loads and evicts models; always reported,
+	// health does not change it.
+	Loading Loading `json:"loading"`
 }
 
 // Model is a downloaded model in the backend's inventory.

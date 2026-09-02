@@ -36,7 +36,7 @@ decision log.
 
 | Operation | REST | MCP tool |
 |---|---|---|
-| Backend identity + capabilities | `GET /api/v1/backend` | `get_backend` |
+| Backend identity, capabilities + load semantics | `GET /api/v1/backend` | `get_backend` |
 | Downloaded models (with loaded state + ModelConfig) | `GET /api/v1/models`, `GET /api/v1/models/{name}` | `list_models`, `get_model` |
 | Loaded / running models | `GET /api/v1/loaded` | `list_loaded_models` |
 | Pull / import (returns a job) | `POST /api/v1/models/pull {"model","wire?"}` | `pull_model` |
@@ -86,6 +86,40 @@ each model's own share stays in `running.vramBytes`. There is no `gpuCount`,
 store is not a node cache. Caveat: the pod reads the kernel it runs on. On kind
 or any install sharing the machine's kernel that is the machine's RAM; under a
 VM-backed container runtime (Docker Desktop, Podman machine) it is the VM's.
+
+## Load semantics: on-demand load and keep-alive
+
+`GET /api/v1/backend` also carries a `loading` block so a client can word a
+not-loaded model correctly without keying off the backend name:
+
+```json
+"loading": { "onDemand": true, "idleEviction": true, "keepAliveDefault": "5m", "keepAliveScope": "request" }
+```
+
+- **ollama** — `onDemand: true`: Ollama loads a model on the first `/api/chat`
+  (or `/api/generate`) that names it, so an agent whose ModelConfig points at a
+  not-loaded model works and its first turn pays the cold start. "Not loaded"
+  is idle, not broken. `idleEviction: true`: Ollama evicts a model when its
+  keep-alive runs out. `keepAliveScope: request`: the keep-alive is set **per
+  request** — Ollama's scheduler takes each request's `keep_alive`, else the
+  server's `OLLAMA_KEEP_ALIVE` (5m unless set), and re-arms the runner's timer
+  on every hit. kagent's Ollama provider sends no `keep_alive`, so every agent
+  turn re-arms the **server default**. `POST /api/v1/models/load` (a generate
+  call with `keep_alive`, default `--default-keep-alive` /
+  `MODEL_MANAGER_DEFAULT_KEEP_ALIVE`, reported as `keepAliveDefault`) therefore
+  only **pre-warms**: it answers with the loaded model and `running.expiresAt`
+  — the deadline Ollama reports right then — and the next agent request resets
+  the timer to the server default again, even after a load with `-1`.
+- **kserve** — `onDemand: false`, `idleEviction: false`, no keep-alive fields:
+  a stopped InferenceService does not come back on request, agents on its
+  ModelConfig fail at their first turn, and a running one stays until unloaded.
+
+The knob that changes what agents experience on Ollama is host-side, not a
+model-manager flag: set `OLLAMA_KEEP_ALIVE=30m` (or `-1` for never) in the
+Ollama service environment — the systemd unit's `Environment=` on Linux —
+and restart Ollama. `keepAliveDefault` is model-manager's default for its own
+load requests; the host's `OLLAMA_KEEP_ALIVE` is not observable through the
+API, which is why the block does not claim to report it.
 
 ## The kserve backend
 
