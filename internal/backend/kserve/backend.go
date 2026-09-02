@@ -119,6 +119,9 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		Backend:  backend.NameKServe,
 		Version:  isvcGVR.Group + "/" + isvcGVR.Version,
 		Endpoint: fmt.Sprintf("%s.%s/%s", isvcGVR.Resource, isvcGVR.Group, s.Namespace),
+		// An InferenceService serves only while it exists: nothing loads a
+		// stopped model on request and nothing evicts a running one.
+		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
 	}
 	if _, err := b.dyn.Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		info.Message = fmt.Sprintf("InferenceService API not available in %s: %v", s.Namespace, err)

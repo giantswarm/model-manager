@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/jobs"
@@ -27,23 +29,35 @@ type fakeBackend struct {
 	mu     sync.Mutex
 	models map[string]backend.Model
 	loaded map[string]bool
-	caps   backend.Capabilities
+	// expires is the keep-alive deadline of a loaded model, as Ollama's
+	// /api/ps reports it.
+	expires map[string]time.Time
+	caps    backend.Capabilities
 	// pullBlock, when set, holds pulls until closed (for cancel tests).
 	pullBlock chan struct{}
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
-		models: map[string]backend.Model{},
-		loaded: map[string]bool{},
-		caps:   backend.Capabilities{Pull: true, PullProgress: true, Delete: true, Load: true, Unload: true, LoadedModels: true},
+		models:  map[string]backend.Model{},
+		loaded:  map[string]bool{},
+		expires: map[string]time.Time{},
+		caps:    backend.Capabilities{Pull: true, PullProgress: true, Delete: true, Load: true, Unload: true, LoadedModels: true},
 	}
 }
+
+// fakeDriverKeepAlive is the fake driver's own fallback keep-alive; it differs
+// from the fixture's configured default on purpose so tests can tell which one
+// the API reports.
+const fakeDriverKeepAlive = "1m"
 
 func (f *fakeBackend) Name() backend.Name                 { return backend.NameOllama }
 func (f *fakeBackend) Capabilities() backend.Capabilities { return f.caps }
 func (f *fakeBackend) Info(context.Context) backend.Info {
-	return backend.Info{Backend: backend.NameOllama, Version: "fake", Endpoint: "http://fake:11434", AgentEndpoint: "http://172.21.0.1:11434", Healthy: true}
+	return backend.Info{
+		Backend: backend.NameOllama, Version: "fake", Endpoint: "http://fake:11434", AgentEndpoint: "http://172.21.0.1:11434", Healthy: true,
+		Loading: backend.Loading{OnDemand: true, IdleEviction: true, KeepAliveDefault: fakeDriverKeepAlive, KeepAliveScope: backend.KeepAliveScopeRequest},
+	}
 }
 func (f *fakeBackend) ListModels(context.Context) ([]backend.Model, error) {
 	f.mu.Lock()
@@ -68,7 +82,11 @@ func (f *fakeBackend) ListLoaded(context.Context) ([]backend.LoadedModel, error)
 	defer f.mu.Unlock()
 	out := []backend.LoadedModel{}
 	for name := range f.loaded {
-		out = append(out, backend.LoadedModel{Name: name, SizeBytes: f.models[name].SizeBytes, Status: "loaded"})
+		lm := backend.LoadedModel{Name: name, SizeBytes: f.models[name].SizeBytes, Status: "loaded"}
+		if exp, ok := f.expires[name]; ok {
+			lm.ExpiresAt = &exp
+		}
+		out = append(out, lm)
 	}
 	return out, nil
 }
@@ -98,18 +116,25 @@ func (f *fakeBackend) Delete(_ context.Context, name string) error {
 	}
 	delete(f.models, name)
 	delete(f.loaded, name)
+	delete(f.expires, name)
 	return nil
 }
 func (f *fakeBackend) Load(_ context.Context, req backend.LoadRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loaded[req.Name] = true
+	// A parseable keep-alive yields a deadline as Ollama's /api/ps would
+	// report it; anything else (kserve paths, -1) leaves none.
+	if keepAlive, err := time.ParseDuration(req.KeepAlive); err == nil && keepAlive > 0 {
+		f.expires[req.Name] = time.Now().Add(keepAlive).Truncate(time.Second)
+	}
 	return nil
 }
 func (f *fakeBackend) Unload(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.loaded, name)
+	delete(f.expires, name)
 	return nil
 }
 func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
@@ -247,6 +272,11 @@ func TestBackendEndpoint(t *testing.T) {
 	assert.Equal(t, true, body["healthy"])
 	assert.Equal(t, "http://fake:11434", body["endpoint"])
 	assert.Equal(t, "http://172.21.0.1:11434", body["agentEndpoint"], "the host agents dial is reported next to the one model-manager dials")
+	loading := body["loading"].(map[string]any)
+	assert.Equal(t, true, loading["onDemand"], "ollama loads a model on the first request naming it")
+	assert.Equal(t, true, loading["idleEviction"], "ollama evicts idle models on its own")
+	assert.Equal(t, "request", loading["keepAliveScope"], "every request re-arms the keep-alive")
+	assert.Equal(t, "5m", loading["keepAliveDefault"], "the configured --default-keep-alive is reported, not the driver's fallback")
 	caps := body["capabilities"].(map[string]any)
 	assert.Equal(t, true, caps["pull"])
 	assert.Equal(t, true, caps["wire"])
@@ -268,6 +298,23 @@ func TestOpenAPIServed(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "yaml")
+
+	// The document must parse: an unquoted `key: value` inside a flow mapping
+	// silently breaks every client that reads the served spec.
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Required   []string                  `json:"required"`
+				Properties map[string]map[string]any `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, yaml.Unmarshal(body, &doc), "served openapi.yaml is not valid YAML")
+	assert.Contains(t, doc.Components.Schemas["Backend"].Required, "loading", "loading is required on Backend")
+	assert.Contains(t, doc.Components.Schemas["Loading"].Properties, "keepAliveScope")
+	assert.Contains(t, doc.Components.Schemas, "NodeInfo")
 }
 
 func TestPullFlowWiresAndEnrichesInventory(t *testing.T) {
@@ -364,7 +411,11 @@ func TestLoadUnloadDelete(t *testing.T) {
 	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "qwen3:0.6b", "keepAlive": "10m"})
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Equal(t, true, body["loaded"])
-	assert.NotNil(t, body["running"])
+	running := body["running"].(map[string]any)
+	assert.Equal(t, "qwen3:0.6b", running["name"], "load answers with the loaded entry")
+	expiresAt, err := time.Parse(time.RFC3339, running["expiresAt"].(string))
+	require.NoError(t, err, "the keep-alive deadline is on the load response, so a client can show 'until …' right away")
+	assert.WithinDuration(t, time.Now().Add(10*time.Minute), expiresAt, time.Minute)
 	assert.Equal(t, "qwen3-0-6b", body["modelConfig"].(map[string]any)["name"], "load auto-wires")
 
 	status, body = f.do(t, http.MethodGet, Prefix+"/loaded", nil)

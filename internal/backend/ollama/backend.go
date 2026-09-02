@@ -18,10 +18,24 @@ import (
 )
 
 const (
-	// DefaultKeepAlive is Ollama's own default idle timeout.
+	// DefaultKeepAlive is the driver's fallback keep-alive for a Load without
+	// one; it mirrors Ollama's own default idle timeout. The service replaces
+	// it with the configured --default-keep-alive.
 	DefaultKeepAlive = "5m"
 	latestTag        = ":latest"
 )
+
+// loading is how Ollama manages memory: a model is loaded by the first
+// /api/chat or /api/generate that names it, and evicted when its keep-alive
+// runs out. The keep-alive is taken from each request (keep_alive, else the
+// server's OLLAMA_KEEP_ALIVE) and re-armed on every hit, so a Load with a
+// long keep-alive is overridden by the next agent turn: it pre-warms only.
+var loading = backend.Loading{
+	OnDemand:         true,
+	IdleEviction:     true,
+	KeepAliveDefault: DefaultKeepAlive,
+	KeepAliveScope:   backend.KeepAliveScopeRequest,
+}
 
 // Backend is the ollama driver.
 type Backend struct {
@@ -87,7 +101,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 // Info implements backend.Backend. AgentEndpoint is the host agents dial (the
 // one written into ModelConfigs), Endpoint the one model-manager dials.
 func (b *Backend) Info(ctx context.Context) backend.Info {
-	info := backend.Info{Backend: backend.NameOllama, Endpoint: b.endpoint, AgentEndpoint: b.agentHost}
+	info := backend.Info{Backend: backend.NameOllama, Endpoint: b.endpoint, AgentEndpoint: b.agentHost, Loading: loading}
 	v, err := b.client.Version(ctx)
 	if err != nil {
 		info.Message = err.Error()
@@ -209,6 +223,8 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 
 // Load implements backend.Backend: a generate call with a positive keep_alive
 // loads the model and keeps it resident for that long after the last request.
+// It pre-warms only — every later request re-arms the timer with its own
+// keep-alive (see loading).
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)

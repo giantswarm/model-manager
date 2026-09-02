@@ -37,6 +37,7 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.Contains(t, info.Endpoint, testServingNS)
 	assert.Empty(t, info.AgentEndpoint, "no single agent-facing endpoint: every served model has its own predictor URL")
 	assert.Empty(t, info.Message, "discovery found")
+	assert.Equal(t, backend.Loading{}, info.Loading, "kserve: nothing loads a stopped InferenceService on request, nothing evicts a running one, no keep-alive")
 
 	s := f.b.cfg.settings(ctx)
 	assert.True(t, s.DiscoveryFound)

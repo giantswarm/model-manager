@@ -105,6 +105,11 @@ func (s *Service) Capabilities() backend.Capabilities {
 // Backend reports identity, health and capabilities.
 func (s *Service) Backend(ctx context.Context) BackendResponse {
 	resp := BackendResponse{Info: s.backend.Info(ctx), Capabilities: s.Capabilities()}
+	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
+	// that is the default a client should report — not the driver's fallback.
+	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
+		resp.Loading.KeepAliveDefault = s.cfg.DefaultKeepAlive
+	}
 	if s.wirer != nil {
 		resp.Wiring = s.wiring
 	}
