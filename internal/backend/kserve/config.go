@@ -31,24 +31,27 @@ const (
 	// download would, so a later start finds them and skips the download.
 	DefaultDownloadImage = "docker.io/kserve/storage-initializer:v0.20.0"
 	// DefaultInitImage creates cache directories and scans the cache.
-	DefaultInitImage              = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
-	DefaultBudgetSource           = "auto"
-	DefaultOverheadGiB            = 30
-	DefaultDiscoveryTTL           = time.Minute
-	DefaultInventoryTTL           = 2 * time.Minute
-	DefaultInventoryTimeout       = 2 * time.Minute
-	DefaultJobTTL                 = time.Hour
-	DefaultReadyTimeout           = 2 * time.Hour
-	DefaultPollInterval           = 5 * time.Second
-	discoveryConfigKey            = "config.yaml"
-	discoveryKind                 = "ModelServingConfig"
-	presetConfigKey               = "preset.yaml"
-	presetKind                    = "ServingPreset"
-	agentPlatformAPIVersion       = "agent-platform.giantswarm.io/v1alpha1"
-	budgetSourceAuto              = "auto"
-	budgetSourceGPULabels         = "gpu-labels"
-	budgetSourceAllocatable       = "allocatable"
-	gib                     int64 = 1 << 30
+	DefaultInitImage        = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
+	DefaultBudgetSource     = "auto"
+	DefaultOverheadGiB      = 30
+	DefaultDiscoveryTTL     = time.Minute
+	DefaultInventoryTTL     = 2 * time.Minute
+	DefaultInventoryTimeout = 2 * time.Minute
+	DefaultJobTTL           = time.Hour
+	DefaultReadyTimeout     = 2 * time.Hour
+	DefaultPollInterval     = 5 * time.Second
+	discoveryConfigKey      = "config.yaml"
+	discoveryKind           = "ModelServingConfig"
+	presetConfigKey         = "preset.yaml"
+	presetKind              = "ServingPreset"
+	agentPlatformAPIVersion = "agent-platform.giantswarm.io/v1alpha1"
+	budgetSourceAuto        = "auto"
+	budgetSourceGPULabels   = "gpu-labels"
+	budgetSourceAllocatable = "allocatable"
+	// budgetSourceAnnotation is reported when the node's BudgetAnnotation
+	// overrode the configured source.
+	budgetSourceAnnotation       = "annotation"
+	gib                    int64 = 1 << 30
 )
 
 // discoveryDoc is the ModelServingConfig document the umbrella chart

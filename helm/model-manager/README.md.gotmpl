@@ -38,9 +38,11 @@ can stay empty.
 - Downloads run as Jobs in the serving namespace with the KServe
   storage-initializer image (`kserve.download.image`), into
   `<claim>/<preset name>` — the directory the preset's InferenceService mounts
-  — after a fit check against the node's memory budget (`kserve.budget.*`).
-  Gated repositories need `kserve.hf.tokenSecret` (a Secret in the serving
-  namespace).
+  — after a fit check against the node's memory budget (`kserve.budget.*`;
+  the node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"`
+  overrides one node's budget, e.g. a unified-memory node without GPU memory
+  labels). Gated repositories need `kserve.hf.tokenSecret` (a Secret in the
+  serving namespace).
 - The cache inventory runs a short-lived pod per cache node
   (`kserve.inventory.*`); results are reused for `kserve.inventory.ttl`.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the

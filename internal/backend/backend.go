@@ -240,7 +240,8 @@ type FitResult struct {
 	RequiredBytes int64  `json:"requiredBytes"`
 	// DownloadBytes is what a pull would fetch (all repository files).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
-	// Node is the node the check was made against.
+	// Node is the node the check was made against; BudgetSource says how its
+	// budget was derived (gpu-labels, allocatable, annotation).
 	Node          string `json:"node,omitempty"`
 	BudgetBytes   int64  `json:"budgetBytes"`
 	BudgetSource  string `json:"budgetSource,omitempty"`
@@ -267,9 +268,14 @@ type NodeInfo struct {
 	GPUMemoryBytes int64  `json:"gpuMemoryBytes,omitempty"`
 	GPUProduct     string `json:"gpuProduct,omitempty"`
 	// BudgetBytes is the memory a served model may use on this node and
-	// BudgetSource how it was derived (gpu-labels, allocatable).
+	// BudgetSource how it was derived: gpu-labels, allocatable, or annotation
+	// when the node's model-manager.giantswarm.io/memory-budget-gib annotation
+	// overrode the configured source.
 	BudgetBytes  int64  `json:"budgetBytes"`
 	BudgetSource string `json:"budgetSource,omitempty"`
+	// Message notes a budget derivation problem, e.g. an ignored, unparsable
+	// budget annotation.
+	Message string `json:"message,omitempty"`
 	// ReservedBytes is what the models already served on the node need.
 	ReservedBytes int64 `json:"reservedBytes"`
 	FreeBytes     int64 `json:"freeBytes"`

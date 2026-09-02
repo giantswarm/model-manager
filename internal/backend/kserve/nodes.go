@@ -3,8 +3,10 @@ package kserve
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -20,6 +22,14 @@ const (
 	labelGPUProduct = "nvidia.com/gpu.product"
 	labelHostname   = "kubernetes.io/hostname"
 	mib             = int64(1 << 20)
+
+	// BudgetAnnotation on a Node overrides its memory budget for fit checks,
+	// in GiB (decimals allowed), whatever the configured budget source: the
+	// most specific setting wins. Unified-memory nodes without GPU memory
+	// labels (allocatable memory overstates what a model may use) and MIG or
+	// shared-GPU setups need it. Zero, negative or unparsable values are
+	// ignored and reported in the node's message.
+	BudgetAnnotation = "model-manager.giantswarm.io/memory-budget-gib"
 )
 
 // nodeBudget is the serving-relevant view of one node.
@@ -34,11 +44,14 @@ type nodeBudget struct {
 	GPUProduct   string
 	Budget       int64
 	BudgetSource string
+	// Message notes a budget derivation problem (an ignored annotation).
+	Message string
 }
 
 // budgetOf derives the memory budget of a node: GPU memory (labels x count)
 // when the node advertises GPUs and the source allows it, else the allocatable
 // memory (unified-memory nodes, or nodes without feature-discovery labels).
+// A valid BudgetAnnotation replaces the result of either source.
 func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 	nb := nodeBudget{Name: n.Name, Labels: n.Labels, Architecture: n.Status.NodeInfo.Architecture}
 	for _, c := range n.Status.Conditions {
@@ -78,6 +91,13 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 			nb.Budget, nb.BudgetSource = gpuBudget, budgetSourceGPULabels
 		} else {
 			nb.Budget, nb.BudgetSource = nb.Allocatable, budgetSourceAllocatable
+		}
+	}
+	if raw, ok := n.Annotations[BudgetAnnotation]; ok {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err != nil || v <= 0 || math.IsInf(v, 0) {
+			nb.Message = fmt.Sprintf("ignoring annotation %s=%q: want a positive number of GiB; budget taken from %s", BudgetAnnotation, raw, nb.BudgetSource)
+		} else {
+			nb.Budget, nb.BudgetSource = gibToBytes(v), budgetSourceAnnotation
 		}
 	}
 	return nb
@@ -198,6 +218,7 @@ func nodeView(nb nodeBudget, reserved int64, cache *backend.NodeCache) backend.N
 		GPUProduct:             nb.GPUProduct,
 		BudgetBytes:            nb.Budget,
 		BudgetSource:           nb.BudgetSource,
+		Message:                nb.Message,
 		ReservedBytes:          reserved,
 		FreeBytes:              nb.Budget - reserved,
 		Cache:                  cache,

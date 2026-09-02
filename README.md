@@ -92,7 +92,11 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   weight size (`model.safetensors.index.json`, else the file tree, else the
   preset), adds the preset's `overheadGiB` (default 30) and compares with the
   node budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
-  allocatable memory — unified-memory nodes); `pull` refuses what cannot be
+  allocatable memory — unified-memory nodes; a node annotation
+  `model-manager.giantswarm.io/memory-budget-gib: "96"` overrides that node's
+  budget in GiB whatever `kserve.budget.source` says, reported as
+  `budgetSource: annotation` — for unified-memory nodes whose allocatable
+  memory overstates what a model may use); `pull` refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's InferenceService
   mounts — reporting bytes on disk against the repository size. Gated models

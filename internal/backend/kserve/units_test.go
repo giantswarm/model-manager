@@ -199,3 +199,23 @@ func TestNormalizePredictorURL(t *testing.T) {
 	assert.Equal(t, "not a url", normalizePredictorURL("not a url"))
 	assert.Equal(t, "", normalizePredictorURL(""))
 }
+
+func TestBudgetOfAnnotationWinsOverEverySource(t *testing.T) {
+	n := node("dgx", "120Gi", map[string]string{labelGPUCount: "1", labelGPUMemory: "131072"})
+	for _, source := range []string{budgetSourceAuto, budgetSourceGPULabels, budgetSourceAllocatable} {
+		nb := budgetOf(n, DefaultGPUResourceName, source)
+		assert.NotEqual(t, budgetSourceAnnotation, nb.BudgetSource, source)
+		assert.Empty(t, nb.Message)
+	}
+	n.Annotations = map[string]string{BudgetAnnotation: " 96 "}
+	for _, source := range []string{budgetSourceAuto, budgetSourceGPULabels, budgetSourceAllocatable} {
+		nb := budgetOf(n, DefaultGPUResourceName, source)
+		assert.Equal(t, budgetSourceAnnotation, nb.BudgetSource, source)
+		assert.Equal(t, 96*gib, nb.Budget, source)
+		assert.EqualValues(t, 128*gib, nb.GPUMemory, "the labels are still reported")
+	}
+	n.Annotations[BudgetAnnotation] = "1e400"
+	nb := budgetOf(n, DefaultGPUResourceName, budgetSourceAllocatable)
+	assert.Equal(t, budgetSourceAllocatable, nb.BudgetSource, "infinite values are ignored")
+	assert.Contains(t, nb.Message, "1e400")
+}

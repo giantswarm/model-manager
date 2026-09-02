@@ -278,8 +278,11 @@ paths:
         `weightsGiB`), adds the serving overhead (the preset's `overheadGiB`,
         default 30 GiB) and compares the sum with the memory budget of the
         target node (GPU memory from the node labels when present, else
-        allocatable memory). `fits=false` is a 200 with the explanation in
-        `reason`; pull and load refuse such models with `412 does_not_fit`.
+        allocatable memory; the node annotation
+        `model-manager.giantswarm.io/memory-budget-gib` overrides it —
+        `budgetSource` says which applied). `fits=false` is a 200 with the
+        explanation in `reason`; pull and load refuse such models with
+        `412 does_not_fit`.
       operationId: fitCheck
       x-mcp-tool: check_fit
       requestBody:
@@ -361,6 +364,14 @@ paths:
     get:
       tags: [serving]
       summary: Node memory budgets and download caches (kserve)
+      description: |
+        Every node with its memory budget for fit checks (`budgetSource`:
+        `gpu-labels` from the NVIDIA feature-discovery labels, `allocatable`
+        memory, or `annotation` when the node carries
+        `model-manager.giantswarm.io/memory-budget-gib: "<GiB>"` — the
+        per-node override for unified-memory nodes), what running models
+        reserve, and the download cache the node holds. `message` reports an
+        ignored, unparsable annotation.
       operationId: listNodes
       x-mcp-tool: list_nodes
       responses:
@@ -747,7 +758,7 @@ components:
         downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }
         node: { type: string, description: node the check was made against }
         budgetBytes: { type: integer, format: int64 }
-        budgetSource: { type: string, enum: [gpu-labels, allocatable] }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
         reservedBytes: { type: integer, format: int64, description: needed by the models already served on the node }
         freeBytes: { type: integer, format: int64 }
         gated: { type: boolean }
@@ -766,7 +777,8 @@ components:
         gpuMemoryBytes: { type: integer, format: int64, description: memory of one GPU from the node labels }
         gpuProduct: { type: string }
         budgetBytes: { type: integer, format: int64 }
-        budgetSource: { type: string, enum: [gpu-labels, allocatable] }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node }
+        message: { type: string, description: a budget derivation note, e.g. an ignored, unparsable budget annotation }
         reservedBytes: { type: integer, format: int64 }
         freeBytes: { type: integer, format: int64 }
         cache:
