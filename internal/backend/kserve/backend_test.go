@@ -301,8 +301,10 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	obj.Object["status"] = map[string]any{
 		"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-		"address":    map[string]any{"url": "http://tiny-predictor.model-serving.svc.cluster.local"},
-		"url":        "http://tiny-model-serving.example.com",
+		// The ingress urlScheme leaks into address.url on a TLS-terminated
+		// install; the predictor Service is plain HTTP regardless.
+		"address": map[string]any{"url": "https://tiny-predictor.model-serving.svc.cluster.local/"},
+		"url":     "https://tiny-model-serving.example.com",
 	}
 	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Update(ctx, obj, metav1.UpdateOptions{})
 	require.NoError(t, err)
@@ -315,7 +317,8 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	loaded, err = f.b.ListLoaded(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, statusReady, loaded[0].Status)
-	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local", loaded[0].Endpoint, "status.address.url wins")
+	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local", loaded[0].Endpoint, "status.address.url wins, with the http scheme the predictor Service speaks")
+	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local/v1", f.b.AgentEndpoint(tinyRepo).BaseURL, "agents are wired to the http predictor, never to the ingress scheme")
 
 	// A hand-written InferenceService of the same name blocks a load and
 	// cannot be unloaded here (409); it is still listed.
