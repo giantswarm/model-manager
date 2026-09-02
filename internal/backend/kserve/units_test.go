@@ -187,3 +187,15 @@ func TestHubHelpers(t *testing.T) {
 	assert.Equal(t, "1.0 GiB", humanBytes(gib))
 	assert.Equal(t, "512 B", humanBytes(512))
 }
+
+func TestNormalizePredictorURL(t *testing.T) {
+	// KServe raw deployment publishes status.address.url with the ingress
+	// urlScheme; the predictor Service is plain HTTP on port 80 regardless.
+	assert.Equal(t, "http://m-predictor.serving.svc.cluster.local", normalizePredictorURL("https://m-predictor.serving.svc.cluster.local/"))
+	assert.Equal(t, "http://m-predictor.serving.svc", normalizePredictorURL("https://m-predictor.serving.svc"))
+	assert.Equal(t, "http://m-predictor.serving.svc.cluster.local", normalizePredictorURL("http://m-predictor.serving.svc.cluster.local/"))
+	assert.Equal(t, "https://m-serving.example.com", normalizePredictorURL("https://m-serving.example.com/"), "external hosts keep their scheme")
+	assert.Equal(t, "https://m-predictor.serving.svc.cluster.local:8443", normalizePredictorURL("https://m-predictor.serving.svc.cluster.local:8443"), "an explicit port is deliberate")
+	assert.Equal(t, "not a url", normalizePredictorURL("not a url"))
+	assert.Equal(t, "", normalizePredictorURL(""))
+}

@@ -3,6 +3,7 @@ package kserve
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,32 @@ func (sv served) manageable() bool {
 // (Service <name>-predictor, port 80).
 func predictorURL(name, namespace string) string {
 	return fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local", name, namespace)
+}
+
+// normalizePredictorURL fixes the scheme of the address KServe publishes for a
+// predictor. In raw-deployment mode the controller writes status.address.url
+// with the ingress urlScheme — https wherever the external route is
+// TLS-terminated — although the predictor Service itself speaks plain HTTP on
+// port 80. A cluster-local host without an explicit port therefore always gets
+// the http scheme; external hosts and explicit ports are kept as published.
+// Trailing slashes are dropped.
+func normalizePredictorURL(raw string) string {
+	raw = strings.TrimRight(raw, "/")
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if u.Scheme == "https" && u.Port() == "" && isClusterLocalHost(u.Hostname()) {
+		u.Scheme = "http"
+		return strings.TrimRight(u.String(), "/")
+	}
+	return raw
+}
+
+// isClusterLocalHost reports whether a host is a Kubernetes Service DNS name
+// (<svc>.<ns>.svc or <svc>.<ns>.svc.<cluster domain>).
+func isClusterLocalHost(host string) bool {
+	return strings.HasSuffix(host, ".svc") || strings.Contains(host, ".svc.")
 }
 
 // listServed lists the InferenceServices of the serving namespace with the
@@ -164,7 +191,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource st
 	} else {
 		sv.URL = predictorURL(sv.Name, sv.Namespace)
 	}
-	sv.URL = strings.TrimRight(sv.URL, "/")
+	sv.URL = normalizePredictorURL(sv.URL)
 	return sv
 }
 
