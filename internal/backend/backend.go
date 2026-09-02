@@ -62,7 +62,9 @@ type Capabilities struct {
 	Presets bool `json:"presets"`
 	// FitCheck validates a model against node memory before download/serve (kserve).
 	FitCheck bool `json:"fitCheck"`
-	// NodeInventory reports the download cache per node (kserve).
+	// NodeInventory reports nodes with their memory budget and what loaded
+	// models reserve (kserve: every cluster node with its download cache;
+	// ollama: the proxied host, budget from /proc/meminfo).
 	NodeInventory bool `json:"nodeInventory"`
 	// Search proxies a model hub search (kserve: Hugging Face Hub).
 	Search bool `json:"search"`
@@ -267,10 +269,16 @@ type NodeInfo struct {
 	// GPUMemoryBytes is the memory of one GPU from the node labels.
 	GPUMemoryBytes int64  `json:"gpuMemoryBytes,omitempty"`
 	GPUProduct     string `json:"gpuProduct,omitempty"`
+	// Accelerated is set by backends that cannot enumerate accelerators but
+	// see them in use (ollama): true when any loaded model has memory on one
+	// (running.vramBytes > 0), false when none has or nothing is loaded.
+	// Absent when the backend counts accelerators in GPUCount (kserve).
+	Accelerated *bool `json:"accelerated,omitempty"`
 	// BudgetBytes is the memory a served model may use on this node and
-	// BudgetSource how it was derived: gpu-labels, allocatable, or annotation
-	// when the node's model-manager.giantswarm.io/memory-budget-gib annotation
-	// overrode the configured source.
+	// BudgetSource how it was derived: gpu-labels, allocatable, annotation
+	// (the node's model-manager.giantswarm.io/memory-budget-gib annotation
+	// overrode the configured source) or host-meminfo (ollama: MemTotal of
+	// /proc/meminfo as the model-manager pod sees it).
 	BudgetBytes  int64  `json:"budgetBytes"`
 	BudgetSource string `json:"budgetSource,omitempty"`
 	// Message notes a budget derivation problem, e.g. an ignored, unparsable
@@ -280,7 +288,7 @@ type NodeInfo struct {
 	ReservedBytes int64 `json:"reservedBytes"`
 	FreeBytes     int64 `json:"freeBytes"`
 	// Cache describes the download cache on this node; nil when the node
-	// holds no cache.
+	// holds no cache (always on ollama).
 	Cache *NodeCache `json:"cache,omitempty"`
 }
 
