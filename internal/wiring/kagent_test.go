@@ -178,3 +178,82 @@ func TestModelConfigName(t *testing.T) {
 	other := ModelConfigName("", "hf.co/"+strings.Repeat("a", 80)+"/repo:Q4")
 	assert.NotEqual(t, long, other, "long names stay distinct through the hash suffix")
 }
+
+func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	// An older naming rule left a ModelConfig derived from the repository id.
+	old, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1", Model: "qwen3-8-27b", PlaceholderAPIKey: true})
+	require.NoError(t, err)
+	assert.Equal(t, "inferact-qwen3-8-27b-nvfp4", old.Name)
+
+	// The backend now names the ModelConfig after the InferenceService.
+	ep := backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1", Model: "qwen3-8-27b", PlaceholderAPIKey: true, Name: "qwen3-8-27b"}
+	ref, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
+	require.NoError(t, err)
+	assert.Equal(t, "qwen3-8-27b", ref.Name)
+	assert.Equal(t, "Inferact/Qwen3.8-27B-NVFP4", ref.Model)
+	assert.Equal(t, "qwen3-8-27b", ref.ProviderModel)
+	assert.Equal(t, "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1", ref.Endpoint)
+	assert.True(t, ref.Managed)
+
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1, "the old name was replaced, not duplicated")
+	assert.Equal(t, "qwen3-8-27b", list.Items[0].GetName())
+	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "inferact-qwen3-8-27b-nvfp4-api-key", metav1.GetOptions{})
+	assert.Error(t, err, "the old placeholder secret went with it")
+	sec, err := client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-8-27b-api-key", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, ManagedByValue, sec.GetLabels()[ManagedByLabel])
+
+	// Idempotent under the new name; Remove finds it by the model annotation.
+	again, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
+	require.NoError(t, err)
+	assert.Equal(t, "qwen3-8-27b", again.Name)
+	require.NoError(t, k.Remove(ctx, "Inferact/Qwen3.8-27B-NVFP4"))
+	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+
+	// A prefix still applies to backend-chosen names.
+	kp := NewKagent(client, "kagent", "v1alpha2", "mm", backend.NameKServe)
+	pref, err := kp.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
+	require.NoError(t, err)
+	assert.Equal(t, "mm-qwen3-8-27b", pref.Name)
+}
+
+func TestListAllReportsForeignModelConfigs(t *testing.T) {
+	portal := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kagent.dev/v1alpha2",
+		"kind":       "ModelConfig",
+		"metadata":   map[string]any{"name": "qwen3-8-27b", "namespace": "kagent", "labels": map[string]any{ManagedByLabel: "backstage"}},
+		"spec": map[string]any{"provider": "OpenAI", "model": "qwen3-8-27b", "apiKeySecret": "qwen3-8-27b-key", "apiKeySecretKey": "OPENAI_API_KEY", // #nosec G101 -- Secret name and key, not a credential
+			"openAI": map[string]any{"baseUrl": "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1"}},
+	}}
+	k, _ := newFakeKagent(t, portal)
+	ctx := context.Background()
+	_, err := k.Ensure(ctx, "smollm2:135m", ollamaEndpoint("smollm2:135m"))
+	require.NoError(t, err)
+
+	all, err := k.ListAll(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	byName := map[string]ModelConfigRef{}
+	for _, r := range all {
+		byName[r.Name] = r
+	}
+	assert.False(t, byName["qwen3-8-27b"].Managed)
+	assert.Equal(t, "qwen3-8-27b", byName["qwen3-8-27b"].ProviderModel)
+	assert.Equal(t, "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1", byName["qwen3-8-27b"].Endpoint)
+	assert.True(t, byName["smollm2-135m"].Managed)
+	assert.Equal(t, "http://172.21.0.1:11434", byName["smollm2-135m"].Endpoint)
+
+	owned, err := k.List(ctx)
+	require.NoError(t, err)
+	assert.Len(t, owned, 1, "List stays model-manager's own")
+	require.NoError(t, k.Remove(ctx, "qwen3-8-27b"), "absent from the owned set: a no-op")
+	all, err = k.ListAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 2, "foreign ModelConfigs are never deleted")
+}

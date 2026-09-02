@@ -95,10 +95,19 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   discovery; `spec.predictor` extras verbatim) after a fit check against the
   node's free budget; `unload` deletes it (the cache persists); `delete`
   removes the cache directory (refused while served).
-- **Wiring** — on ready, a kagent `ModelConfig` (`provider: OpenAI`,
-  `baseUrl` = predictor URL + `/v1`, `model` = InferenceService name, which
-  vLLM serves under `--served-model-name {{.Name}}`) plus the placeholder
-  `OPENAI_API_KEY` Secret the go ADK runtime insists on.
+- **Wiring** — on ready, a kagent `ModelConfig` **named after the
+  InferenceService** (`provider: OpenAI`, `baseUrl` = predictor URL + `/v1`,
+  `model` = InferenceService name, which vLLM serves under
+  `--served-model-name {{.Name}}`) plus the placeholder `OPENAI_API_KEY`
+  Secret the go ADK runtime insists on — the same rule the portal's serve
+  flow applies. A ModelConfig that already points at the predictor (same
+  host, same served model name), whoever created it, counts as the model's
+  wiring: it is reported with `managed: false`, never duplicated and never
+  deleted; `unwire`/`unload` only remove ModelConfigs model-manager created.
+- **Ownership** — InferenceServices in the serving namespace that
+  model-manager created or that carry the `agent-platform.giantswarm.io/preset`
+  label (the portal's serve flow) can be unloaded here; hand-written ones are
+  inventory only (`409 conflict` on unload; `managedBy` says who owns them).
 
 ## Running
 

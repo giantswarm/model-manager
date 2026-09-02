@@ -34,21 +34,34 @@ var isvcGVR = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "
 
 // served is the driver's view of one InferenceService.
 type served struct {
-	Name       string
-	Namespace  string
-	Model      string
-	Preset     string
-	Managed    bool
-	StorageURI string
-	Runtime    string
-	GPUs       int64
-	Ready      bool
-	Status     string
-	Message    string
-	URL        string
-	Node       string
-	Created    time.Time
-	Deleting   bool
+	Name      string
+	Namespace string
+	Model     string
+	Preset    string
+	Managed   bool
+	ManagedBy string
+	// PresetLabelled is true when the object carries the preset label (set
+	// by model-manager and by the portal's serve flow); a preset inferred from
+	// the name alone does not make an InferenceService manageable.
+	PresetLabelled bool
+	StorageURI     string
+	Runtime        string
+	GPUs           int64
+	Ready          bool
+	Status         string
+	Message        string
+	URL            string
+	Node           string
+	Created        time.Time
+	Deleting       bool
+}
+
+// manageable reports whether model-manager may operate on the
+// InferenceService: the ones it created and the ones the portal's serve flow
+// created from a preset (label agent-platform.giantswarm.io/preset). Anything
+// else in the serving namespace is inventory only.
+func (sv served) manageable() bool {
+	return sv.Managed || sv.PresetLabelled
 }
 
 // predictorURL is the in-cluster URL KServe gives a raw-deployment predictor
@@ -108,12 +121,14 @@ func (b *Backend) predictorNodes(ctx context.Context, namespace string) map[stri
 // parseServed reads the fields the driver needs from an InferenceService.
 func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource string) served {
 	sv := served{
-		Name:      obj.GetName(),
-		Namespace: obj.GetNamespace(),
-		Managed:   obj.GetLabels()[ManagedByLabel] == ManagedByValue,
-		Preset:    obj.GetLabels()[PresetLabel],
-		Created:   obj.GetCreationTimestamp().Time,
-		Deleting:  obj.GetDeletionTimestamp() != nil,
+		Name:           obj.GetName(),
+		Namespace:      obj.GetNamespace(),
+		Managed:        obj.GetLabels()[ManagedByLabel] == ManagedByValue,
+		ManagedBy:      obj.GetLabels()[ManagedByLabel],
+		Preset:         obj.GetLabels()[PresetLabel],
+		PresetLabelled: obj.GetLabels()[PresetLabel] != "",
+		Created:        obj.GetCreationTimestamp().Time,
+		Deleting:       obj.GetDeletionTimestamp() != nil,
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storageUri")
 	sv.Runtime, _, _ = unstructured.NestedString(obj.Object, "spec", "predictor", "model", "runtime")

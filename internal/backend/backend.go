@@ -132,6 +132,9 @@ type LoadedModel struct {
 	Preset string `json:"preset,omitempty"`
 	// GPUs is the accelerator count the predictor requests (kserve).
 	GPUs int64 `json:"gpus,omitempty"`
+	// ManagedBy is the app.kubernetes.io/managed-by label of the serving
+	// object (kserve: model-manager, backstage, ...; empty when unlabelled).
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
 // Progress is a pull-progress sample.
@@ -333,6 +336,10 @@ type AgentEndpoint struct {
 	// PlaceholderAPIKey is true when the provider requires an API key the
 	// endpoint does not check (keyless vLLM behind kagent's OpenAI provider).
 	PlaceholderAPIKey bool `json:"placeholderApiKey,omitempty"`
+	// Name is the ModelConfig name the backend wants (kserve: the
+	// InferenceService name, the same rule the portal applies). Empty derives
+	// the name from the model reference.
+	Name string `json:"name,omitempty"`
 }
 
 // Backend is the driver contract. The kserve driver implements the same

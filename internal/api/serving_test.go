@@ -16,6 +16,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
+	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
 // fakeServing is a kserve-shaped backend: presets, search, fit check, node
@@ -83,7 +84,7 @@ func (f *fakeServing) Load(ctx context.Context, req backend.LoadRequest) error {
 }
 func (f *fakeServing) AgentEndpoint(model string) backend.AgentEndpoint {
 	name := strings.ReplaceAll(model, "/", "-")
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://" + name + "-predictor.model-serving.svc.cluster.local/v1", Model: name, PlaceholderAPIKey: true}
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://" + name + "-predictor.model-serving.svc.cluster.local/v1", Model: name, PlaceholderAPIKey: true, Name: name}
 }
 func (f *fakeServing) WaitReady(ctx context.Context, model string) error {
 	for {
@@ -324,9 +325,9 @@ func TestServingRunAdoptsPullsAndReconcilesWiring(t *testing.T) {
 
 	// A model served and ready without a load job (created out of band) gets
 	// wired by the reconciler.
-	f.backend.mu.Lock()
+	f.backend.fakeBackend.mu.Lock()
 	f.backend.loaded["org/tiny"] = true
-	f.backend.mu.Unlock()
+	f.backend.fakeBackend.mu.Unlock()
 	f.backend.setReady("org/tiny")
 	require.Eventually(t, func() bool {
 		ref, _ := f.wirer.Lookup(ctx, "org/tiny")
@@ -385,4 +386,63 @@ func TestServingMCPTools(t *testing.T) {
 		assert.True(t, isErr, tool)
 		assert.Contains(t, out, "unsupported", tool)
 	}
+}
+
+func TestServingDedupesPortalWiredModelConfigs(t *testing.T) {
+	f := newServingFixture(t)
+	// The portal already wired the served model: same predictor host, same
+	// served model name, not managed by model-manager.
+	portal := wiring.ModelConfigRef{Name: "org-tiny", Namespace: "kagent", Provider: "OpenAI", Model: "org-tiny", ProviderModel: "org-tiny", Endpoint: "http://org-tiny-predictor.model-serving.svc.cluster.local/v1", Ready: true, Managed: false}
+	f.wirer.mu.Lock()
+	f.wirer.foreign = append(f.wirer.foreign, portal)
+	f.wirer.mu.Unlock()
+
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	f.backend.setReady("org/tiny")
+	var loadJob map[string]any
+	_, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
+	for _, j := range list["jobs"].([]any) {
+		jm := j.(map[string]any)
+		if jm["type"] == "load" {
+			loadJob = jm
+		}
+	}
+	require.NotNil(t, loadJob)
+	done := f.waitJob(t, loadJob["id"].(string))
+	assert.Equal(t, "succeeded", done["phase"], done)
+	result := done["result"].(map[string]any)
+	assert.Equal(t, "org-tiny", result["name"])
+	assert.Equal(t, false, result["managed"], "the portal's ModelConfig is reported, not replaced")
+	assert.Empty(t, f.wirer.refs, "no duplicate ModelConfig was created")
+
+	// The model view shows the portal's ModelConfig through the endpoint join.
+	status, body = f.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
+	require.Equal(t, http.StatusOK, status)
+	mc := body["modelConfig"].(map[string]any)
+	assert.Equal(t, "org-tiny", mc["name"])
+	assert.Equal(t, false, mc["managed"])
+
+	// Unwire / unload never delete a ModelConfig model-manager did not create.
+	status, _ = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	status, _ = f.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	f.wirer.mu.Lock()
+	assert.Len(t, f.wirer.foreign, 1)
+	f.wirer.mu.Unlock()
+
+	// Without the portal's ModelConfig, model-manager names its own after the
+	// served resource (the InferenceService name).
+	f.wirer.mu.Lock()
+	f.wirer.foreign = nil
+	f.wirer.mu.Unlock()
+	status, _ = f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	require.Eventually(t, func() bool {
+		f.wirer.mu.Lock()
+		defer f.wirer.mu.Unlock()
+		r, ok := f.wirer.refs["org/tiny"]
+		return ok && r.Name == "org-tiny" && r.Managed
+	}, 2*time.Second, 5*time.Millisecond)
 }

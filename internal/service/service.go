@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -468,8 +469,11 @@ func (s *Service) reconcileWiring(ctx context.Context, _ backend.ServeLifecycle)
 		if l.Status != "Ready" {
 			continue
 		}
-		if _, ok := wired[l.Name]; ok {
+		if wired.has(l.Name) {
 			continue
+		}
+		if _, ok := wired.byEndpoint[endpointKey(l.Endpoint, l.Resource)]; ok {
+			continue // wired by someone else (the portal)
 		}
 		if s.hasActiveJob(jobs.TypeLoad, l.Name) {
 			continue
@@ -495,12 +499,69 @@ func (s *Service) wireModel(ctx context.Context, model string) (*wiring.ModelCon
 	if m, err := s.backend.GetModel(ctx, model); err == nil {
 		model = m.Name
 	}
-	ref, err := s.wirer.Ensure(ctx, model, s.backend.AgentEndpoint(model))
+	ep := s.backend.AgentEndpoint(model)
+	// On serve-lifecycle backends the endpoint identifies the served model:
+	// a ModelConfig someone else created for it (the portal's serve flow)
+	// counts as wired — never a duplicate, never touched.
+	if _, ok := s.serveLifecycle(); ok {
+		if existing := s.foreignForEndpoint(ctx, ep); existing != nil {
+			s.log.Info("model already wired by another owner", "model", model, "modelConfig", existing.Namespace+"/"+existing.Name)
+			return existing, nil
+		}
+	}
+	ref, err := s.wirer.Ensure(ctx, model, ep)
 	if err != nil {
 		return nil, err
 	}
 	s.log.Info("model wired", "model", model, "modelConfig", ref.Namespace+"/"+ref.Name)
 	return ref, nil
+}
+
+// foreignForEndpoint finds a ModelConfig not created by model-manager that
+// already points at the endpoint (same host, same served model name).
+func (s *Service) foreignForEndpoint(ctx context.Context, ep backend.AgentEndpoint) *wiring.ModelConfigRef {
+	all, err := s.wirer.ListAll(ctx)
+	if err != nil {
+		s.log.Warn("listing ModelConfigs for dedupe failed", "error", err)
+		return nil
+	}
+	target := ep.BaseURL
+	if target == "" {
+		target = ep.Host
+	}
+	for i := range all {
+		r := all[i]
+		if !r.Managed && sameEndpoint(r.Endpoint, target) && r.ProviderModel == ep.Model {
+			return &r
+		}
+	}
+	return nil
+}
+
+// sameEndpoint compares two provider endpoints by host name (scheme, port
+// and path such as /v1 do not matter: one predictor Service, one model).
+func sameEndpoint(a, b string) bool {
+	return endpointHost(a) != "" && endpointHost(a) == endpointHost(b)
+}
+
+func endpointHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return strings.ToLower(raw)
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// endpointKey indexes ModelConfigs by served endpoint and provider model.
+func endpointKey(endpoint, providerModel string) string {
+	return endpointHost(endpoint) + "|" + providerModel
 }
 
 func (s *Service) loadedIndex(ctx context.Context) map[string]backend.LoadedModel {
@@ -522,19 +583,48 @@ func (s *Service) loadedIndex(ctx context.Context) map[string]backend.LoadedMode
 	return idx
 }
 
-func (s *Service) wiredIndex(ctx context.Context) map[string]wiring.ModelConfigRef {
+// wiredView is what the model views join against: model-manager's own
+// ModelConfigs by model reference and, on serve-lifecycle backends, every
+// ModelConfig by served endpoint so a portal-wired model shows its config.
+type wiredView struct {
+	byModel    map[string]wiring.ModelConfigRef
+	byEndpoint map[string]wiring.ModelConfigRef
+}
+
+func (w wiredView) has(model string) bool {
+	_, ok := w.byModel[model]
+	return ok
+}
+
+func (s *Service) wiredIndex(ctx context.Context) wiredView {
+	out := wiredView{}
 	if s.wirer == nil {
-		return nil
+		return out
 	}
 	wired, err := s.wirer.List(ctx)
 	if err != nil {
 		s.log.Warn("listing ModelConfigs failed", "error", err)
-		return nil
+		return out
 	}
-	return wired
+	out.byModel = wired
+	if _, ok := s.serveLifecycle(); !ok {
+		return out
+	}
+	all, err := s.wirer.ListAll(ctx)
+	if err != nil {
+		s.log.Warn("listing all ModelConfigs failed", "error", err)
+		return out
+	}
+	out.byEndpoint = map[string]wiring.ModelConfigRef{}
+	for _, r := range all {
+		if r.Endpoint != "" && r.ProviderModel != "" {
+			out.byEndpoint[endpointKey(r.Endpoint, r.ProviderModel)] = r
+		}
+	}
+	return out
 }
 
-func (s *Service) view(m backend.Model, loaded map[string]backend.LoadedModel, wired map[string]wiring.ModelConfigRef) ModelView {
+func (s *Service) view(m backend.Model, loaded map[string]backend.LoadedModel, wired wiredView) ModelView {
 	v := ModelView{Model: m}
 	l, ok := loaded[m.Name]
 	if !ok && m.Path != "" {
@@ -545,9 +635,14 @@ func (s *Service) view(m backend.Model, loaded map[string]backend.LoadedModel, w
 		lc := l
 		v.Running = &lc
 	}
-	if mc, ok := wired[m.Name]; ok {
+	if mc, ok := wired.byModel[m.Name]; ok {
 		mcc := mc
 		v.ModelConfig = &mcc
+	} else if v.Running != nil && wired.byEndpoint != nil {
+		if mc, ok := wired.byEndpoint[endpointKey(v.Running.Endpoint, v.Running.Resource)]; ok {
+			mcc := mc
+			v.ModelConfig = &mcc
+		}
 	}
 	return v
 }
