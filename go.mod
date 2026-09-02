@@ -93,3 +93,9 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// nancy (OSS Index) scans the whole module graph and flags
+// golang.org/x/mod < v0.40.0 (CVE-2026-56864, CVE-2026-56865). The module is
+// not imported by model-manager, so a plain `go get` bump is dropped by
+// `go mod tidy`; the replace pins the graph to a fixed version instead.
+replace golang.org/x/mod => golang.org/x/mod v0.40.0
