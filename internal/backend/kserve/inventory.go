@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/giantswarm/model-manager/internal/cacheagent"
 )
 
 // The cache layout the modelServing contract defines: one subdirectory per
@@ -26,7 +30,7 @@ import (
 const (
 	cacheMount  = "/cache"
 	cacheVolume = "cache"
-	markersDir  = ".model-manager"
+	markersDir  = cacheagent.MarkersDir
 	lineDir     = "DIR"
 	lineMarker  = "MARKER"
 	lineEnd     = "END"
@@ -56,15 +60,9 @@ if [ -d ` + markersDir + ` ]; then
 fi
 echo ` + lineEnd
 
-// marker is what a pre-warm download records about its directory.
-type marker struct {
-	Model         string    `json:"model"`
-	Revision      string    `json:"revision,omitempty"`
-	Dir           string    `json:"dir"`
-	BytesExpected int64     `json:"bytesExpected,omitempty"`
-	CompletedAt   time.Time `json:"completedAt,omitempty"`
-	Job           string    `json:"job,omitempty"`
-}
+// marker is what a pre-warm download records about its directory; the
+// cache-agent reads the same files.
+type marker = cacheagent.Marker
 
 // cacheEntry is one directory of the cache on one node.
 type cacheEntry struct {
@@ -225,6 +223,79 @@ func (b *Backend) scanNode(ctx context.Context, node string) ([]cacheEntry, stri
 		return nil, ranOn, err
 	}
 	return entries, ranOn, nil
+}
+
+// scanAgent reads the cache through the cache-agent pod on node (daemonset
+// inventory mode): no pod is created. With an empty node (shared storage) any
+// ready agent answers; the node it runs on is returned.
+func (b *Backend) scanAgent(ctx context.Context, node string) ([]cacheEntry, string, error) {
+	s := b.cfg.settings(ctx)
+	pod, err := b.agentPod(ctx, s.Namespace, node)
+	if err != nil {
+		return nil, node, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, b.opts.InventoryTimeout)
+	defer cancel()
+	url := "http://" + net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(b.opts.InventoryAgentPort)) + cacheagent.InventoryPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, pod.Spec.NodeName, err
+	}
+	resp, err := b.agentHTTP.Do(req)
+	if err != nil {
+		return nil, pod.Spec.NodeName, fmt.Errorf("cache-agent %s on %s: %w", pod.Name, pod.Spec.NodeName, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, pod.Spec.NodeName, fmt.Errorf("cache-agent %s on %s: HTTP %d: %s", pod.Name, pod.Spec.NodeName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var inv cacheagent.Inventory
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&inv); err != nil {
+		return nil, pod.Spec.NodeName, fmt.Errorf("cache-agent %s on %s: decode inventory: %w", pod.Name, pod.Spec.NodeName, err)
+	}
+	for _, w := range inv.Warnings {
+		b.log.Warn("cache-agent scan warning", "node", pod.Spec.NodeName, "detail", w)
+	}
+	entries := make([]cacheEntry, 0, len(inv.Entries))
+	for _, e := range inv.Entries {
+		entries = append(entries, cacheEntry{Node: pod.Spec.NodeName, Dir: e.Dir, Bytes: e.Bytes, Files: e.Files, MTime: e.MTime, Marker: e.Marker})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Dir < entries[j].Dir })
+	return entries, pod.Spec.NodeName, nil
+}
+
+// agentPod finds a ready cache-agent pod on node (any node when empty).
+func (b *Backend) agentPod(ctx context.Context, namespace, node string) (*corev1.Pod, error) {
+	opts := metav1.ListOptions{LabelSelector: b.opts.InventoryAgentSelector}
+	if node != "" {
+		opts.FieldSelector = "spec.nodeName=" + node
+	}
+	pods, err := b.cs.CoreV1().Pods(namespace).List(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list cache-agent pods in %s: %w", namespace, err)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" || !podReady(p) {
+			continue
+		}
+		if node != "" && p.Spec.NodeName != node {
+			continue
+		}
+		return p, nil
+	}
+	return nil, fmt.Errorf("no ready cache-agent pod on %s (pods matching %q in %s): kserve.inventory.mode is %s — is the cache-agent DaemonSet scheduled there and mounting the claim?",
+		nodeOrAny(node), b.opts.InventoryAgentSelector, namespace, InventoryModeDaemonSet)
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // removeDir deletes one cache directory (and its marker) on a node.

@@ -17,7 +17,9 @@ make helm-docs      # regenerate helm/model-manager/README.md
   `PullAdopter`). `internal/backend/ollama` is the host-Ollama driver.
   `internal/backend/kserve` is the KServe driver: `config.go` (discovery
   ConfigMap + flag overrides), `presets.go`, `hub.go` (Hugging Face Hub),
-  `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods),
+  `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods and
+  the cache-agent client), `internal/cacheagent` (the DaemonSet's HTTP
+  inventory, `model-manager cache-agent`),
   `jobs.go` (download Jobs), `isvc.go` (InferenceService composition/status),
   `fit.go`, `backend.go`.
 - `internal/jobs` — in-memory job manager (pulls with progress, cancel, retention).
@@ -92,3 +94,16 @@ helm upgrade --install model-manager-kserve helm/model-manager -n mm-kserve \
 InferenceService appears; patch its status Ready with
 `kubectl patch --subresource=status` to see the load job wire a ModelConfig),
 `POST /api/v1/models/unload`, `DELETE /api/v1/models/<repo>`.
+
+The DaemonSet inventory (`kserve.inventory.mode=daemonset`) is exercised the
+same way — the kind node is the cache node, so the DaemonSet needs no node
+selector there:
+
+```sh
+helm upgrade --install model-manager-kserve helm/model-manager -n mm-kserve --reuse-values \
+  --set kserve.inventory.mode=daemonset --set kserve.cache.claimName=hf-cache
+kubectl -n mm-kserve rollout status ds/model-manager-kserve-cache-agent
+```
+
+`GET /api/v1/nodes` then reports `cache.inventory: daemonset` with the same
+entries as before, and no `mm-scan-*` pods appear in the namespace.

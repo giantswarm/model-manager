@@ -84,6 +84,23 @@ Namespace of the serving-preset ConfigMaps; defaults to the discovery namespace.
 {{- end }}
 
 {{/*
+Labels selecting this release's cache-agent pods (kserve.inventory.mode:
+daemonset) — distinct from the API pods so the Service never routes to them.
+*/}}
+{{- define "model-manager.cacheAgentSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "model-manager.name" . }}-cache-agent
+app.kubernetes.io/instance: {{ .Release.Name }}
+model-manager.giantswarm.io/component: cache-agent
+{{- end }}
+
+{{/*
+The same selector as a label-selector string (passed to the Deployment).
+*/}}
+{{- define "model-manager.cacheAgentSelector" -}}
+model-manager.giantswarm.io/component=cache-agent,app.kubernetes.io/instance={{ .Release.Name }}
+{{- end }}
+
+{{/*
 Name of the Secret holding the Dex client secret when OAuth is enabled.
 */}}
 {{- define "model-manager.oauthSecretName" -}}

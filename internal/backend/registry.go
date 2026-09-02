@@ -71,6 +71,15 @@ type KServeOptions struct {
 	InventoryTTL time.Duration
 	// InventoryTimeout bounds one cache scan.
 	InventoryTimeout time.Duration
+	// InventoryMode selects how a node's cache is read: "pod" runs a
+	// short-lived scan pod on the node; "daemonset" asks the cache-agent
+	// pod (the chart's DaemonSet, `model-manager cache-agent`) running there.
+	InventoryMode string
+	// InventoryAgentSelector is the label selector of the cache-agent pods in
+	// the serving namespace (daemonset mode).
+	InventoryAgentSelector string
+	// InventoryAgentPort is the cache-agent's listen port (daemonset mode).
+	InventoryAgentPort int
 
 	// BudgetSource picks the node memory budget: auto (GPU labels when
 	// present, else allocatable memory), gpu-labels, allocatable.

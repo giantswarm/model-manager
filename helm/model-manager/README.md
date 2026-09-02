@@ -42,8 +42,15 @@ can stay empty.
   overrides one node's budget, e.g. a unified-memory node without GPU memory
   labels). Gated repositories need `kserve.hf.tokenSecret` (a Secret in the
   serving namespace).
-- The cache inventory runs a short-lived pod per cache node
-  (`kserve.inventory.*`); results are reused for `kserve.inventory.ttl`.
+- The cache inventory (`kserve.inventory.*`) reads each cache node either with
+  a short-lived scan pod (`mode: pod`, the default; results are reused for
+  `kserve.inventory.ttl`) or, with `mode: daemonset`, through a DaemonSet in
+  the serving namespace that runs `model-manager cache-agent` — the same
+  image, mounting the claim read-only and serving its contents over HTTP — so
+  no pods are created per read. Daemonset mode needs `kserve.cache.claimName`
+  and usually `kserve.inventory.agent.nodeSelector` (a node-local claim mounts
+  on its node only); `networkPolicy.enabled` then also allows model-manager →
+  agent traffic. Deletes keep using a one-shot pod.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
   discovery/preset namespace when it differs, and a ClusterRole for nodes and
   PersistentVolumes.
@@ -123,9 +130,16 @@ can stay empty.
 | kserve.download.image | object | `{"name":"kserve/storage-initializer","registry":"docker.io","tag":"v0.20.0"}` | Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an InferenceService would, so a later start finds the files and skips the download. |
 | kserve.download.ignorePatterns | list | `[]` | File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an InferenceService does. |
 | kserve.download.jobTTL | string | `"1h"` | ttlSecondsAfterFinished of download Jobs. |
+| kserve.inventory.mode | string | `"pod"` | How the per-node cache contents are read. `pod`: a short-lived scan pod per cache node whenever the inventory is older than `ttl` (no long-running pods, but pod churn in the serving namespace). `daemonset`: the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the serving namespace running `model-manager cache-agent`, which mounts the cache claim read-only and serves its contents over HTTP; model-manager asks the agent on the node instead of creating pods. Requires `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart cannot read the discovery ConfigMap). Deletes still use a one-shot pod. |
+| kserve.inventory.agent.port | int | `8081` | Port the cache agent listens on. |
+| kserve.inventory.agent.nodeSelector | object | `{}` | Node selector of the DaemonSet. A node-local cache claim (static local PV, local-path) can only be mounted on its node: select it. |
+| kserve.inventory.agent.tolerations | list | `[]` | Tolerations of the agent pods (GPU node taints). |
+| kserve.inventory.agent.resources | object | `{"limits":{"cpu":"500m","memory":"256Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | Resources of the agent container (a scan walks file metadata only). |
+| kserve.inventory.agent.podAnnotations | object | `{}` | Annotations on the agent pods. |
+| kserve.inventory.agent.podLabels | object | `{}` | Extra labels on the agent pods. |
 | kserve.inventory.image | object | `{"name":"giantswarm/alpine","registry":"gsoci.azurecr.io","tag":"3.22.1"}` | Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox). |
 | kserve.inventory.ttl | string | `"2m"` | How long one cache scan is reused before a node is scanned again. |
-| kserve.inventory.timeout | string | `"2m"` | Time budget of one scan pod. |
+| kserve.inventory.timeout | string | `"2m"` | Time budget of one scan (scan pod, or cache-agent request). |
 | kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`). |
 | kserve.budget.defaultOverheadGiB | int | `30` | Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`. |
 | kserve.readyTimeout | string | `"2h"` | How long a load job waits for an InferenceService to become ready before it gives up on wiring. |

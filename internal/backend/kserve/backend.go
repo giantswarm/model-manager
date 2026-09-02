@@ -44,6 +44,8 @@ type Backend struct {
 	// scan and logs are the node-touching primitives; tests replace them.
 	scan scanner
 	logs logReader
+	// agentHTTP talks to the cache-agent pods (daemonset inventory mode).
+	agentHTTP *http.Client
 
 	mu          sync.Mutex
 	servedCache []served
@@ -68,6 +70,11 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	default:
 		return nil, fmt.Errorf("kserve budget source %q: want auto, gpu-labels or allocatable", opts.BudgetSource)
 	}
+	switch opts.InventoryMode {
+	case InventoryModePod, InventoryModeDaemonSet:
+	default:
+		return nil, fmt.Errorf("kserve inventory mode %q: want %s or %s", opts.InventoryMode, InventoryModePod, InventoryModeDaemonSet)
+	}
 	b := &Backend{
 		opts: opts,
 		cfg:  newConfig(opts),
@@ -77,7 +84,11 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		log:  slog.Default().With("backend", "kserve"),
 	}
 	b.hub = newHubClient(opts.HFEndpoint, &http.Client{Timeout: 30 * time.Second}, b.hubToken)
+	b.agentHTTP = &http.Client{Timeout: opts.InventoryTimeout}
 	b.scan = b.scanNode
+	if opts.InventoryMode == InventoryModeDaemonSet {
+		b.scan = b.scanAgent
+	}
 	return b, nil
 }
 
@@ -634,7 +645,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 				out = append(out, nodeView(n, reserved[n.Name], nil))
 				continue
 			}
-			cache = &backend.NodeCache{Claim: loc.Claim, MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: len(snap.Entries)}
+			cache = &backend.NodeCache{Claim: loc.Claim, MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: len(snap.Entries), Inventory: b.opts.InventoryMode}
 			for _, e := range snap.Entries {
 				cache.BytesUsed += e.Bytes
 			}

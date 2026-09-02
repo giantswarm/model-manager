@@ -294,6 +294,9 @@ type NodeCache struct {
 	// Shared is true when the claim is not node-local (network storage): the
 	// same contents are visible from every node.
 	Shared bool `json:"shared,omitempty"`
+	// Inventory says how the contents were read: "pod" (a short-lived scan
+	// pod on the node) or "daemonset" (the cache-agent DaemonSet pod there).
+	Inventory string `json:"inventory,omitempty"`
 	// Error is the last inventory failure; the listed contents may be stale.
 	Error string `json:"error,omitempty"`
 }

@@ -1,0 +1,113 @@
+{{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+{{- $agent := .Values.kserve.inventory.agent }}
+{{- $claim := required "kserve.cache.claimName is required when kserve.inventory.mode is daemonset: the DaemonSet mounts the cache claim, and the chart cannot read the discovery ConfigMap at render time (set it to the modelServing cache claim, e.g. hf-cache)" .Values.kserve.cache.claimName }}
+# The DaemonSet inventory (kserve.inventory.mode: daemonset): one cache-agent
+# per selected node mounts the cache claim read-only and serves its contents
+# at GET /inventory; model-manager reads it instead of running a scan pod per
+# node. Same image, `cache-agent` subcommand, no ServiceAccount token. It runs
+# as root with DAC_READ_SEARCH like the scan pod: the claim root is root-owned
+# and the storage-initializer writes as its own uid.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "model-manager.fullname" . }}-cache-agent
+  namespace: {{ include "model-manager.kserveNamespace" . }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "model-manager.cacheAgentSelectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      {{- with $agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "model-manager.cacheAgentSelectorLabels" . | nindent 8 }}
+        helm.sh/chart: {{ include "model-manager.chart" . }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        {{- with $agent.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cache-agent
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - cache-agent
+            - --listen=:{{ $agent.port }}
+            - --cache-root=/cache
+            {{- if .Values.logging.verbose }}
+            - --verbose
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: http
+              containerPort: {{ $agent.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - DAC_READ_SEARCH
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            {{- toYaml $agent.resources | nindent 12 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+              readOnly: true
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: {{ $claim }}
+            readOnly: true
+      {{- with $agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

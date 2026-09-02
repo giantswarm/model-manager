@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/cacheagent"
 )
 
 // Defaults of the driver; every one of them can be overridden by options or,
@@ -37,17 +38,27 @@ const (
 	DefaultDiscoveryTTL     = time.Minute
 	DefaultInventoryTTL     = 2 * time.Minute
 	DefaultInventoryTimeout = 2 * time.Minute
-	DefaultJobTTL           = time.Hour
-	DefaultReadyTimeout     = 2 * time.Hour
-	DefaultPollInterval     = 5 * time.Second
-	discoveryConfigKey      = "config.yaml"
-	discoveryKind           = "ModelServingConfig"
-	presetConfigKey         = "preset.yaml"
-	presetKind              = "ServingPreset"
-	agentPlatformAPIVersion = "agent-platform.giantswarm.io/v1alpha1"
-	budgetSourceAuto        = "auto"
-	budgetSourceGPULabels   = "gpu-labels"
-	budgetSourceAllocatable = "allocatable"
+	// InventoryModePod (default) scans a node's cache with a short-lived pod;
+	// InventoryModeDaemonSet reads it from the cache-agent DaemonSet pod on
+	// the node (chart value kserve.inventory.mode).
+	InventoryModePod       = "pod"
+	InventoryModeDaemonSet = "daemonset"
+	// DefaultInventoryAgentSelector finds the cache-agent pods the chart's
+	// DaemonSet runs (the chart adds the release instance label).
+	DefaultInventoryAgentSelector = ComponentLabel + "=" + componentCacheAgent
+	DefaultInventoryAgentPort     = cacheagent.DefaultPort
+	componentCacheAgent           = "cache-agent"
+	DefaultJobTTL                 = time.Hour
+	DefaultReadyTimeout           = 2 * time.Hour
+	DefaultPollInterval           = 5 * time.Second
+	discoveryConfigKey            = "config.yaml"
+	discoveryKind                 = "ModelServingConfig"
+	presetConfigKey               = "preset.yaml"
+	presetKind                    = "ServingPreset"
+	agentPlatformAPIVersion       = "agent-platform.giantswarm.io/v1alpha1"
+	budgetSourceAuto              = "auto"
+	budgetSourceGPULabels         = "gpu-labels"
+	budgetSourceAllocatable       = "allocatable"
 	// budgetSourceAnnotation is reported when the node's BudgetAnnotation
 	// overrode the configured source.
 	budgetSourceAnnotation       = "annotation"
@@ -239,6 +250,11 @@ func applyDefaults(o *backend.KServeOptions) {
 	defaultIf(&o.DownloadImage, DefaultDownloadImage)
 	defaultIf(&o.InitImage, DefaultInitImage)
 	defaultIf(&o.BudgetSource, DefaultBudgetSource)
+	defaultIf(&o.InventoryMode, InventoryModePod)
+	defaultIf(&o.InventoryAgentSelector, DefaultInventoryAgentSelector)
+	if o.InventoryAgentPort <= 0 {
+		o.InventoryAgentPort = DefaultInventoryAgentPort
+	}
 	if o.DefaultOverheadGiB <= 0 {
 		o.DefaultOverheadGiB = DefaultOverheadGiB
 	}

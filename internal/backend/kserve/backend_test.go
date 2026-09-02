@@ -3,6 +3,13 @@ package kserve
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/cacheagent"
 )
 
 func TestInfoAndCapabilities(t *testing.T) {
@@ -654,4 +662,141 @@ func TestNodeBudgetAnnotation(t *testing.T) {
 	nodes, err = f.b.ListNodes(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, find(nodes, testGPUNode).Message, "no annotation, no message")
+}
+
+// agentPodOn puts a ready cache-agent pod on node whose IP is the loopback
+// address of the given httptest server (the fake API server assigns no IPs).
+func (f *fixture) agentPodOn(ctx context.Context, name, node, hostPort string) {
+	f.t.Helper()
+	host, _, err := net.SplitHostPort(hostPort)
+	require.NoError(f.t, err)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testServingNS, Labels: map[string]string{ComponentLabel: componentCacheAgent, "app.kubernetes.io/instance": "mm"}},
+		Spec:       corev1.PodSpec{NodeName: node},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: host, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	_, err = f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
+	require.NoError(f.t, err)
+}
+
+func TestDaemonSetInventory(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A real cache root served by the agent handler, like the DaemonSet does.
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "tiny"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "tiny", "model.safetensors"), make([]byte, 4096), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, markersDir), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, markersDir, "hf-internal.json"), []byte(`{"model":"hf-internal/testing","revision":"r1"}`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "hf-internal"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-internal", "a.bin"), make([]byte, 10), 0o600))
+	agent := httptest.NewServer(cacheagent.Handler(root, testCacheNode, slog.New(slog.DiscardHandler)))
+	t.Cleanup(agent.Close)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(agent.URL, "http://"))
+	require.NoError(t, err)
+	agentPort, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	// New picks the agent scanner for daemonset mode and validates the mode.
+	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, InventoryMode: "cronjob"})
+	assert.ErrorContains(t, err, "inventory mode")
+	b, err := New(backend.KServeOptions{
+		Dynamic: f.dyn, Clientset: f.cs, DiscoveryNamespace: testPlatformNS, HFEndpoint: f.hub.srv.URL,
+		InventoryMode: InventoryModeDaemonSet, InventoryAgentPort: agentPort, InventoryTimeout: 5 * time.Second,
+		InventoryAgentSelector: DefaultInventoryAgentSelector + ",app.kubernetes.io/instance=mm",
+	})
+	require.NoError(t, err)
+	b.log = slog.New(slog.DiscardHandler)
+
+	// No agent pod yet: the request succeeds, the node reports the error.
+	nodes, err := b.ListNodes(ctx)
+	require.NoError(t, err)
+	var cache *backend.NodeCache
+	for _, n := range nodes {
+		if n.Name == testCacheNode {
+			cache = n.Cache
+		}
+	}
+	require.NotNil(t, cache)
+	assert.Equal(t, InventoryModeDaemonSet, cache.Inventory)
+	assert.Contains(t, cache.Error, "no ready cache-agent pod on "+testCacheNode)
+	assert.Contains(t, cache.Error, "app.kubernetes.io/instance=mm")
+	assert.Equal(t, 0, cache.Models)
+	pods, err := f.cs.CoreV1().Pods(testServingNS).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pods.Items, "daemonset mode creates no scan pods")
+
+	// A not-ready agent on the node and a ready one elsewhere do not count.
+	f.agentPodOn(ctx, "agent-elsewhere", testGPUNode, strings.TrimPrefix(agent.URL, "http://"))
+	f.agentPodOn(ctx, "agent-starting", testCacheNode, strings.TrimPrefix(agent.URL, "http://"))
+	starting, err := f.cs.CoreV1().Pods(testServingNS).Get(ctx, "agent-starting", metav1.GetOptions{})
+	require.NoError(t, err)
+	starting.Status.Conditions[0].Status = corev1.ConditionFalse
+	_, err = f.cs.CoreV1().Pods(testServingNS).Update(ctx, starting, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	b.inv.invalidate()
+	_, err = b.ListModels(ctx)
+	require.NoError(t, err, "a failed scan is logged, not returned")
+	nodes, err = b.ListNodes(ctx)
+	require.NoError(t, err)
+	for _, n := range nodes {
+		if n.Name == testCacheNode {
+			assert.Contains(t, n.Cache.Error, "no ready cache-agent pod")
+		}
+	}
+
+	// The ready agent on the cache node answers: same inventory model as the
+	// scan pod (node, dir, bytes, files, marker -> model name / digest).
+	f.agentPodOn(ctx, "agent-ready", testCacheNode, strings.TrimPrefix(agent.URL, "http://"))
+	b.inv.invalidate()
+	models, err := b.ListModels(ctx)
+	require.NoError(t, err)
+	require.Len(t, models, 2, models)
+	byName := map[string]backend.Model{}
+	for _, m := range models {
+		byName[m.Name] = m
+	}
+	tiny := byName[tinyRepo]
+	assert.Equal(t, "tiny", tiny.Path)
+	assert.Equal(t, "tiny", tiny.Preset)
+	assert.Equal(t, testCacheNode, tiny.Node)
+	assert.EqualValues(t, 4096, tiny.SizeBytes)
+	assert.True(t, *tiny.Downloaded)
+	marked := byName["hf-internal/testing"]
+	assert.Equal(t, "hf-internal", marked.Path)
+	assert.Equal(t, "r1", marked.Digest)
+	nodes, err = b.ListNodes(ctx)
+	require.NoError(t, err)
+	for _, n := range nodes {
+		switch n.Name {
+		case testCacheNode:
+			require.NotNil(t, n.Cache)
+			assert.Empty(t, n.Cache.Error)
+			assert.Equal(t, InventoryModeDaemonSet, n.Cache.Inventory)
+			assert.Equal(t, 2, n.Cache.Models)
+			assert.EqualValues(t, 4106, n.Cache.BytesUsed)
+		case testGPUNode:
+			assert.Nil(t, n.Cache, "the claim is pinned to the cache node")
+		}
+	}
+	pods, err = f.cs.CoreV1().Pods(testServingNS).List(ctx, metav1.ListOptions{LabelSelector: ComponentLabel + "=cache-tool"})
+	require.NoError(t, err)
+	assert.Empty(t, pods.Items, "still no scan pods")
+
+	// The agent answering garbage is an inventory error, not a crash.
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }))
+	t.Cleanup(broken.Close)
+	_, port, err = net.SplitHostPort(strings.TrimPrefix(broken.URL, "http://"))
+	require.NoError(t, err)
+	b.opts.InventoryAgentPort, err = strconv.Atoi(port)
+	require.NoError(t, err)
+	b.inv.invalidate()
+	nodes, err = b.ListNodes(ctx)
+	require.NoError(t, err)
+	for _, n := range nodes {
+		if n.Name == testCacheNode {
+			assert.Contains(t, n.Cache.Error, "HTTP 500")
+		}
+	}
 }

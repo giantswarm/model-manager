@@ -78,6 +78,9 @@ type kserveFlags struct {
 	jobTTL             time.Duration
 	inventoryTTL       time.Duration
 	inventoryTimeout   time.Duration
+	inventoryMode      string
+	inventorySelector  string
+	inventoryAgentPort int
 	budgetSource       string
 	defaultOverheadGiB float64
 	readyTimeout       time.Duration
@@ -120,7 +123,10 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&k.initImage, "kserve-init-image", envOr("KSERVE_INIT_IMAGE", kserve.DefaultInitImage), "Image that prepares cache directories and scans the cache (KSERVE_INIT_IMAGE)")
 	f.DurationVar(&k.jobTTL, "kserve-job-ttl", envDuration("KSERVE_JOB_TTL", kserve.DefaultJobTTL), "ttlSecondsAfterFinished of download Jobs (KSERVE_JOB_TTL)")
 	f.DurationVar(&k.inventoryTTL, "kserve-inventory-ttl", envDuration("KSERVE_INVENTORY_TTL", kserve.DefaultInventoryTTL), "How long a cache scan is reused (KSERVE_INVENTORY_TTL)")
-	f.DurationVar(&k.inventoryTimeout, "kserve-inventory-timeout", envDuration("KSERVE_INVENTORY_TIMEOUT", kserve.DefaultInventoryTimeout), "Time budget of one cache scan pod (KSERVE_INVENTORY_TIMEOUT)")
+	f.DurationVar(&k.inventoryTimeout, "kserve-inventory-timeout", envDuration("KSERVE_INVENTORY_TIMEOUT", kserve.DefaultInventoryTimeout), "Time budget of one cache scan (scan pod or cache-agent request) (KSERVE_INVENTORY_TIMEOUT)")
+	f.StringVar(&k.inventoryMode, "kserve-inventory-mode", envOr("KSERVE_INVENTORY_MODE", kserve.InventoryModePod), "How a node's cache is read: pod (a short-lived scan pod per node) or daemonset (the cache-agent DaemonSet pod on the node, `model-manager cache-agent`) (KSERVE_INVENTORY_MODE)")
+	f.StringVar(&k.inventorySelector, "kserve-inventory-agent-selector", envOr("KSERVE_INVENTORY_AGENT_SELECTOR", kserve.DefaultInventoryAgentSelector), "Label selector of the cache-agent pods in the serving namespace (daemonset mode) (KSERVE_INVENTORY_AGENT_SELECTOR)")
+	f.IntVar(&k.inventoryAgentPort, "kserve-inventory-agent-port", envInt("KSERVE_INVENTORY_AGENT_PORT", kserve.DefaultInventoryAgentPort), "Port of the cache-agent pods (daemonset mode) (KSERVE_INVENTORY_AGENT_PORT)")
 	f.StringVar(&k.budgetSource, "kserve-budget-source", envOr("KSERVE_BUDGET_SOURCE", kserve.DefaultBudgetSource), "Node memory budget: auto (GPU labels when present, else allocatable memory), gpu-labels, allocatable; the node annotation "+kserve.BudgetAnnotation+" (GiB) overrides it per node (KSERVE_BUDGET_SOURCE)")
 	f.Float64Var(&k.defaultOverheadGiB, "kserve-default-overhead-gib", envFloat("KSERVE_DEFAULT_OVERHEAD_GIB", kserve.DefaultOverheadGiB), "Serving overhead added to the weights when the preset has none (KSERVE_DEFAULT_OVERHEAD_GIB)")
 	f.DurationVar(&k.readyTimeout, "kserve-ready-timeout", envDuration("KSERVE_READY_TIMEOUT", kserve.DefaultReadyTimeout), "How long a load job waits for an InferenceService to become ready (KSERVE_READY_TIMEOUT)")
@@ -254,6 +260,9 @@ func (k kserveFlags) options() backend.KServeOptions {
 		JobTTL:                 k.jobTTL,
 		InventoryTTL:           k.inventoryTTL,
 		InventoryTimeout:       k.inventoryTimeout,
+		InventoryMode:          k.inventoryMode,
+		InventoryAgentSelector: k.inventorySelector,
+		InventoryAgentPort:     k.inventoryAgentPort,
 		BudgetSource:           k.budgetSource,
 		DefaultOverheadGiB:     k.defaultOverheadGiB,
 		ReadyTimeout:           k.readyTimeout,
@@ -300,6 +309,18 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func envInt(key string, def int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func envFloat(key string, def float64) float64 {
