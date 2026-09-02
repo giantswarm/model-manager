@@ -61,10 +61,26 @@ ServiceAccount name.
 {{- end }}
 
 {{/*
-Namespace for KServe resources (kserve backend); defaults to the release namespace.
+Serving namespace of the kserve backend (InferenceServices, download Jobs,
+cache); defaults to the release namespace.
 */}}
 {{- define "model-manager.kserveNamespace" -}}
 {{- default .Release.Namespace .Values.kserve.namespace }}
+{{- end }}
+
+{{/*
+Namespace of the model-serving discovery ConfigMap; defaults to the release
+namespace (where the umbrella chart publishes it).
+*/}}
+{{- define "model-manager.kserveDiscoveryNamespace" -}}
+{{- default .Release.Namespace .Values.kserve.discovery.namespace }}
+{{- end }}
+
+{{/*
+Namespace of the serving-preset ConfigMaps; defaults to the discovery namespace.
+*/}}
+{{- define "model-manager.kservePresetNamespace" -}}
+{{- default (include "model-manager.kserveDiscoveryNamespace" .) .Values.kserve.presets.namespace }}
 {{- end }}
 
 {{/*

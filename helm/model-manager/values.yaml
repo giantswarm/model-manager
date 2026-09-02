@@ -23,7 +23,8 @@ nameOverride: ""
 fullnameOverride: ""
 
 # -- Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop)
-# or `kserve` (KServe/vLLM on GPU installs; driver lands in a later release).
+# or `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving
+# presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks).
 # The API reports the backend and its capability flags at /api/v1/backend.
 backend: ollama
 
@@ -122,12 +123,100 @@ serviceAccount:
 
 rbac:
   # -- Create the Role/RoleBinding for ModelConfigs and Secrets in
-  # `kagent.namespace` (and the KServe rules when `backend` is kserve).
+  # `kagent.namespace` (and, when `backend` is kserve, the Role in the serving
+  # namespace, the Role for the discovery/preset ConfigMaps and the
+  # ClusterRole for nodes and PersistentVolumes).
   create: true
 
 kserve:
-  # -- Namespace holding InferenceServices and download Jobs (kserve backend).
-  namespace: ""
+  # -- Serving namespace: InferenceServices, download Jobs, cache-tool pods and
+  # the cache claim live here and the kserve RBAC Role is created here. Must
+  # match the platform's `components.modelServing.namespace.name`.
+  namespace: model-serving
+  discovery:
+    # -- Name of the platform's model-serving discovery ConfigMap (kind
+    # `ModelServingConfig`, key `config.yaml`) that carries the runtime, GPU
+    # resource name, cache claim and preset selector. Empty `kserve.*`
+    # overrides below take their value from it.
+    configMap: agent-platform-model-serving
+    # -- Namespace of the discovery ConfigMap and, by default, of the preset
+    # ConfigMaps. Empty means the release namespace.
+    namespace: ""
+  # -- ClusterServingRuntime for presets that name none; empty takes the
+  # discovery value (default `kserve-vllm`).
+  runtime: ""
+  # -- Accelerator resource name; empty takes the discovery value (default
+  # `nvidia.com/gpu`).
+  gpuResourceName: ""
+  cache:
+    # -- PersistentVolumeClaim of the Hugging Face cache in the serving
+    # namespace; empty takes the discovery value (default `hf-cache`).
+    claimName: ""
+    # -- Where predictors mount the cache; empty takes the discovery value
+    # (default `/mnt/models`).
+    mountPath: ""
+    # -- Nodes that hold the cache. Empty derives them from the node affinity
+    # of the PersistentVolume bound to the claim (a static local PV pins the
+    # cache to its node).
+    nodes: []
+  presets:
+    # -- Namespace of the serving-preset ConfigMaps; empty takes the discovery
+    # value, else `kserve.discovery.namespace`.
+    namespace: ""
+    # -- Label selector of the serving-preset ConfigMaps; empty takes the
+    # discovery value (default `agent-platform.giantswarm.io/serving-preset=true`).
+    labelSelector: ""
+  hf:
+    # -- Hugging Face Hub base URL (search, repository metadata, sizes).
+    endpoint: https://huggingface.co
+    tokenSecret:
+      # -- Secret in the serving namespace holding a Hugging Face token for
+      # gated repositories (read by model-manager, mounted into download
+      # Jobs). Empty: anonymous hub access, gated models refused.
+      name: ""
+      # -- Key of the token in that Secret.
+      key: token
+    # -- Render the token Secret (`kserve.hf.tokenSecret.name`, in the serving
+    # namespace) from this value. Prefer a pre-created Secret; this is for
+    # installs whose values are already secret-managed.
+    token: ""
+  download:
+    # -- Image of the pre-warm download Job. The KServe storage-initializer
+    # downloads exactly what an InferenceService would, so a later start finds
+    # the files and skips the download.
+    image:
+      registry: docker.io
+      name: kserve/storage-initializer
+      tag: v0.20.0
+    # -- File patterns downloads skip (fnmatch, passed as
+    # STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an
+    # InferenceService does.
+    ignorePatterns: []
+    # -- ttlSecondsAfterFinished of download Jobs.
+    jobTTL: 1h
+  inventory:
+    # -- Image that creates cache directories (download Job init container)
+    # and scans / cleans the cache (short-lived pods); needs sh, find, stat,
+    # awk (busybox).
+    image:
+      registry: gsoci.azurecr.io
+      name: giantswarm/alpine
+      tag: 3.22.1
+    # -- How long one cache scan is reused before a node is scanned again.
+    ttl: 2m
+    # -- Time budget of one scan pod.
+    timeout: 2m
+  budget:
+    # -- Node memory budget for fit checks: `auto` (GPU memory from the
+    # nvidia.com/gpu.memory x gpu.count labels when present, else allocatable
+    # memory — unified-memory nodes), `gpu-labels`, `allocatable`.
+    source: auto
+    # -- Serving overhead (KV cache, activations, runtime) added to the weights
+    # when the preset has no `requirements.overheadGiB`.
+    defaultOverheadGiB: 30
+  # -- How long a load job waits for an InferenceService to become ready
+  # before it gives up on wiring.
+  readyTimeout: 2h
 
 # -- Annotations on the pod.
 podAnnotations: {}  # @schema additionalProperties: true

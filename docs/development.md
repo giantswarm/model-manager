@@ -12,10 +12,14 @@ make helm-docs      # regenerate helm/model-manager/README.md
 
 - `cmd/` — cobra CLI (`serve`, `version`).
 - `internal/backend` — the `Backend` interface, capability flags, shared types
-  and the driver registry. `internal/backend/ollama` is the host-Ollama driver.
-  A kserve driver implements the same interface (`ListModels` = per-node HF
-  cache, `Pull` = download Job, `Load`/`Unload` = InferenceService with
-  `LoadRequest.Preset`) and registers itself in `cmd/serve.go`.
+  and the driver registry, plus the optional interfaces a driver may implement
+  (`PresetLister`, `Searcher`, `FitChecker`, `NodeLister`, `ServeLifecycle`,
+  `PullAdopter`). `internal/backend/ollama` is the host-Ollama driver.
+  `internal/backend/kserve` is the KServe driver: `config.go` (discovery
+  ConfigMap + flag overrides), `presets.go`, `hub.go` (Hugging Face Hub),
+  `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods),
+  `jobs.go` (download Jobs), `isvc.go` (InferenceService composition/status),
+  `fit.go`, `backend.go`.
 - `internal/jobs` — in-memory job manager (pulls with progress, cancel, retention).
 - `internal/wiring` — kagent `ModelConfig` create/update/delete via the dynamic
   client; owns only CRs labelled `app.kubernetes.io/managed-by=model-manager`.
@@ -55,3 +59,36 @@ helm upgrade --install model-manager helm/model-manager -n agent-platform \
 
 Then exercise the REST API through a port-forward and the MCP tools through
 muster (`x_model-manager_*`).
+
+### kserve backend in the lab (no controller)
+
+The lab has the KServe CRDs but no controller and no GPUs, which is enough for
+everything except a real vLLM start. Install a second release in its own
+namespace with the modelServing ConfigMaps rendered from
+`agent-platform-standalone` and a local-path cache claim:
+
+```sh
+kubectl create ns mm-kserve
+helm template lab oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-standalone --version 0.10.0 \
+  -n mm-kserve --set components.modelServing.enabled=true \
+  --api-versions serving.kserve.io/v1alpha1 --api-versions serving.kserve.io/v1beta1 \
+  | yq 'select(.kind == "ConfigMap")' | kubectl -n mm-kserve apply -f -
+kubectl -n mm-kserve create -f - <<PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: hf-cache}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+PVC
+helm upgrade --install model-manager-kserve helm/model-manager -n mm-kserve \
+  --set backend=kserve --set kserve.namespace=mm-kserve \
+  --set image.registry=docker.io --set image.repository=library/model-manager \
+  --set image.tag=dev-$(git rev-parse --short HEAD) --set image.pullPolicy=Never \
+  --set muster.mcpServer.enabled=true --set muster.mcpServer.name=model-manager-kserve
+```
+
+`GET /api/v1/search?q=tiny-random-gpt2`, `POST /api/v1/models/fit-check`,
+`POST /api/v1/models/pull` (a Job downloads into the claim), `GET /api/v1/models`
+(the cache entry with size and node), `POST /api/v1/models/load` (an
+InferenceService appears; patch its status Ready with
+`kubectl patch --subresource=status` to see the load job wire a ModelConfig),
+`POST /api/v1/models/unload`, `DELETE /api/v1/models/<repo>`.

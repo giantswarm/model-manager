@@ -14,12 +14,38 @@ the installation supports.
 - `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
   kind the docker network gateway). Agent wiring uses kagent's native keyless
   `Ollama` provider with `ollama.agentHost` (defaults to the endpoint).
-- `kserve` — InferenceServices, per-node HF cache, download Jobs, presets
-  (driver lands in a later release; the RBAC block is already templated).
+- `kserve` — InferenceServices composed from the platform's serving presets,
+  the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
+  download Jobs with progress, Hugging Face Hub search and node fit checks.
+  Agent wiring uses kagent's `OpenAI` provider against the predictor URL with
+  a placeholder API-key Secret, created when the InferenceService is ready.
 
 Used as a dependency of `agent-platform-standalone` behind a `condition`;
 standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
 `mcp.enabled` and `muster.mcpServer.*`.
+
+### kserve backend
+
+`backend: kserve` needs the KServe CRDs and the platform's model-serving layer
+(`components.modelServing` of `agent-platform-standalone`): the discovery
+ConfigMap `agent-platform-model-serving` (`kserve.discovery.*`), the
+`ServingPreset` ConfigMaps and the cache `PersistentVolumeClaim` in the serving
+namespace. `kserve.namespace` must equal the platform's serving namespace: the
+Role for InferenceServices, Jobs, pods and the claim is created there. Every
+other `kserve.*` value is an override of what the discovery ConfigMap says and
+can stay empty.
+
+- Downloads run as Jobs in the serving namespace with the KServe
+  storage-initializer image (`kserve.download.image`), into
+  `<claim>/<preset name>` — the directory the preset's InferenceService mounts
+  — after a fit check against the node's memory budget (`kserve.budget.*`).
+  Gated repositories need `kserve.hf.tokenSecret` (a Secret in the serving
+  namespace).
+- The cache inventory runs a short-lived pod per cache node
+  (`kserve.inventory.*`); results are reused for `kserve.inventory.ttl`.
+- RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
+  discovery/preset namespace when it differs, and a ClusterRole for nodes and
+  PersistentVolumes.
 
 {{ template "chart.homepageLine" . }}
 

@@ -46,6 +46,49 @@ spec:
             - --ollama-agent-host={{ .Values.ollama.agentHost }}
             {{- end }}
             {{- end }}
+            {{- if eq .Values.backend "kserve" }}
+            {{- $k := .Values.kserve }}
+            - --kserve-namespace={{ include "model-manager.kserveNamespace" . }}
+            - --kserve-discovery-configmap={{ $k.discovery.configMap }}
+            - --kserve-discovery-namespace={{ include "model-manager.kserveDiscoveryNamespace" . }}
+            {{- with $k.runtime }}
+            - --kserve-runtime={{ . }}
+            {{- end }}
+            {{- with $k.gpuResourceName }}
+            - --kserve-gpu-resource={{ . }}
+            {{- end }}
+            {{- with $k.cache.claimName }}
+            - --kserve-cache-claim={{ . }}
+            {{- end }}
+            {{- with $k.cache.mountPath }}
+            - --kserve-cache-mount-path={{ . }}
+            {{- end }}
+            {{- with $k.cache.nodes }}
+            - --kserve-cache-nodes={{ join "," . }}
+            {{- end }}
+            {{- with $k.presets.namespace }}
+            - --kserve-preset-namespace={{ . }}
+            {{- end }}
+            {{- with $k.presets.labelSelector }}
+            - --kserve-preset-selector={{ . }}
+            {{- end }}
+            - --kserve-hf-endpoint={{ $k.hf.endpoint }}
+            {{- with $k.hf.tokenSecret.name }}
+            - --kserve-hf-token-secret={{ . }}
+            - --kserve-hf-token-secret-key={{ $k.hf.tokenSecret.key }}
+            {{- end }}
+            - --kserve-download-image={{ $k.download.image.registry }}/{{ $k.download.image.name }}:{{ $k.download.image.tag }}
+            {{- with $k.download.ignorePatterns }}
+            - --kserve-download-ignore-patterns={{ join "," . }}
+            {{- end }}
+            - --kserve-job-ttl={{ $k.download.jobTTL }}
+            - --kserve-init-image={{ $k.inventory.image.registry }}/{{ $k.inventory.image.name }}:{{ $k.inventory.image.tag }}
+            - --kserve-inventory-ttl={{ $k.inventory.ttl }}
+            - --kserve-inventory-timeout={{ $k.inventory.timeout }}
+            - --kserve-budget-source={{ $k.budget.source }}
+            - --kserve-default-overhead-gib={{ $k.budget.defaultOverheadGiB }}
+            - --kserve-ready-timeout={{ $k.readyTimeout }}
+            {{- end }}
             {{- if .Values.kagent.disableWiring }}
             - --disable-wiring=true
             {{- else }}

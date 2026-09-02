@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	spec "github.com/giantswarm/model-manager/api"
@@ -48,17 +49,26 @@ func (h *REST) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+Prefix+"/models/unload", h.unload)
 	mux.HandleFunc("POST "+Prefix+"/models/wire", h.wire)
 	mux.HandleFunc("POST "+Prefix+"/models/unwire", h.unwire)
+	mux.HandleFunc("POST "+Prefix+"/models/fit-check", h.fitCheck)
 	mux.HandleFunc("GET "+Prefix+"/models/{name...}", h.getModel)
 	mux.HandleFunc("DELETE "+Prefix+"/models/{name...}", h.deleteModel)
 	mux.HandleFunc("GET "+Prefix+"/jobs", h.listJobs)
 	mux.HandleFunc("GET "+Prefix+"/jobs/{id}", h.getJob)
 	mux.HandleFunc("DELETE "+Prefix+"/jobs/{id}", h.cancelJob)
+	// kserve capabilities (501 unsupported when the flag is false).
+	mux.HandleFunc("GET "+Prefix+"/presets", h.listPresets)
+	mux.HandleFunc("GET "+Prefix+"/search", h.search)
+	mux.HandleFunc("GET "+Prefix+"/nodes", h.listNodes)
 }
 
 type modelRequest struct {
 	Model     string `json:"model"`
 	Wire      *bool  `json:"wire,omitempty"`
 	KeepAlive string `json:"keepAlive,omitempty"`
+	// Preset / Node are kserve concerns: the serving preset to use and the
+	// node to pull to / serve on.
+	Preset string `json:"preset,omitempty"`
+	Node   string `json:"node,omitempty"`
 }
 
 type errorBody struct {
@@ -122,7 +132,7 @@ func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	job, created, err := h.svc.Pull(r.Context(), req.Model, req.Wire)
+	job, created, err := h.svc.Pull(r.Context(), service.PullOptions{Model: req.Model, Wire: req.Wire, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -131,16 +141,66 @@ func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) load(w http.ResponseWriter, r *http.Request) {
-	req, ok := h.decodeModelRequest(w, r)
+	req, ok := h.decodeModelRequest(w, r, true)
 	if !ok {
 		return
 	}
-	m, err := h.svc.Load(r.Context(), req.Model, req.KeepAlive)
+	m, err := h.svc.Load(r.Context(), service.LoadOptions{Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, m)
+}
+
+func (h *REST) fitCheck(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeModelRequest(w, r, true)
+	if !ok {
+		return
+	}
+	res, err := h.svc.FitCheck(r.Context(), backend.FitRequest{Model: req.Model, Preset: req.Preset, Node: req.Node})
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (h *REST) listPresets(w http.ResponseWriter, r *http.Request) {
+	presets, err := h.svc.Presets(r.Context())
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"presets": presets})
+}
+
+func (h *REST) search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 0
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			h.writeError(w, fmt.Errorf("%w: limit must be a non-negative integer", backend.ErrInvalid))
+			return
+		}
+		limit = n
+	}
+	hits, err := h.svc.Search(r.Context(), q.Get("q"), limit)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"query": q.Get("q"), "results": hits})
+}
+
+func (h *REST) listNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := h.svc.Nodes(r.Context())
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
 
 func (h *REST) unload(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +262,9 @@ func (h *REST) cancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
-func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request) (modelRequest, bool) {
+// decodeModelRequest reads the JSON body. presetOK lets "preset" stand in for
+// "model" (load / fit-check on preset-driven backends).
+func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request, presetOK ...bool) (modelRequest, bool) {
 	var req modelRequest
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
@@ -217,7 +279,8 @@ func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request) (model
 		h.writeError(w, fmt.Errorf("%w: invalid JSON: %v", backend.ErrInvalid, err))
 		return req, false
 	}
-	if strings.TrimSpace(req.Model) == "" {
+	allowPreset := len(presetOK) > 0 && presetOK[0]
+	if strings.TrimSpace(req.Model) == "" && (!allowPreset || strings.TrimSpace(req.Preset) == "") {
 		h.writeError(w, fmt.Errorf("%w: \"model\" is required", backend.ErrInvalid))
 		return req, false
 	}
@@ -244,6 +307,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusNotImplemented, "unsupported"
 	case errors.Is(err, backend.ErrConflict):
 		return http.StatusConflict, "conflict"
+	case errors.Is(err, backend.ErrUnfit):
+		return http.StatusPreconditionFailed, "does_not_fit"
 	default:
 		return http.StatusBadGateway, "backend_error"
 	}

@@ -6,12 +6,81 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
-// Options carries per-driver configuration. Each driver reads its own block;
-// the kserve driver adds a KServe block when it lands.
+// Options carries per-driver configuration. Each driver reads its own block.
 type Options struct {
 	Ollama OllamaOptions
+	KServe KServeOptions
+}
+
+// KServeOptions configures the kserve driver. Empty strings mean "take it
+// from the platform's discovery ConfigMap" (kind ModelServingConfig) where
+// one exists; explicit values win over discovery.
+type KServeOptions struct {
+	// Dynamic and Clientset are the Kubernetes clients (required).
+	Dynamic   dynamic.Interface
+	Clientset kubernetes.Interface
+
+	// DiscoveryNamespace / DiscoveryConfigMap locate the ModelServingConfig
+	// ConfigMap (default: model-manager's own namespace,
+	// agent-platform-model-serving).
+	DiscoveryNamespace string
+	DiscoveryConfigMap string
+	// DiscoveryTTL bounds how long the discovery document is cached.
+	DiscoveryTTL time.Duration
+
+	// Namespace is the serving namespace (InferenceServices, Jobs, cache).
+	Namespace string
+	// Runtime is the ClusterServingRuntime name a preset without one uses.
+	Runtime string
+	// GPUResourceName is the accelerator resource (nvidia.com/gpu).
+	GPUResourceName string
+	// CacheClaim / CacheMountPath describe the HF cache claim in Namespace.
+	CacheClaim     string
+	CacheMountPath string
+	// CacheNodes overrides the nodes that hold the cache (default: derived
+	// from the bound PersistentVolume's node affinity).
+	CacheNodes []string
+	// PresetNamespace / PresetSelector locate the ServingPreset ConfigMaps.
+	PresetNamespace string
+	PresetSelector  string
+
+	// HFEndpoint is the Hugging Face Hub base URL.
+	HFEndpoint string
+	// HFTokenSecret / HFTokenSecretKey name a Secret in Namespace holding a
+	// hub token (optional; gated repositories).
+	HFTokenSecret    string
+	HFTokenSecretKey string
+
+	// DownloadImage runs pre-warm downloads (default: the KServe
+	// storage-initializer, so the cache holds exactly what an
+	// InferenceService would download).
+	DownloadImage string
+	// DownloadIgnorePatterns are passed as STORAGE_IGNORE_PATTERNS.
+	DownloadIgnorePatterns []string
+	// InitImage creates cache directories and scans the cache (a busybox-like
+	// image with sh, find, stat, awk).
+	InitImage string
+	// JobTTL is ttlSecondsAfterFinished of download Jobs.
+	JobTTL time.Duration
+	// InventoryTTL bounds how long a cache scan is reused.
+	InventoryTTL time.Duration
+	// InventoryTimeout bounds one cache scan.
+	InventoryTimeout time.Duration
+
+	// BudgetSource picks the node memory budget: auto (GPU labels when
+	// present, else allocatable memory), gpu-labels, allocatable.
+	BudgetSource string
+	// DefaultOverheadGiB is the serving overhead when no preset says.
+	DefaultOverheadGiB float64
+	// ReadyTimeout bounds WaitReady.
+	ReadyTimeout time.Duration
+	// PollInterval is the readiness / job progress poll period.
+	PollInterval time.Duration
 }
 
 // OllamaOptions configures the ollama driver.

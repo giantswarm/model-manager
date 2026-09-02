@@ -8,14 +8,17 @@ import (
 
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Clients bundles what the wiring layer needs.
+// Clients bundles what the wiring layer and the kserve driver need.
 type Clients struct {
 	Dynamic   dynamic.Interface
 	Discovery discovery.DiscoveryInterface
+	// Clientset is the typed client (Jobs, Pods, Nodes, ConfigMaps, ...).
+	Clientset kubernetes.Interface
 }
 
 // Config selects how to reach the API server.
@@ -45,7 +48,11 @@ func New(cfg Config) (*Clients, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discovery client: %w", err)
 	}
-	return &Clients{Dynamic: dyn, Discovery: disc}, nil
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("clientset: %w", err)
+	}
+	return &Clients{Dynamic: dyn, Discovery: disc, Clientset: cs}, nil
 }
 
 func restConfig(cfg Config) (*rest.Config, error) {

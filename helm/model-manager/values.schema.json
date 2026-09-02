@@ -10,7 +10,7 @@
         },
         "backend": {
             "type": "string",
-            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop) or `kserve` (KServe/vLLM on GPU installs; driver lands in a later release). The API reports the backend and its capability flags at /api/v1/backend."
+            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop) or `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks). The API reports the backend and its capability flags at /api/v1/backend."
         },
         "baseDomain": {
             "type": "string"
@@ -190,9 +190,169 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "budget": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "defaultOverheadGiB": {
+                            "type": "integer",
+                            "description": "Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`."
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`."
+                        }
+                    }
+                },
+                "cache": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "claimName": {
+                            "type": "string",
+                            "description": "PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty takes the discovery value (default `hf-cache`)."
+                        },
+                        "mountPath": {
+                            "type": "string",
+                            "description": "Where predictors mount the cache; empty takes the discovery value (default `/mnt/models`)."
+                        },
+                        "nodes": {
+                            "type": "array",
+                            "description": "Nodes that hold the cache. Empty derives them from the node affinity of the PersistentVolume bound to the claim (a static local PV pins the cache to its node)."
+                        }
+                    }
+                },
+                "discovery": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "configMap": {
+                            "type": "string",
+                            "description": "Name of the platform's model-serving discovery ConfigMap (kind `ModelServingConfig`, key `config.yaml`) that carries the runtime, GPU resource name, cache claim and preset selector. Empty `kserve.*` overrides below take their value from it."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace of the discovery ConfigMap and, by default, of the preset ConfigMaps. Empty means the release namespace."
+                        }
+                    }
+                },
+                "download": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "ignorePatterns": {
+                            "type": "array",
+                            "description": "File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an InferenceService does."
+                        },
+                        "image": {
+                            "type": "object",
+                            "description": "Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an InferenceService would, so a later start finds the files and skips the download.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "registry": {
+                                    "type": "string"
+                                },
+                                "tag": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "jobTTL": {
+                            "type": "string",
+                            "description": "ttlSecondsAfterFinished of download Jobs."
+                        }
+                    }
+                },
+                "gpuResourceName": {
+                    "type": "string",
+                    "description": "Accelerator resource name; empty takes the discovery value (default `nvidia.com/gpu`)."
+                },
+                "hf": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "endpoint": {
+                            "type": "string",
+                            "description": "Hugging Face Hub base URL (search, repository metadata, sizes)."
+                        },
+                        "token": {
+                            "type": "string",
+                            "description": "Render the token Secret (`kserve.hf.tokenSecret.name`, in the serving namespace) from this value. Prefer a pre-created Secret; this is for installs whose values are already secret-managed."
+                        },
+                        "tokenSecret": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "key": {
+                                    "type": "string",
+                                    "description": "Key of the token in that Secret."
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "Secret in the serving namespace holding a Hugging Face token for gated repositories (read by model-manager, mounted into download Jobs). Empty: anonymous hub access, gated models refused."
+                                }
+                            }
+                        }
+                    }
+                },
+                "inventory": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "image": {
+                            "type": "object",
+                            "description": "Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox).",
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "registry": {
+                                    "type": "string"
+                                },
+                                "tag": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "timeout": {
+                            "type": "string",
+                            "description": "Time budget of one scan pod."
+                        },
+                        "ttl": {
+                            "type": "string",
+                            "description": "How long one cache scan is reused before a node is scanned again."
+                        }
+                    }
+                },
                 "namespace": {
                     "type": "string",
-                    "description": "Namespace holding InferenceServices and download Jobs (kserve backend)."
+                    "description": "Serving namespace: InferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`."
+                },
+                "presets": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "labelSelector": {
+                            "type": "string",
+                            "description": "Label selector of the serving-preset ConfigMaps; empty takes the discovery value (default `agent-platform.giantswarm.io/serving-preset=true`)."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace of the serving-preset ConfigMaps; empty takes the discovery value, else `kserve.discovery.namespace`."
+                        }
+                    }
+                },
+                "readyTimeout": {
+                    "type": "string",
+                    "description": "How long a load job waits for an InferenceService to become ready before it gives up on wiring."
+                },
+                "runtime": {
+                    "type": "string",
+                    "description": "ClusterServingRuntime for presets that name none; empty takes the discovery value (default `kserve-vllm`)."
                 }
             }
         },
@@ -381,7 +541,7 @@
             "properties": {
                 "create": {
                     "type": "boolean",
-                    "description": "Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and the KServe rules when `backend` is kserve)."
+                    "description": "Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when `backend` is kserve, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes)."
                 }
             }
         },

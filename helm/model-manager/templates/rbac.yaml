@@ -38,9 +38,12 @@ subjects:
 {{- end }}
 {{- if and .Values.rbac.create (eq .Values.backend "kserve") }}
 {{- /*
-KServe backend: InferenceServices, download Jobs and their pods in the serving
-namespace; node labels/allocatable cluster-wide for the per-node cache
-inventory and fit-checks.
+KServe backend, in the serving namespace: InferenceServices; download Jobs and
+their pods (progress from pod logs); the short-lived cache-tool pods that scan
+and clean the cache claim; the claim itself; the optional hub-token Secret. In
+the discovery / preset namespace: the ModelServingConfig and ServingPreset
+ConfigMaps. Cluster-wide: nodes (memory budgets, GPU labels) and
+PersistentVolumes (which node holds the cache).
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -52,14 +55,29 @@ metadata:
     {{- include "model-manager.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["serving.kserve.io"]
-    resources: ["inferenceservices", "servingruntimes"]
+    resources: ["inferenceservices"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["servingruntimes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "persistentvolumeclaims", "configmaps"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch"]
+  {{- with .Values.kserve.hf.tokenSecret.name }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ . | quote }}]
+    verbs: ["get"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -76,6 +94,40 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "model-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- $discoveryNs := include "model-manager.kserveDiscoveryNamespace" . }}
+{{- $presetNs := include "model-manager.kservePresetNamespace" . }}
+{{- range $ns := (list $discoveryNs $presetNs | uniq) }}
+{{- if ne $ns (include "model-manager.kserveNamespace" $) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "model-manager.fullname" $ }}-kserve-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "model-manager.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" $ }}-kserve-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "model-manager.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "model-manager.fullname" $ }}-kserve-config
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -87,6 +139,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
