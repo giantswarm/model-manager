@@ -116,10 +116,12 @@ func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model}
 }
 
-// fakeWirer records ModelConfigs in memory.
+// fakeWirer records ModelConfigs in memory: refs holds model-manager's own
+// (keyed by model reference), foreign holds ModelConfigs created by others.
 type fakeWirer struct {
-	mu   sync.Mutex
-	refs map[string]wiring.ModelConfigRef
+	mu      sync.Mutex
+	refs    map[string]wiring.ModelConfigRef
+	foreign []wiring.ModelConfigRef
 }
 
 func newFakeWirer() *fakeWirer { return &fakeWirer{refs: map[string]wiring.ModelConfigRef{}} }
@@ -127,7 +129,15 @@ func newFakeWirer() *fakeWirer { return &fakeWirer{refs: map[string]wiring.Model
 func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndpoint) (*wiring.ModelConfigRef, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	ref := wiring.ModelConfigRef{Name: wiring.ModelConfigName("", model), Namespace: "kagent", Provider: ep.Provider, Model: model, Ready: true}
+	name := wiring.ModelConfigName("", model)
+	if ep.Name != "" {
+		name = ep.Name
+	}
+	endpoint := ep.BaseURL
+	if endpoint == "" {
+		endpoint = ep.Host
+	}
+	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true}
 	w.refs[model] = ref
 	return &ref, nil
 }
@@ -136,6 +146,15 @@ func (w *fakeWirer) Remove(_ context.Context, model string) error {
 	defer w.mu.Unlock()
 	delete(w.refs, model)
 	return nil
+}
+func (w *fakeWirer) ListAll(context.Context) ([]wiring.ModelConfigRef, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := append([]wiring.ModelConfigRef(nil), w.foreign...)
+	for _, r := range w.refs {
+		out = append(out, r)
+	}
+	return out, nil
 }
 func (w *fakeWirer) Lookup(_ context.Context, model string) (*wiring.ModelConfigRef, error) {
 	w.mu.Lock()

@@ -319,14 +319,15 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 	out := make([]backend.LoadedModel, 0, len(servedList))
 	for _, sv := range servedList {
 		lm := backend.LoadedModel{
-			Name:     sv.Model,
-			Endpoint: sv.URL,
-			Node:     sv.Node,
-			Status:   sv.Status,
-			Message:  sv.Message,
-			Resource: sv.Name,
-			Preset:   sv.Preset,
-			GPUs:     sv.GPUs,
+			Name:      sv.Model,
+			Endpoint:  sv.URL,
+			Node:      sv.Node,
+			Status:    sv.Status,
+			Message:   sv.Message,
+			Resource:  sv.Name,
+			Preset:    sv.Preset,
+			GPUs:      sv.GPUs,
+			ManagedBy: sv.ManagedBy,
 		}
 		if sv.Deleting {
 			lm.Status = "Terminating"
@@ -431,11 +432,11 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	}
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s.GPUResourceName)
-		if sv.Managed && strings.EqualFold(sv.Model, plan.Repo) {
-			b.log.Info("InferenceService already exists", "name", sv.Name, "model", sv.Model)
+		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
+			b.log.Info("InferenceService already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
 			return nil
 		}
-		return fmt.Errorf("%w: InferenceService %s/%s exists (model %s, managed by model-manager: %t)", backend.ErrConflict, s.Namespace, sv.Name, sv.Model, sv.Managed)
+		return fmt.Errorf("%w: InferenceService %s/%s exists (model %s, managed by %q)", backend.ErrConflict, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
 	}
 	if !plan.Result.Fits {
 		return fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
@@ -450,8 +451,8 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 }
 
 // Unload implements backend.Backend: deletes the InferenceServices serving the
-// model; the cache stays. Only model-manager's own InferenceServices are
-// deleted.
+// model; the cache stays. model-manager's own InferenceServices and the ones
+// the portal created from a preset are deleted; hand-written ones are not.
 func (b *Backend) Unload(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -465,8 +466,8 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 		return fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
 	}
 	for _, sv := range matches {
-		if !sv.Managed {
-			return fmt.Errorf("%w: InferenceService %s/%s is not managed by model-manager", backend.ErrConflict, sv.Namespace, sv.Name)
+		if !sv.manageable() {
+			return fmt.Errorf("%w: InferenceService %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Namespace, sv.Name, sv.ManagedBy)
 		}
 	}
 	for _, sv := range matches {
@@ -530,7 +531,9 @@ func (b *Backend) RunningPulls(ctx context.Context) ([]backend.PullRequest, erro
 // AgentEndpoint implements backend.Backend: kagent's OpenAI provider against
 // the predictor's OpenAI-compatible API. vLLM serves the model under the
 // InferenceService name (--served-model-name {{.Name}} in the platform
-// runtime) and checks no API key, so the placeholder secret is required.
+// runtime) and checks no API key, so the placeholder secret is required. The
+// ModelConfig is named after the InferenceService too — the rule the portal's
+// serve flow applies, so both wire a served model to the same object.
 func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	repo, _ := splitRevision(model)
 	b.mu.Lock()
@@ -539,7 +542,7 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	b.mu.Unlock()
 	for _, sv := range servedList {
 		if strings.EqualFold(sv.Model, repo) || sv.Name == model {
-			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.Name, PlaceholderAPIKey: true}
+			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.Name, PlaceholderAPIKey: true, Name: sv.Name}
 		}
 	}
 	name := dnsLabel(repo)
@@ -548,7 +551,7 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 		name = p.name()
 	}
 	ns := b.cfg.last().Namespace
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: predictorURL(name, ns) + "/v1", Model: name, PlaceholderAPIKey: true}
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: predictorURL(name, ns) + "/v1", Model: name, PlaceholderAPIKey: true, Name: name}
 }
 
 // ListPresets implements backend.PresetLister.

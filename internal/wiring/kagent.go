@@ -56,18 +56,31 @@ type ModelConfigRef struct {
 	// Ready mirrors the kagent Accepted condition.
 	Ready   bool   `json:"ready"`
 	Message string `json:"message,omitempty"`
+	// Managed is true when model-manager created the ModelConfig; others
+	// (the portal's, hand-written ones) are reported but never modified.
+	Managed bool `json:"managed"`
+	// ProviderModel is spec.model — the name the provider serves the model
+	// under (kserve: the InferenceService name); Model is the backend's
+	// reference.
+	ProviderModel string `json:"providerModel,omitempty"`
+	// Endpoint is the provider endpoint: openAI.baseUrl or ollama.host.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // Wirer manages the agent-facing configuration for models.
 type Wirer interface {
 	// Ensure creates or updates the ModelConfig for model (idempotent).
 	Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error)
-	// Remove deletes the ModelConfig for model; absent is not an error.
+	// Remove deletes the ModelConfig for model; absent is not an error. Only
+	// model-manager's own ModelConfigs are ever deleted.
 	Remove(ctx context.Context, model string) error
 	// Lookup returns the ModelConfig for model, or nil when none exists.
 	Lookup(ctx context.Context, model string) (*ModelConfigRef, error)
 	// List returns all model-manager-owned ModelConfigs keyed by model reference.
 	List(ctx context.Context) (map[string]ModelConfigRef, error)
+	// ListAll returns every ModelConfig in the namespace, whoever created it,
+	// so callers can recognise a model that is already wired by someone else.
+	ListAll(ctx context.Context) ([]ModelConfigRef, error)
 }
 
 // Kagent is the Wirer over the kagent.dev ModelConfig CRD.
@@ -138,9 +151,21 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
 	name := ModelConfigName(k.prefix, model)
+	if ep.Name != "" {
+		name = k.prefixed(ep.Name)
+	}
 	desired := k.build(name, model, ep)
 
 	res := k.client.Resource(k.gvr).Namespace(k.namespace)
+	// Converge: an owned ModelConfig for this model under another name (an
+	// earlier naming rule) is replaced, never duplicated.
+	if old, err := k.find(ctx, model); err != nil {
+		return nil, err
+	} else if old != nil && old.GetName() != name {
+		if err := k.removeObj(ctx, old.GetName()); err != nil {
+			return nil, err
+		}
+	}
 	existing, err := res.Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
@@ -202,7 +227,11 @@ func (k *Kagent) Remove(ctx context.Context, model string) error {
 	if obj == nil {
 		return nil
 	}
-	name := obj.GetName()
+	return k.removeObj(ctx, obj.GetName())
+}
+
+// removeObj deletes an owned ModelConfig and its placeholder Secret.
+func (k *Kagent) removeObj(ctx context.Context, name string) error {
 	res := k.client.Resource(k.gvr).Namespace(k.namespace)
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelConfig %s/%s: %w", k.namespace, name, err)
@@ -248,6 +277,27 @@ func (k *Kagent) List(ctx context.Context) (map[string]ModelConfigRef, error) {
 		out[model] = *toRef(item)
 	}
 	return out, nil
+}
+
+// ListAll implements Wirer.
+func (k *Kagent) ListAll(ctx context.Context) ([]ModelConfigRef, error) {
+	list, err := k.client.Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
+	}
+	out := make([]ModelConfigRef, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, *toRef(&list.Items[i]))
+	}
+	return out, nil
+}
+
+// prefixed applies the configured name prefix to a backend-chosen name.
+func (k *Kagent) prefixed(name string) string {
+	if k.prefix == "" {
+		return name
+	}
+	return ModelConfigName(k.prefix, name)
 }
 
 // find returns the owned ModelConfig for model, matching the annotation first
@@ -352,8 +402,15 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	}
 	ref.Provider, _, _ = unstructured.NestedString(obj.Object, "spec", "provider")
 	ref.Model, _, _ = unstructured.NestedString(obj.Object, "spec", "model")
+	ref.ProviderModel = ref.Model
 	if m := obj.GetAnnotations()[ModelAnnotation]; m != "" {
 		ref.Model = m
+	}
+	ref.Managed = obj.GetLabels()[ManagedByLabel] == ManagedByValue
+	if u, _, _ := unstructured.NestedString(obj.Object, "spec", "openAI", "baseUrl"); u != "" {
+		ref.Endpoint = u
+	} else if h, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "host"); h != "" {
+		ref.Endpoint = h
 	}
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	for _, c := range conds {

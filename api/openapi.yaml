@@ -428,7 +428,7 @@ paths:
   /api/v1/models/unwire:
     post:
       tags: [wiring]
-      summary: Delete the ModelConfig model-manager created for a model
+      summary: Delete the ModelConfig model-manager created for a model (never one created by someone else)
       operationId: unwireModel
       x-mcp-tool: unwire_model
       requestBody:
@@ -629,16 +629,27 @@ components:
         resource: { type: string, description: kserve — InferenceService name (also the served model name) }
         preset: { type: string, description: kserve — preset the InferenceService was created from }
         gpus: { type: integer, format: int64, description: kserve — accelerators the predictor requests }
+        managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the InferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
     ModelConfigRef:
       type: object
-      description: kagent ModelConfig created for a model
-      required: [name, namespace, ready]
+      description: |
+        kagent ModelConfig of a model. ollama: named after the model reference
+        (`smollm2:135m` → `smollm2-135m`). kserve: named after the
+        InferenceService (`qwen3-8-27b`), the same rule the portal's serve flow
+        applies; a ModelConfig someone else created for the same predictor
+        (same host, same served model name) counts as the model's wiring and is
+        reported with `managed: false` — model-manager never duplicates or
+        deletes it.
+      required: [name, namespace, ready, managed]
       properties:
         name: { type: string, example: smollm2-135m }
         namespace: { type: string, example: kagent }
         apiVersion: { type: string, example: kagent.dev/v1alpha2 }
         provider: { type: string, example: Ollama }
-        model: { type: string }
+        model: { type: string, description: the backend's model reference }
+        providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the InferenceService name) }
+        endpoint: { type: string, description: openAI.baseUrl or ollama.host }
+        managed: { type: boolean, description: created by model-manager (only these are updated or deleted) }
         ready: { type: boolean, description: mirrors the kagent Accepted condition }
         message: { type: string }
     Job:

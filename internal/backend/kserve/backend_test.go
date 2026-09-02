@@ -282,11 +282,13 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	assert.Equal(t, predictorURL("tiny", testServingNS), loaded[0].Endpoint)
 	assert.EqualValues(t, 1, loaded[0].GPUs)
 
-	// The endpoint agents get: OpenAI provider, predictor URL, served name = InferenceService name.
+	// The endpoint agents get: OpenAI provider, predictor URL, served name =
+	// InferenceService name, which also names the ModelConfig.
 	ep := f.b.AgentEndpoint(tinyRepo)
 	assert.Equal(t, "OpenAI", ep.Provider)
 	assert.Equal(t, predictorURL("tiny", testServingNS)+"/v1", ep.BaseURL)
 	assert.Equal(t, "tiny", ep.Model)
+	assert.Equal(t, "tiny", ep.Name)
 	assert.True(t, ep.PlaceholderAPIKey)
 	ep = f.b.AgentEndpoint(bigRepo)
 	assert.Equal(t, predictorURL("big", testServingNS)+"/v1", ep.BaseURL, "unserved models resolve through their preset")
@@ -315,10 +317,11 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	assert.Equal(t, statusReady, loaded[0].Status)
 	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local", loaded[0].Endpoint, "status.address.url wins")
 
-	// A foreign InferenceService of the same name blocks a load; unload refuses foreign ones.
+	// A hand-written InferenceService of the same name blocks a load and
+	// cannot be unloaded here (409); it is still listed.
 	foreign := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "serving.kserve.io/v1beta1", "kind": "InferenceService",
-		"metadata": map[string]any{"name": "big", "namespace": testServingNS},
+		"metadata": map[string]any{"name": "big", "namespace": testServingNS, "labels": map[string]any{ManagedByLabel: "kustomize"}},
 		"spec":     map[string]any{"predictor": map[string]any{"model": map[string]any{"storageUri": "hf://" + bigRepo, "modelFormat": map[string]any{"name": "vLLM"}}}},
 	}}
 	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Create(ctx, foreign, metav1.CreateOptions{})
@@ -330,6 +333,27 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	loaded, err = f.b.ListLoaded(ctx)
 	require.NoError(t, err)
 	require.Len(t, loaded, 2, "foreign InferenceServices are listed too")
+	for _, l := range loaded {
+		if l.Resource == "big" {
+			assert.Equal(t, "kustomize", l.ManagedBy)
+		}
+	}
+
+	// One the portal created from a preset (preset label, managed-by
+	// backstage) is manageable: loading it again is a no-op, unload deletes it.
+	require.NoError(t, f.dyn.Resource(isvcGVR).Namespace(testServingNS).Delete(ctx, "big", metav1.DeleteOptions{}))
+	portal := f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")
+	portal.SetLabels(map[string]string{ManagedByLabel: "backstage", PresetLabel: "big"})
+	portal.SetAnnotations(nil)
+	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Create(ctx, portal, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode}), "same model behind the same preset: no-op")
+	ep = f.b.AgentEndpoint(bigRepo)
+	assert.Equal(t, "big", ep.Name, "the ModelConfig is named after the InferenceService")
+	assert.Equal(t, "big", ep.Model)
+	require.NoError(t, f.b.Unload(ctx, bigRepo))
+	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, "big", metav1.GetOptions{})
+	assert.Error(t, err, "the portal-created InferenceService was deleted")
 
 	// Unload ours; the cache is untouched.
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
