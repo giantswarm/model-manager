@@ -1,6 +1,13 @@
 # .schema.yaml
 # yaml-language-server: $schema=https://github.com/losisin/helm-values-schema-json/raw/refs/heads/main/config.schema.json
 
+# DO NOT EDIT. Generated with:
+#
+#    devctl
+#
+#    https://github.com/giantswarm/devctl/blob/529e8924bb4b0b60fb205dbbfb874ffc09d73e09/pkg/gen/input/precommit/internal/file/schema.yaml.template
+#
+
 # The generated app-platform file goes first so keys the chart defines itself
 # in values.yaml keep their own schema on merge.
 values:
