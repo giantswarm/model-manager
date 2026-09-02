@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/giantswarm/model-manager/internal/backend"
 )
 
 func TestDNSLabelAndRevisions(t *testing.T) {
