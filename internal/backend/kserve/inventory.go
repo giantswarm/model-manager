@@ -317,7 +317,10 @@ func (b *Backend) removeDir(ctx context.Context, node, dir string) error {
 // cachePod builds a one-shot pod mounting the cache claim. It runs as root:
 // the claim root is root-owned and directories are created by the
 // storage-initializer's uid, so a fixed non-root uid could not read or remove
-// everything.
+// everything. The capabilities stay within the Pod Security "baseline"
+// profile (a serving namespace commonly enforces it): DAC_OVERRIDE already
+// bypasses read, write and search checks, so DAC_READ_SEARCH would add
+// nothing but a baseline violation.
 func (b *Backend) cachePod(name string, s settings, node, script string, readOnly bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -341,7 +344,7 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 					ReadOnlyRootFilesystem:   ptr.To(true),
 					Capabilities: &corev1.Capabilities{
 						Drop: []corev1.Capability{"ALL"},
-						Add:  []corev1.Capability{"DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER"},
+						Add:  []corev1.Capability{"DAC_OVERRIDE", "FOWNER"},
 					},
 				},
 				Resources: corev1.ResourceRequirements{
