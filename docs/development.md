@@ -67,14 +67,25 @@ muster (`x_model-manager_*`).
 The lab has the KServe CRDs but no controller and no GPUs, which is enough for
 everything except a real vLLM start. Install a second release in its own
 namespace with the modelServing ConfigMaps rendered from
-`agent-platform-standalone` and a local-path cache claim:
+`agent-platform-standalone` and a local-path cache claim.
+
+Render the ConfigMaps from the umbrella chart with the lab's own values file
+(`state/agent-platform-values.yaml` in the agentlab checkout): a defaults-only
+render fails on the umbrella's valkey/gateway validation guards, and
+`components.modelServing.namespace.name` moves the ConfigMaps into the release
+namespace. Use chart 0.14.0 or newer; that is where the serving-namespace
+network policies and the discovery `networkPolicy` field arrive. `yq` below is
+the Python jq wrapper (`-y` for YAML output); with the Go yq drop `-y`:
 
 ```sh
 kubectl create ns mm-kserve
-helm template lab oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-standalone --version 0.10.0 \
-  -n mm-kserve --set components.modelServing.enabled=true \
+helm pull oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-standalone --version 0.14.0 --untar
+helm template lab ./agent-platform-standalone -n mm-kserve \
+  -f ~/projects/giantswarm/agentlab/state/agent-platform-values.yaml \
+  --set components.modelServing.enabled=true --set components.modelServing.namespace.name=mm-kserve \
   --api-versions serving.kserve.io/v1alpha1 --api-versions serving.kserve.io/v1beta1 \
-  | yq 'select(.kind == "ConfigMap")' | kubectl -n mm-kserve apply -f -
+  | yq -y 'select(.kind == "ConfigMap" and .metadata.labels."app.kubernetes.io/component" == "model-serving")' \
+  | kubectl -n mm-kserve apply -f -
 kubectl -n mm-kserve create -f - <<PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -82,11 +93,18 @@ metadata: {name: hf-cache}
 spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
 PVC
 helm upgrade --install model-manager-kserve helm/model-manager -n mm-kserve \
-  --set backend=kserve --set kserve.namespace=mm-kserve \
+  --set backend=kserve --set kserve.namespace=mm-kserve --set fullnameOverride=model-manager-kserve \
   --set image.registry=docker.io --set image.repository=library/model-manager \
   --set image.tag=dev-$(git rev-parse --short HEAD) --set image.pullPolicy=Never \
   --set muster.mcpServer.enabled=true --set muster.mcpServer.name=model-manager-kserve
 ```
+
+The chart's cluster-scoped RBAC (`ClusterRole`/`ClusterRoleBinding`
+`<fullname>-nodes`) is named after the release, so a leftover `<release>-nodes`
+from a release someone else has already deleted makes `helm install` refuse the
+same release name (`invalid ownership metadata`). Pick a new release name and
+pass it as `fullnameOverride` so the Service, DaemonSet and RBAC names follow
+it; never delete other people's objects to free the name.
 
 `GET /api/v1/search?q=tiny-random-gpt2`, `POST /api/v1/models/fit-check`,
 `POST /api/v1/models/pull` (a Job downloads into the claim), `GET /api/v1/models`
