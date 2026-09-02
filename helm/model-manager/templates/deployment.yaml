@@ -27,7 +27,18 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "model-manager.serviceAccountName" . }}
-      automountServiceAccountToken: {{ not .Values.kagent.disableWiring }}
+      {{- /*
+      Kubernetes access. The kserve driver talks to the API for everything it
+      does (InferenceServices, download Jobs, cache scans, nodes), so it keeps
+      the ServiceAccount token even with kagent.disableWiring: that flag only
+      switches off the ModelConfig management. Only the ollama driver runs
+      without the API once wiring is off; without the token the kserve pod
+      fails with "the kserve backend needs Kubernetes access" and crash-loops.
+      rbac.yaml follows the same rule (the kserve Roles render regardless of
+      kagent.disableWiring).
+      */}}
+      {{- $kubeAccess := or (eq .Values.backend "kserve") (not .Values.kagent.disableWiring) }}
+      automountServiceAccountToken: {{ $kubeAccess }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -94,10 +105,12 @@ spec:
             - --kserve-default-overhead-gib={{ $k.budget.defaultOverheadGiB }}
             - --kserve-ready-timeout={{ $k.readyTimeout }}
             {{- end }}
+            {{- if $kubeAccess }}
+            - --in-cluster=true
+            {{- end }}
             {{- if .Values.kagent.disableWiring }}
             - --disable-wiring=true
             {{- else }}
-            - --in-cluster=true
             - --kagent-namespace={{ .Values.kagent.namespace }}
             - --kagent-api-version={{ .Values.kagent.apiVersion }}
             - --auto-wire={{ .Values.kagent.autoWire }}

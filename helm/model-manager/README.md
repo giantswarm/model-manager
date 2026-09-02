@@ -54,6 +54,12 @@ can stay empty.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
   discovery/preset namespace when it differs, and a ClusterRole for nodes and
   PersistentVolumes.
+- Kubernetes access does not depend on wiring: the kserve driver needs the API
+  for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
+  ServiceAccount token and the RBAC above renders even with
+  `kagent.disableWiring: true` — that value only removes the ModelConfig
+  management and its Role in `kagent.namespace`. Only the ollama backend runs
+  without the API when wiring is off.
 
 **Homepage:** <https://github.com/giantswarm/model-manager>
 
@@ -86,7 +92,7 @@ can stay empty.
 | kagent.apiVersion | string | `"auto"` | kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version. |
 | kagent.modelConfigPrefix | string | `""` | Prefix for generated ModelConfig names (empty: the sanitized model name, e.g. smollm2:135m -> smollm2-135m). |
 | kagent.autoWire | bool | `true` | Create a ModelConfig automatically when a pull completes or a model is loaded. |
-| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. |
+| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama backend runs without the API when wiring is off. |
 | mcp.enabled | bool | `true` | Serve the MCP streamable-HTTP endpoint alongside the REST API. |
 | mcp.path | string | `"/mcp"` | MCP endpoint path. |
 | oauth.enabled | bool | `false` | Protect the MCP endpoint with an embedded OAuth 2.1 server (Dex upstream). Off by default: on the platform, muster is the auth enforcement point in front of MCP servers. |
@@ -108,7 +114,7 @@ can stay empty.
 | networkPolicy.enabled | bool | `false` | Create a Kubernetes NetworkPolicy for the pod. |
 | networkPolicy.ingressNamespaces | list | `[]` | Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only. |
 | networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32). |
-| networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring). |
+| networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring and by the kserve backend). |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name (generated when empty). |
