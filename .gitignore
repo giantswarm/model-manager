@@ -1,0 +1,11 @@
+# local builds
+/model-manager
+/model-manager-linux-*
+/model-manager-darwin-*
+/model-manager-windows-*
+/build/
+/dist/
+# editor / OS
+.idea/
+.vscode/
+.DS_Store

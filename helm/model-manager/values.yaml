@@ -1,0 +1,188 @@
+# Default values for model-manager.
+
+# -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless
+# clients pin to one pod.
+replicaCount: 1
+
+image:
+  # -- Image registry.
+  registry: gsoci.azurecr.io
+  # -- Image repository.
+  repository: giantswarm/model-manager
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart appVersion.
+  tag: ""
+
+# -- Image pull secrets.
+imagePullSecrets: []
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the fully qualified release name (the umbrella chart pins the
+# Service name through this).
+fullnameOverride: ""
+
+# -- Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop)
+# or `kserve` (KServe/vLLM on GPU installs; driver lands in a later release).
+# The API reports the backend and its capability flags at /api/v1/backend.
+backend: ollama
+
+ollama:
+  # -- Ollama API base URL as reached from pods. On kind this is the docker
+  # network gateway (for example http://172.21.0.1:11434 — agentlab sets it);
+  # Docker Desktop resolves host.docker.internal.
+  endpoint: http://host.docker.internal:11434
+  # -- Ollama host written into kagent ModelConfigs, as reached by agent pods.
+  # Empty means the same as `ollama.endpoint`.
+  agentHost: ""
+
+kagent:
+  # -- Namespace where kagent ModelConfigs are created (RBAC is scoped here).
+  namespace: kagent
+  # -- kagent.dev API version for ModelConfigs; `auto` discovers the server's
+  # preferred version.
+  apiVersion: auto
+  # -- Prefix for generated ModelConfig names (empty: the sanitized model name,
+  # e.g. smollm2:135m -> smollm2-135m).
+  modelConfigPrefix: ""
+  # -- Create a ModelConfig automatically when a pull completes or a model is
+  # loaded.
+  autoWire: true
+  # -- Disable all ModelConfig management; the `wire` capability reports false.
+  disableWiring: false
+
+mcp:
+  # -- Serve the MCP streamable-HTTP endpoint alongside the REST API.
+  enabled: true
+  # -- MCP endpoint path.
+  path: /mcp
+
+oauth:
+  # -- Protect the MCP endpoint with an embedded OAuth 2.1 server (Dex
+  # upstream). Off by default: on the platform, muster is the auth
+  # enforcement point in front of MCP servers.
+  enabled: false
+  # -- Public base URL of this server (https, or http on loopback only).
+  baseURL: ""
+  dex:
+    # -- Dex issuer URL.
+    issuerURL: ""
+    # -- Dex OAuth client ID.
+    clientID: ""
+    # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
+    clientSecret: ""
+  # -- Existing Secret with key `dex-client-secret`.
+  existingSecret: ""
+
+muster:
+  mcpServer:
+    # -- Register this server with muster by rendering an
+    # `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then
+    # appear as `x_<name>_<tool>`.
+    enabled: false
+    # -- MCPServer CR name (drives the tool prefix).
+    name: model-manager
+    # -- Start the server connection when muster initializes.
+    autoStart: true
+    # -- Human-readable description shown by muster.
+    description: Model management (inventory, pull, load/unload, delete, kagent wiring) for the Agent Platform
+    # -- Extra labels on the MCPServer CR.
+    labels: {}  # @schema additionalProperties: true
+
+httpRoute:
+  # -- Expose the service through a Gateway API HTTPRoute.
+  enabled: false
+  # -- parentRefs of the HTTPRoute (required when enabled).
+  parentRefs: []  # @schema item: object ; itemProperties: {name: {type: string}, namespace: {type: string}, sectionName: {type: string}, kind: {type: string}, group: {type: string}, port: {type: integer}}
+  # -- Hostnames matched by the route.
+  hostnames: []
+  # -- Annotations on the HTTPRoute.
+  annotations: {}  # @schema additionalProperties: true
+  # -- Labels on the HTTPRoute.
+  labels: {}  # @schema additionalProperties: true
+
+networkPolicy:
+  # -- Create a Kubernetes NetworkPolicy for the pod.
+  enabled: false
+  # -- Namespaces allowed to reach the API (label kubernetes.io/metadata.name).
+  # Empty allows ingress from the release namespace only.
+  ingressNamespaces: []
+  # -- Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32).
+  egressCIDRs: []
+  # -- Allow egress to the Kubernetes API server (needed for wiring).
+  allowKubeAPI: true
+
+serviceAccount:
+  # -- Create a ServiceAccount.
+  create: true
+  # -- Annotations on the ServiceAccount.
+  annotations: {}  # @schema additionalProperties: true
+  # -- ServiceAccount name (generated when empty).
+  name: ""
+
+rbac:
+  # -- Create the Role/RoleBinding for ModelConfigs and Secrets in
+  # `kagent.namespace` (and the KServe rules when `backend` is kserve).
+  create: true
+
+kserve:
+  # -- Namespace holding InferenceServices and download Jobs (kserve backend).
+  namespace: ""
+
+# -- Annotations on the pod.
+podAnnotations: {}  # @schema additionalProperties: true
+# -- Labels on the pod.
+podLabels: {}  # @schema additionalProperties: true
+
+# -- Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port (container listens on 8080).
+  port: 8080
+
+# -- Container resources.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+logging:
+  # -- Enable debug logging.
+  verbose: false
+
+# -- Extra container arguments.
+extraArgs: []
+# -- Extra environment variables.
+extraEnv: []  # @schema item: object ; itemProperties: {name: {type: string}, value: {type: string}, valueFrom: {type: object, additionalProperties: true}}
+
+# -- Node selector.
+nodeSelector: {}  # @schema additionalProperties: true
+# -- Tolerations.
+tolerations: []  # @schema item: object ; itemProperties: {key: {type: string}, operator: {type: string}, value: {type: string}, effect: {type: string}, tolerationSeconds: {type: integer}}
+# -- Affinity.
+affinity: {}  # @schema additionalProperties: true

@@ -1,0 +1,7 @@
+replace-chart-version-with-git: true
+replace-app-version-with-git: true
+generate-metadata: true
+chart-dir: ./helm/model-manager
+destination: ./build
+# CI overwrites this, check .circleci/workflows.yml
+catalog-base-url: https://giantswarm.github.io/giantswarm-catalog/

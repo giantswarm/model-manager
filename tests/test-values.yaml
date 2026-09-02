@@ -1,0 +1,7 @@
+# Values for chart tests / local installs on kind: the host Ollama through the
+# docker network gateway (agentlab default network).
+backend: ollama
+ollama:
+  endpoint: http://172.21.0.1:11434
+kagent:
+  namespace: kagent

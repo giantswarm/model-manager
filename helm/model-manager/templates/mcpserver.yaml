@@ -1,0 +1,25 @@
+{{- if .Values.muster.mcpServer.enabled }}
+{{- /*
+Registers this server with muster. Tools appear as x_<name>_<tool>. The chart
+serves MCP without OAuth by default, so muster connects without an auth block;
+an installation that turns oauth.enabled on manages its own MCPServer CR.
+*/}}
+apiVersion: muster.giantswarm.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: {{ .Values.muster.mcpServer.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    muster.giantswarm.io/type: model-manager
+    {{- include "model-manager.labels" . | nindent 4 }}
+    {{- with .Values.muster.mcpServer.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  autoStart: {{ .Values.muster.mcpServer.autoStart }}
+  type: streamable-http
+  url: http://{{ include "model-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.mcp.path }}
+  {{- with .Values.muster.mcpServer.description }}
+  description: {{ . | quote }}
+  {{- end }}
+{{- end }}

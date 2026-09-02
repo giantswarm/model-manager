@@ -1,0 +1,16 @@
+# app-test-suite config, consumed by the generated `run-tests-with-ats`
+# CircleCI job (execute-chart-tests).
+#
+# The cluster test steps are skipped on purpose, as in agent-platform: the
+# chart's readiness probe needs a reachable serving backend (a host Ollama or
+# KServe), which a bare app-test-suite kind cluster does not have, so an ATS
+# smoke would only ever time out on an unready Deployment. What gates the PR
+# is the build-chart job (app-build-suite lint + package + values.schema.json
+# validation). Behavior is verified end to end in agentlab against the lab
+# host's Ollama.
+app-tests-app-config-file: tests/test-values.yaml
+app-tests-deploy-namespace: agent-platform
+
+smoke-tests-cluster-type: kind
+
+skip-steps: [smoke, functional, upgrade]

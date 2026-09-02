@@ -1,0 +1,105 @@
+{{- if and .Values.rbac.create (not .Values.kagent.disableWiring) }}
+{{- /*
+Agent wiring: model-manager creates, updates and deletes kagent ModelConfigs
+(and placeholder API-key Secrets for OpenAI-compatible endpoints) in
+kagent.namespace only. Discovery of the preferred kagent.dev API version needs
+no extra permission.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "model-manager.fullname" . }}-kagent
+  namespace: {{ .Values.kagent.namespace }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kagent.dev"]
+    resources: ["modelconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-kagent
+  namespace: {{ .Values.kagent.namespace }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "model-manager.fullname" . }}-kagent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if and .Values.rbac.create (eq .Values.backend "kserve") }}
+{{- /*
+KServe backend: InferenceServices, download Jobs and their pods in the serving
+namespace; node labels/allocatable cluster-wide for the per-node cache
+inventory and fit-checks.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "model-manager.fullname" . }}-kserve
+  namespace: {{ include "model-manager.kserveNamespace" . }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices", "servingruntimes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-kserve
+  namespace: {{ include "model-manager.kserveNamespace" . }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "model-manager.fullname" . }}-kserve
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "model-manager.fullname" . }}-nodes
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-nodes
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "model-manager.fullname" . }}-nodes
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

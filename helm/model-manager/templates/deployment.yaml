@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "model-manager.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "model-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "model-manager.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "model-manager.serviceAccountName" . }}
+      automountServiceAccountToken: {{ not .Values.kagent.disableWiring }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --listen=:8080
+            - --backend={{ .Values.backend }}
+            {{- if eq .Values.backend "ollama" }}
+            - --ollama-endpoint={{ required "ollama.endpoint is required for the ollama backend" .Values.ollama.endpoint }}
+            {{- if .Values.ollama.agentHost }}
+            - --ollama-agent-host={{ .Values.ollama.agentHost }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.kagent.disableWiring }}
+            - --disable-wiring=true
+            {{- else }}
+            - --in-cluster=true
+            - --kagent-namespace={{ .Values.kagent.namespace }}
+            - --kagent-api-version={{ .Values.kagent.apiVersion }}
+            - --auto-wire={{ .Values.kagent.autoWire }}
+            {{- if .Values.kagent.modelConfigPrefix }}
+            - --modelconfig-prefix={{ .Values.kagent.modelConfigPrefix }}
+            {{- end }}
+            {{- end }}
+            - --mcp-enabled={{ .Values.mcp.enabled }}
+            - --mcp-path={{ .Values.mcp.path }}
+            {{- if .Values.oauth.enabled }}
+            - --enable-oauth=true
+            - --oauth-base-url={{ required "oauth.baseURL is required when oauth.enabled" .Values.oauth.baseURL }}
+            {{- end }}
+            {{- if .Values.logging.verbose }}
+            - --verbose
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.oauth.enabled .Values.extraEnv }}
+          env:
+            {{- if .Values.oauth.enabled }}
+            - name: DEX_ISSUER_URL
+              value: {{ required "oauth.dex.issuerURL is required when oauth.enabled" .Values.oauth.dex.issuerURL | quote }}
+            - name: DEX_CLIENT_ID
+              value: {{ required "oauth.dex.clientID is required when oauth.enabled" .Values.oauth.dex.clientID | quote }}
+            - name: DEX_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "model-manager.oauthSecretName" . }}
+                  key: dex-client-secret
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

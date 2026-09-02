@@ -1,0 +1,120 @@
+// Package server assembles the single HTTP listener: health endpoints, the
+// REST API, and the MCP streamable-HTTP endpoint (optionally behind OAuth).
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	"github.com/giantswarm/model-manager/internal/api"
+	"github.com/giantswarm/model-manager/internal/service"
+)
+
+// Config configures the listener.
+type Config struct {
+	Addr       string
+	MCPEnabled bool
+	MCPPath    string
+	// OAuth, when set, protects the MCP endpoint with an OAuth 2.1 server
+	// backed by Dex. Off by default: on the platform, muster is the auth
+	// enforcement point in front of MCP servers.
+	OAuth *OAuthConfig
+}
+
+// Server is the assembled HTTP server.
+type Server struct {
+	http  *http.Server
+	oauth *oauthRuntime
+	log   *slog.Logger
+}
+
+// New builds the server.
+func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slog.Logger) (*Server, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	if cfg.MCPPath == "" {
+		cfg.MCPPath = "/mcp"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := svc.Ready(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	api.NewREST(svc, log).Register(mux)
+
+	s := &Server{log: log}
+	if cfg.MCPEnabled && mcpSrv != nil {
+		var handler http.Handler = mcpserver.NewStreamableHTTPServer(mcpSrv,
+			mcpserver.WithEndpointPath(cfg.MCPPath),
+		)
+		if cfg.OAuth != nil {
+			o, err := newOAuth(*cfg.OAuth, cfg.MCPPath, log)
+			if err != nil {
+				return nil, err
+			}
+			o.register(mux)
+			handler = o.protect(handler)
+			s.oauth = o
+		}
+		mux.Handle(cfg.MCPPath, handler)
+	}
+
+	s.http = &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		// No WriteTimeout: MCP streams and long pulls outlive any fixed value.
+		IdleTimeout: 120 * time.Second,
+	}
+	return s, nil
+}
+
+// Handler exposes the mux (tests).
+func (s *Server) Handler() http.Handler { return s.http.Handler }
+
+// Run serves until ctx is done, then shuts down gracefully.
+func (s *Server) Run(ctx context.Context) error {
+	errCh := make(chan error, 1)
+	go func() {
+		s.log.Info("listening", "addr", s.http.Addr)
+		if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if s.oauth != nil {
+		s.oauth.shutdown(shutdownCtx)
+	}
+	if err := s.http.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	s.log.Info("server stopped")
+	return nil
+}
