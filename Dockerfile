@@ -1,0 +1,18 @@
+# The Go binary is built by CircleCI (architect/go-build) and attached to the
+# build context as <binary>-<os>-<arch>; this image only assembles the runtime.
+# For a local build, produce the binary first:
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o model-manager-linux-amd64 .
+FROM gsoci.azurecr.io/giantswarm/alpine:3.20.3-giantswarm AS certs
+FROM scratch
+
+COPY --from=certs /etc/passwd /etc/passwd
+COPY --from=certs /etc/group /etc/group
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+ARG TARGETOS
+ARG TARGETARCH
+COPY model-manager-${TARGETOS}-${TARGETARCH} /model-manager
+USER giantswarm
+
+ENTRYPOINT ["/model-manager"]
+CMD ["serve"]

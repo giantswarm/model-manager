@@ -1,0 +1,10 @@
+# Tunes goconst to flag genuine production-code duplication only (same
+# rationale as mcp-kubernetes: golangci-lint's embedded goconst defaults flag
+# repeated test fixtures that are not real duplication).
+version: "2"
+linters:
+  settings:
+    goconst:
+      min-len: 5
+      min-occurrences: 5
+      ignore-tests: true

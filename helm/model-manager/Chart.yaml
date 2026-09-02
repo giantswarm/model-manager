@@ -1,0 +1,27 @@
+apiVersion: v2
+name: model-manager
+description: Model management service for the Agent Platform — backend-abstracted (ollama, kserve) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/giantswarm/model-manager
+icon: https://s.giantswarm.io/app-icons/giantswarm/1/dark.svg
+sources:
+  - https://github.com/giantswarm/model-manager
+keywords:
+  - mcp
+  - models
+  - ollama
+  - kserve
+  - kagent
+  - agent-platform
+maintainers:
+  - name: Giant Swarm
+    email: team-bumblebee@giantswarm.io
+annotations:
+  # Team ownership (OCI-compliant format)
+  io.giantswarm.application.team: bumblebee
+  # Target audience: customers (default catalog)
+  io.giantswarm.application.audience: customers
+  # App is managed/supported by Giant Swarm
+  io.giantswarm.application.managed: "true"

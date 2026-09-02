@@ -1,0 +1,32 @@
+{{ template "chart.header" . }}
+{{ template "chart.deprecationWarning" . }}
+
+{{ template "chart.badgesSection" . }}
+
+{{ template "chart.description" . }}
+
+The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
+(contract: `/api/v1/openapi.yaml`) and the MCP streamable-HTTP endpoint under
+`/mcp`. Pick the serving backend with `backend`; the API reports the backend
+and its capability flags at `GET /api/v1/backend` so clients render only what
+the installation supports.
+
+- `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
+  kind the docker network gateway). Agent wiring uses kagent's native keyless
+  `Ollama` provider with `ollama.agentHost` (defaults to the endpoint).
+- `kserve` — InferenceServices, per-node HF cache, download Jobs, presets
+  (driver lands in a later release; the RBAC block is already templated).
+
+Used as a dependency of `agent-platform-standalone` behind a `condition`;
+standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
+`mcp.enabled` and `muster.mcpServer.*`.
+
+{{ template "chart.homepageLine" . }}
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}

@@ -1,0 +1,497 @@
+openapi: 3.1.0
+info:
+  title: model-manager API
+  version: 1.0.0
+  description: |
+    Backend-agnostic model management for the Giant Swarm Agent Platform.
+
+    One API implemented by per-installation serving backends (`ollama` for
+    laptop/agentlab installs, `kserve` for GPU installs). Clients MUST call
+    `GET /api/v1/backend` first and render only what the returned capability
+    flags allow: a false flag means the matching operation answers
+    `501 unsupported` on this installation.
+
+    Model references are backend-native strings and may contain `/` and `:`
+    (e.g. `smollm2:135m`, `hf.co/org/repo:Q4_K_M`). Path parameters therefore
+    capture the remainder of the path; mutating operations take the reference
+    in a JSON body instead.
+
+    The same operations are available as MCP tools (streamable HTTP at `/mcp`,
+    tool names in `x-mcp-tool` below; through muster they appear as
+    `x_<server>_<tool>`).
+servers:
+  - url: /
+tags:
+  - name: backend
+  - name: models
+  - name: jobs
+  - name: wiring
+  - name: health
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness
+      operationId: healthz
+      responses:
+        "200":
+          description: alive
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness (backend reachable)
+      operationId: readyz
+      responses:
+        "200":
+          description: backend answers
+        "503":
+          description: backend unreachable
+  /api/v1/backend:
+    get:
+      tags: [backend]
+      summary: Backend identity, health and capability flags
+      operationId: getBackend
+      x-mcp-tool: get_backend
+      responses:
+        "200":
+          description: backend descriptor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Backend" }
+  /api/v1/openapi.yaml:
+    get:
+      tags: [backend]
+      summary: This document
+      operationId: getOpenAPI
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml:
+              schema: { type: string }
+  /api/v1/models:
+    get:
+      tags: [models]
+      summary: Downloaded models (inventory), enriched with loaded state and ModelConfig
+      operationId: listModels
+      x-mcp-tool: list_models
+      responses:
+        "200":
+          description: inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [models]
+                properties:
+                  models:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/{name}:
+    parameters:
+      - $ref: "#/components/parameters/ModelName"
+    get:
+      tags: [models]
+      summary: One downloaded model
+      operationId: getModel
+      x-mcp-tool: get_model
+      responses:
+        "200":
+          description: model
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Model" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BackendError" }
+    delete:
+      tags: [models]
+      summary: Delete a downloaded model (and by default its ModelConfig)
+      operationId: deleteModel
+      x-mcp-tool: delete_model
+      parameters:
+        - name: unwire
+          in: query
+          description: Also remove the ModelConfig. Default true.
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  deleted: { type: boolean }
+                  unwired: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/loaded:
+    get:
+      tags: [models]
+      summary: Models currently loaded / serving
+      operationId: listLoaded
+      x-mcp-tool: list_loaded_models
+      responses:
+        "200":
+          description: loaded models
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [loaded]
+                properties:
+                  loaded:
+                    type: array
+                    items: { $ref: "#/components/schemas/LoadedModel" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/pull:
+    post:
+      tags: [models, jobs]
+      summary: Start importing a model; returns a job immediately
+      description: |
+        Starts a background import and returns `202` with the job. If an import
+        of the same reference is already pending/running, that job is returned
+        with `created: false`. Poll `GET /api/v1/jobs/{id}` for progress. On
+        success the model is wired into kagent (job `result` carries the
+        ModelConfig reference) unless `wire` is false or the server's autoWire
+        is off.
+      operationId: pullModel
+      x-mcp-tool: pull_model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties:
+                model:
+                  type: string
+                  description: Model reference (ollama registry tag or hf.co/... GGUF ref)
+                  example: smollm2:135m
+                wire:
+                  type: boolean
+                  description: Create a ModelConfig on completion (default = server autoWire)
+      responses:
+        "202":
+          description: job accepted (or joined)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job, created]
+                properties:
+                  job: { $ref: "#/components/schemas/Job" }
+                  created: { type: boolean }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+  /api/v1/models/load:
+    post:
+      tags: [models]
+      summary: Load a model into memory / start serving it
+      operationId: loadModel
+      x-mcp-tool: load_model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties:
+                model: { type: string }
+                keepAlive:
+                  type: string
+                  description: ollama keep-alive after the last request (duration such as 10m; -1 = forever). Default = server default (5m).
+      responses:
+        "200":
+          description: model after load (loaded=true)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Model" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/unload:
+    post:
+      tags: [models]
+      summary: Unload a model from memory / stop serving it
+      operationId: unloadModel
+      x-mcp-tool: unload_model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelRequest" }
+      responses:
+        "200":
+          description: unloaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  loaded: { type: boolean, const: false }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/wire:
+    post:
+      tags: [wiring]
+      summary: Create or refresh the kagent ModelConfig for a downloaded model
+      operationId: wireModel
+      x-mcp-tool: wire_model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelRequest" }
+      responses:
+        "200":
+          description: wired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: a ModelConfig with the derived name exists but is not managed by model-manager
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+  /api/v1/models/unwire:
+    post:
+      tags: [wiring]
+      summary: Delete the ModelConfig model-manager created for a model
+      operationId: unwireModel
+      x-mcp-tool: unwire_model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelRequest" }
+      responses:
+        "200":
+          description: unwired (absent counts as success)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  modelConfig: { type: "null" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+  /api/v1/jobs:
+    get:
+      tags: [jobs]
+      summary: List jobs, newest first
+      operationId: listJobs
+      x-mcp-tool: list_jobs
+      responses:
+        "200":
+          description: jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+  /api/v1/jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [jobs]
+      summary: One job with progress
+      operationId: getJob
+      x-mcp-tool: get_job
+      responses:
+        "200":
+          description: job
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [jobs]
+      summary: Cancel a running job
+      operationId: cancelJob
+      x-mcp-tool: cancel_job
+      responses:
+        "200":
+          description: job after cancellation request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  parameters:
+    ModelName:
+      name: name
+      in: path
+      required: true
+      description: Model reference; may contain `/` and `:` (the remainder of the path is the name).
+      schema: { type: string }
+      example: smollm2:135m
+  responses:
+    NotFound:
+      description: model or job not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidRequest:
+      description: malformed request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unsupported:
+      description: the backend/deployment does not offer this operation (capability flag is false)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BackendError:
+      description: the serving backend failed or is unreachable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [not_found, invalid_request, unsupported, conflict, backend_error]
+            message: { type: string }
+    ModelRequest:
+      type: object
+      required: [model]
+      properties:
+        model: { type: string }
+    Capabilities:
+      type: object
+      description: Explicit data — render per flag, never per backend name.
+      required: [pull, pullProgress, delete, load, unload, loadedModels, wire, presets, fitCheck, nodeInventory, search]
+      properties:
+        pull: { type: boolean, description: import a model by reference }
+        pullProgress: { type: boolean, description: pull jobs report bytes completed/total }
+        delete: { type: boolean }
+        load: { type: boolean, description: load into memory / start serving }
+        unload: { type: boolean, description: evict / stop serving }
+        loadedModels: { type: boolean, description: list loaded models with memory use }
+        wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
+        presets: { type: boolean, description: curated serving presets (kserve) }
+        fitCheck: { type: boolean, description: node-memory fit check (kserve) }
+        nodeInventory: { type: boolean, description: per-node cache inventory (kserve) }
+        search: { type: boolean, description: model hub search (kserve) }
+    Backend:
+      type: object
+      required: [backend, healthy, capabilities]
+      properties:
+        backend:
+          type: string
+          enum: [ollama, kserve]
+        version: { type: string, description: backend server version }
+        endpoint: { type: string, description: backend endpoint as reached by model-manager }
+        healthy: { type: boolean }
+        message: { type: string }
+        capabilities: { $ref: "#/components/schemas/Capabilities" }
+        wiring:
+          type: object
+          description: present when wire=true
+          properties:
+            namespace: { type: string }
+            apiVersion: { type: string, example: v1alpha2 }
+            autoWire: { type: boolean }
+    Model:
+      type: object
+      required: [name, sizeBytes, loaded]
+      properties:
+        name: { type: string, example: smollm2:135m }
+        digest: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        modifiedAt: { type: string, format: date-time }
+        format: { type: string, example: gguf }
+        family: { type: string, example: llama }
+        parameterSize: { type: string, example: 134.52M }
+        quantization: { type: string, example: Q8_0 }
+        contextLength: { type: integer, format: int64 }
+        capabilities:
+          type: array
+          description: model features (completion, tools, vision, embedding, thinking)
+          items: { type: string }
+        node: { type: string, description: node holding the cache entry (kserve) }
+        loaded: { type: boolean }
+        running: { $ref: "#/components/schemas/LoadedModel" }
+        modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
+    LoadedModel:
+      type: object
+      required: [name, sizeBytes]
+      properties:
+        name: { type: string }
+        digest: { type: string }
+        sizeBytes: { type: integer, format: int64, description: memory footprint }
+        vramBytes: { type: integer, format: int64 }
+        contextLength: { type: integer, format: int64 }
+        expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
+        endpoint: { type: string, description: inference URL (kserve) }
+        node: { type: string }
+        status: { type: string, example: loaded }
+    ModelConfigRef:
+      type: object
+      description: kagent ModelConfig created for a model
+      required: [name, namespace, ready]
+      properties:
+        name: { type: string, example: smollm2-135m }
+        namespace: { type: string, example: kagent }
+        apiVersion: { type: string, example: kagent.dev/v1alpha2 }
+        provider: { type: string, example: Ollama }
+        model: { type: string }
+        ready: { type: boolean, description: mirrors the kagent Accepted condition }
+        message: { type: string }
+    Job:
+      type: object
+      required: [id, type, model, phase, bytesCompleted, bytesTotal, percent, createdAt, wire]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [pull] }
+        model: { type: string }
+        phase:
+          type: string
+          enum: [pending, running, succeeded, failed, cancelled]
+        status: { type: string, description: backend progress message, e.g. pulling manifest }
+        bytesCompleted: { type: integer, format: int64 }
+        bytesTotal: { type: integer, format: int64 }
+        percent: { type: number }
+        error: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        wire: { type: boolean, description: whether the job wires the model on success }
+        result:
+          description: operation output; for pull with wire, the ModelConfigRef
+          oneOf:
+            - $ref: "#/components/schemas/ModelConfigRef"
+            - type: "null"

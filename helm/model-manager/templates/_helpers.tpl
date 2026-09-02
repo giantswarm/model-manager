@@ -1,0 +1,75 @@
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "model-manager.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name.
+*/}}
+{{- define "model-manager.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Chart label value.
+*/}}
+{{- define "model-manager.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels.
+*/}}
+{{- define "model-manager.labels" -}}
+helm.sh/chart: {{ include "model-manager.chart" . }}
+{{ include "model-manager.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+application.giantswarm.io/team: {{ index .Chart.Annotations "io.giantswarm.application.team" | quote }}
+{{- end }}
+
+{{/*
+Selector labels.
+*/}}
+{{- define "model-manager.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "model-manager.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+ServiceAccount name.
+*/}}
+{{- define "model-manager.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "model-manager.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Namespace for KServe resources (kserve backend); defaults to the release namespace.
+*/}}
+{{- define "model-manager.kserveNamespace" -}}
+{{- default .Release.Namespace .Values.kserve.namespace }}
+{{- end }}
+
+{{/*
+Name of the Secret holding the Dex client secret when OAuth is enabled.
+*/}}
+{{- define "model-manager.oauthSecretName" -}}
+{{- default (printf "%s-oauth" (include "model-manager.fullname" .)) .Values.oauth.existingSecret }}
+{{- end }}
