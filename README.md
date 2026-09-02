@@ -47,7 +47,7 @@ decision log.
 | Serving presets (kserve) | `GET /api/v1/presets` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…` | `search_models` |
 | Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","node?"}` | `check_fit` |
-| Node budgets + caches (kserve) | `GET /api/v1/nodes` | `list_nodes` |
+| Node budgets + reservations (+ caches on kserve) | `GET /api/v1/nodes` | `list_nodes` |
 | Health | `GET /healthz`, `GET /readyz` | — |
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
@@ -62,7 +62,8 @@ unwired on unload — never after a pull, since a cached model has no endpoint.
 
 Capability flags: `pull`, `pullProgress`, `delete`, `load`, `unload`,
 `loadedModels`, `wire` (Kubernetes access present), `presets`, `fitCheck`,
-`nodeInventory`, `search` (the last four are kserve concerns and false on ollama).
+`nodeInventory`, `search` (`presets`, `fitCheck` and `search` are kserve
+concerns and false on ollama).
 
 `GET /api/v1/backend` reports two addresses: `endpoint`, the backend as
 model-manager dials it, and `agentEndpoint`, the backend as **agent pods** dial
@@ -71,6 +72,20 @@ defaulting to the endpoint). A client that matches ModelConfigs it did not
 create to models by hostname (the portal's "Used by") compares against
 `agentEndpoint`. kserve omits it: every served model has its own predictor URL
 (`running.endpoint`, `modelConfig.endpoint`).
+
+On ollama, `GET /api/v1/nodes` reports the proxied host as one node so a
+laptop install has capacity data too. Ollama's API has no capacity endpoint,
+so `budgetBytes` is `MemTotal` of `/proc/meminfo` as the model-manager pod
+sees it (`budgetSource: host-meminfo`) — on a unified-memory machine GPU memory
+is system memory, so that is the budget that matters; `reservedBytes` is the
+sum of `size` over Ollama's `/api/ps` (weights plus KV cache for the loaded
+context, which is why a 500 MiB download can reserve 5 GB), `accelerated` says
+whether any loaded model has memory on an accelerator (`size_vram` > 0), and
+each model's own share stays in `running.vramBytes`. There is no `gpuCount`,
+`gpuProduct` or `cache` — Ollama does not expose the accelerator, and its model
+store is not a node cache. Caveat: the pod reads the kernel it runs on. On kind
+or any install sharing the machine's kernel that is the machine's RAM; under a
+VM-backed container runtime (Docker Desktop, Podman machine) it is the VM's.
 
 ## The kserve backend
 

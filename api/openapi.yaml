@@ -363,15 +363,28 @@ paths:
   /api/v1/nodes:
     get:
       tags: [serving]
-      summary: Node memory budgets and download caches (kserve)
+      summary: Node memory budgets, reservations and download caches
       description: |
-        Every node with its memory budget for fit checks (`budgetSource`:
-        `gpu-labels` from the NVIDIA feature-discovery labels, `allocatable`
-        memory, or `annotation` when the node carries
+        kserve: every node with its memory budget for fit checks
+        (`budgetSource`: `gpu-labels` from the NVIDIA feature-discovery labels,
+        `allocatable` memory, or `annotation` when the node carries
         `model-manager.giantswarm.io/memory-budget-gib: "<GiB>"` — the
         per-node override for unified-memory nodes), what running models
         reserve, and the download cache the node holds. `message` reports an
         ignored, unparsable annotation.
+
+        ollama: one node, the proxied host (`name` = the host agents dial,
+        e.g. `172.21.0.1`). Ollama's API has no capacity endpoint, so
+        `budgetBytes` (= `allocatableMemoryBytes`) is `MemTotal` of
+        `/proc/meminfo` as the model-manager pod sees it (`budgetSource:
+        host-meminfo`; the machine's RAM when pod and Ollama share a kernel,
+        the VM's under Docker Desktop or another VM-backed runtime),
+        `reservedBytes` is the sum of `size` over Ollama's `/api/ps`,
+        `accelerated` says whether any loaded model has memory on an
+        accelerator (`size_vram` > 0). `gpuCount` is 0 — accelerators are not
+        observable through Ollama's API; the per-model share is
+        `running.vramBytes` on `/models` and `/loaded` — and there is no
+        `cache`. `message` explains the figures.
       operationId: listNodes
       x-mcp-tool: list_nodes
       responses:
@@ -577,7 +590,7 @@ components:
         wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
         presets: { type: boolean, description: curated serving presets (kserve) }
         fitCheck: { type: boolean, description: node-memory fit check (kserve) }
-        nodeInventory: { type: boolean, description: per-node cache inventory (kserve) }
+        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: every node with its download cache; ollama: the proxied host from /proc/meminfo and /api/ps)" }
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
@@ -773,17 +786,18 @@ components:
         ready: { type: boolean }
         architecture: { type: string, example: arm64 }
         allocatableMemoryBytes: { type: integer, format: int64 }
-        gpuCount: { type: integer, format: int64 }
+        gpuCount: { type: integer, format: int64, description: accelerators on the node (kserve, from the GPU resource / feature-discovery labels); 0 on ollama, whose API does not expose them }
         gpuMemoryBytes: { type: integer, format: int64, description: memory of one GPU from the node labels }
         gpuProduct: { type: string }
+        accelerated: { type: boolean, description: "ollama only: true when any loaded model has memory on an accelerator (`size_vram` > 0 in /api/ps, i.e. `running.vramBytes` > 0), false when none has or nothing is loaded; absent on backends that count accelerators in gpuCount" }
         budgetBytes: { type: integer, format: int64 }
-        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node }
-        message: { type: string, description: a budget derivation note, e.g. an ignored, unparsable budget annotation }
-        reservedBytes: { type: integer, format: int64 }
-        freeBytes: { type: integer, format: int64 }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo], description: how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node; `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama) }
+        message: { type: string, description: a budget derivation note — an ignored, unparsable budget annotation (kserve), or what the host figures mean and whether /proc/meminfo could be read (ollama) }
+        reservedBytes: { type: integer, format: int64, description: memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps) }
+        freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
         cache:
           type: object
-          description: the download cache on this node; absent when the node holds none
+          description: the download cache on this node; absent when the node holds none (always on ollama)
           required: [claim, mountPath, models, bytesUsed]
           properties:
             claim: { type: string }

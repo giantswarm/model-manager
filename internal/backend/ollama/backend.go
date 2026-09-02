@@ -1,7 +1,8 @@
 // Package ollama implements the serving backend over a host Ollama API: a thin
 // proxy of /api/tags, /api/ps, /api/pull, /api/delete and keep_alive-driven
 // load/unload. Ollama does downloads and memory management itself, so there
-// are no Jobs, presets or fit-checks here — those are kserve concerns.
+// are no Jobs, presets or fit-checks here — those are kserve concerns. The
+// node inventory is the proxied host itself (nodes.go).
 package ollama
 
 import (
@@ -27,6 +28,8 @@ type Backend struct {
 	client    *Client
 	endpoint  string
 	agentHost string
+	// meminfoPath is the /proc/meminfo the host node's budget is read from.
+	meminfoPath string
 }
 
 // Factory builds the driver from backend.Options.
@@ -53,7 +56,7 @@ func New(opts backend.OllamaOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost}, nil
+	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo}, nil
 }
 
 // NewWithClient builds the driver around an existing client (tests).
@@ -61,21 +64,23 @@ func NewWithClient(c *Client, endpoint, agentHost string) *Backend {
 	if agentHost == "" {
 		agentHost = endpoint
 	}
-	return &Backend{client: c, endpoint: endpoint, agentHost: agentHost}
+	return &Backend{client: c, endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo}
 }
 
 // Name implements backend.Backend.
 func (b *Backend) Name() backend.Name { return backend.NameOllama }
 
 // Capabilities implements backend.Backend. Wire is decided by the service.
+// NodeInventory is the proxied host as one node (ListNodes).
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{
-		Pull:         true,
-		PullProgress: true,
-		Delete:       true,
-		Load:         true,
-		Unload:       true,
-		LoadedModels: true,
+		Pull:          true,
+		PullProgress:  true,
+		Delete:        true,
+		Load:          true,
+		Unload:        true,
+		LoadedModels:  true,
+		NodeInventory: true,
 	}
 }
 

@@ -25,7 +25,9 @@ type fakeOllama struct {
 	keepAlive map[string]any
 	pullError string
 	embedOnly map[string]bool
-	srv       *httptest.Server
+	// cpuOnly makes /api/ps report size_vram 0 (no accelerator in use).
+	cpuOnly bool
+	srv     *httptest.Server
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
@@ -55,7 +57,9 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 		out := modelsResponse{Models: []apiModel{}}
 		for name := range f.loaded {
 			m := f.models[name]
-			m.SizeVRAM = m.Size
+			if !f.cpuOnly {
+				m.SizeVRAM = m.Size
+			}
 			exp := time.Now().Add(5 * time.Minute)
 			m.ExpiresAt = &exp
 			out.Models = append(out.Models, m)
@@ -179,7 +183,8 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.NotEqual(t, info.Endpoint, info.AgentEndpoint, "model-manager and agents dial different addresses here")
 	caps := b.Capabilities()
 	assert.True(t, caps.Pull && caps.PullProgress && caps.Delete && caps.Load && caps.Unload && caps.LoadedModels)
-	assert.False(t, caps.Presets || caps.FitCheck || caps.NodeInventory || caps.Search, "kserve-only flags stay off")
+	assert.True(t, caps.NodeInventory, "the proxied host is reported as a node")
+	assert.False(t, caps.Presets || caps.FitCheck || caps.Search, "kserve-only flags stay off")
 	assert.False(t, caps.Wire, "wire is decided by the service")
 }
 
