@@ -42,8 +42,19 @@ paths:
   /readyz:
     get:
       tags: [health]
-      summary: Readiness (backend reachable)
+      summary: Readiness (the API is serving)
+      description: |
+        Does not depend on the serving backend: with the host Ollama down the
+        API stays reachable and `GET /api/v1/backend` reports `healthy: false`.
       operationId: readyz
+      responses:
+        "200":
+          description: serving
+  /backendz:
+    get:
+      tags: [health]
+      summary: Backend reachability probe (503 when the serving backend does not answer)
+      operationId: backendz
       responses:
         "200":
           description: backend answers
