@@ -37,9 +37,11 @@ can stay empty.
 - Downloads run as Jobs in the serving namespace with the KServe
   storage-initializer image (`kserve.download.image`), into
   `<claim>/<preset name>` — the directory the preset's InferenceService mounts
-  — after a fit check against the node's memory budget (`kserve.budget.*`).
-  Gated repositories need `kserve.hf.tokenSecret` (a Secret in the serving
-  namespace).
+  — after a fit check against the node's memory budget (`kserve.budget.*`;
+  the node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"`
+  overrides one node's budget, e.g. a unified-memory node without GPU memory
+  labels). Gated repositories need `kserve.hf.tokenSecret` (a Secret in the
+  serving namespace).
 - The cache inventory runs a short-lived pod per cache node
   (`kserve.inventory.*`); results are reused for `kserve.inventory.ttl`.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
@@ -124,7 +126,7 @@ can stay empty.
 | kserve.inventory.image | object | `{"name":"giantswarm/alpine","registry":"gsoci.azurecr.io","tag":"3.22.1"}` | Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox). |
 | kserve.inventory.ttl | string | `"2m"` | How long one cache scan is reused before a node is scanned again. |
 | kserve.inventory.timeout | string | `"2m"` | Time budget of one scan pod. |
-| kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. |
+| kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`). |
 | kserve.budget.defaultOverheadGiB | int | `30` | Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`. |
 | kserve.readyTimeout | string | `"2h"` | How long a load job waits for an InferenceService to become ready before it gives up on wiring. |
 | podAnnotations | object | `{}` | Annotations on the pod. |

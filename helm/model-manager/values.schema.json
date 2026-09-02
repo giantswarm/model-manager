@@ -200,7 +200,7 @@
                         },
                         "source": {
                             "type": "string",
-                            "description": "Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`."
+                            "description": "Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: \"96\"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`)."
                         }
                     }
                 },

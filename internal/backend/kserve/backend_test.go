@@ -585,3 +585,73 @@ func TestNewValidatesOptions(t *testing.T) {
 	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, BudgetSource: "vibes"})
 	assert.ErrorContains(t, err, "budget source")
 }
+
+func TestNodeBudgetAnnotation(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	annotate := func(node, value string) {
+		n, err := f.cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		require.NoError(t, err)
+		if n.Annotations == nil {
+			n.Annotations = map[string]string{}
+		}
+		if value == "" {
+			delete(n.Annotations, BudgetAnnotation)
+		} else {
+			n.Annotations[BudgetAnnotation] = value
+		}
+		_, err = f.cs.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}
+	find := func(nodes []backend.NodeInfo, name string) backend.NodeInfo {
+		for _, n := range nodes {
+			if n.Name == name {
+				return n
+			}
+		}
+		t.Fatalf("node %s missing", name)
+		return backend.NodeInfo{}
+	}
+
+	// The GPU node's labels say 128 GiB; the operator knows better.
+	annotate(testGPUNode, "8.5")
+	nodes, err := f.b.ListNodes(ctx)
+	require.NoError(t, err)
+	gpu := find(nodes, testGPUNode)
+	assert.Equal(t, budgetSourceAnnotation, gpu.BudgetSource)
+	assert.Equal(t, gibToBytes(8.5), gpu.BudgetBytes)
+	assert.Equal(t, gibToBytes(8.5), gpu.FreeBytes)
+	assert.Empty(t, gpu.Message)
+	assert.Equal(t, budgetSourceAllocatable, find(nodes, testCacheNode).BudgetSource, "other nodes keep the configured source")
+
+	// The fit check and therefore pull/load use the override: 100 GiB + 1 GiB
+	// no longer fits the node that used to take it.
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: bigRepo, Node: testGPUNode})
+	require.NoError(t, err)
+	assert.False(t, res.Fits)
+	assert.Equal(t, budgetSourceAnnotation, res.BudgetSource)
+	assert.Equal(t, gibToBytes(8.5), res.BudgetBytes)
+	assert.Contains(t, res.Reason, budgetSourceAnnotation)
+	err = f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode})
+	assert.ErrorIs(t, err, backend.ErrUnfit)
+	err = f.b.Pull(ctx, backend.PullRequest{Ref: bigRepo, Node: testGPUNode}, nil)
+	assert.ErrorIs(t, err, backend.ErrUnfit)
+
+	// Garbage, zero and negative values are ignored and reported.
+	for _, bad := range []string{"lots", "0", "-4", ""} {
+		annotate(testGPUNode, bad)
+		if bad == "" {
+			break
+		}
+		nodes, err = f.b.ListNodes(ctx)
+		require.NoError(t, err)
+		gpu = find(nodes, testGPUNode)
+		assert.Equal(t, budgetSourceGPULabels, gpu.BudgetSource, bad)
+		assert.Equal(t, 128*gib, gpu.BudgetBytes, bad)
+		assert.Contains(t, gpu.Message, BudgetAnnotation, bad)
+		assert.Contains(t, gpu.Message, budgetSourceGPULabels, bad)
+	}
+	nodes, err = f.b.ListNodes(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, find(nodes, testGPUNode).Message, "no annotation, no message")
+}
