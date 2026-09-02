@@ -2,7 +2,7 @@ module github.com/giantswarm/model-manager
 
 go 1.26.0
 
-toolchain go1.27.0
+toolchain go1.27.1
 
 require (
 	github.com/giantswarm/mcp-oauth v1.3.7
