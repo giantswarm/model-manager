@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/jobs"
@@ -26,6 +27,9 @@ type Config struct {
 	AutoWire bool
 	// DefaultKeepAlive is passed to Load when the request has none.
 	DefaultKeepAlive string
+	// ReconcileInterval is how often Run re-checks served models for missing
+	// ModelConfigs on ServeLifecycle backends (0 disables).
+	ReconcileInterval time.Duration
 }
 
 // BackendResponse is the backend identity plus effective capabilities.
@@ -49,6 +53,24 @@ type ModelView struct {
 	Loaded      bool                   `json:"loaded"`
 	Running     *backend.LoadedModel   `json:"running,omitempty"`
 	ModelConfig *wiring.ModelConfigRef `json:"modelConfig,omitempty"`
+}
+
+// PullOptions describe an import request.
+type PullOptions struct {
+	Model string
+	// Wire nil means the AutoWire default.
+	Wire *bool
+	// Preset / Node are kserve concerns (cache directory and target node).
+	Preset string
+	Node   string
+}
+
+// LoadOptions describe a load / serve request.
+type LoadOptions struct {
+	Model     string
+	KeepAlive string
+	Preset    string
+	Node      string
 }
 
 // Service is the orchestration layer.
@@ -97,6 +119,13 @@ func (s *Service) Ready(ctx context.Context) error {
 	return nil
 }
 
+// serveLifecycle reports whether the backend's endpoints exist only while a
+// model is loaded (wire on ready, unwire on unload, never wire after a pull).
+func (s *Service) serveLifecycle() (backend.ServeLifecycle, bool) {
+	sl, ok := s.backend.(backend.ServeLifecycle)
+	return sl, ok
+}
+
 // ListModels returns the downloaded models enriched with loaded state and
 // ModelConfig references. Enrichment failures are logged, not fatal.
 func (s *Service) ListModels(ctx context.Context) ([]ModelView, error) {
@@ -131,67 +160,111 @@ func (s *Service) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 	return s.backend.ListLoaded(ctx)
 }
 
-// Pull starts (or joins) an import job. wire nil means the AutoWire default.
-func (s *Service) Pull(ctx context.Context, ref string, wire *bool) (jobs.Job, bool, error) {
+// Pull starts (or joins) an import job.
+func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, error) {
 	if !s.backend.Capabilities().Pull {
 		return jobs.Job{}, false, fmt.Errorf("%w: pull", backend.ErrUnsupported)
 	}
-	ref = strings.TrimSpace(ref)
+	ref := strings.TrimSpace(opts.Model)
 	if ref == "" {
 		return jobs.Job{}, false, fmt.Errorf("%w: model reference is required", backend.ErrInvalid)
 	}
-	doWire := s.cfg.AutoWire && s.wirer != nil
-	if wire != nil {
-		doWire = *wire
+	_, servesOnLoad := s.serveLifecycle()
+	doWire := s.cfg.AutoWire && s.wirer != nil && !servesOnLoad
+	if opts.Wire != nil {
+		doWire = *opts.Wire
 	}
 	if doWire && s.wirer == nil {
 		return jobs.Job{}, false, ErrWiringDisabled
 	}
-	job, created := s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: ref, Wire: doWire},
+	if doWire && servesOnLoad {
+		return jobs.Job{}, false, fmt.Errorf("%w: models on this backend are wired when loaded (served), not when pulled", backend.ErrInvalid)
+	}
+	req := backend.PullRequest{Ref: ref, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
+	job, created := s.startPull(req, doWire)
+	if created {
+		s.log.Info("pull started", "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node)
+	}
+	return job, created, nil
+}
+
+func (s *Service) startPull(req backend.PullRequest, doWire bool) (jobs.Job, bool) {
+	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: req.Ref, Wire: doWire},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
-			if err := s.backend.Pull(jobCtx, backend.PullRequest{Ref: ref}, report); err != nil {
+			if err := s.backend.Pull(jobCtx, req, report); err != nil {
 				return nil, err
 			}
 			if !doWire {
 				return nil, nil
 			}
-			mcRef, err := s.wireModel(jobCtx, ref)
+			mcRef, err := s.wireModel(jobCtx, req.Ref)
 			if err != nil {
-				return nil, fmt.Errorf("pulled %s but wiring failed: %w", ref, err)
+				return nil, fmt.Errorf("pulled %s but wiring failed: %w", req.Ref, err)
 			}
 			return mcRef, nil
 		})
-	if created {
-		s.log.Info("pull started", "model", ref, "job", job.ID, "wire", doWire)
-	}
-	return job, created, nil
 }
 
-// Load loads/serves a model and, with AutoWire, ensures its ModelConfig.
-func (s *Service) Load(ctx context.Context, name, keepAlive string) (*ModelView, error) {
+// Load loads/serves a model. With AutoWire the ModelConfig is ensured right
+// away, or — on ServeLifecycle backends — by a `load` job once the served
+// model is ready.
+func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error) {
 	if !s.backend.Capabilities().Load {
 		return nil, fmt.Errorf("%w: load", backend.ErrUnsupported)
+	}
+	name := strings.TrimSpace(opts.Model)
+	if name == "" && opts.Preset != "" {
+		name = opts.Preset
 	}
 	m, err := s.backend.GetModel(ctx, name)
 	if err != nil {
 		return nil, err
 	}
+	keepAlive := opts.KeepAlive
 	if keepAlive == "" {
 		keepAlive = s.cfg.DefaultKeepAlive
 	}
-	if err := s.backend.Load(ctx, backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive}); err != nil {
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
+	if req.Preset == "" && m.Preset != "" {
+		req.Preset = m.Preset
+	}
+	if err := s.backend.Load(ctx, req); err != nil {
 		return nil, err
 	}
-	s.log.Info("model loaded", "model", m.Name, "keepAlive", keepAlive)
+	s.log.Info("model loaded", "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node)
 	if s.cfg.AutoWire && s.wirer != nil {
-		if _, err := s.wireModel(ctx, m.Name); err != nil {
+		if sl, ok := s.serveLifecycle(); ok {
+			s.startLoadJob(sl, m.Name)
+		} else if _, err := s.wireModel(ctx, m.Name); err != nil {
 			s.log.Warn("auto-wire after load failed", "model", m.Name, "error", err)
 		}
 	}
 	return s.GetModel(ctx, m.Name)
 }
 
-// Unload evicts a model.
+// startLoadJob follows a served model to readiness and wires it.
+func (s *Service) startLoadJob(sl backend.ServeLifecycle, model string) {
+	job, created := s.jobs.Start(jobs.StartRequest{Type: jobs.TypeLoad, Model: model, Wire: true},
+		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
+			report(backend.Progress{Status: "waiting for the served model to become ready"})
+			if err := sl.WaitReady(jobCtx, model); err != nil {
+				return nil, err
+			}
+			report(backend.Progress{Status: "ready; wiring into kagent"})
+			ref, err := s.wireModel(jobCtx, model)
+			if err != nil {
+				return nil, fmt.Errorf("%s is ready but wiring failed: %w", model, err)
+			}
+			report(backend.Progress{Status: "wired"})
+			return ref, nil
+		})
+	if created {
+		s.log.Info("load job started", "model", model, "job", job.ID)
+	}
+}
+
+// Unload evicts a model. On ServeLifecycle backends the ModelConfig goes with
+// the endpoint.
 func (s *Service) Unload(ctx context.Context, name string) error {
 	if !s.backend.Capabilities().Unload {
 		return fmt.Errorf("%w: unload", backend.ErrUnsupported)
@@ -204,6 +277,13 @@ func (s *Service) Unload(ctx context.Context, name string) error {
 		return err
 	}
 	s.log.Info("model unloaded", "model", m.Name)
+	if _, ok := s.serveLifecycle(); ok && s.wirer != nil {
+		if err := s.wirer.Remove(ctx, m.Name); err != nil {
+			s.log.Warn("unwire after unload failed", "model", m.Name, "error", err)
+		} else {
+			s.log.Info("model unwired", "model", m.Name)
+		}
+	}
 	return nil
 }
 
@@ -259,6 +339,69 @@ func (s *Service) Unwire(ctx context.Context, name string) error {
 	return nil
 }
 
+// Presets lists the serving presets (capability presets).
+func (s *Service) Presets(ctx context.Context) ([]backend.Preset, error) {
+	pl, ok := s.backend.(backend.PresetLister)
+	if !ok || !s.backend.Capabilities().Presets {
+		return nil, fmt.Errorf("%w: presets", backend.ErrUnsupported)
+	}
+	presets, err := pl.ListPresets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if presets == nil {
+		presets = []backend.Preset{}
+	}
+	return presets, nil
+}
+
+// Search proxies the model hub (capability search).
+func (s *Service) Search(ctx context.Context, query string, limit int) ([]backend.SearchResult, error) {
+	sr, ok := s.backend.(backend.Searcher)
+	if !ok || !s.backend.Capabilities().Search {
+		return nil, fmt.Errorf("%w: search", backend.ErrUnsupported)
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("%w: query is required", backend.ErrInvalid)
+	}
+	hits, err := sr.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	if hits == nil {
+		hits = []backend.SearchResult{}
+	}
+	return hits, nil
+}
+
+// FitCheck sizes a model against node budgets (capability fitCheck).
+func (s *Service) FitCheck(ctx context.Context, req backend.FitRequest) (*backend.FitResult, error) {
+	fc, ok := s.backend.(backend.FitChecker)
+	if !ok || !s.backend.Capabilities().FitCheck {
+		return nil, fmt.Errorf("%w: fit check", backend.ErrUnsupported)
+	}
+	if strings.TrimSpace(req.Model) == "" && strings.TrimSpace(req.Preset) == "" {
+		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+	}
+	return fc.FitCheck(ctx, req)
+}
+
+// Nodes lists node budgets and caches (capability nodeInventory).
+func (s *Service) Nodes(ctx context.Context) ([]backend.NodeInfo, error) {
+	nl, ok := s.backend.(backend.NodeLister)
+	if !ok || !s.backend.Capabilities().NodeInventory {
+		return nil, fmt.Errorf("%w: node inventory", backend.ErrUnsupported)
+	}
+	nodes, err := nl.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if nodes == nil {
+		nodes = []backend.NodeInfo{}
+	}
+	return nodes, nil
+}
+
 // Jobs lists jobs, newest first.
 func (s *Service) Jobs() []jobs.Job { return s.jobs.List() }
 
@@ -267,6 +410,84 @@ func (s *Service) Job(id string) (jobs.Job, error) { return s.jobs.Get(id) }
 
 // CancelJob cancels a running job.
 func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(id) }
+
+// Run performs the background duties until ctx ends: adopting pulls that
+// survived a restart (PullAdopter backends) and, on ServeLifecycle backends,
+// wiring served models that became ready without a load job watching them
+// (model-manager restarted, or the InferenceService was created by someone
+// else with the preset label).
+func (s *Service) Run(ctx context.Context) {
+	s.adoptPulls(ctx)
+	sl, ok := s.serveLifecycle()
+	if !ok || s.cfg.ReconcileInterval <= 0 || s.wirer == nil || !s.cfg.AutoWire {
+		return
+	}
+	ticker := time.NewTicker(s.cfg.ReconcileInterval)
+	defer ticker.Stop()
+	for {
+		s.reconcileWiring(ctx, sl)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) adoptPulls(ctx context.Context) {
+	pa, ok := s.backend.(backend.PullAdopter)
+	if !ok {
+		return
+	}
+	pulls, err := pa.RunningPulls(ctx)
+	if err != nil {
+		s.log.Warn("listing running pulls for adoption failed", "error", err)
+		return
+	}
+	for _, req := range pulls {
+		job, created := s.startPull(req, false)
+		if created {
+			s.log.Info("adopted running pull", "model", req.Ref, "job", job.ID)
+		}
+	}
+}
+
+// reconcileWiring ensures a ModelConfig for every ready served model that has
+// none. It never touches ModelConfigs of models that are not served: unload
+// removes those explicitly.
+func (s *Service) reconcileWiring(ctx context.Context, _ backend.ServeLifecycle) {
+	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	loaded, err := s.backend.ListLoaded(rctx)
+	if err != nil {
+		s.log.Warn("reconcile: listing served models failed", "error", err)
+		return
+	}
+	wired := s.wiredIndex(rctx)
+	for _, l := range loaded {
+		if l.Status != "Ready" {
+			continue
+		}
+		if _, ok := wired[l.Name]; ok {
+			continue
+		}
+		if s.hasActiveJob(jobs.TypeLoad, l.Name) {
+			continue
+		}
+		if _, err := s.wireModel(rctx, l.Name); err != nil {
+			s.log.Warn("reconcile: wiring served model failed", "model", l.Name, "error", err)
+		}
+	}
+}
+
+func (s *Service) hasActiveJob(t jobs.Type, model string) bool {
+	for _, j := range s.jobs.List() {
+		if j.Type == t && j.Model == model && !j.Done() {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Service) wireModel(ctx context.Context, model string) (*wiring.ModelConfigRef, error) {
 	// Resolve the canonical name so "smollm2:135m" and "smollm2:135m" pulled
@@ -294,6 +515,9 @@ func (s *Service) loadedIndex(ctx context.Context) map[string]backend.LoadedMode
 	}
 	for _, l := range loaded {
 		idx[l.Name] = l
+		if l.Resource != "" {
+			idx[l.Resource] = l
+		}
 	}
 	return idx
 }
@@ -312,7 +536,11 @@ func (s *Service) wiredIndex(ctx context.Context) map[string]wiring.ModelConfigR
 
 func (s *Service) view(m backend.Model, loaded map[string]backend.LoadedModel, wired map[string]wiring.ModelConfigRef) ModelView {
 	v := ModelView{Model: m}
-	if l, ok := loaded[m.Name]; ok {
+	l, ok := loaded[m.Name]
+	if !ok && m.Path != "" {
+		l, ok = loaded[m.Path]
+	}
+	if ok {
 		v.Loaded = true
 		lc := l
 		v.Running = &lc

@@ -19,6 +19,13 @@ info:
     The same operations are available as MCP tools (streamable HTTP at `/mcp`,
     tool names in `x-mcp-tool` below; through muster they appear as
     `x_<server>_<tool>`).
+
+    The `kserve` backend adds, behind its capability flags: serving presets
+    (`GET /api/v1/presets`), hub search (`GET /api/v1/search`), a fit check
+    (`POST /api/v1/models/fit-check`) and the per-node budget / cache view
+    (`GET /api/v1/nodes`). On kserve, pull and load accept `preset` and `node`,
+    a refused fit answers `412 does_not_fit`, and a `load` job follows a served
+    model to readiness before wiring it into kagent.
 servers:
   - url: /
 tags:
@@ -26,6 +33,8 @@ tags:
   - name: models
   - name: jobs
   - name: wiring
+  - name: serving
+    description: kserve capabilities (presets, search, fit check, nodes)
   - name: health
 paths:
   /healthz:
@@ -185,11 +194,17 @@ paths:
               properties:
                 model:
                   type: string
-                  description: Model reference (ollama registry tag or hf.co/... GGUF ref)
+                  description: Model reference (ollama registry tag or hf.co/... GGUF ref; kserve Hugging Face repository owner/name[:revision])
                   example: smollm2:135m
                 wire:
                   type: boolean
-                  description: Create a ModelConfig on completion (default = server autoWire)
+                  description: Create a ModelConfig on completion (default = server autoWire; kserve refuses true — models are wired when served)
+                preset:
+                  type: string
+                  description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
+                node:
+                  type: string
+                  description: kserve — node whose cache receives the download. Default = the cache node, else the node with the largest budget.
       responses:
         "202":
           description: job accepted (or joined)
@@ -207,6 +222,13 @@ paths:
     post:
       tags: [models]
       summary: Load a model into memory / start serving it
+      description: |
+        ollama: a keep-alive load. kserve: fit-checks the model, composes an
+        InferenceService from the preset (the only way to serve on kserve) and
+        creates it; the response has `loaded=true` with `running.status`
+        `Pending` until the predictor is ready, and a `load` job (see
+        `GET /api/v1/jobs`) follows readiness and wires the model into kagent.
+        Loading an already-served preset again is a no-op.
       operationId: loadModel
       x-mcp-tool: load_model
       requestBody:
@@ -215,12 +237,17 @@ paths:
           application/json:
             schema:
               type: object
-              required: [model]
               properties:
-                model: { type: string }
+                model: { type: string, description: model reference; required unless preset is given }
                 keepAlive:
                   type: string
                   description: ollama keep-alive after the last request (duration such as 10m; -1 = forever). Default = server default (5m).
+                preset:
+                  type: string
+                  description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
+                node:
+                  type: string
+                  description: kserve — pin the predictor to this node.
       responses:
         "200":
           description: model after load (loaded=true)
@@ -229,6 +256,121 @@ paths:
               schema: { $ref: "#/components/schemas/Model" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: an InferenceService of that name exists for another model or is not managed by model-manager
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "412": { $ref: "#/components/responses/DoesNotFit" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/fit-check:
+    post:
+      tags: [serving]
+      summary: Check whether a model fits a node before downloading or serving it (kserve)
+      description: |
+        Resolves the weight size from the Hugging Face Hub
+        (`model.safetensors.index.json`, else the file tree, else the preset's
+        `weightsGiB`), adds the serving overhead (the preset's `overheadGiB`,
+        default 30 GiB) and compares the sum with the memory budget of the
+        target node (GPU memory from the node labels when present, else
+        allocatable memory). `fits=false` is a 200 with the explanation in
+        `reason`; pull and load refuse such models with `412 does_not_fit`.
+      operationId: fitCheck
+      x-mcp-tool: check_fit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model: { type: string, description: Hugging Face repository owner/name; required unless preset is given }
+                preset: { type: string }
+                node: { type: string, description: node to check against; default = the best eligible node }
+      responses:
+        "200":
+          description: fit result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FitResult" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/presets:
+    get:
+      tags: [serving]
+      summary: Curated serving presets (kserve)
+      description: |
+        The published `ServingPreset` ConfigMaps of the platform
+        (`agent-platform.giantswarm.io/serving-preset=true`), resolved to what a
+        client needs to pick one: model, runtime, GPUs, weights + overhead
+        requirements, arguments.
+      operationId: listPresets
+      x-mcp-tool: list_presets
+      responses:
+        "200":
+          description: presets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [presets]
+                properties:
+                  presets:
+                    type: array
+                    items: { $ref: "#/components/schemas/Preset" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/search:
+    get:
+      tags: [serving]
+      summary: Search the model hub (kserve — Hugging Face Hub)
+      operationId: searchModels
+      x-mcp-tool: search_models
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 50 }
+      responses:
+        "200":
+          description: search results, most downloaded first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  query: { type: string }
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/nodes:
+    get:
+      tags: [serving]
+      summary: Node memory budgets and download caches (kserve)
+      operationId: listNodes
+      x-mcp-tool: list_nodes
+      responses:
+        "200":
+          description: nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes]
+                properties:
+                  nodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/NodeInfo" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/unload:
@@ -383,6 +525,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    DoesNotFit:
+      description: the fit check refused the model (kserve); the message explains the numbers
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
   schemas:
     Error:
       type: object
@@ -394,7 +541,7 @@ components:
           properties:
             code:
               type: string
-              enum: [not_found, invalid_request, unsupported, conflict, backend_error]
+              enum: [not_found, invalid_request, unsupported, conflict, does_not_fit, backend_error]
             message: { type: string }
     ModelRequest:
       type: object
@@ -454,6 +601,11 @@ components:
           description: model features (completion, tools, vision, embedding, thinking)
           items: { type: string }
         node: { type: string, description: node holding the cache entry (kserve) }
+        downloaded:
+          type: boolean
+          description: kserve — false for a model known only from a preset or a running InferenceService whose weights are not cached yet; absent means the backend lists downloads only
+        path: { type: string, description: kserve — cache directory (the InferenceService name the storage-initializer uses) }
+        preset: { type: string, description: kserve — the serving preset whose model this is }
         loaded: { type: boolean }
         running: { $ref: "#/components/schemas/LoadedModel" }
         modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
@@ -463,13 +615,20 @@ components:
       properties:
         name: { type: string }
         digest: { type: string }
-        sizeBytes: { type: integer, format: int64, description: memory footprint }
+        sizeBytes: { type: integer, format: int64, description: memory footprint (kserve — the preset's weights) }
         vramBytes: { type: integer, format: int64 }
         contextLength: { type: integer, format: int64 }
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
-        endpoint: { type: string, description: inference URL (kserve) }
+        endpoint: { type: string, description: inference URL (kserve — the predictor's in-cluster URL) }
         node: { type: string }
-        status: { type: string, example: loaded }
+        status:
+          type: string
+          description: ollama `loaded`; kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`
+          example: loaded
+        message: { type: string, description: kserve — why the model is not ready }
+        resource: { type: string, description: kserve — InferenceService name (also the served model name) }
+        preset: { type: string, description: kserve — preset the InferenceService was created from }
+        gpus: { type: integer, format: int64, description: kserve — accelerators the predictor requests }
     ModelConfigRef:
       type: object
       description: kagent ModelConfig created for a model
@@ -487,7 +646,10 @@ components:
       required: [id, type, model, phase, bytesCompleted, bytesTotal, percent, createdAt, wire]
       properties:
         id: { type: string }
-        type: { type: string, enum: [pull] }
+        type:
+          type: string
+          enum: [pull, load]
+          description: pull = import with progress; load = kserve — follows a served model to readiness, then wires it (result = ModelConfigRef)
         model: { type: string }
         phase:
           type: string
@@ -502,7 +664,95 @@ components:
         finishedAt: { type: string, format: date-time }
         wire: { type: boolean, description: whether the job wires the model on success }
         result:
-          description: operation output; for pull with wire, the ModelConfigRef
+          description: operation output; for pull with wire and for load jobs, the ModelConfigRef
           oneOf:
             - $ref: "#/components/schemas/ModelConfigRef"
             - type: "null"
+    Preset:
+      type: object
+      description: a published ServingPreset, resolved for clients (kserve)
+      required: [name, displayName, model, gpus, weightsBytes, overheadBytes, requiredBytes]
+      properties:
+        name: { type: string, example: qwen3-14b, description: also the InferenceService name a load creates }
+        displayName: { type: string }
+        description: { type: string, description: operator notes (markdown) }
+        source: { type: string, enum: [shipped, values], description: where the preset came from }
+        model: { type: string, example: Qwen/Qwen3-14B, description: Hugging Face repository }
+        storageUri: { type: string, example: hf://Qwen/Qwen3-14B }
+        format: { type: string, example: vLLM }
+        runtime: { type: string, example: kserve-vllm }
+        contextLength: { type: integer, format: int64 }
+        capabilities: { type: array, items: { type: string } }
+        license: { type: string }
+        gpus: { type: integer, format: int64 }
+        weightsBytes: { type: integer, format: int64 }
+        overheadBytes: { type: integer, format: int64 }
+        requiredBytes: { type: integer, format: int64, description: weights + overhead }
+        args: { type: array, items: { type: string } }
+        nodeSelector: { type: object, additionalProperties: { type: string } }
+        chatTemplate: { type: string, description: ConfigMap of the chat template mounted into the predictor }
+    SearchResult:
+      type: object
+      required: [id, downloads, likes, gated, private]
+      properties:
+        id: { type: string, example: Qwen/Qwen3-14B }
+        author: { type: string }
+        downloads: { type: integer, format: int64 }
+        likes: { type: integer, format: int64 }
+        gated: { type: boolean, description: needs a hub token with access to download }
+        private: { type: boolean }
+        pipelineTag: { type: string, example: text-generation }
+        library: { type: string, example: transformers }
+        tags: { type: array, items: { type: string } }
+        lastModified: { type: string, format: date-time }
+        presets: { type: array, items: { type: string }, description: serving presets that serve exactly this model }
+    FitResult:
+      type: object
+      required: [model, fits, weightsBytes, overheadBytes, requiredBytes, budgetBytes, reservedBytes, freeBytes, gated, private, tokenConfigured, cached]
+      properties:
+        model: { type: string }
+        fits: { type: boolean }
+        reason: { type: string, description: human-readable explanation of the numbers }
+        preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
+        presets: { type: array, items: { type: string }, description: every preset serving the model }
+        weightsBytes: { type: integer, format: int64 }
+        weightsSource: { type: string, enum: [safetensors-index, tree, preset] }
+        overheadBytes: { type: integer, format: int64 }
+        requiredBytes: { type: integer, format: int64 }
+        downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }
+        node: { type: string, description: node the check was made against }
+        budgetBytes: { type: integer, format: int64 }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable] }
+        reservedBytes: { type: integer, format: int64, description: needed by the models already served on the node }
+        freeBytes: { type: integer, format: int64 }
+        gated: { type: boolean }
+        private: { type: boolean }
+        tokenConfigured: { type: boolean, description: a hub token Secret is configured }
+        cached: { type: boolean, description: the model is already in the node's cache }
+    NodeInfo:
+      type: object
+      required: [name, ready, allocatableMemoryBytes, gpuCount, budgetBytes, reservedBytes, freeBytes]
+      properties:
+        name: { type: string }
+        ready: { type: boolean }
+        architecture: { type: string, example: arm64 }
+        allocatableMemoryBytes: { type: integer, format: int64 }
+        gpuCount: { type: integer, format: int64 }
+        gpuMemoryBytes: { type: integer, format: int64, description: memory of one GPU from the node labels }
+        gpuProduct: { type: string }
+        budgetBytes: { type: integer, format: int64 }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable] }
+        reservedBytes: { type: integer, format: int64 }
+        freeBytes: { type: integer, format: int64 }
+        cache:
+          type: object
+          description: the download cache on this node; absent when the node holds none
+          required: [claim, mountPath, models, bytesUsed]
+          properties:
+            claim: { type: string }
+            mountPath: { type: string }
+            models: { type: integer }
+            bytesUsed: { type: integer, format: int64 }
+            scannedAt: { type: string, format: date-time }
+            shared: { type: boolean, description: network storage visible from every node }
+            error: { type: string, description: last scan failure; contents may be stale }

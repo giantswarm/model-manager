@@ -29,8 +29,13 @@ const (
 // Type is the kind of operation a job runs.
 type Type string
 
-// TypePull is a model import.
-const TypePull Type = "pull"
+const (
+	// TypePull is a model import.
+	TypePull Type = "pull"
+	// TypeLoad tracks a served model from start to ready (and its wiring) on
+	// backends where serving takes time (kserve InferenceServices).
+	TypeLoad Type = "load"
+)
 
 // ErrNotFound means no job has that id.
 var ErrNotFound = errors.New("job not found")
