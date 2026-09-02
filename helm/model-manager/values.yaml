@@ -51,6 +51,9 @@ kagent:
   # loaded.
   autoWire: true
   # -- Disable all ModelConfig management; the `wire` capability reports false.
+  # The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC)
+  # regardless — it needs the API for InferenceServices, Jobs and nodes; only
+  # the ollama backend runs without the API when wiring is off.
   disableWiring: false
 
 mcp:
@@ -111,7 +114,8 @@ networkPolicy:
   ingressNamespaces: []
   # -- Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32).
   egressCIDRs: []
-  # -- Allow egress to the Kubernetes API server (needed for wiring).
+  # -- Allow egress to the Kubernetes API server (needed for wiring and by the
+  # kserve backend).
   allowKubeAPI: true
 
 serviceAccount:

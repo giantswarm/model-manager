@@ -55,6 +55,12 @@ can stay empty.
 - RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
   discovery/preset namespace when it differs, and a ClusterRole for nodes and
   PersistentVolumes.
+- Kubernetes access does not depend on wiring: the kserve driver needs the API
+  for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
+  ServiceAccount token and the RBAC above renders even with
+  `kagent.disableWiring: true` — that value only removes the ModelConfig
+  management and its Role in `kagent.namespace`. Only the ollama backend runs
+  without the API when wiring is off.
 
 {{ template "chart.homepageLine" . }}
 
