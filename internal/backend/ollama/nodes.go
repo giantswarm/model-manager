@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"runtime"
@@ -25,15 +26,35 @@ const (
 	// /proc/meminfo as the model-manager pod sees it.
 	BudgetSourceHostMeminfo = "host-meminfo"
 
+	// BudgetSourceOverride marks a node budget set by the operator
+	// (ollama.memoryBudgetGiB / --ollama-memory-budget-gib) instead of the
+	// pod's MemTotal: the ollama counterpart of the kserve node annotation
+	// model-manager.giantswarm.io/memory-budget-gib, for installs where the
+	// pod's view of the host memory is wrong (a VM-backed container runtime,
+	// an Ollama on another machine).
+	BudgetSourceOverride = "override"
+
+	// overrideKnob names the override for messages: the chart value and the
+	// flag behind it.
+	overrideKnob = "ollama.memoryBudgetGiB / --ollama-memory-budget-gib"
+
 	// hostNodeMessage explains the host node's numbers to API clients.
 	hostNodeMessage = "host memory as seen from the model-manager pod; per-model accelerator share in running.vramBytes"
+
+	// overrideMessage explains the host node's numbers under an override.
+	overrideMessage = "memory budget set by the operator (" + overrideKnob + "), not the host's MemTotal; per-model accelerator share in running.vramBytes"
+
+	gib = int64(1 << 30)
 )
 
 // ListNodes implements backend.NodeLister: the proxied host is the one node.
 // Ollama's API has no capacity endpoint (the totals appear only in its startup
 // log), so the budget is MemTotal of /proc/meminfo as the pod sees it — on the
 // unified-memory laptops Ollama typically runs on, GPU memory is system memory
-// anyway — and what loaded models reserve is the sum of `size` over /api/ps.
+// anyway — unless the operator set a budget (BudgetSourceOverride), and what
+// loaded models reserve is the sum of `size` over /api/ps. AllocatableMemoryBytes
+// stays the pod's MemTotal either way, as the kserve node's allocatable memory
+// stays under its annotation.
 // Accelerated says whether any loaded model has memory on an accelerator
 // (`size_vram` > 0); the accelerator itself is not observable through Ollama's
 // API, so there is no GPU count, product or memory and no cache block.
@@ -57,18 +78,54 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 		}
 	}
 	node.Accelerated = &accelerated
+	explain := hostNodeMessage
+	override, ignored := budgetOverride(b.memoryBudgetGiB)
+	if override > 0 {
+		node.BudgetBytes = override
+		node.BudgetSource = BudgetSourceOverride
+		explain = overrideMessage
+	}
 	total, err := readMemTotal(b.meminfoPath)
 	if err != nil {
-		node.Message = fmt.Sprintf("host memory unknown (%v); %s", err, hostNodeMessage)
+		node.Message = fmt.Sprintf("host memory unknown (%v); %s", err, explain)
 	} else {
 		node.AllocatableMemoryBytes = total
-		node.BudgetBytes = total
+		if override == 0 {
+			node.BudgetBytes = total
+		}
+		node.Message = explain
+	}
+	if ignored != "" {
+		node.Message = ignored + "; " + node.Message
 	}
 	node.FreeBytes = node.BudgetBytes - node.ReservedBytes
 	if node.FreeBytes < 0 {
 		node.FreeBytes = 0
 	}
 	return []backend.NodeInfo{node}, nil
+}
+
+// budgetOverride parses the operator's memory budget override, in GiB with
+// decimals allowed, into bytes. Empty or 0 means none (0, ""). Anything else
+// that is not a positive finite number is ignored — same rule as the kserve
+// budget annotation — and the reason is returned for the node's message.
+func budgetOverride(raw string) (int64, string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, ""
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err == nil && v == 0 {
+		return 0, ""
+	}
+	bytes := int64(0)
+	if err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 {
+		bytes = int64(math.Round(v * float64(gib)))
+	}
+	if bytes <= 0 {
+		return 0, fmt.Sprintf("ignoring memory budget override %q (%s): want a positive number of GiB; budget taken from %s", raw, overrideKnob, BudgetSourceHostMeminfo)
+	}
+	return bytes, ""
 }
 
 // hostOf returns the host part of an address agents dial (the agent host as

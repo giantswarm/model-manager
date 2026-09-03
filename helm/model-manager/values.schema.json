@@ -576,6 +576,14 @@
                 "endpoint": {
                     "type": "string",
                     "description": "Ollama API base URL as reached from pods. On kind this is the docker network gateway (for example http://172.21.0.1:11434 — agentlab sets it); Docker Desktop resolves host.docker.internal."
+                },
+                "memoryBudgetGiB": {
+                    "type": [
+                        "number",
+                        "string"
+                    ],
+                    "description": "Memory budget of the proxied host in GiB (a number; decimals allowed, `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is not the host's: Docker Desktop or another VM-backed runtime (the pod sees the VM's memory), an Ollama on another machine. 0 is off; a value that is not a positive number of GiB is ignored and named in the node's `message`. The ollama counterpart of the kserve node annotation `model-manager.giantswarm.io/memory-budget-gib`.",
+                    "minimum": 0
                 }
             }
         },

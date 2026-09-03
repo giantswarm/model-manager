@@ -125,7 +125,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.checkFit)
 
 	s.AddTool(mcp.NewTool(ToolListNodes,
-		mcp.WithDescription("List nodes with their serving memory budget, what loaded models reserve and the download cache each node holds. kserve: every node, budget from GPU labels or allocatable memory. ollama: the proxied host, budget from MemTotal of /proc/meminfo as the pod sees it, reservations from /api/ps, accelerated when a loaded model sits on the GPU."),
+		mcp.WithDescription("List nodes with their serving memory budget, what loaded models reserve and the download cache each node holds. kserve: every node, budget from GPU labels or allocatable memory. ollama: the proxied host, budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listNodes)
 

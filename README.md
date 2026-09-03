@@ -85,7 +85,16 @@ each model's own share stays in `running.vramBytes`. There is no `gpuCount`,
 `gpuProduct` or `cache` — Ollama does not expose the accelerator, and its model
 store is not a node cache. Caveat: the pod reads the kernel it runs on. On kind
 or any install sharing the machine's kernel that is the machine's RAM; under a
-VM-backed container runtime (Docker Desktop, Podman machine) it is the VM's.
+VM-backed container runtime (Docker Desktop, Podman machine) it is the VM's,
+and for an Ollama on another machine it says nothing about that host. For those
+installs the chart value `ollama.memoryBudgetGiB` (`--ollama-memory-budget-gib`,
+`MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB`; GiB, decimals allowed) sets the budget
+instead: `budgetBytes` is that figure with `budgetSource: override`, `message`
+says so, and `allocatableMemoryBytes` stays the pod's `MemTotal` — the ollama
+counterpart of the kserve node annotation
+`model-manager.giantswarm.io/memory-budget-gib`. A value that is not a positive
+number of GiB is ignored and named in `message`; the budget then comes from
+`/proc/meminfo` as before.
 
 ## Load semantics: on-demand load and keep-alive
 

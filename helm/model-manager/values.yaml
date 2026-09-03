@@ -37,6 +37,16 @@ ollama:
   # reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same
   # as `ollama.endpoint`.
   agentHost: ""
+  # -- Memory budget of the proxied host in GiB (a number; decimals allowed,
+  # also as a string so `--set` can carry them), reported as `budgetBytes` on
+  # `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of
+  # the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is
+  # not the host's: Docker Desktop or another VM-backed runtime (the pod sees
+  # the VM's memory), an Ollama on another machine. 0 is off; a value that is
+  # not a positive number of GiB is ignored and named in the node's `message`.
+  # The ollama counterpart of the kserve node annotation
+  # `model-manager.giantswarm.io/memory-budget-gib`.
+  memoryBudgetGiB: 0  # @schema type: [number, string]; minimum: 0
 
 kagent:
   # -- Namespace where kagent ModelConfigs are created (RBAC is scoped here).

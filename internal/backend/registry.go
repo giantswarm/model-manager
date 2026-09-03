@@ -101,6 +101,12 @@ type OllamaOptions struct {
 	AgentHost string
 	// Timeout bounds non-streaming API calls.
 	Timeout time.Duration
+	// MemoryBudgetGiB is the operator's memory budget for the proxied host in
+	// GiB (decimals allowed), reported on the host node instead of MemTotal of
+	// the pod's /proc/meminfo — for installs where the pod's view is not the
+	// host's. Empty or 0: none. Parsed by the driver so that an unusable value
+	// is reported on the node rather than dropped.
+	MemoryBudgetGiB string
 }
 
 // Factory builds a Backend from Options.

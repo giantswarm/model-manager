@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -185,4 +186,80 @@ func TestReadMemTotal(t *testing.T) {
 	}
 	_, err := readMemTotal(filepath.Join(t.TempDir(), "missing"))
 	require.Error(t, err)
+}
+
+func TestListNodesBudgetOverride(t *testing.T) {
+	f, b := newTestBackend(t)
+	b.meminfoPath = writeMeminfo(t, testMeminfo)
+	b.memoryBudgetGiB = "32"
+	f.add("qwen3:0.6b", 5_400_000_000)
+	require.NoError(t, b.Load(context.Background(), backend.LoadRequest{Name: "qwen3:0.6b"}))
+	n := listHostNode(t, b)
+	assert.Equal(t, int64(32<<30), n.BudgetBytes)
+	assert.Equal(t, BudgetSourceOverride, n.BudgetSource)
+	assert.Equal(t, testMemTotalBytes, n.AllocatableMemoryBytes, "allocatable stays the pod's view, as a kserve node's does under its annotation")
+	assert.Equal(t, int64(5_400_000_000), n.ReservedBytes)
+	assert.Equal(t, int64(32<<30)-5_400_000_000, n.FreeBytes)
+	assert.Equal(t, overrideMessage, n.Message)
+	assert.Contains(t, n.Message, "ollama.memoryBudgetGiB", "the message names the knob")
+	assert.NotContains(t, n.Message, "ignoring")
+}
+
+func TestListNodesBudgetOverrideDecimal(t *testing.T) {
+	_, b := newTestBackend(t)
+	b.meminfoPath = writeMeminfo(t, testMeminfo)
+	b.memoryBudgetGiB = " 0.5 "
+	n := listHostNode(t, b)
+	assert.Equal(t, int64(512<<20), n.BudgetBytes)
+	assert.Equal(t, BudgetSourceOverride, n.BudgetSource)
+}
+
+func TestListNodesBudgetOverrideWithoutMeminfo(t *testing.T) {
+	_, b := newTestBackend(t)
+	b.meminfoPath = filepath.Join(t.TempDir(), "missing")
+	b.memoryBudgetGiB = "32"
+	n := listHostNode(t, b)
+	assert.Equal(t, int64(32<<30), n.BudgetBytes, "the override does not need /proc/meminfo")
+	assert.Equal(t, BudgetSourceOverride, n.BudgetSource)
+	assert.Zero(t, n.AllocatableMemoryBytes)
+	assert.Contains(t, n.Message, "host memory unknown")
+	assert.Contains(t, n.Message, overrideMessage)
+}
+
+func TestListNodesNoBudgetOverride(t *testing.T) {
+	for _, raw := range []string{"", "0", " 0.0 "} {
+		_, b := newTestBackend(t)
+		b.meminfoPath = writeMeminfo(t, testMeminfo)
+		b.memoryBudgetGiB = raw
+		n := listHostNode(t, b)
+		assert.Equal(t, testMemTotalBytes, n.BudgetBytes, raw)
+		assert.Equal(t, BudgetSourceHostMeminfo, n.BudgetSource, raw)
+		assert.Equal(t, hostNodeMessage, n.Message, "%q is off, not an error", raw)
+	}
+}
+
+func TestListNodesBudgetOverrideIgnored(t *testing.T) {
+	for _, raw := range []string{"abc", "-1", "32GiB", "NaN", "Inf", "-Inf", "1e999"} {
+		_, b := newTestBackend(t)
+		b.meminfoPath = writeMeminfo(t, testMeminfo)
+		b.memoryBudgetGiB = raw
+		n := listHostNode(t, b)
+		assert.Equal(t, testMemTotalBytes, n.BudgetBytes, raw)
+		assert.Equal(t, BudgetSourceHostMeminfo, n.BudgetSource, "%q: the budget falls back to the pod's view", raw)
+		assert.Contains(t, n.Message, "ignoring memory budget override "+strconv.Quote(raw), raw)
+		assert.Contains(t, n.Message, "want a positive number of GiB", raw)
+		assert.Contains(t, n.Message, "budget taken from "+BudgetSourceHostMeminfo, raw)
+		assert.Contains(t, n.Message, hostNodeMessage, "the host explanation stays")
+	}
+}
+
+func TestBudgetOverride(t *testing.T) {
+	for raw, want := range map[string]int64{"": 0, "0": 0, "32": 32 << 30, "0.5": 512 << 20, "1.5": 1536 << 20, " 2 ": 2 << 30, "96": 96 << 30} {
+		got, note := budgetOverride(raw)
+		assert.Equal(t, want, got, raw)
+		assert.Empty(t, note, raw)
+	}
+	got, note := budgetOverride("1e-12")
+	assert.Zero(t, got, "rounds to no memory at all")
+	assert.Contains(t, note, "ignoring")
 }
