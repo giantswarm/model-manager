@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -243,4 +244,50 @@ func TestCachePodStaysWithinPodSecurityBaseline(t *testing.T) {
 		}
 		assert.False(t, *c.SecurityContext.AllowPrivilegeEscalation)
 	}
+}
+
+func TestIsAcceleratorAndEligibility(t *testing.T) {
+	// The configured GPU resource (capacity or allocatable) or a
+	// gpu-feature-discovery label makes an accelerator node; nothing else does.
+	assert.False(t, isAccelerator(node("cpu", "8Gi", nil), DefaultGPUResourceName))
+	assert.True(t, isAccelerator(withGPUs(node("res", "8Gi", nil), 1), DefaultGPUResourceName))
+	amd := node("amd", "8Gi", nil)
+	amd.Status.Capacity = corev1.ResourceList{"amd.com/gpu": resource.MustParse("2")}
+	assert.False(t, isAccelerator(amd, DefaultGPUResourceName), "the configured resource decides")
+	assert.True(t, isAccelerator(amd, "amd.com/gpu"))
+	assert.EqualValues(t, 2, budgetOf(amd, "amd.com/gpu", budgetSourceAuto).GPUCount, "capacity counts when allocatable is absent")
+	for _, labels := range []map[string]string{{labelGPUPresent: "true"}, {labelGPUCount: "2"}, {labelGPUProduct: "NVIDIA-GB10-SHARED"}} {
+		assert.True(t, isAccelerator(node("labelled", "8Gi", labels), DefaultGPUResourceName), labels)
+	}
+	assert.False(t, isAccelerator(node("off", "8Gi", map[string]string{labelGPUPresent: "false", labelGPUCount: "0"}), DefaultGPUResourceName))
+
+	// Eligibility: every failing rule contributes one reason, in a fixed order.
+	pinned := cacheLocation{Claim: "hf-cache", Nodes: []string{"a"}, Bound: true}
+	strict := settings{NodeSelector: map[string]string{labelHostname: "a"}, CacheEnabled: true, CacheRedirectPolicy: true}
+	a := nodeBudget{Name: "a", Ready: true, Labels: map[string]string{labelHostname: "a"}}
+	b := nodeBudget{Name: "b", Ready: false, Labels: map[string]string{labelHostname: "b"}}
+	ok, why := eligibility(a, strict, pinned)
+	assert.True(t, ok)
+	assert.Empty(t, why)
+	ok, why = eligibility(b, strict, pinned)
+	assert.False(t, ok)
+	assert.Equal(t, "not ready; outside the serving node selector (kubernetes.io/hostname=a); cache claim hf-cache is pinned to a", why)
+
+	// A shared, unbound, missing or disabled cache — or predictors that do not
+	// mount the claim (redirect policy off) — never disqualify a node.
+	open := settings{CacheEnabled: true, CacheRedirectPolicy: true}
+	ready := nodeBudget{Name: "b", Ready: true, Labels: map[string]string{labelHostname: "b"}}
+	for _, loc := range []cacheLocation{{Claim: "hf-cache", Shared: true, Bound: true}, {Claim: "hf-cache"}, {Claim: "hf-cache", Missing: true}} {
+		ok, why = eligibility(ready, open, loc)
+		assert.True(t, ok, why)
+	}
+	ok, _ = eligibility(ready, open, pinned)
+	assert.False(t, ok, "pinned elsewhere, predictors mount it")
+	ok, _ = eligibility(ready, settings{CacheEnabled: true}, pinned)
+	assert.True(t, ok, "redirect policy off: predictors download themselves")
+	ok, _ = eligibility(ready, settings{CacheRedirectPolicy: true}, pinned)
+	assert.True(t, ok, "cache disabled")
+
+	assert.Equal(t, "a=1, b=2", formatSelector(map[string]string{"b": "2", "a": "1"}))
+	assert.Equal(t, "", formatSelector(nil))
 }

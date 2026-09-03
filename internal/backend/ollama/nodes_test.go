@@ -52,6 +52,8 @@ func TestListNodesHostWithoutLoadedModels(t *testing.T) {
 	assert.Equal(t, testMemTotalBytes, n.BudgetBytes)
 	assert.Equal(t, BudgetSourceHostMeminfo, n.BudgetSource)
 	assert.Zero(t, n.GPUCount, "accelerators are not observable through Ollama's API")
+	assert.True(t, n.Eligible, "the proxied host is the only serving target")
+	assert.Empty(t, n.EligibilityReason)
 	assert.Zero(t, n.GPUMemoryBytes)
 	assert.Empty(t, n.GPUProduct)
 	assert.Zero(t, n.ReservedBytes)

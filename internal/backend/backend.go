@@ -63,8 +63,9 @@ type Capabilities struct {
 	// FitCheck validates a model against node memory before download/serve (kserve).
 	FitCheck bool `json:"fitCheck"`
 	// NodeInventory reports nodes with their memory budget and what loaded
-	// models reserve (kserve: every cluster node with its download cache;
-	// ollama: the proxied host, budget from /proc/meminfo).
+	// models reserve (kserve: the accelerator nodes with their download cache
+	// and whether each is a serving target; ollama: the proxied host, budget
+	// from /proc/meminfo).
 	NodeInventory bool `json:"nodeInventory"`
 	// Search proxies a model hub search (kserve: Hugging Face Hub).
 	Search bool `json:"search"`
@@ -307,6 +308,14 @@ type NodeInfo struct {
 	Name         string `json:"name"`
 	Ready        bool   `json:"ready"`
 	Architecture string `json:"architecture,omitempty"`
+	// Eligible is true when a model can be served on this node right now:
+	// kserve — ready, inside the discovery node selector, and able to mount
+	// the cache claim when predictors mount it; ollama — always, the host is
+	// the only serving target. EligibilityReason explains a false value in
+	// one human-readable sentence (several reasons joined with "; "); a
+	// serve, pull or fit-check request naming the node fails with it.
+	Eligible          bool   `json:"eligible"`
+	EligibilityReason string `json:"eligibilityReason,omitempty"`
 	// AllocatableMemoryBytes is the node's allocatable memory.
 	AllocatableMemoryBytes int64 `json:"allocatableMemoryBytes"`
 	GPUCount               int64 `json:"gpuCount"`

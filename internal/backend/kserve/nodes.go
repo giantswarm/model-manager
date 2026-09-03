@@ -17,6 +17,7 @@ import (
 
 // GPU feature-discovery labels (NVIDIA GPU operator / gpu-feature-discovery).
 const (
+	labelGPUPresent = "nvidia.com/gpu.present"
 	labelGPUCount   = "nvidia.com/gpu.count"
 	labelGPUMemory  = "nvidia.com/gpu.memory" // MiB
 	labelGPUProduct = "nvidia.com/gpu.product"
@@ -46,6 +47,63 @@ type nodeBudget struct {
 	BudgetSource string
 	// Message notes a budget derivation problem (an ignored annotation).
 	Message string
+	// Eligible says whether a model can be served on the node right now;
+	// EligibilityReason explains a false value (see eligibility).
+	Eligible          bool
+	EligibilityReason string
+}
+
+// isAccelerator reports whether the node advertises the configured GPU
+// resource (capacity or allocatable) or carries a gpu-feature-discovery label.
+// CPU-only nodes are not serving capacity for this backend.
+func isAccelerator(n *corev1.Node, gpuResource string) bool {
+	res := corev1.ResourceName(gpuResource)
+	if q, ok := n.Status.Capacity[res]; ok && q.Value() > 0 {
+		return true
+	}
+	if q, ok := n.Status.Allocatable[res]; ok && q.Value() > 0 {
+		return true
+	}
+	if v := strings.ToLower(strings.TrimSpace(n.Labels[labelGPUPresent])); v != "" && v != "false" {
+		return true
+	}
+	if v, err := strconv.ParseInt(n.Labels[labelGPUCount], 10, 64); err == nil && v > 0 {
+		return true
+	}
+	return strings.TrimSpace(n.Labels[labelGPUProduct]) != ""
+}
+
+// eligibility decides whether a node is a serving target: ready, inside the
+// discovery node selector, and able to mount the cache claim when predictors
+// mount it (cache enabled and the redirect policy on) and the claim is pinned
+// to nodes. Every failing rule adds one reason; the reasons are joined with
+// "; " for the API. An empty reason means eligible.
+func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
+	var reasons []string
+	if !n.Ready {
+		reasons = append(reasons, "not ready")
+	}
+	if !matchesSelector(n.Labels, s.NodeSelector) {
+		reasons = append(reasons, "outside the serving node selector ("+formatSelector(s.NodeSelector)+")")
+	}
+	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !containsString(loc.Nodes, n.Name) {
+		reasons = append(reasons, fmt.Sprintf("cache claim %s is pinned to %s", loc.Claim, strings.Join(loc.Nodes, ", ")))
+	}
+	return len(reasons) == 0, strings.Join(reasons, "; ")
+}
+
+// formatSelector renders a node selector as "k=v, k2=v2" in key order.
+func formatSelector(sel map[string]string) string {
+	keys := make([]string, 0, len(sel))
+	for k := range sel {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+sel[k])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // budgetOf derives the memory budget of a node: GPU memory (labels x count)
@@ -62,7 +120,10 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 	if q, ok := n.Status.Allocatable[corev1.ResourceMemory]; ok {
 		nb.Allocatable = q.Value()
 	}
-	if q, ok := n.Status.Allocatable[corev1.ResourceName(gpuResource)]; ok {
+	if q, ok := n.Status.Capacity[corev1.ResourceName(gpuResource)]; ok {
+		nb.GPUCount = q.Value()
+	}
+	if q, ok := n.Status.Allocatable[corev1.ResourceName(gpuResource)]; ok && q.Value() > 0 {
 		nb.GPUCount = q.Value()
 	}
 	if v, err := strconv.ParseInt(n.Labels[labelGPUCount], 10, 64); err == nil && v > 0 {
@@ -103,8 +164,10 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 	return nb
 }
 
-// nodes lists every node's budget, sorted by name.
-func (b *Backend) nodes(ctx context.Context) ([]nodeBudget, error) {
+// nodes lists the accelerator nodes (isAccelerator) with their budget and
+// eligibility against the cache location, sorted by name. CPU-only nodes are
+// left out: nothing can be served there.
+func (b *Backend) nodes(ctx context.Context, loc cacheLocation) ([]nodeBudget, error) {
 	list, err := b.cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -112,7 +175,13 @@ func (b *Backend) nodes(ctx context.Context) ([]nodeBudget, error) {
 	s := b.cfg.settings(ctx)
 	out := make([]nodeBudget, 0, len(list.Items))
 	for i := range list.Items {
-		out = append(out, budgetOf(&list.Items[i], s.GPUResourceName, b.opts.BudgetSource))
+		n := &list.Items[i]
+		if !isAccelerator(n, s.GPUResourceName) {
+			continue
+		}
+		nb := budgetOf(n, s.GPUResourceName, b.opts.BudgetSource)
+		nb.Eligible, nb.EligibilityReason = eligibility(nb, s, loc)
+		out = append(out, nb)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -140,6 +209,12 @@ type cacheLocation struct {
 	Bound bool
 	// Missing is true when the claim does not exist.
 	Missing bool
+}
+
+// pinned reports whether the claim can only be mounted on known nodes (a
+// static local PV or a local-path volume): a bound, node-affine claim.
+func (l cacheLocation) pinned() bool {
+	return !l.Missing && l.Bound && !l.Shared && len(l.Nodes) > 0
 }
 
 // cacheNodes locates the cache: the explicit override, else the node affinity
@@ -219,6 +294,8 @@ func nodeView(nb nodeBudget, reserved int64, cache *backend.NodeCache) backend.N
 		BudgetBytes:            nb.Budget,
 		BudgetSource:           nb.BudgetSource,
 		Message:                nb.Message,
+		Eligible:               nb.Eligible,
+		EligibilityReason:      nb.EligibilityReason,
 		ReservedBytes:          reserved,
 		FreeBytes:              nb.Budget - reserved,
 		Cache:                  cache,

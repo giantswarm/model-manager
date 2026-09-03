@@ -120,7 +120,7 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 		return nil, err
 	}
 	plan.CacheLocal = len(loc.Nodes) > 0
-	nodes, err := b.nodes(ctx)
+	nodes, err := b.nodes(ctx, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -179,39 +179,48 @@ func reservedNote(reserved int64) string {
 	return ", " + humanBytes(reserved) + " reserved by running models"
 }
 
-// candidateNodes narrows the nodes a model may be served on: an explicit node,
-// else the ready nodes matching the discovery and preset node selectors,
-// preferring the nodes that hold the cache.
+// candidateNodes narrows the nodes a model may be served on: an explicit node
+// — refused with its eligibility reason when it is not a serving target, so
+// nothing gets scheduled onto a node that cannot run it — else the eligible
+// nodes matching the preset's node selector, preferring the nodes that hold
+// the cache. The nodes are the accelerator nodes (nodes), eligibility judged.
 func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explicit string, loc cacheLocation, p *servingPreset) ([]nodeBudget, string) {
+	s := b.cfg.settings(ctx)
 	if explicit != "" {
 		for _, n := range nodes {
-			if n.Name == explicit {
-				return []nodeBudget{n}, ""
+			if n.Name != explicit {
+				continue
 			}
+			if !n.Eligible {
+				return nil, fmt.Sprintf("node %s is not a serving target: %s", n.Name, n.EligibilityReason)
+			}
+			return []nodeBudget{n}, ""
 		}
-		return nil, fmt.Sprintf("node %q not found", explicit)
+		return nil, fmt.Sprintf("node %q not found: it does not exist or is not an accelerator node (no %s resource, no %s label)", explicit, s.GPUResourceName, labelGPUPresent)
 	}
-	s := b.cfg.settings(ctx)
-	selector := map[string]string{}
-	for k, v := range s.NodeSelector {
-		selector[k] = v
-	}
+	presetSelector := map[string]string{}
 	if p != nil {
-		for k, v := range p.Spec.Scheduling.NodeSelector {
-			selector[k] = v
-		}
+		presetSelector = p.Spec.Scheduling.NodeSelector
 	}
 	var eligible []nodeBudget
 	for _, n := range nodes {
-		if n.Ready && matchesSelector(n.Labels, selector) {
+		if n.Eligible && matchesSelector(n.Labels, presetSelector) {
 			eligible = append(eligible, n)
 		}
 	}
 	if len(eligible) == 0 {
-		if len(selector) > 0 {
-			return nil, fmt.Sprintf("no ready node matches the node selector %v", selector)
+		if len(nodes) == 0 {
+			return nil, fmt.Sprintf("no accelerator node: no node advertises %s or carries the %s label", s.GPUResourceName, labelGPUPresent)
 		}
-		return nil, "no ready node"
+		why := make([]string, 0, len(nodes))
+		for _, n := range nodes {
+			reason := n.EligibilityReason
+			if reason == "" {
+				reason = "outside the preset's node selector (" + formatSelector(presetSelector) + ")"
+			}
+			why = append(why, n.Name+": "+reason)
+		}
+		return nil, "no eligible node: " + strings.Join(why, "; ")
 	}
 	if len(loc.Nodes) > 0 {
 		var onCache []nodeBudget

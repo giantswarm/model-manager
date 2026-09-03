@@ -66,6 +66,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	node := backend.NodeInfo{
 		Name:         hostOf(b.agentHost),
 		Ready:        true,
+		Eligible:     true, // the proxied host is the only serving target
 		Architecture: runtime.GOARCH,
 		BudgetSource: BudgetSourceHostMeminfo,
 		Message:      hostNodeMessage,

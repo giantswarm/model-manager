@@ -30,6 +30,7 @@ const (
 	testServingNS  = "model-serving"
 	testCacheNode  = "n1"
 	testGPUNode    = "gpu1"
+	testCPUNode    = "cpu1"
 	tinyRepo       = "org/tiny"
 	bigRepo        = "org/big"
 	gatedRepo      = "org/gated"
@@ -179,27 +180,54 @@ func presetConfigMap(name, doc string) *corev1.ConfigMap {
 func discoveryConfigMap() *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: DefaultDiscoveryConfigMap, Namespace: testPlatformNS},
-		Data: map[string]string{discoveryConfigKey: `apiVersion: agent-platform.giantswarm.io/v1alpha1
+		Data:       map[string]string{discoveryConfigKey: discoveryDocYAML(nil, false)},
+	}
+}
+
+// discoveryDocYAML renders the ModelServingConfig document with the given
+// serving node selector and cache redirect-policy flag (whether the Kyverno
+// policies mount the cache claim into every predictor).
+func discoveryDocYAML(nodeSelector map[string]string, redirectPolicy bool) string {
+	selector := "  nodeSelector: {}\n"
+	if len(nodeSelector) > 0 {
+		selector = "  nodeSelector:\n"
+		for k, v := range nodeSelector {
+			selector += fmt.Sprintf("    %s: %s\n", k, v)
+		}
+	}
+	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ModelServingConfig
 spec:
   namespace: model-serving
   runtime: kserve-vllm
   gpuResourceName: nvidia.com/gpu
   runtimeClassName: ""
-  nodeSelector: {}
-  deploymentStrategyType: Recreate
+%s  deploymentStrategyType: Recreate
   timeoutSeconds: 1800
   cache:
     enabled: true
     claimName: hf-cache
     mountPath: /mnt/models
-    redirectPolicy: false
+    redirectPolicy: %t
   presets:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`},
-	}
+`, selector, redirectPolicy)
+}
+
+// setDiscovery rewrites the discovery ConfigMap and drops the cached settings
+// so the next call sees the change.
+func (f *fixture) setDiscovery(ctx context.Context, nodeSelector map[string]string, redirectPolicy bool) {
+	f.t.Helper()
+	cm, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Get(ctx, DefaultDiscoveryConfigMap, metav1.GetOptions{})
+	require.NoError(f.t, err)
+	cm.Data[discoveryConfigKey] = discoveryDocYAML(nodeSelector, redirectPolicy)
+	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(f.t, err)
+	f.b.cfg.mu.Lock()
+	f.b.cfg.cached = nil
+	f.b.cfg.mu.Unlock()
 }
 
 func node(name string, memory string, labels map[string]string) *corev1.Node {
@@ -217,6 +245,29 @@ func node(name string, memory string, labels map[string]string) *corev1.Node {
 	return n
 }
 
+// withGPUs advertises count GPUs as the default GPU resource (capacity and
+// allocatable), the way a device plugin does — no feature-discovery labels,
+// like a unified-memory node without the GPU operator's labeller.
+func withGPUs(n *corev1.Node, count int64) *corev1.Node {
+	q := *resource.NewQuantity(count, resource.DecimalSI)
+	if n.Status.Capacity == nil {
+		n.Status.Capacity = corev1.ResourceList{}
+	}
+	n.Status.Capacity[corev1.ResourceName(DefaultGPUResourceName)] = q
+	n.Status.Allocatable[corev1.ResourceName(DefaultGPUResourceName)] = q
+	return n
+}
+
+// notReady flips the node's Ready condition to False.
+func notReady(n *corev1.Node) *corev1.Node {
+	for i := range n.Status.Conditions {
+		if n.Status.Conditions[i].Type == corev1.NodeReady {
+			n.Status.Conditions[i].Status = corev1.ConditionFalse
+		}
+	}
+	return n
+}
+
 func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	t.Helper()
 	hub := newFakeHub(t)
@@ -224,8 +275,12 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 		discoveryConfigMap(),
 		presetConfigMap("tiny", presetDoc("tiny", tinyRepo, 0.001, "")),
 		presetConfigMap("big", presetDoc("big", bigRepo, 100, "  chatTemplate:\n    configMap: agent-platform-chat-template-big\n    key: chat-template.jinja\n    mountPath: /mnt/chat-template\n  scheduling:\n    nodeSelector:\n      accelerator: gpu\n  predictor:\n    minReplicas: 1\n")),
-		node(testCacheNode, "64Gi", map[string]string{"accelerator": "gpu"}),
+		// The cache node advertises its GPU as a resource only (a unified-memory
+		// node without feature-discovery labels); the GPU node is known from
+		// its labels alone; the CPU node must never show up as capacity.
+		withGPUs(node(testCacheNode, "64Gi", map[string]string{"accelerator": "gpu"}), 1),
 		node(testGPUNode, "256Gi", map[string]string{"accelerator": "gpu", labelGPUCount: "1", labelGPUMemory: "131072", labelGPUProduct: "GB10"}),
+		node(testCPUNode, "32Gi", nil),
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: DefaultCacheClaim, Namespace: testServingNS},
 			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-cache"},
