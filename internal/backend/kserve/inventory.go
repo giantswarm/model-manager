@@ -39,14 +39,17 @@ const (
 
 // scanScript walks the cache root and prints one DIR line per subdirectory
 // (name, apparent bytes, file count, mtime) and one MARKER line per marker
-// file. busybox-compatible: find -exec stat -c, awk, wc.
+// file. busybox-compatible: find -exec stat -c, awk, wc. The byte sum is
+// printed with %.0f, not %d: busybox awk formats %d through a 32-bit int, so
+// every directory above 2 GiB — which is every model — came out as
+// 2147483647 (or wrapped negative). awk sums in doubles, exact to 2^53.
 const scanScript = `set -u
 cd "${MM_CACHE_ROOT:-` + cacheMount + `}" || exit 1
 for d in */ ; do
   d="${d%/}"
   [ -d "$d" ] || continue
   case "$d" in .*|'*') continue ;; esac
-  bytes=$(find "$d" -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1} END {printf "%d", s}')
+  bytes=$(find "$d" -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1} END {printf "%.0f", s}')
   files=$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')
   mtime=$(stat -c %Y "$d" 2>/dev/null || echo 0)
   printf '` + lineDir + `\t%s\t%s\t%s\t%s\n' "$d" "${bytes:-0}" "${files:-0}" "${mtime:-0}"

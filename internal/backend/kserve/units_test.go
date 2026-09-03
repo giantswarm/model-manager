@@ -119,20 +119,38 @@ func TestParseScanAndScript(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, markersDir), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, markersDir, "tiny.json"), []byte(`{"model":"org/tiny","dir":"tiny"}`+"\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "stray-file"), []byte("x"), 0o600))
+	// Model weights are larger than 2 GiB: a sparse file with the apparent
+	// size of a real checkpoint (no disk is used) guards the byte sum against
+	// 32-bit formatting in the scan pod's awk.
+	const bigBytes = int64(29_552_615_805) // Qwen/Qwen3-14B on disk
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "big"), 0o750))
+	bigFile, err := os.Create(filepath.Join(root, "big", "model-00001-of-00008.safetensors")) // #nosec G304 -- test fixture under t.TempDir()
+	require.NoError(t, err)
+	require.NoError(t, bigFile.Truncate(bigBytes-1))
+	require.NoError(t, bigFile.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(root, "big", "config.json"), []byte("{"), 0o600))
+	// busybox is what the scan pod's alpine image ships; prefer it when the
+	// machine has one so the test exercises the same awk.
 	cmd := exec.Command("sh", "-c", scanScript)
+	if busybox, err := exec.LookPath("busybox"); err == nil {
+		cmd = exec.Command(busybox, "sh", "-c", scanScript) // #nosec G204 -- fixed script; busybox resolved from PATH
+	}
 	cmd.Env = append(os.Environ(), "MM_CACHE_ROOT="+root)
 	raw, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(raw))
 	entries, err = parseScan("n1", strings.NewReader(string(raw)))
 	require.NoError(t, err, string(raw))
-	require.Len(t, entries, 2, string(raw))
-	assert.Equal(t, "empty", entries[0].Dir)
-	assert.EqualValues(t, 0, entries[0].Bytes)
-	assert.Equal(t, "tiny", entries[1].Dir)
-	assert.EqualValues(t, 2100, entries[1].Bytes)
-	assert.Equal(t, 2, entries[1].Files)
-	require.NotNil(t, entries[1].Marker)
-	assert.Equal(t, "org/tiny", entries[1].Marker.Model)
+	require.Len(t, entries, 3, string(raw))
+	assert.Equal(t, "big", entries[0].Dir)
+	assert.Equal(t, bigBytes, entries[0].Bytes, string(raw))
+	assert.Equal(t, 2, entries[0].Files)
+	assert.Equal(t, "empty", entries[1].Dir)
+	assert.EqualValues(t, 0, entries[1].Bytes)
+	assert.Equal(t, "tiny", entries[2].Dir)
+	assert.EqualValues(t, 2100, entries[2].Bytes)
+	assert.Equal(t, 2, entries[2].Files)
+	require.NotNil(t, entries[2].Marker)
+	assert.Equal(t, "org/tiny", entries[2].Marker.Model)
 }
 
 func TestParseProgressAndJobHelpers(t *testing.T) {
