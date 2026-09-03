@@ -2,6 +2,7 @@ package kserve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -17,8 +18,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/cacheagent"
@@ -155,9 +160,12 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	f.setEntries(testCacheNode,
-		cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2},
+		cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true},
 		cacheEntry{Dir: "hf-internal-testing-tiny-random-gpt2", Bytes: 500, Files: 3, Marker: &marker{Model: "hf-internal-testing/tiny-random-gpt2", Revision: "abc"}},
-		cacheEntry{Dir: "unknown-dir", Bytes: 7, Files: 1},
+		cacheEntry{Dir: "unknown-dir", Bytes: 7, Files: 1, HasModel: true},
+		// Hugging Face client internals on the same claim: no model at the top level.
+		cacheEntry{Dir: "hf-home", Bytes: 1539458569, Files: 11},
+		cacheEntry{Dir: "xet", Bytes: 99, Files: 4},
 	)
 	// A served model whose weights are not cached.
 	require.NoError(t, f.b.createISVC(ctx, f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
@@ -169,6 +177,8 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 		byName[m.Name] = m
 	}
 	require.Len(t, models, 4, models)
+	assert.NotContains(t, byName, "hf-home", "a directory without a model is not a download")
+	assert.NotContains(t, byName, "xet")
 	tiny := byName[tinyRepo]
 	assert.Equal(t, "tiny", tiny.Path)
 	assert.Equal(t, "tiny", tiny.Preset)
@@ -197,6 +207,8 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 	assert.Equal(t, bigRepo, m.Name)
 	_, err = f.b.GetModel(ctx, "nobody/nothing")
 	assert.ErrorIs(t, err, backend.ErrNotFound)
+	_, err = f.b.GetModel(ctx, "hf-home")
+	assert.ErrorIs(t, err, backend.ErrNotFound, "client internals are not models")
 
 	// Scans are cached within the TTL.
 	before := f.scans
@@ -490,16 +502,20 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2})
+	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true})
 	f.completePods(ctx)
 
-	// Served -> conflict.
+	// Served -> conflict. Listing the InferenceService recorded its directory.
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
 	err := f.b.Delete(ctx, tinyRepo)
 	assert.ErrorIs(t, err, backend.ErrConflict)
+	cm, err := f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data, "tiny", "the InferenceService's directory is in the cache index")
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
 
-	// Not cached -> not found; cached -> a cleanup pod runs on the cache node.
+	// Not cached -> not found; cached -> a cleanup pod runs on the cache node
+	// and the index forgets the directory.
 	err = f.b.Delete(ctx, bigRepo)
 	assert.ErrorIs(t, err, backend.ErrNotFound)
 	require.NoError(t, f.b.Delete(ctx, tinyRepo))
@@ -507,12 +523,19 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pods.Items, "the cleanup pod is removed afterwards")
 	assert.Equal(t, 2, f.scans, "the inventory was invalidated after the delete")
+	cm, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, cm.Data, "tiny", "the removed directory is forgotten")
 }
 
 func TestListNodes(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2})
+	f.setEntries(testCacheNode,
+		cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true},
+		// Client internals occupy the claim but are not models.
+		cacheEntry{Dir: "xet", Bytes: 10, Files: 1},
+	)
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
 	// Give the predictor a pod on the cache node so its reservation counts.
 	_, err := f.cs.CoreV1().Pods(testServingNS).Create(ctx, &corev1.Pod{
@@ -540,8 +563,8 @@ func TestListNodes(t *testing.T) {
 	assert.Equal(t, gibToBytes(0.001)+gib, cache.ReservedBytes, "the served tiny model reserves weights + overhead")
 	require.NotNil(t, cache.Cache)
 	assert.Equal(t, DefaultCacheClaim, cache.Cache.Claim)
-	assert.Equal(t, 1, cache.Cache.Models)
-	assert.EqualValues(t, 453864, cache.Cache.BytesUsed)
+	assert.Equal(t, 1, cache.Cache.Models, "directories holding a model")
+	assert.EqualValues(t, 453874, cache.Cache.BytesUsed, "everything on the claim, client internals included")
 
 	// The reservation shrinks the free budget a load fit-check uses; a load of
 	// the same preset does not count against itself.
@@ -568,7 +591,7 @@ func TestSharedCacheAndMissingClaim(t *testing.T) {
 	loc, err := f.b.cacheNodes(ctx)
 	require.NoError(t, err)
 	assert.True(t, loc.Shared)
-	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 1, Files: 1})
+	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 1, Files: 1, HasModel: true})
 	models, err := f.b.ListModels(ctx)
 	require.NoError(t, err)
 	require.Len(t, models, 1)
@@ -698,6 +721,9 @@ func TestDaemonSetInventory(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, markersDir, "hf-internal.json"), []byte(`{"model":"hf-internal/testing","revision":"r1"}`), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "hf-internal"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-internal", "a.bin"), make([]byte, 10), 0o600))
+	// The xet chunk cache: on the claim, not a model.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "xet", "chunk-cache"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "xet", "chunk-cache", "c1"), make([]byte, 7), 0o600))
 	agent := httptest.NewServer(cacheagent.Handler(root, testCacheNode, slog.New(slog.DiscardHandler)))
 	t.Cleanup(agent.Close)
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(agent.URL, "http://"))
@@ -764,6 +790,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	for _, m := range models {
 		byName[m.Name] = m
 	}
+	assert.NotContains(t, byName, "xet", "the agent's hasModel verdict filters client internals")
 	tiny := byName[tinyRepo]
 	assert.Equal(t, "tiny", tiny.Path)
 	assert.Equal(t, "tiny", tiny.Preset)
@@ -781,8 +808,8 @@ func TestDaemonSetInventory(t *testing.T) {
 			require.NotNil(t, n.Cache)
 			assert.Empty(t, n.Cache.Error)
 			assert.Equal(t, InventoryModeDaemonSet, n.Cache.Inventory)
-			assert.Equal(t, 2, n.Cache.Models)
-			assert.EqualValues(t, 4106, n.Cache.BytesUsed)
+			assert.Equal(t, 2, n.Cache.Models, "xet is not a model")
+			assert.EqualValues(t, 4113, n.Cache.BytesUsed, "but occupies the claim")
 		case testGPUNode:
 			assert.Nil(t, n.Cache, "the claim is pinned to the cache node")
 		}
@@ -806,4 +833,139 @@ func TestDaemonSetInventory(t *testing.T) {
 			assert.Contains(t, n.Cache.Error, "HTTP 500")
 		}
 	}
+}
+
+func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f.completePods(ctx)
+	isvcs := f.dyn.Resource(isvcGVR).Namespace(testServingNS)
+	cms := f.cs.CoreV1().ConfigMaps(testServingNS)
+	list := func() map[string]backend.Model {
+		t.Helper()
+		models, err := f.b.ListModels(ctx)
+		require.NoError(t, err)
+		out := map[string]backend.Model{}
+		for _, m := range models {
+			out[m.Path] = m
+		}
+		return out
+	}
+
+	// A directory the storage-initializer filled for a hand-written
+	// InferenceService of the same name: while it exists the directory is
+	// named after its storageUri, and the pair is recorded.
+	f.setEntries(testCacheNode, cacheEntry{Dir: "clone", Bytes: 10 * gib, Files: 3, HasModel: true})
+	_, err := isvcs.Create(ctx, isvcObject("clone", "hf://"+tinyRepo+":abc", map[string]string{ManagedByLabel: "kustomize"}), metav1.CreateOptions{})
+	require.NoError(t, err)
+	clone := list()["clone"]
+	assert.Equal(t, tinyRepo, clone.Name)
+	assert.Equal(t, "tiny", clone.Preset, "the single preset serving the repository")
+	assert.Equal(t, "abc", clone.Digest)
+	assert.True(t, *clone.Downloaded)
+	cm, err := cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, ManagedByValue, cm.Labels[ManagedByLabel])
+	assert.Equal(t, componentCacheIndex, cm.Labels[ComponentLabel])
+	var rec indexEntry
+	require.NoError(t, json.Unmarshal([]byte(cm.Data["clone"]), &rec))
+	assert.False(t, rec.RecordedAt.IsZero())
+	assert.Equal(t, indexEntry{Model: tinyRepo, Revision: "abc", Dir: "clone", InferenceService: "clone", RecordedAt: rec.RecordedAt}, rec)
+
+	// The InferenceService goes; the directory keeps its repository, preset
+	// and revision, and the repository resolves to it.
+	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+	f.b.inv.invalidate()
+	clone = list()["clone"]
+	assert.Equal(t, tinyRepo, clone.Name)
+	assert.Equal(t, "tiny", clone.Preset)
+	assert.Equal(t, "abc", clone.Digest)
+	m, err := f.b.GetModel(ctx, tinyRepo)
+	require.NoError(t, err)
+	assert.Equal(t, "clone", m.Path)
+
+	// A second preset serving the same repository makes the repository match
+	// ambiguous; the preset label of the InferenceService that filled a
+	// directory is remembered and decides. A storageUri that is not a
+	// Hugging Face repository records nothing.
+	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap("tiny-alt", presetDoc("tiny-alt", tinyRepo, 0.001, "")), metav1.CreateOptions{})
+	require.NoError(t, err)
+	f.setEntries(testCacheNode,
+		cacheEntry{Dir: "clone", Bytes: 10 * gib, Files: 3, HasModel: true},
+		cacheEntry{Dir: "labelled", Bytes: 10 * gib, Files: 3, HasModel: true},
+		cacheEntry{Dir: "pvc-model", Bytes: 5, Files: 1, HasModel: true},
+	)
+	_, err = isvcs.Create(ctx, isvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = isvcs.Create(ctx, isvcObject("pvc-model", "pvc://weights/model", nil), metav1.CreateOptions{})
+	require.NoError(t, err)
+	models := list()
+	assert.Empty(t, models["clone"].Preset, "two presets serve the repository and the InferenceService named none")
+	assert.Equal(t, "tiny-alt", models["labelled"].Preset)
+	assert.Equal(t, "pvc-model", models["pvc-model"].Name, "the InferenceService of the same name still names it")
+	cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data["labelled"], `"preset":"tiny-alt"`)
+	assert.NotContains(t, cm.Data, "pvc-model")
+	require.NoError(t, isvcs.Delete(ctx, "labelled", metav1.DeleteOptions{}))
+	require.NoError(t, isvcs.Delete(ctx, "pvc-model", metav1.DeleteOptions{}))
+	models = list()
+	assert.Equal(t, tinyRepo, models["labelled"].Name)
+	assert.Equal(t, "tiny-alt", models["labelled"].Preset, "remembered with its preset")
+	assert.Equal(t, "pvc-model", models["pvc-model"].Name, "nothing remembered: the directory name")
+
+	// A new InferenceService of the same name serving another repository wins
+	// over the record and replaces it.
+	_, err = isvcs.Create(ctx, isvcObject("clone", "hf://"+bigRepo, nil), metav1.CreateOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, bigRepo, list()["clone"].Name)
+	cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data["clone"], `"model":"`+bigRepo+`"`)
+	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+
+	// Removing the directory forgets it.
+	require.NoError(t, f.b.Delete(ctx, bigRepo))
+	cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, cm.Data, "clone")
+	assert.Contains(t, cm.Data, "labelled")
+
+	// Nothing is written while the index already says everything.
+	writes := 0
+	count := func(k8stesting.Action) (bool, runtime.Object, error) { writes++; return false, nil, nil }
+	f.cs.PrependReactor("update", "configmaps", count)
+	f.cs.PrependReactor("create", "configmaps", count)
+	f.setEntries(testCacheNode, cacheEntry{Dir: "labelled", Bytes: 10 * gib, Files: 3, HasModel: true})
+	_, err = isvcs.Create(ctx, isvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
+	require.NoError(t, err)
+	list()
+	list()
+	assert.Equal(t, 0, writes)
+}
+
+func TestCacheIndexToleratesAMissingPermission(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	forbidden := func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, DefaultCacheIndexConfigMap, errors.New("no"))
+	}
+	f.cs.PrependReactor("create", "configmaps", forbidden)
+	f.cs.PrependReactor("update", "configmaps", forbidden)
+	isvcs := f.dyn.Resource(isvcGVR).Namespace(testServingNS)
+	f.setEntries(testCacheNode, cacheEntry{Dir: "clone", Bytes: 1, Files: 1, HasModel: true})
+	_, err := isvcs.Create(ctx, isvcObject("clone", "hf://"+tinyRepo, nil), metav1.CreateOptions{})
+	require.NoError(t, err)
+	models, err := f.b.ListModels(ctx)
+	require.NoError(t, err, "the inventory works without the index")
+	require.Len(t, models, 1)
+	assert.Equal(t, tinyRepo, models[0].Name, "the live InferenceService names its directory")
+	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+	models, err = f.b.ListModels(ctx)
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	assert.Equal(t, "clone", models[0].Name, "nothing could be remembered")
+	_, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }

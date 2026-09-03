@@ -80,6 +80,9 @@ spec:
             {{- with $k.cache.nodes }}
             - --kserve-cache-nodes={{ join "," . }}
             {{- end }}
+            {{- with $k.cache.indexConfigMap }}
+            - --kserve-cache-index-configmap={{ . }}
+            {{- end }}
             {{- with $k.presets.namespace }}
             - --kserve-preset-namespace={{ . }}
             {{- end }}

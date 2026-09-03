@@ -38,12 +38,23 @@ const (
 )
 
 // scanScript walks the cache root and prints one DIR line per subdirectory
-// (name, apparent bytes, file count, mtime) and one MARKER line per marker
-// file. busybox-compatible: find -exec stat -c, awk, wc. The byte sum is
-// printed with %.0f, not %d: busybox awk formats %d through a 32-bit int, so
-// every directory above 2 GiB — which is every model — came out as
-// 2147483647 (or wrapped negative). awk sums in doubles, exact to 2^53.
-const scanScript = `set -u
+// (name, apparent bytes, file count, mtime, whether it holds a model) and one
+// MARKER line per marker file. busybox-compatible: find -exec stat -c, awk,
+// wc. The byte sum is printed with %.0f, not %d: busybox awk formats %d
+// through a 32-bit int, so every directory above 2 GiB — which is every model
+// — came out as 2147483647 (or wrapped negative); awk sums in doubles, exact
+// to 2^53. A directory holds a model when its top level has a config.json or
+// a weights file (cacheagent.WeightSuffixes, the test the cache-agent applies
+// too) — what separates a model from the Hugging Face client internals that
+// live on the same claim (hf-home, xet) without walking the contents twice.
+var scanScript = buildScanScript(cacheagent.WeightSuffixes)
+
+func buildScanScript(weightSuffixes []string) string {
+	globs := make([]string, 0, len(weightSuffixes))
+	for _, s := range weightSuffixes {
+		globs = append(globs, `"$d"/*`+s)
+	}
+	return `set -u
 cd "${MM_CACHE_ROOT:-` + cacheMount + `}" || exit 1
 for d in */ ; do
   d="${d%/}"
@@ -52,7 +63,11 @@ for d in */ ; do
   bytes=$(find "$d" -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1} END {printf "%.0f", s}')
   files=$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')
   mtime=$(stat -c %Y "$d" 2>/dev/null || echo 0)
-  printf '` + lineDir + `\t%s\t%s\t%s\t%s\n' "$d" "${bytes:-0}" "${files:-0}" "${mtime:-0}"
+  model=0
+  if [ -f "$d/config.json" ]; then model=1; else
+    for w in ` + strings.Join(globs, " ") + `; do [ -f "$w" ] && { model=1; break; }; done
+  fi
+  printf '` + lineDir + `\t%s\t%s\t%s\t%s\t%s\n' "$d" "${bytes:-0}" "${files:-0}" "${mtime:-0}" "$model"
 done
 if [ -d ` + markersDir + ` ]; then
   for m in ` + markersDir + `/*.json ; do
@@ -62,6 +77,7 @@ if [ -d ` + markersDir + ` ]; then
   done
 fi
 echo ` + lineEnd
+}
 
 // marker is what a pre-warm download records about its directory; the
 // cache-agent reads the same files.
@@ -75,6 +91,18 @@ type cacheEntry struct {
 	Files  int
 	MTime  time.Time
 	Marker *marker
+	// HasModel is the scan's verdict on the top level: a config.json or a
+	// weights file is there. See holdsModel.
+	HasModel bool
+}
+
+// holdsModel reports whether the directory is a model in the inventory's
+// sense: the scan found a config.json or weights at its top level, or a
+// pre-warm download completed into it (its marker). Hugging Face client
+// internals (hf-home, xet) and a directory still filling up are neither and
+// are not listed as downloads; they still occupy the claim.
+func (e cacheEntry) holdsModel() bool {
+	return e.HasModel || (e.Marker != nil && e.Marker.Model != "")
 }
 
 // cacheSnapshot is one node's scan.
@@ -172,7 +200,11 @@ func parseScan(node string, r io.Reader) ([]cacheEntry, error) {
 			bytes, _ := strconv.ParseInt(fields[2], 10, 64)
 			files, _ := strconv.Atoi(fields[3])
 			mtime, _ := strconv.ParseInt(fields[4], 10, 64)
-			e := &cacheEntry{Node: node, Dir: fields[1], Bytes: bytes, Files: files}
+			// A line without the model field (an older script) is a model.
+			e := &cacheEntry{Node: node, Dir: fields[1], Bytes: bytes, Files: files, HasModel: true}
+			if len(fields) >= 6 {
+				e.HasModel = fields[5] == "1"
+			}
 			if mtime > 0 {
 				e.MTime = time.Unix(mtime, 0).UTC()
 			}
@@ -262,7 +294,11 @@ func (b *Backend) scanAgent(ctx context.Context, node string) ([]cacheEntry, str
 	}
 	entries := make([]cacheEntry, 0, len(inv.Entries))
 	for _, e := range inv.Entries {
-		entries = append(entries, cacheEntry{Node: pod.Spec.NodeName, Dir: e.Dir, Bytes: e.Bytes, Files: e.Files, MTime: e.MTime, Marker: e.Marker})
+		entries = append(entries, cacheEntry{
+			Node: pod.Spec.NodeName, Dir: e.Dir, Bytes: e.Bytes, Files: e.Files, MTime: e.MTime, Marker: e.Marker,
+			// An agent that predates the field lists every directory as a model.
+			HasModel: e.HasModel == nil || *e.HasModel,
+		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Dir < entries[j].Dir })
 	return entries, pod.Spec.NodeName, nil

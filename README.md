@@ -153,6 +153,26 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   `cache.error`. The node holding the cache comes from the bound
   PersistentVolume's node affinity. `GET /api/v1/nodes` says which nodes hold
   a cache at all and what their memory budget is.
+- **Naming a cache directory** — a directory is named by what is known to
+  have filled it: the marker a pre-warm download Job wrote, else the **cache
+  index** — a ConfigMap in the serving namespace (`model-manager-cache-index`,
+  `kserve.cache.indexConfigMap`) in which the driver records, while an
+  InferenceService exists, that its name is the directory the KServe
+  storage-initializer fills and its `hf://` storageUri the repository
+  (repository, revision, preset label, one JSON entry per directory). The
+  record outlives the InferenceService, so the directory keeps its repository
+  and, through it, its preset (the labelled one, else the single preset
+  serving the repository) after the InferenceService is deleted; a live
+  InferenceService always wins over a stale record, and the record is dropped
+  when model-manager removes the directory. Without a marker or record the
+  preset or InferenceService of the same name is assumed, else the directory
+  is listed by its bare name. Directories whose top level holds no model —
+  no `config.json` and no weights file (`*.safetensors`, `*.gguf`, `*.bin`,
+  `*.pt`, `*.pth`, `*.onnx`) — are not listed as downloads: Hugging Face
+  client internals such as `hf-home` and `xet` live on the same claim and
+  count towards `nodes[].cache.bytesUsed`, but they are not models, and a
+  directory an InferenceService is still filling shows as that served model
+  with `downloaded: false` until its files arrive.
 - **Nodes and eligibility** — `GET /api/v1/nodes` lists the **accelerator
   nodes only**: nodes that advertise the configured GPU resource
   (`gpuResourceName` from discovery, default `nvidia.com/gpu`; capacity or

@@ -24,9 +24,14 @@ const (
 	DefaultGPUResourceName    = "nvidia.com/gpu"
 	DefaultCacheClaim         = "hf-cache"
 	DefaultCacheMountPath     = "/mnt/models"
-	DefaultPresetSelector     = "agent-platform.giantswarm.io/serving-preset=true"
-	DefaultHFEndpoint         = "https://huggingface.co"
-	DefaultHFTokenSecretKey   = "token"
+	// DefaultCacheIndexConfigMap is the ConfigMap in the serving namespace
+	// that remembers which repository filled which cache directory
+	// (index.go).
+	DefaultCacheIndexConfigMap = "model-manager-cache-index"
+	componentCacheIndex        = "cache-index"
+	DefaultPresetSelector      = "agent-platform.giantswarm.io/serving-preset=true"
+	DefaultHFEndpoint          = "https://huggingface.co"
+	DefaultHFTokenSecretKey    = "token"
 	// DefaultDownloadImage is the KServe storage-initializer: a pre-warm
 	// download then produces exactly the files an InferenceService's own
 	// download would, so a later start finds them and skips the download.
@@ -245,6 +250,7 @@ func defaultIf(dst *string, def string) {
 // applyDefaults fills zero options.
 func applyDefaults(o *backend.KServeOptions) {
 	defaultIf(&o.DiscoveryConfigMap, DefaultDiscoveryConfigMap)
+	defaultIf(&o.CacheIndexConfigMap, DefaultCacheIndexConfigMap)
 	defaultIf(&o.HFEndpoint, DefaultHFEndpoint)
 	defaultIf(&o.HFTokenSecretKey, DefaultHFTokenSecretKey)
 	defaultIf(&o.DownloadImage, DefaultDownloadImage)

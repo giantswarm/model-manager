@@ -60,32 +60,33 @@ type serveOptions struct {
 // kserveFlags are the kserve driver's settings. Empty serving-layer values are
 // taken from the platform's discovery ConfigMap (kind ModelServingConfig).
 type kserveFlags struct {
-	discoveryNamespace string
-	discoveryConfigMap string
-	namespace          string
-	runtime            string
-	gpuResourceName    string
-	cacheClaim         string
-	cacheMountPath     string
-	cacheNodes         string
-	presetNamespace    string
-	presetSelector     string
-	hfEndpoint         string
-	hfTokenSecret      string
-	hfTokenSecretKey   string
-	downloadImage      string
-	downloadIgnore     string
-	initImage          string
-	jobTTL             time.Duration
-	inventoryTTL       time.Duration
-	inventoryTimeout   time.Duration
-	inventoryMode      string
-	inventorySelector  string
-	inventoryAgentPort int
-	budgetSource       string
-	defaultOverheadGiB float64
-	readyTimeout       time.Duration
-	pollInterval       time.Duration
+	discoveryNamespace  string
+	discoveryConfigMap  string
+	namespace           string
+	runtime             string
+	gpuResourceName     string
+	cacheClaim          string
+	cacheMountPath      string
+	cacheNodes          string
+	cacheIndexConfigMap string
+	presetNamespace     string
+	presetSelector      string
+	hfEndpoint          string
+	hfTokenSecret       string
+	hfTokenSecretKey    string
+	downloadImage       string
+	downloadIgnore      string
+	initImage           string
+	jobTTL              time.Duration
+	inventoryTTL        time.Duration
+	inventoryTimeout    time.Duration
+	inventoryMode       string
+	inventorySelector   string
+	inventoryAgentPort  int
+	budgetSource        string
+	defaultOverheadGiB  float64
+	readyTimeout        time.Duration
+	pollInterval        time.Duration
 }
 
 func newServeCmd() *cobra.Command {
@@ -115,6 +116,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&k.cacheClaim, "kserve-cache-claim", envOr("KSERVE_CACHE_CLAIM", ""), "PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty: discovery, else "+kserve.DefaultCacheClaim+" (KSERVE_CACHE_CLAIM)")
 	f.StringVar(&k.cacheMountPath, "kserve-cache-mount-path", envOr("KSERVE_CACHE_MOUNT_PATH", ""), "Where predictors mount the cache; empty: discovery, else "+kserve.DefaultCacheMountPath+" (KSERVE_CACHE_MOUNT_PATH)")
 	f.StringVar(&k.cacheNodes, "kserve-cache-nodes", envOr("KSERVE_CACHE_NODES", ""), "Comma-separated nodes holding the cache; empty derives them from the bound PersistentVolume's node affinity (KSERVE_CACHE_NODES)")
+	f.StringVar(&k.cacheIndexConfigMap, "kserve-cache-index-configmap", envOr("KSERVE_CACHE_INDEX_CONFIGMAP", kserve.DefaultCacheIndexConfigMap), "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from it, kept after it is gone (KSERVE_CACHE_INDEX_CONFIGMAP)")
 	f.StringVar(&k.presetNamespace, "kserve-preset-namespace", envOr("KSERVE_PRESET_NAMESPACE", ""), "Namespace of the serving-preset ConfigMaps; empty: discovery, else the discovery namespace (KSERVE_PRESET_NAMESPACE)")
 	f.StringVar(&k.presetSelector, "kserve-preset-selector", envOr("KSERVE_PRESET_SELECTOR", ""), "Label selector of the serving-preset ConfigMaps; empty: discovery, else "+kserve.DefaultPresetSelector+" (KSERVE_PRESET_SELECTOR)")
 	f.StringVar(&k.hfEndpoint, "kserve-hf-endpoint", envOr("KSERVE_HF_ENDPOINT", kserve.DefaultHFEndpoint), "Hugging Face Hub base URL (KSERVE_HF_ENDPOINT)")
@@ -251,6 +253,7 @@ func (k kserveFlags) options() backend.KServeOptions {
 		CacheClaim:             k.cacheClaim,
 		CacheMountPath:         k.cacheMountPath,
 		CacheNodes:             splitList(k.cacheNodes),
+		CacheIndexConfigMap:    k.cacheIndexConfigMap,
 		PresetNamespace:        k.presetNamespace,
 		PresetSelector:         k.presetSelector,
 		HFEndpoint:             k.hfEndpoint,

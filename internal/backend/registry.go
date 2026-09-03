@@ -45,6 +45,10 @@ type KServeOptions struct {
 	// CacheNodes overrides the nodes that hold the cache (default: derived
 	// from the bound PersistentVolume's node affinity).
 	CacheNodes []string
+	// CacheIndexConfigMap names the ConfigMap in Namespace that remembers
+	// which repository filled which cache directory (default
+	// model-manager-cache-index).
+	CacheIndexConfigMap string
 	// PresetNamespace / PresetSelector locate the ServingPreset ConfigMaps.
 	PresetNamespace string
 	PresetSelector  string
