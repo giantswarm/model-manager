@@ -596,7 +596,7 @@
                     "properties": {
                         "enabled": {
                             "type": "boolean",
-                            "description": "Call the Kubernetes API as the caller: everything a request does (InferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's wiring reconciler, a job that outlives its caller's token — keeps the ServiceAccount, which is why the RBAC objects stay rendered."
+                            "description": "Call the Kubernetes API as the caller: everything a request does (InferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials."
                         }
                     }
                 },
@@ -711,7 +711,7 @@
             "properties": {
                 "create": {
                     "type": "boolean",
-                    "description": "Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when `backend` is kserve, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes)."
+                    "description": "Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when `backend` is kserve, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes) — the ServiceAccount's own permissions. Ignored with `oauth.downstream.enabled`: the ServiceAccount then gets no RBAC at all."
                 }
             }
         },

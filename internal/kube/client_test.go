@@ -55,8 +55,9 @@ func TestForUsesCallerWhileTheTokenIsValid(t *testing.T) {
 
 	expired := jwt(t, time.Now().Add(-time.Minute))
 	ctx = identity.ContextWithToken(context.Background(), expired)
-	assert.Same(t, c, c.For(ctx), "an expired caller token falls back to the ServiceAccount")
-	assert.Same(t, c, c.For(ctx), "and stays there")
+	stale := c.For(ctx)
+	assert.NotSame(t, c, stale, "an expired caller token is still the caller's: no fallback to the ServiceAccount, the apiserver rejects it")
+	assert.Same(t, stale, c.For(ctx), "and stays cached")
 
 	opaque := identity.ContextWithToken(context.Background(), "opaque")
 	assert.NotSame(t, c, c.For(opaque), "a token without exp is presented as long as the request lasts")

@@ -172,7 +172,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens — the platform client muster forwards tokens for and the portal logs in with (OAUTH_TRUSTED_AUDIENCES)")
 	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (SSO_ALLOW_PRIVATE_IPS)")
 	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
-	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does; background work keeps the ServiceAccount. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
+	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
 }
@@ -246,7 +246,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
-	svc := service.New(b, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval}, log)
+	svc := service.New(b, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
 
 	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath}
 	if o.oauthEnabled {

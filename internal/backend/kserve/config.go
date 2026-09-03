@@ -213,7 +213,15 @@ func (c *config) discover(ctx context.Context) (*discoveryDoc, error) {
 	if o.DiscoveryConfigMap == "" || o.DiscoveryNamespace == "" || o.Clientset == nil {
 		return nil, nil
 	}
-	cm, err := o.Clientset.CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
+	// The caller's clients when the request carries a caller token
+	// (downstream OAuth: the ServiceAccount cannot read the ConfigMap).
+	cs := o.Clientset
+	if o.ClientsFor != nil {
+		if c, _ := o.ClientsFor(ctx); c != nil {
+			cs = c
+		}
+	}
+	cm, err := cs.CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
