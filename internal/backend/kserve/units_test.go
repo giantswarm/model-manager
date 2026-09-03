@@ -124,7 +124,7 @@ func TestParseScanAndScript(t *testing.T) {
 	// 32-bit formatting in the scan pod's awk.
 	const bigBytes = int64(29_552_615_805) // Qwen/Qwen3-14B on disk
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "big"), 0o750))
-	bigFile, err := os.Create(filepath.Join(root, "big", "model-00001-of-00008.safetensors"))
+	bigFile, err := os.Create(filepath.Join(root, "big", "model-00001-of-00008.safetensors")) // #nosec G304 -- test fixture under t.TempDir()
 	require.NoError(t, err)
 	require.NoError(t, bigFile.Truncate(bigBytes-1))
 	require.NoError(t, bigFile.Close())
@@ -133,7 +133,7 @@ func TestParseScanAndScript(t *testing.T) {
 	// machine has one so the test exercises the same awk.
 	cmd := exec.Command("sh", "-c", scanScript)
 	if busybox, err := exec.LookPath("busybox"); err == nil {
-		cmd = exec.Command(busybox, "sh", "-c", scanScript)
+		cmd = exec.Command(busybox, "sh", "-c", scanScript) // #nosec G204 -- fixed script; busybox resolved from PATH
 	}
 	cmd.Env = append(os.Environ(), "MM_CACHE_ROOT="+root)
 	raw, err := cmd.CombinedOutput()
