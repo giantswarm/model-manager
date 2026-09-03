@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,9 +22,14 @@ type Options struct {
 // from the platform's discovery ConfigMap" (kind ModelServingConfig) where
 // one exists; explicit values win over discovery.
 type KServeOptions struct {
-	// Dynamic and Clientset are the Kubernetes clients (required).
+	// Dynamic and Clientset are the Kubernetes clients (required): the
+	// ServiceAccount's, used for everything that runs without a caller.
 	Dynamic   dynamic.Interface
 	Clientset kubernetes.Interface
+	// ClientsFor, when set, returns the clients a call should use for ctx —
+	// the caller's own (downstream OAuth: the request carries the caller's
+	// IdP token) or the ServiceAccount's. Nil always uses Dynamic/Clientset.
+	ClientsFor func(ctx context.Context) (kubernetes.Interface, dynamic.Interface)
 
 	// DiscoveryNamespace / DiscoveryConfigMap locate the ModelServingConfig
 	// ConfigMap (default: model-manager's own namespace,

@@ -185,7 +185,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 // replaced.
 func (b *Backend) ensureJob(ctx context.Context, plan downloadPlan) (job *batchv1.Job, adopted bool, err error) {
 	s := b.cfg.settings(ctx)
-	jobs := b.cs.BatchV1().Jobs(s.Namespace)
+	jobs := b.k8s(ctx).BatchV1().Jobs(s.Namespace)
 	existing, err := jobs.Get(ctx, plan.jobName(), metav1.GetOptions{})
 	switch {
 	case err == nil:
@@ -213,7 +213,7 @@ func (b *Backend) ensureJob(ctx context.Context, plan downloadPlan) (job *batchv
 
 func (b *Backend) deleteJob(ctx context.Context, namespace, name string) error {
 	propagation := metav1.DeletePropagationBackground
-	err := b.cs.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
+	err := b.k8s(ctx).BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete Job %s/%s: %w", namespace, name, err)
 	}
@@ -223,7 +223,7 @@ func (b *Backend) deleteJob(ctx context.Context, namespace, name string) error {
 func (b *Backend) waitJobGone(ctx context.Context, namespace, name string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		_, err := b.cs.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := b.k8s(ctx).BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
 			return nil
 		}
@@ -281,7 +281,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 	defer ticker.Stop()
 	var lastBytes int64
 	for {
-		job, err := b.cs.BatchV1().Jobs(s.Namespace).Get(ctx, name, metav1.GetOptions{})
+		job, err := b.k8s(ctx).BatchV1().Jobs(s.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
 			return fmt.Errorf("download Job %s/%s disappeared", s.Namespace, name)
 		}
@@ -336,7 +336,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 
 // latestJobPod returns the newest pod of a Job (nil when none exists yet).
 func (b *Backend) latestJobPod(ctx context.Context, namespace, job string) *corev1.Pod {
-	pods, err := b.cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: jobPodLabel + "=" + job})
+	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: jobPodLabel + "=" + job})
 	if err != nil || len(pods.Items) == 0 {
 		return nil
 	}
@@ -382,7 +382,7 @@ func lastLines(s string, n int) string {
 // after a restart of model-manager).
 func (b *Backend) runningDownloads(ctx context.Context) ([]backend.PullRequest, error) {
 	s := b.cfg.settings(ctx)
-	list, err := b.cs.BatchV1().Jobs(s.Namespace).List(ctx, metav1.ListOptions{
+	list, err := b.k8s(ctx).BatchV1().Jobs(s.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: ManagedByLabel + "=" + ManagedByValue + "," + ComponentLabel + "=" + componentDownload,
 	})
 	if err != nil {

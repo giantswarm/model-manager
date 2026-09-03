@@ -793,6 +793,9 @@ components:
         preset:
           type: string
           description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama."
+        requestedBy:
+          type: string
+          description: "the caller who started the job (email, else the IdP subject) when the server runs with OAuth; absent for jobs the service starts on its own (adopted downloads) and on servers without OAuth"
         result:
           description: operation output; for pull with wire and for load jobs, the ModelConfigRef
           oneOf:

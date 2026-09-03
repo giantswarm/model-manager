@@ -155,7 +155,7 @@ func parsePreset(raw []byte, source string) (*servingPreset, error) {
 // warnings so one bad preset does not hide the rest.
 func (b *Backend) presets(ctx context.Context) ([]*servingPreset, []string, error) {
 	s := b.cfg.settings(ctx)
-	list, err := b.cs.CoreV1().ConfigMaps(s.PresetNamespace).List(ctx, metav1.ListOptions{LabelSelector: s.PresetSelector})
+	list, err := b.k8s(ctx).CoreV1().ConfigMaps(s.PresetNamespace).List(ctx, metav1.ListOptions{LabelSelector: s.PresetSelector})
 	if err != nil {
 		return nil, nil, fmt.Errorf("list presets in %s (%s): %w", s.PresetNamespace, s.PresetSelector, err)
 	}

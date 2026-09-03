@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/identity"
 )
 
 // Phase is the job lifecycle state.
@@ -65,6 +66,10 @@ type Job struct {
 	// Preset is the serving preset a pull is for (kserve): the one the request
 	// named, else the single preset the backend resolved for the model.
 	Preset string `json:"preset,omitempty"`
+	// RequestedBy is the caller who started the job (email, else the IdP
+	// subject) when the request was authenticated; empty for jobs the service
+	// starts on its own (adopted downloads).
+	RequestedBy string `json:"requestedBy,omitempty"`
 	// Result is operation-specific output (pull: the ModelConfig reference).
 	Result any `json:"result,omitempty"`
 }
@@ -125,6 +130,12 @@ type StartRequest struct {
 	Type  Type
 	Model string
 	Wire  bool
+	// Context is the request that starts the job. Its values — the caller's
+	// identity and, with downstream OAuth, the caller's token — are inherited
+	// by the job's own context so the job's Kubernetes writes are made as the
+	// caller for as long as the token lives; its cancellation is not (the job
+	// outlives the HTTP request). Nil starts the job without a caller.
+	Context context.Context
 	// Node and Preset are what the request named (or what a re-adopted
 	// download Job carries); the backend refines them through Progress.
 	Node   string
@@ -143,17 +154,22 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 			return e.job, false
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := req.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	e := &entry{
 		job: Job{
-			ID:        m.newID(),
-			Type:      req.Type,
-			Model:     req.Model,
-			Phase:     PhasePending,
-			CreatedAt: m.now(),
-			Wire:      req.Wire,
-			Node:      req.Node,
-			Preset:    req.Preset,
+			ID:          m.newID(),
+			Type:        req.Type,
+			Model:       req.Model,
+			Phase:       PhasePending,
+			CreatedAt:   m.now(),
+			Wire:        req.Wire,
+			Node:        req.Node,
+			Preset:      req.Preset,
+			RequestedBy: identity.Caller(parent),
 		},
 		cancel: cancel,
 	}

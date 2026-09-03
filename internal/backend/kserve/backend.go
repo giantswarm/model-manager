@@ -57,6 +57,27 @@ type Backend struct {
 	tokenAt     time.Time
 }
 
+// k8s returns the typed client a call should use: the caller's own when ctx
+// carries a caller token (downstream OAuth), else the ServiceAccount's.
+func (b *Backend) k8s(ctx context.Context) kubernetes.Interface {
+	if b.opts.ClientsFor != nil {
+		if cs, _ := b.opts.ClientsFor(ctx); cs != nil {
+			return cs
+		}
+	}
+	return b.cs
+}
+
+// dynamic is k8s for the dynamic client (InferenceServices).
+func (b *Backend) dynamic(ctx context.Context) dynamic.Interface {
+	if b.opts.ClientsFor != nil {
+		if _, dyn := b.opts.ClientsFor(ctx); dyn != nil {
+			return dyn
+		}
+	}
+	return b.dyn
+}
+
 // Factory builds the driver from backend.Options.
 func Factory(opts backend.Options) (backend.Backend, error) {
 	return New(opts.KServe)
@@ -126,7 +147,7 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		// stopped model on request and nothing evicts a running one.
 		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
 	}
-	if _, err := b.dyn.Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+	if _, err := b.dynamic(ctx).Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		info.Message = fmt.Sprintf("InferenceService API not available in %s: %v", s.Namespace, err)
 		return info
 	}
@@ -728,7 +749,7 @@ func (b *Backend) hubToken(ctx context.Context) string {
 	}
 	b.mu.Unlock()
 	s := b.cfg.settings(ctx)
-	sec, err := b.cs.CoreV1().Secrets(s.Namespace).Get(ctx, b.opts.HFTokenSecret, metav1.GetOptions{})
+	sec, err := b.k8s(ctx).CoreV1().Secrets(s.Namespace).Get(ctx, b.opts.HFTokenSecret, metav1.GetOptions{})
 	tok := ""
 	if err != nil {
 		b.log.Warn("reading the hub token Secret failed", "secret", s.Namespace+"/"+b.opts.HFTokenSecret, "error", err)

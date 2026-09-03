@@ -1,5 +1,13 @@
 # Default values for model-manager.
 
+# -- Platform-wide values an umbrella chart (agent-platform-standalone) shares
+# with every component; Helm forwards them to this chart. `oauth.*` reads the
+# identity contract as its defaults: `global.identity.issuerUrl`,
+# `global.identity.clientId`, `global.identity.existingSecret`,
+# `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth
+# base URL. Empty here; a standalone install sets `oauth.*` directly.
+global: {}  # @schema type: object; additionalProperties: true
+
 # -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless
 # clients pin to one pod.
 replicaCount: 1
@@ -73,21 +81,70 @@ mcp:
   path: /mcp
 
 oauth:
-  # -- Protect the MCP endpoint with an embedded OAuth 2.1 server (Dex
-  # upstream). Off by default: on the platform, muster is the auth
-  # enforcement point in front of MCP servers.
+  # -- Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP
+  # endpoint and the REST API require a bearer token the platform identity
+  # provider issued, and every call carries the caller's identity (logged,
+  # recorded as `requestedBy` on jobs). On the Agent Platform muster forwards
+  # the session's IdP id_token to this server (MCPServer `auth.forwardToken`,
+  # rendered below) and the portal sends the signed-in user's id_token through
+  # the gateway; both are validated against the IdP's JWKS when their audience
+  # is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount —
+  # only for a server nothing but a trusted proxy can reach.
   enabled: false
-  # -- Public base URL of this server (https, or http on loopback only).
+  # -- Public base URL of this server: the issuer of its own OAuth metadata
+  # (https, or http on loopback). Empty derives
+  # `https://<fullname>.<global.domain>` when `global.domain` is set.
   baseURL: ""
+  # -- Identity provider: `dex` or `google`.
+  provider: dex
   dex:
-    # -- Dex issuer URL.
+    # -- Dex issuer URL. Empty falls back to `global.identity.issuerUrl`.
     issuerURL: ""
-    # -- Dex OAuth client ID.
+    # -- Dex OAuth client ID. Empty falls back to `global.identity.clientId`.
     clientID: ""
     # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
     clientSecret: ""
-  # -- Existing Secret with key `dex-client-secret`.
+    # -- Let the issuer resolve to a private or loopback address (an
+    # in-cluster Dex).
+    allowPrivateURLs: false
+    # -- Secret with the CA of a Dex that serves a private certificate;
+    # mounted and passed as `--dex-ca-file`. Empty name falls back to
+    # `global.identity.ca.secretName` / `global.identity.ca.key`.
+    caSecret:
+      name: ""
+      key: ca.crt
+  google:
+    # -- Google OAuth client ID (not secret; may also come from the Secret key
+    # `google-client-id` when empty).
+    clientID: ""
+    # -- Google OAuth client secret (prefer `oauth.existingSecret`).
+    clientSecret: ""
+  # -- Existing Secret with the provider credentials: `dex-client-secret`
+  # (dex) or `google-client-secret` (+ optional `google-client-id`) (google).
+  # Empty falls back to `global.identity.existingSecret`, whose
+  # `dex-client-secret` is the platform client's; without that, the chart
+  # renders a Secret from the values above.
   existingSecret: ""
+  # -- OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO
+  # token forwarding): the platform client muster forwards tokens for and the
+  # portal logs in with. Empty falls back to `[global.identity.clientId]`.
+  trustedAudiences: []
+  sso:
+    # -- Let the IdP's JWKS endpoint resolve to a private address when
+    # validating forwarded tokens (an in-cluster Dex).
+    allowPrivateIPs: false
+  # -- Accept unauthenticated dynamic client registration (labs only).
+  allowPublicClientRegistration: false
+  downstream:
+    # -- Call the Kubernetes API as the caller: everything a request does
+    # (InferenceServices, download Jobs, cache scans, ModelConfigs) presents
+    # the caller's IdP token, so the caller's RBAC governs — the apiserver
+    # must trust the IdP and the token's audience (a Dex install lists that
+    # audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's
+    # client id is the apiserver's `--oidc-client-id`). Background work — the
+    # wiring reconciler, a job that outlives its caller's token — keeps the
+    # ServiceAccount, which is why the RBAC objects stay rendered.
+    enabled: false
 
 muster:
   mcpServer:
@@ -103,6 +160,18 @@ muster:
     description: Model management (inventory, pull, load/unload, delete, kagent wiring) for the Agent Platform
     # -- Extra labels on the MCPServer CR.
     labels: {}  # @schema additionalProperties: true
+    # -- How muster authenticates to this server; rendered only with
+    # `oauth.enabled`. `forwardToken` makes muster forward the session's IdP
+    # id_token byte-identical (the SSO path this chart trusts through
+    # `oauth.trustedAudiences`). `requiredAudiences` are extra audiences that
+    # token must carry — the Dex cross-client audience the kube-apiserver
+    # trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is
+    # `kubernetes`) so `oauth.downstream` works; muster requests them at
+    # login, so users re-login after a change. A Google IdP has no
+    # cross-client audiences: leave the list empty.
+    auth:
+      forwardToken: true
+      requiredAudiences: []
 
 httpRoute:
   # -- Expose the service through a Gateway API HTTPRoute.

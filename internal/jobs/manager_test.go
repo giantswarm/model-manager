@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/identity"
 )
 
 func waitDone(t *testing.T, m *Manager, id string) Job {
@@ -143,4 +144,34 @@ func TestListOrderAndPrune(t *testing.T) {
 
 	now = now.Add(2 * time.Hour)
 	assert.Empty(t, m.List(), "retention window drops finished jobs")
+}
+
+func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
+	m := NewManager()
+	reqCtx, cancelReq := context.WithCancel(identity.ContextWithToken(
+		identity.ContextWith(context.Background(), &identity.Identity{Subject: "sub-1", Email: "admin@lab.local"}), "caller-token"))
+	release := make(chan struct{})
+	var seenCaller, seenToken string
+	var seenErr error
+	job, created := m.Start(StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
+		seenCaller = identity.Caller(ctx)
+		seenToken, _ = identity.TokenFromContext(ctx)
+		<-release
+		seenErr = ctx.Err()
+		return nil, nil
+	})
+	require.True(t, created)
+	assert.Equal(t, "admin@lab.local", job.RequestedBy, "the job is attributed to the caller")
+
+	cancelReq() // the HTTP request ends; the job must go on
+	close(release)
+	done := waitDone(t, m, job.ID)
+	assert.Equal(t, PhaseSucceeded, done.Phase)
+	assert.Equal(t, "admin@lab.local", seenCaller, "the job's context carries the caller")
+	assert.Equal(t, "caller-token", seenToken, "and the caller's token for downstream Kubernetes calls")
+	assert.NoError(t, seenErr, "the request's cancellation does not reach the job")
+
+	anon, _ := m.Start(StartRequest{Type: TypeLoad, Model: "m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	assert.Empty(t, anon.RequestedBy, "jobs the service starts on its own carry no caller")
+	waitDone(t, m, anon.ID)
 }

@@ -75,12 +75,9 @@
             "type": "string"
         },
         "global": {
-            "type": [
-                "object",
-                "null"
-            ],
-            "description": "Global values shared between all subcharts",
-            "$comment": "Added automatically by 'helm schema' to allow this chart to be used as a Helm dependency, as this schema would otherwise not allow Helm's special 'global' values key."
+            "type": "object",
+            "description": "Platform-wide values an umbrella chart (agent-platform-standalone) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly.",
+            "additionalProperties": true
         },
         "httpRoute": {
             "type": "object",
@@ -481,6 +478,19 @@
                             "type": "string",
                             "description": "Human-readable description shown by muster."
                         },
+                        "auth": {
+                            "type": "object",
+                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP id_token byte-identical (the SSO path this chart trusts through `oauth.trustedAudiences`). `requiredAudiences` are extra audiences that token must carry — the Dex cross-client audience the kube-apiserver trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is `kubernetes`) so `oauth.downstream` works; muster requests them at login, so users re-login after a change. A Google IdP has no cross-client audiences: leave the list empty.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "forwardToken": {
+                                    "type": "boolean"
+                                },
+                                "requiredAudiences": {
+                                    "type": "array"
+                                }
+                            }
+                        },
                         "autoStart": {
                             "type": "boolean",
                             "description": "Start the server connection when muster initializes."
@@ -537,17 +547,38 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "allowPublicClientRegistration": {
+                    "type": "boolean",
+                    "description": "Accept unauthenticated dynamic client registration (labs only)."
+                },
                 "baseURL": {
                     "type": "string",
-                    "description": "Public base URL of this server (https, or http on loopback only)."
+                    "description": "Public base URL of this server: the issuer of its own OAuth metadata (https, or http on loopback). Empty derives `https://<fullname>.<global.domain>` when `global.domain` is set."
                 },
                 "dex": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                        "allowPrivateURLs": {
+                            "type": "boolean",
+                            "description": "Let the issuer resolve to a private or loopback address (an in-cluster Dex)."
+                        },
+                        "caSecret": {
+                            "type": "object",
+                            "description": "Secret with the CA of a Dex that serves a private certificate; `global.identity.ca.secretName` / `global.identity.ca.key`.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "key": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                }
+                            }
+                        },
                         "clientID": {
                             "type": "string",
-                            "description": "Dex OAuth client ID."
+                            "description": "Dex OAuth client ID. Empty falls back to `global.identity.clientId`."
                         },
                         "clientSecret": {
                             "type": "string",
@@ -555,17 +586,59 @@
                         },
                         "issuerURL": {
                             "type": "string",
-                            "description": "Dex issuer URL."
+                            "description": "Dex issuer URL. Empty falls back to `global.identity.issuerUrl`."
+                        }
+                    }
+                },
+                "downstream": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Call the Kubernetes API as the caller: everything a request does (InferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's wiring reconciler, a job that outlives its caller's token — keeps the ServiceAccount, which is why the RBAC objects stay rendered."
                         }
                     }
                 },
                 "enabled": {
                     "type": "boolean",
-                    "description": "Protect the MCP endpoint with an embedded OAuth 2.1 server (Dex upstream). Off by default: on the platform, muster is the auth enforcement point in front of MCP servers."
+                    "description": "Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's id_token through the gateway; both are validated against the IdP's JWKS when their audience is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount — only for a server nothing but a trusted proxy can reach."
                 },
                 "existingSecret": {
                     "type": "string",
-                    "description": "Existing Secret with key `dex-client-secret`."
+                    "description": "Existing Secret with the provider credentials: `dex-client-secret` (dex) or `google-client-secret` (+ optional `google-client-id`) (google). Empty falls back to `global.identity.existingSecret`, whose `dex-client-secret` is the platform client's; without that, the chart renders a Secret from the values above."
+                },
+                "google": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "clientID": {
+                            "type": "string",
+                            "description": "Google OAuth client ID (not secret; may also come from the Secret key `google-client-id` when empty)."
+                        },
+                        "clientSecret": {
+                            "type": "string",
+                            "description": "Google OAuth client secret (prefer `oauth.existingSecret`)."
+                        }
+                    }
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Identity provider: `dex` or `google`."
+                },
+                "sso": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "allowPrivateIPs": {
+                            "type": "boolean",
+                            "description": "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (an in-cluster Dex)."
+                        }
+                    }
+                },
+                "trustedAudiences": {
+                    "type": "array",
+                    "description": "OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO token forwarding): the platform client muster forwards tokens for and the portal logs in with. Empty falls back to `[global.identity.clientId]`."
                 }
             }
         },

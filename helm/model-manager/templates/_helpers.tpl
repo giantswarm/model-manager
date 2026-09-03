@@ -101,8 +101,71 @@ model-manager.giantswarm.io/component=cache-agent,app.kubernetes.io/instance={{ 
 {{- end }}
 
 {{/*
-Name of the Secret holding the Dex client secret when OAuth is enabled.
+The platform identity contract (global.identity), an empty dict when absent.
+*/}}
+{{- define "model-manager.globalIdentity" -}}
+{{- dig "identity" (dict) (.Values.global | default dict) | toJson }}
+{{- end }}
+
+{{/*
+Existing Secret with the provider credentials: oauth.existingSecret, else the
+platform's global.identity.existingSecret, else the chart-rendered one.
 */}}
 {{- define "model-manager.oauthSecretName" -}}
-{{- default (printf "%s-oauth" (include "model-manager.fullname" .)) .Values.oauth.existingSecret }}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- .Values.oauth.existingSecret | default (dig "existingSecret" "" $g) | default (printf "%s-oauth" (include "model-manager.fullname" .)) }}
+{{- end }}
+
+{{/*
+Whether the chart renders its own OAuth Secret (no existing one named).
+*/}}
+{{- define "model-manager.oauthRendersSecret" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- if and .Values.oauth.enabled (not .Values.oauth.existingSecret) (not (dig "existingSecret" "" $g)) }}true{{ end }}
+{{- end }}
+
+{{/*
+OAuth base URL: oauth.baseURL, else https://<fullname>.<global.domain>.
+*/}}
+{{- define "model-manager.oauthBaseURL" -}}
+{{- $domain := dig "domain" "" (.Values.global | default dict) -}}
+{{- $derived := "" -}}
+{{- if $domain }}{{ $derived = printf "https://%s.%s" (include "model-manager.fullname" .) $domain }}{{ end -}}
+{{- required "oauth.baseURL is required when oauth.enabled (or set global.domain)" (.Values.oauth.baseURL | default $derived) }}
+{{- end }}
+
+{{/*
+Dex issuer / client id with the global.identity fallbacks.
+*/}}
+{{- define "model-manager.oauthDexIssuerURL" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- required "oauth.dex.issuerURL (or global.identity.issuerUrl) is required for the dex provider" (.Values.oauth.dex.issuerURL | default (dig "issuerUrl" "" $g)) }}
+{{- end }}
+
+{{- define "model-manager.oauthDexClientID" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- required "oauth.dex.clientID (or global.identity.clientId) is required for the dex provider" (.Values.oauth.dex.clientID | default (dig "clientId" "" $g)) }}
+{{- end }}
+
+{{/*
+CA Secret of a private-certificate Dex: oauth.dex.caSecret, else
+global.identity.ca. Name empty means system trust.
+*/}}
+{{- define "model-manager.oauthDexCASecretName" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- .Values.oauth.dex.caSecret.name | default (dig "ca" "secretName" "" $g) }}
+{{- end }}
+
+{{- define "model-manager.oauthDexCASecretKey" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- if .Values.oauth.dex.caSecret.name }}{{ .Values.oauth.dex.caSecret.key | default "ca.crt" }}{{ else }}{{ dig "ca" "key" "" $g | default .Values.oauth.dex.caSecret.key | default "ca.crt" }}{{ end }}
+{{- end }}
+
+{{/*
+Trusted audiences, comma-separated: oauth.trustedAudiences, else the platform
+client id.
+*/}}
+{{- define "model-manager.oauthTrustedAudiences" -}}
+{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
+{{- if .Values.oauth.trustedAudiences }}{{ join "," .Values.oauth.trustedAudiences }}{{ else }}{{ dig "clientId" "" $g }}{{ end }}
 {{- end }}
