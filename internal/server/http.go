@@ -21,9 +21,12 @@ type Config struct {
 	Addr       string
 	MCPEnabled bool
 	MCPPath    string
-	// OAuth, when set, protects the MCP endpoint with an OAuth 2.1 server
-	// backed by Dex. Off by default: on the platform, muster is the auth
-	// enforcement point in front of MCP servers.
+	// OAuth, when set, makes the server an OAuth 2.1 resource server: the MCP
+	// endpoint and the REST API require a bearer token the platform IdP
+	// issued (forwarded by muster / sent by the portal) or this server's own,
+	// and every call carries the caller's identity. Off: anonymous, acting as
+	// the ServiceAccount — only for a server nothing but a trusted proxy can
+	// reach.
 	OAuth *OAuthConfig
 }
 
@@ -65,23 +68,26 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	api.NewREST(svc, log).Register(mux)
-
 	s := &Server{log: log}
-	if cfg.MCPEnabled && mcpSrv != nil {
-		var handler http.Handler = mcpserver.NewStreamableHTTPServer(mcpSrv,
-			mcpserver.WithEndpointPath(cfg.MCPPath),
-		)
-		if cfg.OAuth != nil {
-			o, err := newOAuth(*cfg.OAuth, cfg.MCPPath, log)
-			if err != nil {
-				return nil, err
-			}
-			o.register(mux)
-			handler = o.protect(handler)
-			s.oauth = o
+	if cfg.OAuth != nil {
+		o, err := newOAuth(*cfg.OAuth, cfg.MCPPath, log)
+		if err != nil {
+			return nil, err
 		}
-		mux.Handle(cfg.MCPPath, handler)
+		o.register(mux)
+		s.oauth = o
+	}
+
+	// The REST API on its own mux so one guard covers every route; the
+	// health endpoints above stay open for the probes.
+	rest := http.NewServeMux()
+	api.NewREST(svc, log).Register(rest)
+	mux.Handle(api.Prefix+"/", s.guard(rest))
+
+	if cfg.MCPEnabled && mcpSrv != nil {
+		mux.Handle(cfg.MCPPath, s.guard(mcpserver.NewStreamableHTTPServer(mcpSrv,
+			mcpserver.WithEndpointPath(cfg.MCPPath),
+		)))
 	}
 
 	s.http = &http.Server{
@@ -92,6 +98,14 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil
+}
+
+// guard requires an authenticated caller when OAuth is on.
+func (s *Server) guard(next http.Handler) http.Handler {
+	if s.oauth == nil {
+		return next
+	}
+	return s.oauth.protect(next)
 }
 
 // Handler exposes the mux (tests).

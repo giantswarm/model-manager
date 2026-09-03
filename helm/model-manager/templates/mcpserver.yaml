@@ -1,8 +1,10 @@
 {{- if .Values.muster.mcpServer.enabled }}
 {{- /*
-Registers this server with muster. Tools appear as x_<name>_<tool>. The chart
-serves MCP without OAuth by default, so muster connects without an auth block;
-an installation that turns oauth.enabled on manages its own MCPServer CR.
+Registers this server with muster. Tools appear as x_<name>_<tool>. With
+oauth.enabled the CR carries the auth block: muster forwards the session's IdP
+id_token (forwardToken), which this server validates through
+oauth.trustedAudiences, and requests the requiredAudiences at login. Without
+OAuth muster connects anonymously.
 */}}
 apiVersion: muster.giantswarm.io/v1alpha1
 kind: MCPServer
@@ -21,5 +23,14 @@ spec:
   url: http://{{ include "model-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.mcp.path }}
   {{- with .Values.muster.mcpServer.description }}
   description: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.oauth.enabled }}
+  auth:
+    type: oauth
+    forwardToken: {{ .Values.muster.mcpServer.auth.forwardToken }}
+    {{- with .Values.muster.mcpServer.auth.requiredAudiences }}
+    requiredAudiences:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
   {{- end }}
 {{- end }}

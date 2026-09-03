@@ -128,7 +128,30 @@ spec:
             - --mcp-path={{ .Values.mcp.path }}
             {{- if .Values.oauth.enabled }}
             - --enable-oauth=true
-            - --oauth-base-url={{ required "oauth.baseURL is required when oauth.enabled" .Values.oauth.baseURL }}
+            - --oauth-base-url={{ include "model-manager.oauthBaseURL" . }}
+            - --oauth-provider={{ .Values.oauth.provider }}
+            {{- with include "model-manager.oauthTrustedAudiences" . }}
+            - --oauth-trusted-audiences={{ . }}
+            {{- end }}
+            {{- if .Values.oauth.sso.allowPrivateIPs }}
+            - --sso-allow-private-ips=true
+            {{- end }}
+            {{- if .Values.oauth.allowPublicClientRegistration }}
+            - --allow-public-client-registration=true
+            {{- end }}
+            {{- if .Values.oauth.downstream.enabled }}
+            - --downstream-oauth=true
+            {{- end }}
+            {{- if eq .Values.oauth.provider "dex" }}
+            - --dex-issuer-url={{ include "model-manager.oauthDexIssuerURL" . }}
+            - --dex-client-id={{ include "model-manager.oauthDexClientID" . }}
+            {{- if .Values.oauth.dex.allowPrivateURLs }}
+            - --allow-private-oauth-urls=true
+            {{- end }}
+            {{- if include "model-manager.oauthDexCASecretName" . }}
+            - --dex-ca-file=/etc/model-manager/idp-ca/{{ include "model-manager.oauthDexCASecretKey" . }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- if .Values.logging.verbose }}
             - --verbose
@@ -139,15 +162,29 @@ spec:
           {{- if or .Values.oauth.enabled .Values.extraEnv }}
           env:
             {{- if .Values.oauth.enabled }}
-            - name: DEX_ISSUER_URL
-              value: {{ required "oauth.dex.issuerURL is required when oauth.enabled" .Values.oauth.dex.issuerURL | quote }}
-            - name: DEX_CLIENT_ID
-              value: {{ required "oauth.dex.clientID is required when oauth.enabled" .Values.oauth.dex.clientID | quote }}
+            {{- if eq .Values.oauth.provider "google" }}
+            {{- if .Values.oauth.google.clientID }}
+            - name: GOOGLE_CLIENT_ID
+              value: {{ .Values.oauth.google.clientID | quote }}
+            {{- else }}
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "model-manager.oauthSecretName" . }}
+                  key: google-client-id
+            {{- end }}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "model-manager.oauthSecretName" . }}
+                  key: google-client-secret
+            {{- else }}
             - name: DEX_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "model-manager.oauthSecretName" . }}
                   key: dex-client-secret
+            {{- end }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -175,12 +212,27 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- $idpCA := "" }}
+          {{- if and .Values.oauth.enabled (eq .Values.oauth.provider "dex") }}{{ $idpCA = include "model-manager.oauthDexCASecretName" . }}{{ end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if $idpCA }}
+            - name: idp-ca
+              mountPath: /etc/model-manager/idp-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $idpCA }}
+        - name: idp-ca
+          secret:
+            secretName: {{ $idpCA }}
+            items:
+              - key: {{ include "model-manager.oauthDexCASecretKey" . }}
+                path: {{ include "model-manager.oauthDexCASecretKey" . }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

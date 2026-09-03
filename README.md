@@ -256,8 +256,35 @@ model-manager serve \
 
 Every flag has an environment variable (`model-manager serve --help`). Without
 Kubernetes access the server still runs; `wire` reports `false` and wiring
-operations answer 501. OAuth in front of `/mcp` is available (`--enable-oauth`,
-Dex) but off by default: on the platform muster is the auth enforcement point.
+operations answer 501.
+
+## Identity
+
+With `--enable-oauth` model-manager is an OAuth 2.1 resource server
+([mcp-oauth](https://github.com/giantswarm/mcp-oauth)) in front of both the
+MCP endpoint and the REST API: every call needs a bearer token the platform
+identity provider issued — Dex (`--oauth-provider dex`, the Agent Platform
+default) or Google (`--oauth-provider google`). On the platform nobody logs in
+to model-manager itself: muster forwards the session's IdP id_token
+byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
+and the portal sends the signed-in user's id_token through the gateway;
+model-manager validates them against the IdP's JWKS when their audience is one
+of `--oauth-trusted-audiences` (the platform's OAuth client). The caller — the
+`email`, else the `sub` — is on every mutation's log line and recorded as
+`requestedBy` on jobs.
+
+`--downstream-oauth` goes one step further: everything a request does against
+the Kubernetes API (InferenceServices, download Jobs, cache scans, kagent
+ModelConfigs) presents the caller's IdP token instead of the ServiceAccount,
+so the caller's RBAC governs. That needs an apiserver that trusts the IdP and
+the token's audience — a Dex install lists the cross-client audience the
+apiserver trusts in the MCPServer's `requiredAudiences` (muster requests it at
+login), a Google install's client id is the apiserver's `--oidc-client-id`.
+Work that outlives the request — the wiring reconciler, a job that follows a
+download longer than the token lives — continues as the ServiceAccount and
+stays attributed to the caller, which is why the chart keeps the RBAC objects.
+Health endpoints (`/healthz`, `/readyz`, `/backendz`) and the OAuth metadata
+stay public.
 
 ## Helm chart
 

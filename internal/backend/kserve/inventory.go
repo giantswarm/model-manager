@@ -310,7 +310,7 @@ func (b *Backend) agentPod(ctx context.Context, namespace, node string) (*corev1
 	if node != "" {
 		opts.FieldSelector = "spec.nodeName=" + node
 	}
-	pods, err := b.cs.CoreV1().Pods(namespace).List(ctx, opts)
+	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("list cache-agent pods in %s: %w", namespace, err)
 	}
@@ -407,7 +407,7 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 // runPod creates the pod, waits for it to finish, returns its logs and the
 // node it ran on, and deletes it.
 func (b *Backend) runPod(ctx context.Context, pod *corev1.Pod) (logs, node string, err error) {
-	pods := b.cs.CoreV1().Pods(pod.Namespace)
+	pods := b.k8s(ctx).CoreV1().Pods(pod.Namespace)
 	created, err := pods.Create(ctx, pod, metav1.CreateOptions{FieldManager: ManagedByValue})
 	if err != nil {
 		return "", "", fmt.Errorf("create pod %s: %w", pod.Name, err)
@@ -455,7 +455,7 @@ func (b *Backend) podLogs(ctx context.Context, namespace, name string, tail int6
 	if tail > 0 {
 		opts.TailLines = ptr.To(tail)
 	}
-	rc, err := b.cs.CoreV1().Pods(namespace).GetLogs(name, opts).Stream(ctx)
+	rc, err := b.k8s(ctx).CoreV1().Pods(namespace).GetLogs(name, opts).Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read logs of %s: %w", name, err)
 	}

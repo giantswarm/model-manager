@@ -86,6 +86,7 @@ type Wirer interface {
 // Kagent is the Wirer over the kagent.dev ModelConfig CRD.
 type Kagent struct {
 	client    dynamic.Interface
+	clientFor func(ctx context.Context) dynamic.Interface
 	gvr       schema.GroupVersionResource
 	namespace string
 	prefix    string
@@ -104,6 +105,24 @@ func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string, b
 		prefix:    prefix,
 		backend:   b,
 	}
+}
+
+// WithClientFor makes every call pick its client from ctx (downstream OAuth:
+// the caller's own clients when the request carries the caller's token, the
+// ServiceAccount's otherwise). fn returning nil falls back to the base client.
+func (k *Kagent) WithClientFor(fn func(ctx context.Context) dynamic.Interface) *Kagent {
+	k.clientFor = fn
+	return k
+}
+
+// dyn is the client for this call.
+func (k *Kagent) dyn(ctx context.Context) dynamic.Interface {
+	if k.clientFor != nil {
+		if c := k.clientFor(ctx); c != nil {
+			return c
+		}
+	}
+	return k.client
 }
 
 // Namespace returns the target namespace.
@@ -156,7 +175,7 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	}
 	desired := k.build(name, model, ep)
 
-	res := k.client.Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
 	// Converge: an owned ModelConfig for this model under another name (an
 	// earlier naming rule) is replaced, never duplicated.
 	if old, err := k.find(ctx, model); err != nil {
@@ -232,11 +251,11 @@ func (k *Kagent) Remove(ctx context.Context, model string) error {
 
 // removeObj deletes an owned ModelConfig and its placeholder Secret.
 func (k *Kagent) removeObj(ctx context.Context, name string) error {
-	res := k.client.Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelConfig %s/%s: %w", k.namespace, name, err)
 	}
-	secrets := k.client.Resource(secretGVR).Namespace(k.namespace)
+	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
 	secretName := placeholderSecretName(name)
 	sec, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil && sec.GetLabels()[ManagedByLabel] == ManagedByValue {
@@ -258,7 +277,7 @@ func (k *Kagent) Lookup(ctx context.Context, model string) (*ModelConfigRef, err
 
 // List implements Wirer.
 func (k *Kagent) List(ctx context.Context) (map[string]ModelConfigRef, error) {
-	list, err := k.client.Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{
+	list, err := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: ManagedByLabel + "=" + ManagedByValue,
 	})
 	if err != nil {
@@ -281,7 +300,7 @@ func (k *Kagent) List(ctx context.Context) (map[string]ModelConfigRef, error) {
 
 // ListAll implements Wirer.
 func (k *Kagent) ListAll(ctx context.Context) ([]ModelConfigRef, error) {
-	list, err := k.client.Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
+	list, err := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
@@ -303,7 +322,7 @@ func (k *Kagent) prefixed(name string) string {
 // find returns the owned ModelConfig for model, matching the annotation first
 // and the derived name second.
 func (k *Kagent) find(ctx context.Context, model string) (*unstructured.Unstructured, error) {
-	res := k.client.Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
 	list, err := res.List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
@@ -361,7 +380,7 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 
 func (k *Kagent) ensurePlaceholderSecret(ctx context.Context, mcName string) error {
 	name := placeholderSecretName(mcName)
-	secrets := k.client.Resource(secretGVR).Namespace(k.namespace)
+	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
 	_, err := secrets.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return nil

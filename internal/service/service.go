@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/wiring"
 )
@@ -187,15 +188,15 @@ func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, e
 		return jobs.Job{}, false, fmt.Errorf("%w: models on this backend are wired when loaded (served), not when pulled", backend.ErrInvalid)
 	}
 	req := backend.PullRequest{Ref: ref, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
-	job, created := s.startPull(req, doWire)
+	job, created := s.startPull(ctx, req, doWire)
 	if created {
-		s.log.Info("pull started", "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node)
+		s.log.Info("pull started", "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	}
 	return job, created, nil
 }
 
-func (s *Service) startPull(req backend.PullRequest, doWire bool) (jobs.Job, bool) {
-	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset},
+func (s *Service) startPull(ctx context.Context, req backend.PullRequest, doWire bool) (jobs.Job, bool) {
+	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset, Context: ctx},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			if err := s.backend.Pull(jobCtx, req, report); err != nil {
 				return nil, err
@@ -237,10 +238,10 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if err := s.backend.Load(ctx, req); err != nil {
 		return nil, err
 	}
-	s.log.Info("model loaded", "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node)
+	s.log.Info("model loaded", "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	if s.cfg.AutoWire && s.wirer != nil {
 		if sl, ok := s.serveLifecycle(); ok {
-			s.startLoadJob(sl, m.Name)
+			s.startLoadJob(ctx, sl, m.Name)
 		} else if _, err := s.wireModel(ctx, m.Name); err != nil {
 			s.log.Warn("auto-wire after load failed", "model", m.Name, "error", err)
 		}
@@ -249,8 +250,8 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 }
 
 // startLoadJob follows a served model to readiness and wires it.
-func (s *Service) startLoadJob(sl backend.ServeLifecycle, model string) {
-	job, created := s.jobs.Start(jobs.StartRequest{Type: jobs.TypeLoad, Model: model, Wire: true},
+func (s *Service) startLoadJob(ctx context.Context, sl backend.ServeLifecycle, model string) {
+	job, created := s.jobs.Start(jobs.StartRequest{Type: jobs.TypeLoad, Model: model, Wire: true, Context: ctx},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			report(backend.Progress{Status: "waiting for the served model to become ready"})
 			if err := sl.WaitReady(jobCtx, model); err != nil {
@@ -265,7 +266,7 @@ func (s *Service) startLoadJob(sl backend.ServeLifecycle, model string) {
 			return ref, nil
 		})
 	if created {
-		s.log.Info("load job started", "model", model, "job", job.ID)
+		s.log.Info("load job started", "model", model, "job", job.ID, identity.LogAttr(ctx))
 	}
 }
 
@@ -282,12 +283,12 @@ func (s *Service) Unload(ctx context.Context, name string) error {
 	if err := s.backend.Unload(ctx, m.Name); err != nil {
 		return err
 	}
-	s.log.Info("model unloaded", "model", m.Name)
+	s.log.Info("model unloaded", "model", m.Name, identity.LogAttr(ctx))
 	if _, ok := s.serveLifecycle(); ok && s.wirer != nil {
 		if err := s.wirer.Remove(ctx, m.Name); err != nil {
 			s.log.Warn("unwire after unload failed", "model", m.Name, "error", err)
 		} else {
-			s.log.Info("model unwired", "model", m.Name)
+			s.log.Info("model unwired", "model", m.Name, identity.LogAttr(ctx))
 		}
 	}
 	return nil
@@ -310,7 +311,7 @@ func (s *Service) Delete(ctx context.Context, name string, unwire bool) error {
 	if err := s.backend.Delete(ctx, m.Name); err != nil {
 		return err
 	}
-	s.log.Info("model deleted", "model", m.Name, "unwired", unwire && s.wirer != nil)
+	s.log.Info("model deleted", "model", m.Name, "unwired", unwire && s.wirer != nil, identity.LogAttr(ctx))
 	return nil
 }
 
@@ -341,7 +342,7 @@ func (s *Service) Unwire(ctx context.Context, name string) error {
 	if err := s.wirer.Remove(ctx, name); err != nil {
 		return err
 	}
-	s.log.Info("model unwired", "model", name)
+	s.log.Info("model unwired", "model", name, identity.LogAttr(ctx))
 	return nil
 }
 
@@ -451,7 +452,7 @@ func (s *Service) adoptPulls(ctx context.Context) {
 		return
 	}
 	for _, req := range pulls {
-		job, created := s.startPull(req, false)
+		job, created := s.startPull(ctx, req, false)
 		if created {
 			s.log.Info("adopted running pull", "model", req.Ref, "job", job.ID)
 		}

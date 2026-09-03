@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -48,11 +50,20 @@ type serveOptions struct {
 	mcpEnabled bool
 	mcpPath    string
 
-	oauthEnabled    bool
-	oauthBaseURL    string
-	dexIssuerURL    string
-	dexClientID     string
-	dexClientSecret string
+	oauthEnabled                  bool
+	oauthBaseURL                  string
+	oauthProvider                 string
+	dexIssuerURL                  string
+	dexClientID                   string
+	dexClientSecret               string
+	dexCAFile                     string
+	dexAllowPrivateIP             bool
+	googleClientID                string
+	googleClientSecret            string
+	oauthTrustedAudiences         string
+	ssoAllowPrivateIPs            bool
+	allowPublicClientRegistration bool
+	downstreamOAuth               bool
 
 	jobRetention time.Duration
 }
@@ -148,23 +159,35 @@ environment variable named next to it; flags win over the environment.`,
 	f.DurationVar(&o.reconcileInterval, "reconcile-interval", envDuration("MODEL_MANAGER_RECONCILE_INTERVAL", 30*time.Second), "How often served models are checked for a missing ModelConfig on backends that wire on readiness; 0 disables (MODEL_MANAGER_RECONCILE_INTERVAL)")
 	f.BoolVar(&o.mcpEnabled, "mcp-enabled", envBool("MODEL_MANAGER_MCP_ENABLED", true), "Serve the MCP streamable-HTTP endpoint (MODEL_MANAGER_MCP_ENABLED)")
 	f.StringVar(&o.mcpPath, "mcp-path", envOr("MODEL_MANAGER_MCP_PATH", "/mcp"), "MCP endpoint path (MODEL_MANAGER_MCP_PATH)")
-	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("MODEL_MANAGER_OAUTH_ENABLED", false), "Protect the MCP endpoint with an embedded OAuth 2.1 server backed by Dex (MODEL_MANAGER_OAUTH_ENABLED)")
-	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("MODEL_MANAGER_OAUTH_BASE_URL", ""), "Public base URL of this server for OAuth (MODEL_MANAGER_OAUTH_BASE_URL)")
+	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("MODEL_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API, validated against the platform IdP (mcp-oauth); the caller's identity travels with every request (MODEL_MANAGER_OAUTH_ENABLED)")
+	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("MODEL_MANAGER_OAUTH_BASE_URL", ""), "Public base URL of this server: the issuer of its OAuth metadata, https or loopback http (MODEL_MANAGER_OAUTH_BASE_URL)")
+	f.StringVar(&o.oauthProvider, "oauth-provider", envOr("MODEL_MANAGER_OAUTH_PROVIDER", server.ProviderDex), "Identity provider: dex or google (MODEL_MANAGER_OAUTH_PROVIDER)")
 	f.StringVar(&o.dexIssuerURL, "dex-issuer-url", envOr("DEX_ISSUER_URL", ""), "Dex issuer URL (DEX_ISSUER_URL)")
 	f.StringVar(&o.dexClientID, "dex-client-id", envOr("DEX_CLIENT_ID", ""), "Dex client ID (DEX_CLIENT_ID)")
 	f.StringVar(&o.dexClientSecret, "dex-client-secret", envOr("DEX_CLIENT_SECRET", ""), "Dex client secret (DEX_CLIENT_SECRET)")
+	f.StringVar(&o.dexCAFile, "dex-ca-file", envOr("DEX_CA_FILE", ""), "PEM CA bundle of a Dex with a private certificate; verifies discovery, token and JWKS calls (DEX_CA_FILE)")
+	f.BoolVar(&o.dexAllowPrivateIP, "allow-private-oauth-urls", envBool("MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", false), "Let the Dex issuer resolve to a private or loopback address, an in-cluster Dex (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS)")
+	f.StringVar(&o.googleClientID, "google-client-id", envOr("GOOGLE_CLIENT_ID", ""), "Google OAuth client ID (GOOGLE_CLIENT_ID)")
+	f.StringVar(&o.googleClientSecret, "google-client-secret", envOr("GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret (GOOGLE_CLIENT_SECRET)")
+	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens — the platform client muster forwards tokens for and the portal logs in with (OAUTH_TRUSTED_AUDIENCES)")
+	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (SSO_ALLOW_PRIVATE_IPS)")
+	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
+	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does; background work keeps the ServiceAccount. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
 }
 
 func runServe(ctx context.Context, o *serveOptions) error {
 	log := slog.Default()
+	if o.downstreamOAuth && !o.oauthEnabled {
+		return fmt.Errorf("--downstream-oauth needs --enable-oauth: without OAuth there is no caller token to present to the Kubernetes API")
+	}
 
 	// Kubernetes access: required by the kserve driver, optional (wiring only)
 	// for ollama.
 	var clients *kube.Clients
 	if !o.wiringDisabled || o.backendName == string(backend.NameKServe) {
-		c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster})
+		c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster, Logger: log})
 		if err != nil {
 			if o.backendName == string(backend.NameKServe) {
 				return fmt.Errorf("the kserve backend needs Kubernetes access: %w", err)
@@ -184,6 +207,12 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	if clients != nil {
 		opts.KServe.Dynamic = clients.Dynamic
 		opts.KServe.Clientset = clients.Clientset
+		// Per-call clients: the caller's own when the request carries the
+		// caller's token (downstream OAuth), the ServiceAccount's otherwise.
+		opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
+			c := clients.For(ctx)
+			return c.Clientset, c.Dynamic
+		}
 	}
 	b, err := backend.New(backend.Name(o.backendName), opts)
 	if err != nil {
@@ -209,7 +238,8 @@ func runServe(ctx context.Context, o *serveOptions) error {
 				apiVersion = wiring.DefaultAPIVersion
 			}
 		}
-		k := wiring.NewKagent(clients.Dynamic, o.kagentNamespace, apiVersion, o.modelConfigPrefix, b.Name())
+		k := wiring.NewKagent(clients.Dynamic, o.kagentNamespace, apiVersion, o.modelConfigPrefix, b.Name()).
+			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
 		wirer = k
 		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion()}
 		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "autoWire", o.autoWire)
@@ -221,17 +251,26 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath}
 	if o.oauthEnabled {
 		cfg.OAuth = &server.OAuthConfig{
-			BaseURL:         o.oauthBaseURL,
-			DexIssuerURL:    o.dexIssuerURL,
-			DexClientID:     o.dexClientID,
-			DexClientSecret: o.dexClientSecret,
+			BaseURL:                       o.oauthBaseURL,
+			Provider:                      o.oauthProvider,
+			DexIssuerURL:                  o.dexIssuerURL,
+			DexClientID:                   o.dexClientID,
+			DexClientSecret:               o.dexClientSecret,
+			DexCAFile:                     o.dexCAFile,
+			DexAllowPrivateIP:             o.dexAllowPrivateIP,
+			GoogleClientID:                o.googleClientID,
+			GoogleClientSecret:            o.googleClientSecret,
+			TrustedAudiences:              splitList(o.oauthTrustedAudiences),
+			SSOAllowPrivateIPs:            o.ssoAllowPrivateIPs,
+			AllowPublicClientRegistration: o.allowPublicClientRegistration,
+			DownstreamOAuth:               o.downstreamOAuth,
 		}
 	}
 	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, version), log)
 	if err != nil {
 		return err
 	}
-	log.Info("model-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled)
+	log.Info("model-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

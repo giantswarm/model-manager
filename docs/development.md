@@ -27,7 +27,12 @@ make helm-docs      # regenerate helm/model-manager/README.md
   client; owns only CRs labelled `app.kubernetes.io/managed-by=model-manager`.
 - `internal/service` — orchestration shared by both API surfaces.
 - `internal/api` — REST handlers and MCP tools over the service.
-- `internal/server` — HTTP listener, optional OAuth (mcp-oauth, Dex).
+- `internal/server` — HTTP listener; with `--enable-oauth` the mcp-oauth
+  resource server (Dex or Google) in front of REST and MCP.
+- `internal/identity` — the authenticated caller on the request context and,
+  with `--downstream-oauth`, the caller's IdP token the Kubernetes clients use.
+- `internal/kube` — Kubernetes clients: the ServiceAccount's, and per-caller
+  ones built from the caller's token.
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 - `helm/model-manager` — the chart.
 

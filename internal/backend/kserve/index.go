@@ -117,7 +117,7 @@ func (b *Backend) readIndex(ctx context.Context) map[string]indexEntry {
 	}
 	b.index.mu.Unlock()
 	s := b.cfg.settings(ctx)
-	cm, err := b.cs.CoreV1().ConfigMaps(s.Namespace).Get(ctx, b.opts.CacheIndexConfigMap, metav1.GetOptions{})
+	cm, err := b.k8s(ctx).CoreV1().ConfigMaps(s.Namespace).Get(ctx, b.opts.CacheIndexConfigMap, metav1.GetOptions{})
 	var entries map[string]indexEntry
 	switch {
 	case err == nil:
@@ -223,7 +223,7 @@ func (b *Backend) forgetDir(ctx context.Context, dir string) {
 func (b *Backend) updateIndex(ctx context.Context, mutate func(map[string]indexEntry) bool) error {
 	s := b.cfg.settings(ctx)
 	name := b.opts.CacheIndexConfigMap
-	cms := b.cs.CoreV1().ConfigMaps(s.Namespace)
+	cms := b.k8s(ctx).CoreV1().ConfigMaps(s.Namespace)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		cm, err := cms.Get(ctx, name, metav1.GetOptions{})

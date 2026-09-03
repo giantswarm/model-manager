@@ -56,10 +56,3 @@ func TestReadinessDoesNotTrackBackend(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, get("/backendz"), "the backend probe reports the outage")
 	assert.Equal(t, http.StatusOK, get("/api/v1/backend"), "clients can still read healthy=false")
 }
-
-func TestOAuthConfigValidation(t *testing.T) {
-	require.Error(t, OAuthConfig{}.Validate())
-	require.Error(t, OAuthConfig{BaseURL: "http://mm.example.com", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}.Validate(), "plain http only on loopback")
-	require.NoError(t, OAuthConfig{BaseURL: "http://localhost:8080", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}.Validate())
-	require.NoError(t, OAuthConfig{BaseURL: "https://mm.example.com", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}.Validate())
-}

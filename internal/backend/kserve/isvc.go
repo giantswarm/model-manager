@@ -101,7 +101,7 @@ func isClusterLocalHost(host string) bool {
 // node their predictor runs on.
 func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	s := b.cfg.settings(ctx)
-	list, err := b.dyn.Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
+	list, err := b.dynamic(ctx).Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list InferenceServices in %s: %w", s.Namespace, err)
 	}
@@ -128,7 +128,7 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 // predictorNodes maps InferenceService name to the node of its predictor pod.
 func (b *Backend) predictorNodes(ctx context.Context, namespace string) map[string]string {
 	out := map[string]string{}
-	pods, err := b.cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: isvcPodLabel})
+	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: isvcPodLabel})
 	if err != nil {
 		b.log.Warn("listing predictor pods failed", "namespace", namespace, "error", err)
 		return out
@@ -354,7 +354,7 @@ func (b *Backend) compose(p *servingPreset, s settings, node string) *unstructur
 }
 
 func (b *Backend) getISVC(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	obj, err := b.dyn.Resource(isvcGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	obj, err := b.dynamic(ctx).Resource(isvcGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -365,7 +365,7 @@ func (b *Backend) getISVC(ctx context.Context, namespace, name string) (*unstruc
 }
 
 func (b *Backend) createISVC(ctx context.Context, obj *unstructured.Unstructured) error {
-	if _, err := b.dyn.Resource(isvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
+	if _, err := b.dynamic(ctx).Resource(isvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
 		return fmt.Errorf("create InferenceService %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
 	}
 	return nil
@@ -373,7 +373,7 @@ func (b *Backend) createISVC(ctx context.Context, obj *unstructured.Unstructured
 
 func (b *Backend) deleteISVC(ctx context.Context, namespace, name string) error {
 	propagation := metav1.DeletePropagationForeground
-	err := b.dyn.Resource(isvcGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
+	err := b.dynamic(ctx).Resource(isvcGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete InferenceService %s/%s: %w", namespace, name, err)
 	}
