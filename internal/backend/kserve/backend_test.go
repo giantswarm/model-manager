@@ -414,6 +414,10 @@ func TestPullRunsAJobWithProgress(t *testing.T) {
 		}
 	}
 	assert.True(t, sawProgress, "progress read from the pod log: %+v", samples)
+	for _, s := range samples {
+		assert.Equal(t, testCacheNode, s.Node, "every sample says which node the download lands on: %+v", s)
+		assert.Equal(t, "tiny", s.Preset, "and which preset it is for: %+v", s)
+	}
 
 	job, err := f.cs.BatchV1().Jobs(testServingNS).Get(ctx, plan.jobName(), metav1.GetOptions{})
 	require.NoError(t, err)
@@ -446,6 +450,8 @@ func TestPullRunsAJobWithProgress(t *testing.T) {
 	require.NoError(t, f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, func(p backend.Progress) { samples = append(samples, p) }))
 	require.Len(t, samples, 1)
 	assert.Equal(t, "already cached", samples[0].Status)
+	assert.Equal(t, testCacheNode, samples[0].Node)
+	assert.Equal(t, "tiny", samples[0].Preset)
 	jobs, _ = f.cs.BatchV1().Jobs(testServingNS).List(ctx, metav1.ListOptions{})
 	assert.Empty(t, jobs.Items)
 }

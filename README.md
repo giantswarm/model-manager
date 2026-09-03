@@ -39,7 +39,7 @@ decision log.
 | Backend identity, capabilities + load semantics | `GET /api/v1/backend` | `get_backend` |
 | Downloaded models (with loaded state + ModelConfig) | `GET /api/v1/models`, `GET /api/v1/models/{name}` | `list_models`, `get_model` |
 | Loaded / running models | `GET /api/v1/loaded` | `list_loaded_models` |
-| Pull / import (returns a job) | `POST /api/v1/models/pull {"model","wire?"}` | `pull_model` |
+| Pull / import (returns a job) | `POST /api/v1/models/pull {"model","wire?","preset?","node?"}` | `pull_model` |
 | Job progress | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload | `POST /api/v1/models/load {"model","keepAlive?"}`, `POST /api/v1/models/unload` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false]` | `delete_model` |
@@ -180,9 +180,14 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
 ## Jobs, restarts and replicas
 
 Jobs (`GET /api/v1/jobs`) live in process memory: the chart runs one replica
-and clients poll one server. A restart loses the job list, not the work —
-kserve pulls are Kubernetes Jobs that model-manager re-adopts on start
-(`GET /api/v1/jobs` lists them again as running pulls), a kserve `load` is
+and clients poll one server. On kserve a pull job carries the `node` whose
+cache receives the download and the `preset` it is for — what the request
+named, or what model-manager picked itself after the fit check — so any
+client (another tab, an agent through MCP) can place the download without
+remembering the request; ollama jobs carry neither. A restart loses the job
+list, not the work — kserve pulls are Kubernetes Jobs that model-manager
+re-adopts on start (`GET /api/v1/jobs` lists them again as running pulls,
+node and preset read back from the Job's annotations), a kserve `load` is
 recovered by the reconcile loop that wires ready InferenceServices without a
 job, and an ollama pull simply is re-issued (Ollama resumes the layers it has).
 A persistent job store is deliberately not built until a second replica or a

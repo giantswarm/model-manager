@@ -373,15 +373,15 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 	if res.Gated && !res.TokenConfigured {
 		return fmt.Errorf("%w: %s is gated; configure a Hugging Face token (kserve.hf.tokenSecret) to download it", backend.ErrInvalid, plan.Repo)
 	}
-	if res.Cached {
-		if progress != nil {
-			progress(backend.Progress{Status: "already cached", BytesCompleted: res.DownloadBytes, BytesTotal: res.DownloadBytes})
-		}
-		return nil
-	}
 	dl := downloadPlan{Repo: plan.Repo, Revision: plan.Revision, Dir: plan.Dir, Preset: res.Preset, BytesTotal: res.DownloadBytes}
 	if plan.CacheLocal || req.Node != "" {
 		dl.Node = res.Node
+	}
+	if res.Cached {
+		if progress != nil {
+			progress(backend.Progress{Status: "already cached", BytesCompleted: res.DownloadBytes, BytesTotal: res.DownloadBytes, Node: dl.Node, Preset: dl.Preset})
+		}
+		return nil
 	}
 	job, adopted, err := b.ensureJob(ctx, dl)
 	if err != nil {

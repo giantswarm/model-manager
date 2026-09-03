@@ -264,14 +264,16 @@ func jobSucceeded(j *batchv1.Job) bool {
 }
 
 // watchJob follows a download Job until it finishes, reporting bytes on disk
-// (from the pod's PROGRESS lines) against the expected total. Cancelling ctx
-// deletes the Job; partial files stay so a retry resumes.
+// (from the pod's PROGRESS lines) against the expected total. Every sample
+// carries the plan's node and preset so the job echoes where the download
+// lands, including the node the fit check picked. Cancelling ctx deletes the
+// Job; partial files stay so a retry resumes.
 func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func(backend.Progress)) error {
 	s := b.cfg.settings(ctx)
 	name := plan.jobName()
 	report := func(status string, done int64) {
 		if progress != nil {
-			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal})
+			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal, Node: plan.Node, Preset: plan.Preset})
 		}
 	}
 	report("download job created", 0)

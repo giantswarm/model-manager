@@ -97,6 +97,8 @@ func TestMCPToolsMirrorREST(t *testing.T) {
 	}
 	require.Equal(t, "succeeded", job["phase"], fmt.Sprint(job))
 	assert.Equal(t, "smollm2-135m", job["result"].(map[string]any)["name"])
+	assert.NotContains(t, job, "node", "ollama jobs carry no placement")
+	assert.NotContains(t, job, "preset")
 
 	text, isErr = callTool(t, srv, ToolListModels, nil)
 	require.False(t, isErr, text)

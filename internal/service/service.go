@@ -195,7 +195,7 @@ func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, e
 }
 
 func (s *Service) startPull(req backend.PullRequest, doWire bool) (jobs.Job, bool) {
-	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: req.Ref, Wire: doWire},
+	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			if err := s.backend.Pull(jobCtx, req, report); err != nil {
 				return nil, err

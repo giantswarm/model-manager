@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -48,6 +49,35 @@ func TestStartRunsAndReportsProgress(t *testing.T) {
 	assert.Equal(t, map[string]string{"name": "smollm2-135m"}, done.Result)
 	assert.NotNil(t, done.StartedAt)
 	assert.NotNil(t, done.FinishedAt)
+}
+
+func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
+	m := NewManager()
+	// The request named a preset but left the node open: the job echoes the
+	// preset at once and takes the node the backend reports once it picked one.
+	job, created := m.Start(StartRequest{Type: TypePull, Model: "org/tiny", Preset: "tiny"}, func(_ context.Context, report func(backend.Progress)) (any, error) {
+		report(backend.Progress{Status: "download job created", Node: "gpu1", Preset: "tiny"})
+		report(backend.Progress{Status: "downloading", BytesCompleted: 5, BytesTotal: 10})
+		return nil, nil
+	})
+	require.True(t, created)
+	assert.Equal(t, "tiny", job.Preset)
+	assert.Empty(t, job.Node, "not known before the backend ran its fit check")
+	done := waitDone(t, m, job.ID)
+	assert.Equal(t, "gpu1", done.Node)
+	assert.Equal(t, "tiny", done.Preset, "a sample without placement leaves the values alone")
+
+	// A named node is echoed in the initial snapshot already.
+	pinned, _ := m.Start(StartRequest{Type: TypePull, Model: "org/other", Node: "gpu2"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	assert.Equal(t, "gpu2", pinned.Node)
+	assert.Empty(t, pinned.Preset)
+
+	// Backends without placement never set either; the JSON omits both.
+	bare, _ := m.Start(StartRequest{Type: TypePull, Model: "smollm2:135m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	raw, err := json.Marshal(waitDone(t, m, bare.ID))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"node"`)
+	assert.NotContains(t, string(raw), `"preset"`)
 }
 
 func TestStartJoinsActiveJobForSameModel(t *testing.T) {

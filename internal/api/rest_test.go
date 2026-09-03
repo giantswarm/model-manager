@@ -325,6 +325,8 @@ func TestPullFlowWiresAndEnrichesInventory(t *testing.T) {
 	job := body["job"].(map[string]any)
 	assert.Equal(t, "smollm2:135m", job["model"])
 	assert.Equal(t, true, job["wire"])
+	assert.NotContains(t, job, "node", "ollama has no placement")
+	assert.NotContains(t, job, "preset")
 
 	// Re-posting joins the running/finished job or starts a fresh one; either way 202.
 	status, again := f.do(t, http.MethodPost, Prefix+"/models/pull", map[string]any{"model": "smollm2:135m"})
