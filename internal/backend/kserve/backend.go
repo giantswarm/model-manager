@@ -47,6 +47,9 @@ type Backend struct {
 	// agentHTTP talks to the cache-agent pods (daemonset inventory mode).
 	agentHTTP *http.Client
 
+	// index is the driver's copy of the cache index ConfigMap (index.go).
+	index cacheIndex
+
 	mu          sync.Mutex
 	servedCache []served
 	presetCache []*servingPreset
@@ -157,11 +160,18 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	index := b.cacheIndexWith(ctx, servedList)
 
 	out := make([]backend.Model, 0, len(entries)+len(servedList))
 	seen := map[string]bool{} // node/dir
 	for _, e := range entries {
-		m := b.modelFromEntry(e, idx, servedByName)
+		if !e.holdsModel() {
+			// Hugging Face client internals (hf-home, xet) or a directory
+			// still filling up: not a download. A served model whose
+			// directory is still filling is listed below as not downloaded.
+			continue
+		}
+		m := b.modelFromEntry(e, idx, servedByName, index)
 		seen[e.Node+"/"+e.Dir] = true
 		out = append(out, m)
 	}
@@ -203,10 +213,14 @@ func anyDir(seen map[string]bool, dir string) bool {
 	return false
 }
 
-// modelFromEntry names a cache directory: the marker a pre-warm download
-// wrote, the preset of the same name, the InferenceService of the same name,
-// else the directory itself.
-func (b *Backend) modelFromEntry(e cacheEntry, idx presetIndex, servedByName map[string]served) backend.Model {
+// modelFromEntry names a cache directory by what is known to have filled it:
+// the marker a pre-warm download wrote, the cache index record of the
+// InferenceService that served from it (index.go — live InferenceServices are
+// part of the index), then the assumptions — the preset of the same name, the
+// InferenceService of the same name — else the directory itself. The preset is
+// the one of the same name, else the one the record names when it still serves
+// that model, else the single preset serving the model.
+func (b *Backend) modelFromEntry(e cacheEntry, idx presetIndex, servedByName map[string]served, index map[string]indexEntry) backend.Model {
 	m := backend.Model{
 		Node:       e.Node,
 		Path:       e.Dir,
@@ -214,9 +228,12 @@ func (b *Backend) modelFromEntry(e cacheEntry, idx presetIndex, servedByName map
 		ModifiedAt: e.MTime,
 		Downloaded: ptr.To(e.Files > 0),
 	}
+	record, remembered := index[e.Dir]
 	switch {
 	case e.Marker != nil && e.Marker.Model != "":
-		m.Name = e.Marker.Model
+		m.Name, m.Digest = e.Marker.Model, e.Marker.Revision
+	case remembered:
+		m.Name, m.Digest = record.Model, record.Revision
 	case idx.byName[e.Dir] != nil:
 		m.Name = idx.byName[e.Dir].Spec.Model.ID
 	case servedByName[e.Dir].Model != "":
@@ -224,20 +241,39 @@ func (b *Backend) modelFromEntry(e cacheEntry, idx presetIndex, servedByName map
 	default:
 		m.Name = e.Dir
 	}
-	if p, ok := idx.byName[e.Dir]; ok {
-		m.Preset = p.name()
-	} else if matches := idx.forModel(m.Name); len(matches) == 1 {
-		m.Preset = matches[0].name()
+	switch {
+	case idx.byName[e.Dir] != nil:
+		m.Preset = e.Dir
+	case remembered && record.Preset != "" && presetServes(idx, record.Preset, m.Name):
+		m.Preset = record.Preset
+	default:
+		if matches := idx.forModel(m.Name); len(matches) == 1 {
+			m.Preset = matches[0].name()
+		}
 	}
 	if p, ok := idx.byName[m.Preset]; ok {
 		m.Format = p.Spec.Model.Format
 		m.ContextLength = p.Spec.Model.ContextLength
 		m.Capabilities = p.Spec.Model.Capabilities
 	}
-	if e.Marker != nil && e.Marker.Model != "" {
-		m.Digest = e.Marker.Revision
-	}
 	return m
+}
+
+// presetServes reports whether the named preset exists and serves the model.
+func presetServes(idx presetIndex, preset, model string) bool {
+	p, ok := idx.byName[preset]
+	return ok && strings.EqualFold(p.Spec.Model.ID, model)
+}
+
+// countModels is the number of cache directories that hold a model.
+func countModels(entries []cacheEntry) int {
+	n := 0
+	for _, e := range entries {
+		if e.holdsModel() {
+			n++
+		}
+	}
+	return n
 }
 
 // cacheEntries scans every cache node (or the shared cache once).
@@ -421,6 +457,7 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 	if err := b.removeDir(ctx, node, m.Path); err != nil {
 		return err
 	}
+	b.forgetDir(ctx, m.Path)
 	b.inv.invalidate()
 	return nil
 }
@@ -649,7 +686,9 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 				out = append(out, nodeView(n, reserved[n.Name], nil))
 				continue
 			}
-			cache = &backend.NodeCache{Claim: loc.Claim, MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: len(snap.Entries), Inventory: b.opts.InventoryMode}
+			// Models counts directories that hold a model; bytes count everything
+			// on the claim, client internals included — they occupy it too.
+			cache = &backend.NodeCache{Claim: loc.Claim, MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: countModels(snap.Entries), Inventory: b.opts.InventoryMode}
 			for _, e := range snap.Entries {
 				cache.BytesUsed += e.Bytes
 			}

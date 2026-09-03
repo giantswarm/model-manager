@@ -40,10 +40,11 @@ subjects:
 {{- /*
 KServe backend, in the serving namespace: InferenceServices; download Jobs and
 their pods (progress from pod logs); the short-lived cache-tool pods that scan
-and clean the cache claim; the claim itself; the optional hub-token Secret. In
-the discovery / preset namespace: the ModelServingConfig and ServingPreset
-ConfigMaps. Cluster-wide: nodes (memory budgets, GPU labels) and
-PersistentVolumes (which node holds the cache).
+and clean the cache claim; the claim itself; the cache index ConfigMap
+model-manager writes (create cannot be limited to a name, update and patch
+are); the optional hub-token Secret. In the discovery / preset namespace: the
+ModelServingConfig and ServingPreset ConfigMaps. Cluster-wide: nodes (memory
+budgets, GPU labels) and PersistentVolumes (which node holds the cache).
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -72,6 +73,15 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch"]
+  {{- with .Values.kserve.cache.indexConfigMap }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ . | quote }}]
+    verbs: ["update", "patch"]
+  {{- end }}
   {{- with .Values.kserve.hf.tokenSecret.name }}
   - apiGroups: [""]
     resources: ["secrets"]

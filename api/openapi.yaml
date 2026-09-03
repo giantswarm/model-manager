@@ -717,8 +717,8 @@ components:
         downloaded:
           type: boolean
           description: kserve — false for a model known only from a preset or a running InferenceService whose weights are not cached yet; absent means the backend lists downloads only
-        path: { type: string, description: kserve — cache directory (the InferenceService name the storage-initializer uses) }
-        preset: { type: string, description: kserve — the serving preset whose model this is }
+        path: { type: string, description: "kserve — cache directory (the InferenceService name the storage-initializer uses). Directories whose top level holds no model (no config.json, no weights file — Hugging Face client internals such as hf-home or xet) are not listed. The name is the repository known to have filled the directory (pre-warm marker, else the cache index recorded while an InferenceService served from it), else the preset or InferenceService of the same name, else the directory name." }
+        preset: { type: string, description: "kserve — the serving preset whose model this is: the preset of the same name, else the one the InferenceService that filled the directory was composed from, else the single preset serving the repository" }
         loaded: { type: boolean }
         running: { $ref: "#/components/schemas/LoadedModel" }
         modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }

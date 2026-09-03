@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -408,4 +409,23 @@ func (f *fixture) isvc(ctx context.Context, name string) map[string]any {
 	obj, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, name, metav1.GetOptions{})
 	require.NoError(f.t, err)
 	return obj.Object
+}
+
+// isvcObject is a hand-written InferenceService serving storageURI, carrying
+// only the given labels.
+func isvcObject(name, storageURI string, labels map[string]string) *unstructured.Unstructured {
+	meta := map[string]any{"name": name, "namespace": testServingNS}
+	if len(labels) > 0 {
+		l := map[string]any{}
+		for k, v := range labels {
+			l[k] = v
+		}
+		meta["labels"] = l
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": isvcGVR.Group + "/" + isvcGVR.Version,
+		"kind":       "InferenceService",
+		"metadata":   meta,
+		"spec":       map[string]any{"predictor": map[string]any{"model": map[string]any{"storageUri": storageURI, "modelFormat": map[string]any{"name": "vLLM"}}}},
+	}}
 }

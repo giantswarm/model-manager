@@ -87,27 +87,37 @@ func TestParsePresetAndResolve(t *testing.T) {
 
 func TestParseScanAndScript(t *testing.T) {
 	out := strings.Join([]string{
-		"DIR\ttiny\t453864\t2\t1700000000",
-		"DIR\tqwen3-14b\t0\t0\t1700000100",
+		"DIR\ttiny\t453864\t2\t1700000000\t1",
+		"DIR\tqwen3-14b\t0\t0\t1700000100\t0",
+		"DIR\tlegacy\t5\t1\t1700000200",
 		"MARKER\ttiny\t{\"model\":\"org/tiny\",\"dir\":\"tiny\",\"bytesExpected\":453864}",
 		"junk line",
 		"END",
 	}, "\n")
 	entries, err := parseScan("n1", strings.NewReader(out))
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
-	assert.Equal(t, "qwen3-14b", entries[0].Dir)
-	assert.Nil(t, entries[0].Marker)
-	assert.Equal(t, "tiny", entries[1].Dir)
-	assert.EqualValues(t, 453864, entries[1].Bytes)
-	assert.Equal(t, 2, entries[1].Files)
-	assert.Equal(t, "org/tiny", entries[1].Marker.Model)
-	assert.Equal(t, time.Unix(1700000000, 0).UTC(), entries[1].MTime)
+	require.Len(t, entries, 3)
+	assert.Equal(t, "legacy", entries[0].Dir)
+	assert.True(t, entries[0].HasModel, "a DIR line without the model field (an older script) is a model")
+	assert.Equal(t, "qwen3-14b", entries[1].Dir)
+	assert.Nil(t, entries[1].Marker)
+	assert.False(t, entries[1].HasModel)
+	assert.False(t, entries[1].holdsModel())
+	assert.Equal(t, "tiny", entries[2].Dir)
+	assert.EqualValues(t, 453864, entries[2].Bytes)
+	assert.Equal(t, 2, entries[2].Files)
+	assert.True(t, entries[2].HasModel)
+	assert.Equal(t, "org/tiny", entries[2].Marker.Model)
+	assert.Equal(t, time.Unix(1700000000, 0).UTC(), entries[2].MTime)
+	assert.True(t, cacheEntry{Marker: &marker{Model: "org/x"}}.holdsModel(), "a completed pre-warm download holds a model whatever its layout")
+	assert.False(t, cacheEntry{Marker: &marker{}}.holdsModel())
 
-	_, err = parseScan("n1", strings.NewReader("DIR\tx\t1\t1\t1\n"))
+	_, err = parseScan("n1", strings.NewReader("DIR\tx\t1\t1\t1\t1\n"))
 	assert.ErrorContains(t, err, "truncated")
 
-	// The real script against a temporary cache root.
+	// The real script against a temporary cache root: tiny has a config.json,
+	// mistral only consolidated weights (Mistral layout, no config.json),
+	// hf-home and xet are Hugging Face client internals, empty is empty.
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
@@ -115,6 +125,14 @@ func TestParseScanAndScript(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "tiny", "sub"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "tiny", "config.json"), make([]byte, 100), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "tiny", "sub", "model.safetensors"), make([]byte, 2000), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "mistral"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "mistral", "consolidated-00001-of-00002.safetensors"), make([]byte, 300), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "mistral", "params.json"), make([]byte, 30), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "hf-home", "hub", "models--org--tiny", "refs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-home", "hub", "models--org--tiny", "refs", "main"), []byte("abc"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-home", "CACHEDIR.TAG"), []byte("Signature: 8a477f597d28d172789f06886806bc55"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "xet", "chunk-cache"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "xet", "chunk-cache", "c1"), make([]byte, 7), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "empty"), 0o750))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, markersDir), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, markersDir, "tiny.json"), []byte(`{"model":"org/tiny","dir":"tiny"}`+"\n"), 0o600))
@@ -140,17 +158,29 @@ func TestParseScanAndScript(t *testing.T) {
 	require.NoError(t, err, string(raw))
 	entries, err = parseScan("n1", strings.NewReader(string(raw)))
 	require.NoError(t, err, string(raw))
-	require.Len(t, entries, 3, string(raw))
-	assert.Equal(t, "big", entries[0].Dir)
-	assert.Equal(t, bigBytes, entries[0].Bytes, string(raw))
-	assert.Equal(t, 2, entries[0].Files)
-	assert.Equal(t, "empty", entries[1].Dir)
-	assert.EqualValues(t, 0, entries[1].Bytes)
-	assert.Equal(t, "tiny", entries[2].Dir)
-	assert.EqualValues(t, 2100, entries[2].Bytes)
-	assert.Equal(t, 2, entries[2].Files)
-	require.NotNil(t, entries[2].Marker)
-	assert.Equal(t, "org/tiny", entries[2].Marker.Model)
+	byDir := map[string]cacheEntry{}
+	for _, e := range entries {
+		byDir[e.Dir] = e
+	}
+	require.Len(t, byDir, 6, string(raw))
+	big := byDir["big"]
+	assert.Equal(t, bigBytes, big.Bytes, string(raw))
+	assert.Equal(t, 2, big.Files)
+	assert.True(t, big.HasModel)
+	assert.EqualValues(t, 0, byDir["empty"].Bytes)
+	assert.False(t, byDir["empty"].HasModel)
+	tiny := byDir["tiny"]
+	assert.EqualValues(t, 2100, tiny.Bytes)
+	assert.Equal(t, 2, tiny.Files)
+	assert.True(t, tiny.HasModel, string(raw))
+	require.NotNil(t, tiny.Marker)
+	assert.Equal(t, "org/tiny", tiny.Marker.Model)
+	assert.True(t, byDir["mistral"].HasModel, "weights at the top level count without a config.json: %s", raw)
+	assert.EqualValues(t, 330, byDir["mistral"].Bytes)
+	assert.False(t, byDir["hf-home"].HasModel, "the Hugging Face hub cache is not a model: %s", raw)
+	assert.EqualValues(t, 3+len("Signature: 8a477f597d28d172789f06886806bc55"), byDir["hf-home"].Bytes, "but its bytes are counted")
+	assert.False(t, byDir["xet"].HasModel, "the xet chunk cache is not a model: %s", raw)
+	assert.Equal(t, 3, countModels(entries), "big, tiny and mistral, nothing else")
 }
 
 func TestParseProgressAndJobHelpers(t *testing.T) {

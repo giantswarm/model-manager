@@ -19,6 +19,14 @@ func fixtureRoot(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "tiny", "config.json"), make([]byte, 100), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "tiny", "sub", "model.safetensors"), make([]byte, 2000), 0o600))
 	require.NoError(t, os.Symlink(filepath.Join(root, "tiny", "config.json"), filepath.Join(root, "tiny", "link.json")), "symlinks are not files")
+	// A Mistral-style repository: consolidated weights and params.json, no config.json.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "mistral"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "mistral", "consolidated-00001-of-00002.safetensors"), make([]byte, 300), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "mistral", "params.json"), make([]byte, 30), 0o600))
+	// Hugging Face client internals living on the same claim.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "hf-home", "hub", "models--org--tiny", "refs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-home", "hub", "models--org--tiny", "refs", "main"), []byte("abc"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "hf-home", "CACHEDIR.TAG"), []byte("Signature: 8a477f597d28d172789f06886806bc55"), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "empty"), 0o750))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".hidden"), 0o750))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, MarkersDir), 0o750))
@@ -30,31 +38,72 @@ func fixtureRoot(t *testing.T) string {
 	return root
 }
 
+func TestIsModelFile(t *testing.T) {
+	for _, name := range []string{"config.json", "model.safetensors", "model-00001-of-00002.safetensors", "consolidated.safetensors", "model.gguf", "pytorch_model.bin", "model.pt", "model.pth", "model.onnx"} {
+		assert.True(t, IsModelFile(name), name)
+	}
+	for _, name := range []string{"README.md", "params.json", "generation_config.json", "tokenizer.json", "CACHEDIR.TAG", "model.safetensors.index.json", "chunk-cache"} {
+		assert.False(t, IsModelFile(name), name)
+	}
+}
+
 func TestScan(t *testing.T) {
 	root := fixtureRoot(t)
 	inv, err := Scan(root)
 	require.NoError(t, err)
 	assert.Equal(t, root, inv.Root)
 	assert.False(t, inv.ScannedAt.IsZero())
-	require.Len(t, inv.Entries, 3, inv.Entries)
-	assert.Equal(t, "alias", inv.Entries[0].Dir, "a symlinked directory is listed")
-	assert.EqualValues(t, 0, inv.Entries[0].Bytes, "but not followed — `find` in the scan pod does not either")
-	assert.Equal(t, 0, inv.Entries[0].Files)
-	assert.Equal(t, "empty", inv.Entries[1].Dir)
-	assert.EqualValues(t, 0, inv.Entries[1].Bytes)
-	assert.Equal(t, 0, inv.Entries[1].Files)
-	assert.Nil(t, inv.Entries[1].Marker)
-	tiny := inv.Entries[2]
-	assert.Equal(t, "tiny", tiny.Dir)
+	require.Len(t, inv.Entries, 5, inv.Entries)
+	byDir := map[string]Entry{}
+	for _, e := range inv.Entries {
+		byDir[e.Dir] = e
+		require.NotNil(t, e.HasModel, "every entry carries the verdict: %s", e.Dir)
+	}
+	assert.Equal(t, []string{"alias", "empty", "hf-home", "mistral", "tiny"}, func() []string {
+		out := make([]string, 0, len(inv.Entries))
+		for _, e := range inv.Entries {
+			out = append(out, e.Dir)
+		}
+		return out
+	}(), "sorted by name")
+
+	alias := byDir["alias"]
+	assert.EqualValues(t, 0, alias.Bytes, "a symlinked directory is listed but not followed — `find` in the scan pod does not either")
+	assert.Equal(t, 0, alias.Files)
+	assert.False(t, *alias.HasModel)
+	empty := byDir["empty"]
+	assert.EqualValues(t, 0, empty.Bytes)
+	assert.Equal(t, 0, empty.Files)
+	assert.Nil(t, empty.Marker)
+	assert.False(t, *empty.HasModel)
+	tiny := byDir["tiny"]
 	assert.EqualValues(t, 2100, tiny.Bytes)
 	assert.Equal(t, 2, tiny.Files)
 	assert.False(t, tiny.MTime.IsZero())
+	assert.True(t, *tiny.HasModel, "config.json at the top level")
 	require.NotNil(t, tiny.Marker)
 	assert.Equal(t, "org/tiny", tiny.Marker.Model)
 	assert.Equal(t, "abc", tiny.Marker.Revision)
 	assert.Equal(t, "tiny", tiny.Marker.Dir, "the file stem fills a missing dir")
+	mistral := byDir["mistral"]
+	assert.True(t, *mistral.HasModel, "weights at the top level count without a config.json")
+	assert.EqualValues(t, 330, mistral.Bytes)
+	hfHome := byDir["hf-home"]
+	assert.False(t, *hfHome.HasModel, "the hub cache is not a model")
+	assert.Equal(t, 2, hfHome.Files, "but its files and bytes are counted")
 	require.Len(t, inv.Warnings, 1, inv.Warnings)
 	assert.Contains(t, inv.Warnings[0], "broken.json")
+
+	// The verdict is on the wire as hasModel.
+	raw, err := json.Marshal(tiny)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"hasModel":true`)
+	raw, err = json.Marshal(hfHome)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"hasModel":false`)
+	var legacy Entry
+	require.NoError(t, json.Unmarshal([]byte(`{"dir":"x","bytes":1,"files":1}`), &legacy))
+	assert.Nil(t, legacy.HasModel, "an agent that predates the field says nothing")
 
 	_, err = Scan(filepath.Join(root, "nope"))
 	assert.ErrorContains(t, err, "read cache root")
@@ -86,7 +135,7 @@ func TestHandler(t *testing.T) {
 	var inv Inventory
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&inv))
 	assert.Equal(t, "n1", inv.Node)
-	assert.Len(t, inv.Entries, 3)
+	assert.Len(t, inv.Entries, 5)
 
 	resp, err = http.Post(srv.URL+InventoryPath, "text/plain", nil)
 	require.NoError(t, err)

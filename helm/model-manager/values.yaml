@@ -174,6 +174,13 @@ kserve:
     # of the PersistentVolume bound to the claim (a static local PV pins the
     # cache to its node).
     nodes: []
+    # -- ConfigMap in the serving namespace that remembers which Hugging Face
+    # repository filled which cache directory: recorded while an
+    # InferenceService serves from the directory (its name), kept after the
+    # InferenceService is gone, so the directory keeps its repository and
+    # preset in the inventory. The kserve Role grants `create` on ConfigMaps
+    # and `update`/`patch` on this name.
+    indexConfigMap: model-manager-cache-index
   presets:
     # -- Namespace of the serving-preset ConfigMaps; empty takes the discovery
     # value, else `kserve.discovery.namespace`.

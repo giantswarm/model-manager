@@ -52,9 +52,20 @@ can stay empty.
   and usually `kserve.inventory.agent.nodeSelector` (a node-local claim mounts
   on its node only); `networkPolicy.enabled` then also allows model-manager →
   agent traffic. Deletes keep using a one-shot pod.
-- RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
-  discovery/preset namespace when it differs, and a ClusterRole for nodes and
-  PersistentVolumes.
+- The inventory names a cache directory after the repository known to have
+  filled it: the marker of a pre-warm download, else the **cache index** — the
+  ConfigMap `kserve.cache.indexConfigMap` (default `model-manager-cache-index`)
+  in the serving namespace, in which model-manager records, while an
+  InferenceService exists, that its name is the directory the
+  storage-initializer fills and its `hf://` storageUri the repository — so a
+  directory keeps its repository and preset after its InferenceService is
+  deleted. Directories whose top level holds no model (no `config.json`, no
+  weights file: Hugging Face client internals such as `hf-home`, `xet`) are
+  not listed as downloads.
+- RBAC: a Role in the serving namespace (InferenceServices, Jobs, pods, the
+  claim, `create` on ConfigMaps and `update`/`patch` on the cache index
+  ConfigMap), a Role for the ConfigMaps in the discovery/preset namespace when
+  it differs, and a ClusterRole for nodes and PersistentVolumes.
 - Kubernetes access does not depend on wiring: the kserve driver needs the API
   for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
   ServiceAccount token and the RBAC above renders even with

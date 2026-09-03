@@ -51,9 +51,20 @@ can stay empty.
   and usually `kserve.inventory.agent.nodeSelector` (a node-local claim mounts
   on its node only); `networkPolicy.enabled` then also allows model-manager →
   agent traffic. Deletes keep using a one-shot pod.
-- RBAC: a Role in the serving namespace, a Role for the ConfigMaps in the
-  discovery/preset namespace when it differs, and a ClusterRole for nodes and
-  PersistentVolumes.
+- The inventory names a cache directory after the repository known to have
+  filled it: the marker of a pre-warm download, else the **cache index** — the
+  ConfigMap `kserve.cache.indexConfigMap` (default `model-manager-cache-index`)
+  in the serving namespace, in which model-manager records, while an
+  InferenceService exists, that its name is the directory the
+  storage-initializer fills and its `hf://` storageUri the repository — so a
+  directory keeps its repository and preset after its InferenceService is
+  deleted. Directories whose top level holds no model (no `config.json`, no
+  weights file: Hugging Face client internals such as `hf-home`, `xet`) are
+  not listed as downloads.
+- RBAC: a Role in the serving namespace (InferenceServices, Jobs, pods, the
+  claim, `create` on ConfigMaps and `update`/`patch` on the cache index
+  ConfigMap), a Role for the ConfigMaps in the discovery/preset namespace when
+  it differs, and a ClusterRole for nodes and PersistentVolumes.
 - Kubernetes access does not depend on wiring: the kserve driver needs the API
   for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
   ServiceAccount token and the RBAC above renders even with
@@ -128,6 +139,7 @@ can stay empty.
 | kserve.cache.claimName | string | `""` | PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty takes the discovery value (default `hf-cache`). |
 | kserve.cache.mountPath | string | `""` | Where predictors mount the cache; empty takes the discovery value (default `/mnt/models`). |
 | kserve.cache.nodes | list | `[]` | Nodes that hold the cache. Empty derives them from the node affinity of the PersistentVolume bound to the claim (a static local PV pins the cache to its node). |
+| kserve.cache.indexConfigMap | string | `"model-manager-cache-index"` | ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from the directory (its name), kept after the InferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch` on this name. |
 | kserve.presets.namespace | string | `""` | Namespace of the serving-preset ConfigMaps; empty takes the discovery value, else `kserve.discovery.namespace`. |
 | kserve.presets.labelSelector | string | `""` | Label selector of the serving-preset ConfigMaps; empty takes the discovery value (default `agent-platform.giantswarm.io/serving-preset=true`). |
 | kserve.hf.endpoint | string | `"https://huggingface.co"` | Hugging Face Hub base URL (search, repository metadata, sizes). |

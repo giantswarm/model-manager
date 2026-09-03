@@ -44,15 +44,42 @@ type Marker struct {
 	Job           string    `json:"job,omitempty"`
 }
 
+// WeightSuffixes are the file extensions that mark a directory as holding
+// model weights when one is found at its top level. They count next to, or
+// instead of, config.json: Mistral repositories ship consolidated-*.safetensors
+// with params.json and no config.json.
+var WeightSuffixes = []string{".safetensors", ".gguf", ".bin", ".pt", ".pth", ".onnx"}
+
+// IsModelFile reports whether a top-level file name says the directory holds
+// a model: config.json or a weights file (WeightSuffixes). The scan pod's
+// shell script applies the same test.
+func IsModelFile(name string) bool {
+	if name == "config.json" {
+		return true
+	}
+	for _, s := range WeightSuffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // Entry is one top-level directory of the cache: apparent bytes and count of
-// the regular files below it, the directory's mtime, and its marker when a
-// pre-warm download wrote one.
+// the regular files below it, the directory's mtime, its marker when a
+// pre-warm download wrote one, and whether its top level holds a model.
 type Entry struct {
 	Dir    string    `json:"dir"`
 	Bytes  int64     `json:"bytes"`
 	Files  int       `json:"files"`
 	MTime  time.Time `json:"mtime,omitempty"`
 	Marker *Marker   `json:"marker,omitempty"`
+	// HasModel says whether the directory's top level holds a model
+	// (IsModelFile: config.json or a weights file) — false for Hugging Face
+	// client internals living on the same claim (hf-home, xet) and for a
+	// directory still filling up. Absent from agents that predate the field;
+	// the driver then treats the directory as a model.
+	HasModel *bool `json:"hasModel,omitempty"`
 }
 
 // Inventory is one scan of the cache root.
@@ -94,6 +121,7 @@ func Scan(root string) (*Inventory, error) {
 			continue
 		}
 		e := Entry{Dir: name, MTime: info.ModTime().UTC(), Marker: markers[name]}
+		hasModel := false
 		walkErr := filepath.WalkDir(path, func(p string, de fs.DirEntry, err error) error {
 			if err != nil {
 				inv.Warnings = append(inv.Warnings, fmt.Sprintf("%s: %v", p, err))
@@ -109,11 +137,17 @@ func Scan(root string) (*Inventory, error) {
 			}
 			e.Bytes += fi.Size()
 			e.Files++
+			// The top level decides whether this is a model; one walk serves
+			// both the sizes and the verdict.
+			if filepath.Dir(p) == path && IsModelFile(de.Name()) {
+				hasModel = true
+			}
 			return nil
 		})
 		if walkErr != nil {
 			inv.Warnings = append(inv.Warnings, fmt.Sprintf("%s: %v", name, walkErr))
 		}
+		e.HasModel = &hasModel
 		inv.Entries = append(inv.Entries, e)
 	}
 	sort.Slice(inv.Entries, func(i, j int) bool { return inv.Entries[i].Dir < inv.Entries[j].Dir })
