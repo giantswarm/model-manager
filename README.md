@@ -275,16 +275,18 @@ of `--oauth-trusted-audiences` (the platform's OAuth client). The caller — the
 
 `--downstream-oauth` goes one step further: everything a request does against
 the Kubernetes API (InferenceServices, download Jobs, cache scans, kagent
-ModelConfigs) presents the caller's IdP token instead of the ServiceAccount,
-so the caller's RBAC governs. That needs an apiserver that trusts the IdP and
-the token's audience — a Dex install lists the cross-client audience the
-apiserver trusts in the MCPServer's `requiredAudiences` (muster requests it at
-login), a Google install's client id is the apiserver's `--oidc-client-id`.
-Work that outlives the request — the wiring reconciler, a job that follows a
-download longer than the token lives — continues as the ServiceAccount and
-stays attributed to the caller, which is why the chart keeps the RBAC objects.
-Health endpoints (`/healthz`, `/readyz`, `/backendz`) and the OAuth metadata
-stay public.
+ModelConfigs, the discovery ConfigMap) presents the caller's IdP token, and
+the ServiceAccount holds no permissions at all — the chart renders none of its
+Roles and ClusterRoles; the caller's RBAC is the only RBAC. That needs an
+apiserver that trusts the IdP and the token's audience — a Dex install lists
+the cross-client audience the apiserver trusts in the MCPServer's
+`requiredAudiences` (muster requests it at login), a Google install's client
+id is the apiserver's `--oidc-client-id`. Nothing runs without a caller: the
+wiring reconciler and the re-adoption of running downloads after a restart
+are off, and a job that outlives its caller's token (a download longer than
+the token lives) fails on the apiserver's 401 — attributed to the caller,
+retried by the caller. Health endpoints (`/healthz`, `/readyz`, `/backendz`)
+and the OAuth metadata stay public.
 
 ## Helm chart
 

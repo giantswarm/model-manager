@@ -32,6 +32,11 @@ type Config struct {
 	// ReconcileInterval is how often Run re-checks served models for missing
 	// ModelConfigs on ServeLifecycle backends (0 disables).
 	ReconcileInterval time.Duration
+	// CallerOnly means every Kubernetes call is made with the caller's token
+	// (downstream OAuth) and the ServiceAccount holds no permissions: Run
+	// neither adopts running downloads nor reconciles wiring, since both run
+	// without a caller.
+	CallerOnly bool
 }
 
 // BackendResponse is the backend identity plus effective capabilities.
@@ -424,6 +429,10 @@ func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(
 // (model-manager restarted, or the InferenceService was created by someone
 // else with the preset label).
 func (s *Service) Run(ctx context.Context) {
+	if s.cfg.CallerOnly {
+		s.log.Info("caller-only mode: no download adoption and no wiring reconciler (every Kubernetes call carries the caller's token; the ServiceAccount holds no permissions)")
+		return
+	}
 	s.adoptPulls(ctx)
 	sl, ok := s.serveLifecycle()
 	if !ok || s.cfg.ReconcileInterval <= 0 || s.wirer == nil || !s.cfg.AutoWire {

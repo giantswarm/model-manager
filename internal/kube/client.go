@@ -2,7 +2,8 @@
 // wiring and the kserve driver: in-cluster when running as a pod, kubeconfig
 // (+ context) otherwise. With downstream OAuth on, a request that carries the
 // caller's IdP token gets clients that present that token instead — the
-// caller's RBAC governs what the request may do.
+// caller's RBAC governs what the request may do, and the ServiceAccount holds
+// no permissions of its own (the chart renders no RBAC for it).
 package kube
 
 import (
@@ -37,12 +38,13 @@ type Clients struct {
 	byUser map[[32]byte]*callerEntry
 }
 
-// callerEntry caches the clients built for one caller token until it expires.
+// callerEntry caches the clients built for one caller token; entries are
+// evicted once the token has expired (the apiserver rejects it from then on).
 type callerEntry struct {
 	clients *Clients
 	expires time.Time
-	// expiredLogged: the fallback to the ServiceAccount is logged once per
-	// token, not on every call a long job makes after the token ran out.
+	// expiredLogged: the expiry is logged once per token, not on every call
+	// a long job makes after the token ran out.
 	expiredLogged bool
 }
 
@@ -116,11 +118,14 @@ func (c *Clients) ForToken(token string) (*Clients, error) {
 	return user, nil
 }
 
-// For returns the clients a request should use: the caller's when ctx carries
-// a still-valid caller token (downstream OAuth), else the ServiceAccount's.
-// A token that has expired since the request came in — a job following a
-// download for longer than the token lives — falls back to the ServiceAccount,
-// logged once; the operation stays attributed to the caller on the job.
+// For returns the clients a call should use: the caller's when ctx carries a
+// caller token (downstream OAuth), else the ServiceAccount's. There is no
+// fallback from a caller to the ServiceAccount: with downstream OAuth the
+// ServiceAccount holds no permissions, so a token that expired since the
+// request came in — a job following a download for longer than the token
+// lives — keeps being presented and the apiserver answers 401; the job fails
+// with that error, attributed to the caller, and the operation stays bounded
+// by the caller's own credential.
 func (c *Clients) For(ctx context.Context) *Clients {
 	token, ok := identity.TokenFromContext(ctx)
 	if !ok {
@@ -144,12 +149,10 @@ func (c *Clients) For(ctx context.Context) *Clients {
 		e = &callerEntry{clients: clients, expires: identity.TokenExpiry(token)}
 		c.byUser[key] = e
 	}
-	if !e.expires.IsZero() && now.After(e.expires) {
-		if !e.expiredLogged {
-			e.expiredLogged = true
-			c.log.Info("caller token expired; continuing as the ServiceAccount", identity.LogAttr(ctx), "expired", e.expires.UTC().Format(time.RFC3339))
-		}
-		return c
+	if !e.expires.IsZero() && now.After(e.expires) && !e.expiredLogged {
+		e.expiredLogged = true
+		c.log.Warn("caller token expired; the Kubernetes API will reject the remaining calls of this operation (the ServiceAccount holds no permissions)",
+			identity.LogAttr(ctx), "expired", e.expires.UTC().Format(time.RFC3339))
 	}
 	return e.clients
 }

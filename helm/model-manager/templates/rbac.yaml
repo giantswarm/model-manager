@@ -1,4 +1,11 @@
-{{- if and .Values.rbac.create (not .Values.kagent.disableWiring) }}
+{{- /*
+No RBAC at all with oauth.downstream: every Kubernetes call then carries the
+caller's IdP token and the caller's RBAC governs; the ServiceAccount keeps only
+what every authenticated principal has (API discovery). The token stays
+mounted for the in-cluster API address and CA.
+*/}}
+{{- $rbac := and .Values.rbac.create (not (and .Values.oauth.enabled .Values.oauth.downstream.enabled)) }}
+{{- if and $rbac (not .Values.kagent.disableWiring) }}
 {{- /*
 Agent wiring: model-manager creates, updates and deletes kagent ModelConfigs
 (and placeholder API-key Secrets for OpenAI-compatible endpoints) in
@@ -36,7 +43,7 @@ subjects:
     name: {{ include "model-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if and .Values.rbac.create (eq .Values.backend "kserve") }}
+{{- if and $rbac (eq .Values.backend "kserve") }}
 {{- /*
 KServe backend, in the serving namespace: InferenceServices; download Jobs and
 their pods (progress from pod logs); the short-lived cache-tool pods that scan
