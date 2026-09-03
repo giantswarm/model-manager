@@ -129,7 +129,10 @@ func (f *fakeServing) FitCheck(_ context.Context, req backend.FitRequest) (*back
 	return &backend.FitResult{Model: req.Model, Fits: fits, Preset: req.Preset, Node: "n1", WeightsBytes: 10, OverheadBytes: 20, RequiredBytes: 30, BudgetBytes: 64, FreeBytes: 64, Reason: "because"}, nil
 }
 func (f *fakeServing) ListNodes(context.Context) ([]backend.NodeInfo, error) {
-	return []backend.NodeInfo{{Name: "n1", Ready: true, BudgetBytes: 64, BudgetSource: "allocatable", Cache: &backend.NodeCache{Claim: "hf-cache", MountPath: "/mnt/models", Models: 1}}}, nil
+	return []backend.NodeInfo{
+		{Name: "n1", Ready: true, Eligible: true, BudgetBytes: 64, BudgetSource: "allocatable", Cache: &backend.NodeCache{Claim: "hf-cache", MountPath: "/mnt/models", Models: 1}},
+		{Name: "gpu2", Ready: true, Eligible: false, EligibilityReason: "cache claim hf-cache is pinned to n1", BudgetBytes: 128, BudgetSource: "gpu-labels"},
+	}, nil
 }
 
 type servingFixture struct {
@@ -217,10 +220,15 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	status, body = f.do(t, http.MethodGet, Prefix+"/nodes", nil)
 	require.Equal(t, http.StatusOK, status)
 	nodes := body["nodes"].([]any)
-	require.Len(t, nodes, 1)
+	require.Len(t, nodes, 2)
 	n := nodes[0].(map[string]any)
 	assert.Equal(t, "n1", n["name"])
+	assert.Equal(t, true, n["eligible"])
+	assert.NotContains(t, n, "eligibilityReason", "no reason on an eligible node")
 	assert.Equal(t, "hf-cache", n["cache"].(map[string]any)["claim"])
+	other := nodes[1].(map[string]any)
+	assert.Equal(t, false, other["eligible"])
+	assert.Equal(t, "cache claim hf-cache is pinned to n1", other["eligibilityReason"])
 }
 
 func TestServingReadsAreUnsupportedOnOllama(t *testing.T) {

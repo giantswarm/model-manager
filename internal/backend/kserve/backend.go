@@ -618,9 +618,14 @@ func (b *Backend) FitCheck(ctx context.Context, req backend.FitRequest) (*backen
 	return &res, nil
 }
 
-// ListNodes implements backend.NodeLister.
+// ListNodes implements backend.NodeLister: the accelerator nodes, each with
+// its budget, reservation, cache and whether it is a serving target.
 func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
-	nodes, err := b.nodes(ctx)
+	loc, err := b.cacheNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := b.nodes(ctx, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -630,10 +635,6 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 		return nil, err
 	}
 	reserved := b.reservedByNode(ctx, indexPresets(presets), nil)
-	loc, err := b.cacheNodes(ctx)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache

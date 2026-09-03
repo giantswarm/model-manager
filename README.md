@@ -153,6 +153,26 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   `cache.error`. The node holding the cache comes from the bound
   PersistentVolume's node affinity. `GET /api/v1/nodes` says which nodes hold
   a cache at all and what their memory budget is.
+- **Nodes and eligibility** — `GET /api/v1/nodes` lists the **accelerator
+  nodes only**: nodes that advertise the configured GPU resource
+  (`gpuResourceName` from discovery, default `nvidia.com/gpu`; capacity or
+  allocatable > 0) or carry a gpu-feature-discovery label
+  (`nvidia.com/gpu.present`, `.count`, `.product`). CPU-only nodes are not
+  serving capacity for this backend. Each node says whether a model can be
+  served there right now: `eligible` is true when the node is ready, matches
+  the discovery `nodeSelector`, and can mount the cache claim whenever
+  predictors mount it (cache enabled and `cache.redirectPolicy` on — the
+  Kyverno rule that mounts the claim into every predictor) and the claim is
+  pinned to nodes (a static local PersistentVolume or a `local-path` volume);
+  a shared (RWX), unbound, missing or disabled cache never disqualifies a
+  node. `eligibilityReason` names every failing rule (`not ready`, `outside
+  the serving node selector (kubernetes.io/hostname=spark-8723)`, `cache claim
+  hf-cache is pinned to spark-8723`). `pull`, `load` and `fit-check` refuse
+  an explicit `node` that is not eligible with that reason (`412
+  does_not_fit`; `fits=false` on the fit check) before any Job or
+  InferenceService exists, and never pick an ineligible node themselves. A
+  second node-local GPU node becomes a serving target only with per-node
+  claims or shared storage — a chart decision, not a flag here.
 - **Import** — `search` proxies the Hugging Face Hub; `fit-check` resolves the
   weight size (`model.safetensors.index.json`, else the file tree, else the
   preset), adds the preset's `overheadGiB` (default 30) and compares with the

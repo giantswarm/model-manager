@@ -213,7 +213,7 @@ paths:
                   description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
                 node:
                   type: string
-                  description: kserve — node whose cache receives the download. Default = the cache node, else the node with the largest budget.
+                  description: "kserve — node whose cache receives the download; must be eligible (GET /api/v1/nodes), else the job fails with does_not_fit and the eligibility reason. Default = the cache node, else the eligible node with the largest budget."
       responses:
         "202":
           description: job accepted (or joined)
@@ -266,7 +266,7 @@ paths:
                   description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
                 node:
                   type: string
-                  description: kserve — pin the predictor to this node.
+                  description: "kserve — pin the predictor to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no InferenceService is created."
       responses:
         "200":
           description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; kserve with `status` Pending)
@@ -297,7 +297,12 @@ paths:
         `model-manager.giantswarm.io/memory-budget-gib` overrides it —
         `budgetSource` says which applied). `fits=false` is a 200 with the
         explanation in `reason`; pull and load refuse such models with
-        `412 does_not_fit`.
+        `412 does_not_fit`. A `node` that is not a serving target
+        (`eligible: false` on `GET /api/v1/nodes`, or a CPU-only node that is
+        not listed there) answers `fits=false` with the eligibility reason
+        and no `node`; pull and load refuse it the same way, before any Job
+        or InferenceService is created. Without a `node` only eligible nodes
+        are considered.
       operationId: fitCheck
       x-mcp-tool: check_fit
       requestBody:
@@ -309,7 +314,7 @@ paths:
               properties:
                 model: { type: string, description: Hugging Face repository owner/name; required unless preset is given }
                 preset: { type: string }
-                node: { type: string, description: node to check against; default = the best eligible node }
+                node: { type: string, description: "node to check against — must be eligible (GET /api/v1/nodes); default = the eligible node with the most free budget, cache nodes first" }
       responses:
         "200":
           description: fit result
@@ -380,13 +385,27 @@ paths:
       tags: [serving]
       summary: Node memory budgets, reservations and download caches
       description: |
-        kserve: every node with its memory budget for fit checks
+        kserve: the accelerator nodes only — nodes that advertise the
+        configured GPU resource (`gpuResourceName` of the discovery ConfigMap,
+        default `nvidia.com/gpu`; capacity or allocatable > 0) or carry a
+        gpu-feature-discovery label (`nvidia.com/gpu.present`, `.count`,
+        `.product`); CPU-only nodes are not serving capacity and are left
+        out. Each node comes with its memory budget for fit checks
         (`budgetSource`: `gpu-labels` from the NVIDIA feature-discovery labels,
         `allocatable` memory, or `annotation` when the node carries
         `model-manager.giantswarm.io/memory-budget-gib: "<GiB>"` — the
         per-node override for unified-memory nodes), what running models
-        reserve, and the download cache the node holds. `message` reports an
-        ignored, unparsable annotation.
+        reserve, the download cache the node holds, and `eligible`: whether a
+        model can be served there right now — the node is ready, inside the
+        serving `nodeSelector` of the discovery ConfigMap, and can mount the
+        cache claim whenever predictors mount it (cache enabled with
+        `cache.redirectPolicy` on) and the claim is pinned to nodes (a static
+        local PersistentVolume). `eligibilityReason` explains a false value,
+        e.g. `outside the serving node selector
+        (kubernetes.io/hostname=spark-8723); cache claim hf-cache is pinned to
+        spark-8723` or `not ready`; pull, load and fit-check refuse such a
+        node with that reason. `message` reports an ignored, unparsable
+        annotation.
 
         ollama: one node, the proxied host (`name` = the host agents dial,
         e.g. `172.21.0.1`). Ollama's API has no capacity endpoint, so
@@ -574,7 +593,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     DoesNotFit:
-      description: the fit check refused the model (kserve); the message explains the numbers
+      description: "the fit check refused the model (kserve) — the numbers do not fit, or the named node is not a serving target (eligible=false on GET /api/v1/nodes); the message says which"
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -610,7 +629,7 @@ components:
         wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
         presets: { type: boolean, description: curated serving presets (kserve) }
         fitCheck: { type: boolean, description: node-memory fit check (kserve) }
-        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: every node with its download cache; ollama: the proxied host from /proc/meminfo and /api/ps)" }
+        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps)" }
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
@@ -842,10 +861,12 @@ components:
         cached: { type: boolean, description: the model is already in the node's cache }
     NodeInfo:
       type: object
-      required: [name, ready, allocatableMemoryBytes, gpuCount, budgetBytes, reservedBytes, freeBytes]
+      required: [name, ready, eligible, allocatableMemoryBytes, gpuCount, budgetBytes, reservedBytes, freeBytes]
       properties:
         name: { type: string }
         ready: { type: boolean }
+        eligible: { type: boolean, description: "a model can be served on this node right now (kserve: ready, inside the serving node selector, able to mount the cache claim when predictors mount it; ollama: always true, the host is the only serving target); pull, load and fit-check refuse a node with eligible=false and echo the reason" }
+        eligibilityReason: { type: string, description: "why eligible is false, human-readable, several reasons joined with `; ` (kserve: `not ready`, `outside the serving node selector (k=v)`, `cache claim <claim> is pinned to <node>`); absent when eligible" }
         architecture: { type: string, example: arm64 }
         allocatableMemoryBytes: { type: integer, format: int64 }
         gpuCount: { type: integer, format: int64, description: accelerators on the node (kserve, from the GPU resource / feature-discovery labels); 0 on ollama, whose API does not expose them }
