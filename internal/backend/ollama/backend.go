@@ -44,6 +44,9 @@ type Backend struct {
 	agentHost string
 	// meminfoPath is the /proc/meminfo the host node's budget is read from.
 	meminfoPath string
+	// memoryBudgetGiB is the operator's budget override for the host node
+	// (OllamaOptions.MemoryBudgetGiB), raw; empty means none.
+	memoryBudgetGiB string
 }
 
 // Factory builds the driver from backend.Options.
@@ -70,7 +73,7 @@ func New(opts backend.OllamaOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo}, nil
+	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo, memoryBudgetGiB: opts.MemoryBudgetGiB}, nil
 }
 
 // NewWithClient builds the driver around an existing client (tests).

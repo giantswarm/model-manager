@@ -321,12 +321,13 @@ type NodeInfo struct {
 	// BudgetBytes is the memory a served model may use on this node and
 	// BudgetSource how it was derived: gpu-labels, allocatable, annotation
 	// (the node's model-manager.giantswarm.io/memory-budget-gib annotation
-	// overrode the configured source) or host-meminfo (ollama: MemTotal of
-	// /proc/meminfo as the model-manager pod sees it).
+	// overrode the configured source), host-meminfo (ollama: MemTotal of
+	// /proc/meminfo as the model-manager pod sees it) or override (ollama:
+	// the operator's ollama.memoryBudgetGiB replaced that figure).
 	BudgetBytes  int64  `json:"budgetBytes"`
 	BudgetSource string `json:"budgetSource,omitempty"`
 	// Message notes a budget derivation problem, e.g. an ignored, unparsable
-	// budget annotation.
+	// budget annotation or override, or explains the figures (ollama).
 	Message string `json:"message,omitempty"`
 	// ReservedBytes is what the models already served on the node need.
 	ReservedBytes int64 `json:"reservedBytes"`

@@ -27,9 +27,10 @@ import (
 type serveOptions struct {
 	listen string
 
-	backendName     string
-	ollamaEndpoint  string
-	ollamaAgentHost string
+	backendName           string
+	ollamaEndpoint        string
+	ollamaAgentHost       string
+	ollamaMemoryBudgetGiB string
 
 	kserve kserveFlags
 
@@ -103,6 +104,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve (MODEL_MANAGER_BACKEND)")
 	f.StringVar(&o.ollamaEndpoint, "ollama-endpoint", envOr("OLLAMA_ENDPOINT", "http://127.0.0.1:11434"), "Ollama API base URL as reached by model-manager (OLLAMA_ENDPOINT)")
 	f.StringVar(&o.ollamaAgentHost, "ollama-agent-host", envOr("OLLAMA_AGENT_HOST", ""), "Ollama host written into kagent ModelConfigs, as reached by agent pods; defaults to --ollama-endpoint (OLLAMA_AGENT_HOST)")
+	f.StringVar(&o.ollamaMemoryBudgetGiB, "ollama-memory-budget-gib", envOr("MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB", ""), "Memory budget of the proxied host in GiB (decimals allowed), reported on /api/v1/nodes as budgetSource=override instead of MemTotal of the pod's /proc/meminfo — for Docker Desktop, another VM-backed runtime or an Ollama on another machine; empty or 0: the pod's view (MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB)")
 
 	k := &o.kserve
 	f.StringVar(&k.discoveryNamespace, "kserve-discovery-namespace", envOr("KSERVE_DISCOVERY_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace of the model-serving discovery ConfigMap; defaults to the pod's namespace (KSERVE_DISCOVERY_NAMESPACE, POD_NAMESPACE)")
@@ -174,7 +176,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	backend.Register(backend.NameOllama, ollama.Factory)
 	backend.Register(backend.NameKServe, kserve.Factory)
 	opts := backend.Options{
-		Ollama: backend.OllamaOptions{Endpoint: o.ollamaEndpoint, AgentHost: o.ollamaAgentHost},
+		Ollama: backend.OllamaOptions{Endpoint: o.ollamaEndpoint, AgentHost: o.ollamaAgentHost, MemoryBudgetGiB: o.ollamaMemoryBudgetGiB},
 		KServe: o.kserve.options(),
 	}
 	if clients != nil {

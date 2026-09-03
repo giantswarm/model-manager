@@ -56,6 +56,9 @@ spec:
             {{- if .Values.ollama.agentHost }}
             - --ollama-agent-host={{ .Values.ollama.agentHost }}
             {{- end }}
+            {{- if .Values.ollama.memoryBudgetGiB }}
+            - --ollama-memory-budget-gib={{ .Values.ollama.memoryBudgetGiB }}
+            {{- end }}
             {{- end }}
             {{- if eq .Values.backend "kserve" }}
             {{- $k := .Values.kserve }}

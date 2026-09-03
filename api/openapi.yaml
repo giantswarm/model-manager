@@ -393,8 +393,13 @@ paths:
         `budgetBytes` (= `allocatableMemoryBytes`) is `MemTotal` of
         `/proc/meminfo` as the model-manager pod sees it (`budgetSource:
         host-meminfo`; the machine's RAM when pod and Ollama share a kernel,
-        the VM's under Docker Desktop or another VM-backed runtime),
-        `reservedBytes` is the sum of `size` over Ollama's `/api/ps`,
+        the VM's under Docker Desktop or another VM-backed runtime) unless the
+        operator set the chart value `ollama.memoryBudgetGiB`
+        (`--ollama-memory-budget-gib`): then `budgetBytes` is that figure with
+        `budgetSource: override` while `allocatableMemoryBytes` stays the
+        pod's `MemTotal` — the counterpart of the kserve node annotation; a
+        value that is not a positive number of GiB is ignored and named in
+        `message`. `reservedBytes` is the sum of `size` over Ollama's `/api/ps`,
         `accelerated` says whether any loaded model has memory on an
         accelerator (`size_vram` > 0). `gpuCount` is 0 — accelerators are not
         observable through Ollama's API; the per-model share is
@@ -848,8 +853,8 @@ components:
         gpuProduct: { type: string }
         accelerated: { type: boolean, description: "ollama only: true when any loaded model has memory on an accelerator (`size_vram` > 0 in /api/ps, i.e. `running.vramBytes` > 0), false when none has or nothing is loaded; absent on backends that count accelerators in gpuCount" }
         budgetBytes: { type: integer, format: int64 }
-        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo], description: how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node; `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama) }
-        message: { type: string, description: a budget derivation note — an ignored, unparsable budget annotation (kserve), or what the host figures mean and whether /proc/meminfo could be read (ollama) }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo, override], description: "how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node (kserve); `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama); `override` = set by the operator through the chart value `ollama.memoryBudgetGiB` / `--ollama-memory-budget-gib` (ollama)" }
+        message: { type: string, description: "a budget derivation note — an ignored, unparsable budget annotation (kserve); what the host figures mean, whether /proc/meminfo could be read and whether an operator override applied or was ignored (ollama)" }
         reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps)" }
         freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
         cache:
