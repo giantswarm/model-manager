@@ -75,6 +75,13 @@ func (f *fakeServing) Pull(ctx context.Context, req backend.PullRequest, progres
 	f.mu.Lock()
 	f.pulls = append(f.pulls, req)
 	f.mu.Unlock()
+	// Like the kserve driver: the first sample says where the download lands
+	// — the named node, else the one the fit check picked (n1 here).
+	node := req.Node
+	if node == "" {
+		node = "n1"
+	}
+	progress(backend.Progress{Status: "download job created", Node: node, Preset: req.Preset})
 	return f.fakeBackend.Pull(ctx, req, progress)
 }
 func (f *fakeServing) Load(ctx context.Context, req backend.LoadRequest) error {
@@ -240,9 +247,13 @@ func TestServingPullRefusesWireAndUnfit(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, status, body)
 	job := body["job"].(map[string]any)
 	assert.Equal(t, false, job["wire"])
+	assert.Equal(t, "tiny", job["preset"], "the 202 echoes what the request named")
+	assert.Equal(t, "n1", job["node"])
 	done := f.waitJob(t, job["id"].(string))
 	assert.Equal(t, "succeeded", done["phase"])
 	assert.Nil(t, done["result"])
+	assert.Equal(t, "tiny", done["preset"])
+	assert.Equal(t, "n1", done["node"])
 	assert.Empty(t, f.wirer.refs, "kserve models are wired when served, not when pulled")
 	f.backend.mu.Lock()
 	require.Len(t, f.backend.pulls, 1)
@@ -255,6 +266,33 @@ func TestServingPullRefusesWireAndUnfit(t *testing.T) {
 	done = f.waitJob(t, body["job"].(map[string]any)["id"].(string))
 	assert.Equal(t, "failed", done["phase"])
 	assert.Contains(t, done["error"], "does not fit")
+}
+
+func TestServingPullJobCarriesTheNodeTheBackendPicked(t *testing.T) {
+	f := newServingFixture(t)
+	// The request left the node open: the job carries no node until the
+	// backend's fit check picked one, then names it — in GET /jobs too, so a
+	// client that did not issue the pull can place the download.
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/pull", map[string]any{"model": "org/open"})
+	require.Equal(t, http.StatusAccepted, status, body)
+	job := body["job"].(map[string]any)
+	assert.NotContains(t, job, "node")
+	assert.NotContains(t, job, "preset")
+	done := f.waitJob(t, job["id"].(string))
+	assert.Equal(t, "succeeded", done["phase"])
+	assert.Equal(t, "n1", done["node"], "the node the backend picked")
+	assert.NotContains(t, done, "preset", "none named, none resolved by this fake")
+
+	status, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
+	require.Equal(t, http.StatusOK, status)
+	var listed map[string]any
+	for _, j := range list["jobs"].([]any) {
+		if jm := j.(map[string]any); jm["id"] == job["id"] {
+			listed = jm
+		}
+	}
+	require.NotNil(t, listed)
+	assert.Equal(t, "n1", listed["node"])
 }
 
 func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
@@ -326,8 +364,12 @@ func TestServingRunAdoptsPullsAndReconcilesWiring(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 5*time.Millisecond)
+	assert.Equal(t, "n1", adopted["node"], "read back from the download Job's annotations")
+	assert.Equal(t, "tiny", adopted["preset"])
 	done := f.waitJob(t, adopted["id"].(string))
 	assert.Equal(t, "succeeded", done["phase"])
+	assert.Equal(t, "n1", done["node"])
+	assert.Equal(t, "tiny", done["preset"])
 
 	// A model served and ready without a load job (created out of band) gets
 	// wired by the reconciler.

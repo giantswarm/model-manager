@@ -155,7 +155,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		mcp.WithDescription("List pull jobs (newest first) with phase and progress."),
+		mcp.WithDescription("List jobs (newest first) with phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listJobs)
 

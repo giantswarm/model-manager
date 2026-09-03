@@ -58,6 +58,13 @@ type Job struct {
 	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
 	// Wire records whether the job wires the model into kagent when done.
 	Wire bool `json:"wire"`
+	// Node is the node whose cache receives a pull (kserve): the one the
+	// request named, else the one the backend picked after its fit check.
+	// Empty on backends without placement (ollama) and on a shared cache.
+	Node string `json:"node,omitempty"`
+	// Preset is the serving preset a pull is for (kserve): the one the request
+	// named, else the single preset the backend resolved for the model.
+	Preset string `json:"preset,omitempty"`
 	// Result is operation-specific output (pull: the ModelConfig reference).
 	Result any `json:"result,omitempty"`
 }
@@ -118,6 +125,10 @@ type StartRequest struct {
 	Type  Type
 	Model string
 	Wire  bool
+	// Node and Preset are what the request named (or what a re-adopted
+	// download Job carries); the backend refines them through Progress.
+	Node   string
+	Preset string
 }
 
 // Start begins a job in the background and returns its initial snapshot. If a
@@ -141,6 +152,8 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 			Phase:     PhasePending,
 			CreatedAt: m.now(),
 			Wire:      req.Wire,
+			Node:      req.Node,
+			Preset:    req.Preset,
 		},
 		cancel: cancel,
 	}
@@ -167,6 +180,12 @@ func (m *Manager) run(ctx context.Context, id string, fn RunFunc) {
 			}
 			if p.BytesCompleted > j.BytesCompleted {
 				j.BytesCompleted = p.BytesCompleted
+			}
+			if p.Node != "" {
+				j.Node = p.Node
+			}
+			if p.Preset != "" {
+				j.Preset = p.Preset
 			}
 			if j.BytesTotal > 0 {
 				j.Percent = float64(j.BytesCompleted) / float64(j.BytesTotal) * 100

@@ -190,6 +190,12 @@ type Progress struct {
 	Status         string `json:"status"`
 	BytesCompleted int64  `json:"bytesCompleted"`
 	BytesTotal     int64  `json:"bytesTotal"`
+	// Node and Preset name where the pull lands once the backend has decided
+	// (kserve: the node the fit check picked when the request left it open,
+	// the preset resolved from the model). Empty leaves the job's values as
+	// they are; drivers without placement (ollama) never set them.
+	Node   string `json:"node,omitempty"`
+	Preset string `json:"preset,omitempty"`
 }
 
 // PullRequest asks the backend to import a model.

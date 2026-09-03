@@ -188,7 +188,9 @@ paths:
         with `created: false`. Poll `GET /api/v1/jobs/{id}` for progress. On
         success the model is wired into kagent (job `result` carries the
         ModelConfig reference) unless `wire` is false or the server's autoWire
-        is off.
+        is off. On kserve the job echoes `preset` and `node`: the values the
+        request named right away, and the node model-manager picked itself
+        once the fit check ran.
       operationId: pullModel
       x-mcp-tool: pull_model
       requestBody:
@@ -761,6 +763,12 @@ components:
         startedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
         wire: { type: boolean, description: whether the job wires the model on success }
+        node:
+          type: string
+          description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama and on a shared cache."
+        preset:
+          type: string
+          description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama."
         result:
           description: operation output; for pull with wire and for load jobs, the ModelConfigRef
           oneOf:
