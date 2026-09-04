@@ -61,6 +61,22 @@ ServiceAccount name.
 {{- end }}
 
 {{/*
+The serving backends the release runs, as a JSON list: `backends` when set,
+else `[backend]`. The first is the default backend.
+*/}}
+{{- define "model-manager.backends" -}}
+{{- if .Values.backends }}{{ .Values.backends | toJson }}{{ else }}{{ list .Values.backend | toJson }}{{ end }}
+{{- end }}
+
+{{/*
+Truthy when the named driver is among the release's backends.
+Usage: include "model-manager.hasBackend" (dict "root" . "name" "kserve")
+*/}}
+{{- define "model-manager.hasBackend" -}}
+{{- if has .name (include "model-manager.backends" .root | fromJsonArray) }}true{{ end }}
+{{- end }}
+
+{{/*
 Serving namespace of the kserve backend (InferenceServices, download Jobs,
 cache); defaults to the release namespace.
 */}}

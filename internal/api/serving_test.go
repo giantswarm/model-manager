@@ -39,7 +39,14 @@ func newFakeServing() *fakeServing {
 	}
 }
 
-func (f *fakeServing) Name() backend.Name { return backend.NameKServe }
+// Name is kserve unless the embedded fake was given another name (a second
+// serving-shaped backend in one service).
+func (f *fakeServing) Name() backend.Name {
+	if f.name != "" {
+		return f.name
+	}
+	return backend.NameKServe
+}
 
 // GetModel resolves preset names too, as the kserve driver does.
 func (f *fakeServing) GetModel(ctx context.Context, name string) (*backend.Model, error) {
@@ -51,7 +58,7 @@ func (f *fakeServing) GetModel(ctx context.Context, name string) (*backend.Model
 	return f.fakeBackend.GetModel(ctx, name)
 }
 func (f *fakeServing) Info(context.Context) backend.Info {
-	return backend.Info{Backend: backend.NameKServe, Version: "serving.kserve.io/v1beta1", Healthy: true}
+	return backend.Info{Backend: f.Name(), Version: "serving.kserve.io/v1beta1", Healthy: true}
 }
 func (f *fakeServing) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error) {
 	loaded, err := f.fakeBackend.ListLoaded(ctx)
@@ -147,7 +154,7 @@ func newServingFixture(t *testing.T) *servingFixture {
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny", Path: "tiny", Node: "n1"}
 	fw := newFakeWirer()
-	svc := service.New(fb, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -206,6 +213,7 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, true, body["fits"])
 	assert.Equal(t, "n1", body["node"])
+	assert.Equal(t, "kserve", body["backend"], "the fit result names its backend")
 	status, body = f.do(t, http.MethodPost, Prefix+"/models/fit-check", map[string]any{"model": "org/huge"})
 	require.Equal(t, http.StatusOK, status, "a negative fit check is a 200 with fits=false")
 	assert.Equal(t, false, body["fits"])
@@ -223,6 +231,7 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	require.Len(t, nodes, 2)
 	n := nodes[0].(map[string]any)
 	assert.Equal(t, "n1", n["name"])
+	assert.Equal(t, "kserve", n["backend"], "every node names its backend")
 	assert.Equal(t, true, n["eligible"])
 	assert.NotContains(t, n, "eligibilityReason", "no reason on an eligible node")
 	assert.Equal(t, "hf-cache", n["cache"].(map[string]any)["claim"])
@@ -386,10 +395,10 @@ func TestServingRunAdoptsPullsAndReconcilesWiring(t *testing.T) {
 	f.backend.fakeBackend.mu.Unlock()
 	f.backend.setReady("org/tiny")
 	require.Eventually(t, func() bool {
-		ref, _ := f.wirer.Lookup(ctx, "org/tiny")
+		ref, _ := f.wirer.Lookup(ctx, backend.NameKServe, "org/tiny")
 		return ref != nil
 	}, 2*time.Second, 5*time.Millisecond)
-	ref, _ := f.wirer.Lookup(ctx, "org/tiny")
+	ref, _ := f.wirer.Lookup(ctx, backend.NameKServe, "org/tiny")
 	assert.Equal(t, "OpenAI", ref.Provider)
 }
 
@@ -397,7 +406,7 @@ func TestServingMCPTools(t *testing.T) {
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny"}
 	fw := newFakeWirer()
-	svc := service.New(fb, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	srv := NewMCPServer(svc, "test")
 
 	out, isErr := callTool(t, srv, ToolListPresets, nil)
@@ -436,7 +445,7 @@ func TestServingMCPTools(t *testing.T) {
 	assert.Contains(t, out, "wired when loaded")
 
 	// The ollama-shaped fake answers unsupported for the kserve tools.
-	plain := NewMCPServer(service.New(newFakeBackend(), jobs.NewManager(), nil, nil, service.Config{}, nil), "test")
+	plain := NewMCPServer(service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), nil, nil, service.Config{}, nil), "test")
 	for _, tool := range []string{ToolListPresets, ToolListNodes} {
 		out, isErr = callTool(t, plain, tool, nil)
 		assert.True(t, isErr, tool)
@@ -496,9 +505,7 @@ func TestServingDedupesPortalWiredModelConfigs(t *testing.T) {
 	status, _ = f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
 	require.Equal(t, http.StatusOK, status)
 	require.Eventually(t, func() bool {
-		f.wirer.mu.Lock()
-		defer f.wirer.mu.Unlock()
-		r, ok := f.wirer.refs["org/tiny"]
+		r, ok := f.wirer.get(backend.NameKServe, "org/tiny")
 		return ok && r.Name == "org-tiny" && r.Managed
 	}, 2*time.Second, 5*time.Millisecond)
 }

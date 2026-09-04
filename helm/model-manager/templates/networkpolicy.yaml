@@ -50,7 +50,7 @@ spec:
         - ipBlock:
             cidr: {{ . }}
     {{- end }}
-    {{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+    {{- if and (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (eq .Values.kserve.inventory.mode "daemonset") }}
     # The cache-agent pods of the DaemonSet inventory, in the serving namespace.
     - to:
         - namespaceSelector:
@@ -63,7 +63,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.kserve.inventory.agent.port }}
     {{- end }}
-{{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+{{- if and (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (eq .Values.kserve.inventory.mode "daemonset") }}
 ---
 # The cache-agent pods accept model-manager only (kubelet probes come from
 # the node and are not subject to NetworkPolicy in the common implementations).

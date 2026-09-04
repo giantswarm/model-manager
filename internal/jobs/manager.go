@@ -44,10 +44,13 @@ var ErrNotFound = errors.New("job not found")
 // Job is a snapshot of one operation. Values returned by the manager are
 // copies; mutate nothing.
 type Job struct {
-	ID    string `json:"id"`
-	Type  Type   `json:"type"`
-	Model string `json:"model"`
-	Phase Phase  `json:"phase"`
+	ID   string `json:"id"`
+	Type Type   `json:"type"`
+	// Backend is the driver the job runs on; with several backends the same
+	// reference pulled on two of them is two jobs.
+	Backend backend.Name `json:"backend,omitempty"`
+	Model   string       `json:"model"`
+	Phase   Phase        `json:"phase"`
 	// Status is the backend's last progress message (e.g. "pulling manifest").
 	Status         string     `json:"status,omitempty"`
 	BytesCompleted int64      `json:"bytesCompleted"`
@@ -127,9 +130,11 @@ func NewManager(opts ...Option) *Manager {
 
 // StartRequest describes the job to start.
 type StartRequest struct {
-	Type  Type
-	Model string
-	Wire  bool
+	Type Type
+	// Backend is the driver the job runs on (part of the dedupe key).
+	Backend backend.Name
+	Model   string
+	Wire    bool
 	// Context is the request that starts the job. Its values — the caller's
 	// identity and, with downstream OAuth, the caller's token — are inherited
 	// by the job's own context so the job's Kubernetes writes are made as the
@@ -143,14 +148,14 @@ type StartRequest struct {
 }
 
 // Start begins a job in the background and returns its initial snapshot. If a
-// job of the same type for the same model is still pending/running, that job
-// is returned instead and created is false.
+// job of the same type for the same model on the same backend is still
+// pending/running, that job is returned instead and created is false.
 func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneLocked()
 	for _, e := range m.jobs {
-		if e.job.Type == req.Type && e.job.Model == req.Model && !e.job.Done() {
+		if e.job.Type == req.Type && e.job.Backend == req.Backend && e.job.Model == req.Model && !e.job.Done() {
 			return e.job, false
 		}
 	}
@@ -163,6 +168,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 		job: Job{
 			ID:          m.newID(),
 			Type:        req.Type,
+			Backend:     req.Backend,
 			Model:       req.Model,
 			Phase:       PhasePending,
 			CreatedAt:   m.now(),

@@ -87,4 +87,44 @@ if echo "$got" | grep -q -- '^--lemonade-'; then
   fail "ollama backend renders lemonade flags: '$got'"
 fi
 
+# Several backends at once: `backends` renders the list flag plus every listed
+# driver's flags, and never the single --backend flag.
+got=$(args --set 'backends={ollama,lemonade}' --set ollama.endpoint=http://172.21.0.1:11434 \
+  --set lemonade.endpoint=http://172.21.0.1:13305)
+echo "$got" | grep -q -- '^--backends=ollama,lemonade$' \
+  || fail "backends list: --backends=ollama,lemonade not rendered, got '$got'"
+echo "$got" | grep -q -- '^--ollama-endpoint=http://172.21.0.1:11434$' \
+  || fail "backends list: the ollama flags must render for a listed ollama"
+echo "$got" | grep -q -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
+  || fail "backends list: the lemonade flags must render for a listed lemonade"
+if echo "$got" | grep -q -- '^--backend='; then
+  fail "backends list: the single --backend flag must not render next to --backends: '$got'"
+fi
+if echo "$got" | grep -q -- '^--kserve-'; then
+  fail "backends list without kserve renders kserve flags: '$got'"
+fi
+
+# kserve in the list brings its flags, the Kubernetes access and its Roles even
+# with wiring off — as `backend: kserve` alone does.
+got=$(args --set 'backends={ollama,kserve}' --set ollama.endpoint=http://172.21.0.1:11434 --set kagent.disableWiring=true)
+echo "$got" | grep -q -- '^--kserve-namespace=' \
+  || fail "backends list with kserve: the kserve flags must render"
+echo "$got" | grep -q -- '^--in-cluster=true$' \
+  || fail "backends list with kserve and wiring off: Kubernetes access expected"
+helm template mm "$CHART" --show-only templates/rbac.yaml --set 'backends={ollama,kserve}' --set kagent.disableWiring=true \
+  | grep -q -- '^  name: mm-model-manager-kserve$' \
+  || fail "backends list with kserve: the kserve Role must render"
+if helm template mm "$CHART" --show-only templates/rbac.yaml --set 'backends={ollama,lemonade}' --set kagent.disableWiring=true 2>/dev/null \
+  | grep -q -- 'kserve'; then
+  fail "backends list without kserve renders kserve RBAC"
+fi
+
+# The one-backend form is untouched: `backend: ollama` renders --backend=ollama
+# and no --backends.
+got=$(args)
+echo "$got" | grep -q -- '^--backend=ollama$' || fail "single backend: --backend=ollama expected, got '$got'"
+if echo "$got" | grep -q -- '^--backends='; then
+  fail "single backend renders --backends: '$got'"
+fi
+
 echo "verify-chart: ok"

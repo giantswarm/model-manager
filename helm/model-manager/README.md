@@ -6,9 +6,12 @@ Model management service for the Agent Platform — backend-abstracted (ollama, 
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
 (contract: `/api/v1/openapi.yaml`) and the MCP streamable-HTTP endpoint under
-`/mcp`. Pick the serving backend with `backend`; the API reports the backend
-and its capability flags at `GET /api/v1/backend` so clients render only what
-the installation supports.
+`/mcp`. Pick the serving backend with `backend`, or several at once with
+`backends` (one process in front of every server the host runs, e.g.
+`[ollama, lemonade]`); the API reports each backend and its capability flags
+at `GET /api/v1/backends` so clients render only what the installation
+supports. `GET /api/v1/backend` describes the first (default) backend and
+names the others.
 
 - `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
   kind the docker network gateway). Agent wiring uses kagent's native keyless
@@ -22,6 +25,21 @@ the installation supports.
 Used as a dependency of `agent-platform-standalone` behind a `condition`;
 standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
 `mcp.enabled` and `muster.mcpServer.*`.
+
+### Several backends at once
+
+`backends: [ollama, lemonade]` runs both drivers in one process: the Deployment
+passes `--backends` and the flags of every listed driver (each reads its own
+block — `ollama.*`, `lemonade.*`, `kserve.*`), the ServiceAccount token, the
+kserve Roles, the cache-agent DaemonSet and the Hugging Face token Secret
+render when kserve is listed. The order is the operator's: the first backend
+is the **default backend** — the one `GET /api/v1/backend` describes and the
+one `POST /api/v1/models/pull` uses when the request names none (a pull names a
+model that does not exist yet, so nothing else can pick). Every model, loaded
+entry, job, node and ModelConfig reference carries `backend`; reads take
+`?backend=`, mutations a `backend` field, and an unqualified reference that
+exists on two backends answers `409 conflict`. `backend: ollama` alone renders
+exactly what it always did.
 
 ### kserve backend
 
@@ -97,7 +115,8 @@ can stay empty.
 | imagePullSecrets | list | `[]` | Image pull secrets. |
 | nameOverride | string | `""` | Override the chart name. |
 | fullnameOverride | string | `""` | Override the fully qualified release name (the umbrella chart pins the Service name through this). |
-| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend. |
+| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. |
+| backends | list | `[]` | Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone. |
 | ollama.endpoint | string | `"http://host.docker.internal:11434"` | Ollama API base URL as reached from pods. On kind this is the docker network gateway (for example http://172.21.0.1:11434 — agentlab sets it); Docker Desktop resolves host.docker.internal. |
 | ollama.agentHost | string | `""` | Ollama host written into kagent ModelConfigs, as reached by agent pods; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `ollama.endpoint`. |
 | ollama.memoryBudgetGiB | int | `0` | Memory budget of the proxied host in GiB (a number; decimals allowed, also as a string so `--set` can carry them), reported as `budgetBytes` on `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is not the host's: Docker Desktop or another VM-backed runtime (the pod sees the VM's memory), an Ollama on another machine. 0 is off; a value that is not a positive number of GiB is ignored and named in the node's `message`. The ollama counterpart of the kserve node annotation `model-manager.giantswarm.io/memory-budget-gib`. |
@@ -107,7 +126,7 @@ can stay empty.
 | kagent.apiVersion | string | `"auto"` | kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version. |
 | kagent.modelConfigPrefix | string | `""` | Prefix for generated ModelConfig names (empty: the sanitized model name, e.g. smollm2:135m -> smollm2-135m). |
 | kagent.autoWire | bool | `true` | Create a ModelConfig automatically when a pull completes or a model is loaded. |
-| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama and lemonade backends run without the API when wiring is off. |
+| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. A release that runs the kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only releases with the ollama and lemonade backends alone run without the API when wiring is off. |
 | mcp.enabled | bool | `true` | Serve the MCP streamable-HTTP endpoint alongside the REST API. |
 | mcp.path | string | `"/mcp"` | MCP endpoint path. |
 | oauth.enabled | bool | `false` | Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's id_token through the gateway; both are validated against the IdP's JWKS when their audience is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount — only for a server nothing but a trusted proxy can reach. |
@@ -143,7 +162,7 @@ can stay empty.
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name (generated when empty). |
-| rbac.create | bool | `true` | Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when `backend` is kserve, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes) — the ServiceAccount's own permissions. Ignored with `oauth.downstream.enabled`: the ServiceAccount then gets no RBAC at all. |
+| rbac.create | bool | `true` | Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when kserve is among the backends, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes) — the ServiceAccount's own permissions. Ignored with `oauth.downstream.enabled`: the ServiceAccount then gets no RBAC at all. |
 | kserve.namespace | string | `"model-serving"` | Serving namespace: InferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`. |
 | kserve.discovery.configMap | string | `"agent-platform-model-serving"` | Name of the platform's model-serving discovery ConfigMap (kind `ModelServingConfig`, key `config.yaml`) that carries the runtime, GPU resource name, cache claim and preset selector. Empty `kserve.*` overrides below take their value from it. |
 | kserve.discovery.namespace | string | `""` | Namespace of the discovery ConfigMap and, by default, of the preset ConfigMaps. Empty means the release namespace. |

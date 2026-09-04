@@ -29,17 +29,18 @@ spec:
       serviceAccountName: {{ include "model-manager.serviceAccountName" . }}
       {{- /*
       Kubernetes access. The kserve driver talks to the API for everything it
-      does (InferenceServices, download Jobs, cache scans, nodes), so it keeps
-      the ServiceAccount token even with kagent.disableWiring: that flag only
-      switches off the ModelConfig management. Only the ollama and lemonade drivers run
-      without the API once wiring is off; without the token the kserve pod
-      fails with "the kserve backend needs Kubernetes access" and crash-loops.
-      The lemonade driver behaves like ollama: a host server proxied over HTTP,
-      no Kubernetes access of its own.
+      does (InferenceServices, download Jobs, cache scans, nodes), so a release
+      running it keeps the ServiceAccount token even with kagent.disableWiring:
+      that flag only switches off the ModelConfig management. Only releases
+      with the ollama and lemonade drivers alone run without the API once
+      wiring is off; without the token a kserve pod fails with "the kserve
+      backend needs Kubernetes access" and crash-loops. The lemonade driver
+      behaves like ollama: a host server proxied over HTTP, no Kubernetes
+      access of its own.
       rbac.yaml follows the same rule (the kserve Roles render regardless of
       kagent.disableWiring).
       */}}
-      {{- $kubeAccess := or (eq .Values.backend "kserve") (not .Values.kagent.disableWiring) }}
+      {{- $kubeAccess := or (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (not .Values.kagent.disableWiring) }}
       automountServiceAccountToken: {{ $kubeAccess }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -52,8 +53,16 @@ spec:
           args:
             - serve
             - --listen=:8080
+            {{- /*
+            The backends the process runs: the list when set (each listed
+            driver's flags follow), else the single backend as before.
+            */}}
+            {{- if .Values.backends }}
+            - --backends={{ join "," .Values.backends }}
+            {{- else }}
             - --backend={{ .Values.backend }}
-            {{- if eq .Values.backend "ollama" }}
+            {{- end }}
+            {{- if include "model-manager.hasBackend" (dict "root" . "name" "ollama") }}
             - --ollama-endpoint={{ required "ollama.endpoint is required for the ollama backend" .Values.ollama.endpoint }}
             {{- if .Values.ollama.agentHost }}
             - --ollama-agent-host={{ .Values.ollama.agentHost }}
@@ -62,13 +71,13 @@ spec:
             - --ollama-memory-budget-gib={{ .Values.ollama.memoryBudgetGiB }}
             {{- end }}
             {{- end }}
-            {{- if eq .Values.backend "lemonade" }}
+            {{- if include "model-manager.hasBackend" (dict "root" . "name" "lemonade") }}
             - --lemonade-endpoint={{ required "lemonade.endpoint is required for the lemonade backend" .Values.lemonade.endpoint }}
             {{- if .Values.lemonade.agentHost }}
             - --lemonade-agent-host={{ .Values.lemonade.agentHost }}
             {{- end }}
             {{- end }}
-            {{- if eq .Values.backend "kserve" }}
+            {{- if include "model-manager.hasBackend" (dict "root" . "name" "kserve") }}
             {{- $k := .Values.kserve }}
             - --kserve-namespace={{ include "model-manager.kserveNamespace" . }}
             - --kserve-discovery-configmap={{ $k.discovery.configMap }}

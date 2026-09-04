@@ -35,8 +35,18 @@ fullnameOverride: ""
 # presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or
 # `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs,
 # llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports
-# the backend and its capability flags at /api/v1/backend.
+# the backend and its capability flags at /api/v1/backend. The one-backend form
+# of `backends`.
 backend: ollama
+
+# -- Serving backends to run at once, in the operator's order — one process in
+# front of several servers, for example `[ollama, lemonade]` on a host running
+# both. Each driver at most once; every listed driver reads its own block
+# (`ollama.*`, `lemonade.*`, `kserve.*`). The first is the default backend: the
+# one `GET /api/v1/backend` describes and an unqualified pull goes to; every
+# model, job and node the API returns names its backend, every request may
+# name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone.
+backends: []  # @schema item: string; itemEnum: [ollama, kserve, lemonade]; uniqueItems: true
 
 ollama:
   # -- Ollama API base URL as reached from pods. On kind this is the docker
@@ -84,9 +94,10 @@ kagent:
   # loaded.
   autoWire: true
   # -- Disable all ModelConfig management; the `wire` capability reports false.
-  # The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC)
-  # regardless — it needs the API for InferenceServices, Jobs and nodes; only
-  # the ollama and lemonade backends run without the API when wiring is off.
+  # A release that runs the kserve backend keeps its Kubernetes access
+  # (ServiceAccount token, RBAC) regardless — it needs the API for
+  # InferenceServices, Jobs and nodes; only releases with the ollama and
+  # lemonade backends alone run without the API when wiring is off.
   disableWiring: false
 
 mcp:
@@ -233,8 +244,8 @@ serviceAccount:
 
 rbac:
   # -- Create the Role/RoleBinding for ModelConfigs and Secrets in
-  # `kagent.namespace` (and, when `backend` is kserve, the Role in the serving
-  # namespace, the Role for the discovery/preset ConfigMaps and the
+  # `kagent.namespace` (and, when kserve is among the backends, the Role in the
+  # serving namespace, the Role for the discovery/preset ConfigMaps and the
   # ClusterRole for nodes and PersistentVolumes) — the ServiceAccount's own
   # permissions. Ignored with `oauth.downstream.enabled`: the ServiceAccount
   # then gets no RBAC at all.

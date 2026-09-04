@@ -3,7 +3,7 @@
 [![CircleCI](https://dl.circleci.com/status-badge/img/gh/giantswarm/model-manager/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/giantswarm/model-manager/tree/main)
 
 Model management service for the Giant Swarm Agent Platform. One API over
-per-installation **serving backends**:
+**serving backends** — one or several per installation, in one process:
 
 | Backend | Where | What it proxies |
 |---|---|---|
@@ -11,9 +11,15 @@ per-installation **serving backends**:
 | `kserve` | GPU installs (KServe + the platform's `modelServing` component) | InferenceServices composed from serving presets, per-node HF cache inventory, pre-warm download Jobs with progress, Hugging Face Hub search, node fit checks |
 | `lemonade` | AMD Ryzen AI laptops / workstations running [Lemonade Server](https://lemonade-server.ai) on the host (FastFlowLM on the NPU, llama.cpp on GPU / CPU) | `/api/v1/health` (loaded models), `/api/v1/models`, streamed `/api/v1/pull`, `/api/v1/load`, `/api/v1/unload`, `/api/v1/delete`, `/api/v1/system-info` |
 
-The API reports the backend and **explicit capability flags**
-(`GET /api/v1/backend`), so clients render only what an installation supports
-instead of switching on the backend name. Pulled or loaded models are wired
+One model-manager runs every backend the host has (`--backends=ollama,lemonade`,
+chart value `backends: [ollama, lemonade]`): the API reports each backend and
+its **explicit capability flags** (`GET /api/v1/backends`), every model, job and
+node names its `backend`, every request may name one, and an unqualified
+model reference is resolved to the one backend that holds it (`409 conflict`
+when several do). `GET /api/v1/backend` describes the first, default backend
+and names the others — the one-backend form clients of a single backend keep
+using. Clients render only what a backend supports instead of switching on
+its name. Pulled or loaded models are wired
 into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
 for the ollama backend; `OpenAI` provider plus a placeholder API-key Secret —
 against the predictor URL for kserve, created once the InferenceService is
@@ -25,10 +31,11 @@ The same operations are exposed twice from one process:
 - **REST/JSON** under `/api/v1` for the portal backend — contract in
   [`api/openapi.yaml`](api/openapi.yaml), also served at `/api/v1/openapi.yaml`.
 - **MCP** (streamable HTTP, `/mcp`) for muster — tools `get_backend`,
-  `list_models`, `get_model`, `list_loaded_models`, `pull_model`, `load_model`,
-  `unload_model`, `delete_model`, `wire_model`, `unwire_model`, `list_jobs`,
-  `get_job`, `cancel_job`, plus the kserve capabilities `list_presets`,
-  `search_models`, `check_fit`, `list_nodes` (through muster: `x_<server>_<tool>`).
+  `list_backends`, `list_models`, `get_model`, `list_loaded_models`, `pull_model`,
+  `load_model`, `unload_model`, `delete_model`, `wire_model`, `unwire_model`,
+  `list_jobs`, `get_job`, `cancel_job`, plus the kserve capabilities
+  `list_presets`, `search_models`, `check_fit`, `list_nodes` (through muster:
+  `x_<server>_<tool>`); every tool takes an optional `backend`.
 
 Part of [Model management in the Agent Platform](https://github.com/giantswarm/giantswarm/issues/37590);
 decision records: Model Manager PDR, the Ollama-backend ADR and the
@@ -38,25 +45,38 @@ Lemonade-backend ADR in the team's decision log.
 
 | Operation | REST | MCP tool |
 |---|---|---|
-| Backend identity, capabilities + load semantics | `GET /api/v1/backend` | `get_backend` |
-| Downloaded models (with loaded state + ModelConfig) | `GET /api/v1/models`, `GET /api/v1/models/{name}` | `list_models`, `get_model` |
-| Loaded / running models | `GET /api/v1/loaded` | `list_loaded_models` |
-| Pull / import (returns a job) | `POST /api/v1/models/pull {"model","wire?","preset?","node?"}` | `pull_model` |
-| Job progress | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
-| Load / unload | `POST /api/v1/models/load {"model","keepAlive?"}`, `POST /api/v1/models/unload` | `load_model`, `unload_model` |
-| Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false]` | `delete_model` |
-| Wire / unwire to kagent | `POST /api/v1/models/wire`, `POST /api/v1/models/unwire` | `wire_model`, `unwire_model` |
-| Serving presets (kserve) | `GET /api/v1/presets` | `list_presets` |
-| Hub search (kserve) | `GET /api/v1/search?q=…&limit=…` | `search_models` |
-| Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","node?"}` | `check_fit` |
-| Node budgets + reservations (+ caches on kserve) | `GET /api/v1/nodes` | `list_nodes` |
+| Every backend's identity, capabilities + load semantics (the first is the default) | `GET /api/v1/backends` | `list_backends` |
+| One backend (the named one, else the default) plus the names of all | `GET /api/v1/backend[?backend=]` | `get_backend` |
+| Downloaded models (with loaded state + ModelConfig), of one or every backend | `GET /api/v1/models[?backend=]`, `GET /api/v1/models/{name}[?backend=]` | `list_models`, `get_model` |
+| Loaded / running models | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
+| Pull / import (returns a job; on `backend`, else the default backend) | `POST /api/v1/models/pull {"model","backend?","wire?","preset?","node?"}` | `pull_model` |
+| Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
+| Load / unload | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
+| Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
+| Wire / unwire to kagent | `POST /api/v1/models/wire {"model","backend?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
+| Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
+| Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
+| Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","backend?","node?"}` | `check_fit` |
+| Node budgets + reservations (+ caches on kserve) | `GET /api/v1/nodes[?backend=]` | `list_nodes` |
 | Health | `GET /healthz`, `GET /readyz` | — |
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
 `{"error":{"code":"not_found|invalid_request|unsupported|conflict|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
-(412) that the kserve fit check refused a pull or load.
+(412) that the kserve fit check refused a pull or load, `conflict` (409) also
+that an unqualified reference exists on several backends — repeat the request
+with `backend`.
+
+**Several backends in one process.** Every `Model`, `LoadedModel`, `Job`,
+`NodeInfo`, `Preset`, `FitResult` and `ModelConfigRef` carries `backend`. Reads
+without `?backend=` aggregate every backend; a backend that fails to answer is
+reported in the response's `errors` (`{"lemonade": "connection refused"}`)
+while the others' items are returned — `502` only when every backend failed.
+An unknown or unconfigured backend name answers `400`. kagent ModelConfigs are
+one per (backend, model): the label `model-manager.giantswarm.io/backend` plus
+the model annotation identify them, and the same reference on two backends is
+two ModelConfigs (the second named `<derived>-<backend>`).
 
 On kserve, `pull` and `load` accept `preset` and `node`; a model is wired into
 kagent when its InferenceService becomes ready (a `load` job tracks that) and

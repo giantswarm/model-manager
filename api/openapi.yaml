@@ -5,13 +5,28 @@ info:
   description: |
     Backend-agnostic model management for the Giant Swarm Agent Platform.
 
-    One API implemented by per-installation serving backends (`ollama` for
-    laptop/agentlab installs, `kserve` for GPU installs, `lemonade` for hosts
-    running Lemonade Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on
-    GPU and CPU). Clients MUST call
-    `GET /api/v1/backend` first and render only what the returned capability
-    flags allow: a false flag means the matching operation answers
-    `501 unsupported` on this installation.
+    One API implemented by serving backends (`ollama` for laptop/agentlab
+    installs, `kserve` for GPU installs, `lemonade` for hosts running Lemonade
+    Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU). One
+    model-manager runs one or several of them at once (`--backends`, chart
+    value `backends`). Clients MUST call `GET /api/v1/backends` first and
+    render only what each backend's capability flags allow: a false flag
+    means the matching operation answers `501 unsupported` on that backend.
+    `GET /api/v1/backend` stays for clients of one backend: it describes the
+    default backend (the first configured) and names the others in
+    `backends`.
+
+    Every model, loaded entry, job, node, preset, fit result and ModelConfig
+    reference carries `backend`. Reads take an optional `?backend=` filter and
+    otherwise aggregate every backend — a backend that fails to answer is
+    reported in the response's `errors` while the others' items are returned
+    (`502` only when every backend failed). Mutations take an optional
+    `backend` in the body (or query, on `DELETE /api/v1/models/{name}`); a
+    request without it is resolved to the one backend holding the reference —
+    a reference that exists on several backends answers `409 conflict` (name
+    the backend), one on none `404`. A pull without `backend` goes to the
+    default backend. An unknown or unconfigured backend name answers `400
+    invalid_request`, listing the configured ones.
 
     Model references are backend-native strings and may contain `/` and `:`
     (e.g. `smollm2:135m`, `hf.co/org/repo:Q4_K_M`). Path parameters therefore
@@ -64,32 +79,61 @@ paths:
   /backendz:
     get:
       tags: [health]
-      summary: Backend reachability probe (503 when the serving backend does not answer)
+      summary: Backend reachability probe (503 when a serving backend does not answer)
+      description: 200 only when every configured backend answers; the 503 body names the ones that do not.
       operationId: backendz
       responses:
         "200":
-          description: backend answers
+          description: every backend answers
         "503":
-          description: backend unreachable
+          description: a backend is unreachable
+  /api/v1/backends:
+    get:
+      tags: [backend]
+      summary: Every configured backend, in order, each with its own health, capability flags, endpoints and load semantics
+      description: |
+        The first entry is the default backend. Clients build one group of
+        models per backend from these descriptors and the `backend` field on
+        every model; the capability flags of the model's own backend decide
+        which controls render for it.
+      operationId: listBackends
+      x-mcp-tool: list_backends
+      responses:
+        "200":
+          description: backend descriptors
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backends]
+                properties:
+                  backends:
+                    type: array
+                    items: { $ref: "#/components/schemas/Backend" }
   /api/v1/backend:
     get:
       tags: [backend]
-      summary: Backend identity, health, capability flags, endpoints and load semantics
+      summary: One backend — the named one, else the default — plus the names of every configured backend
       description: |
         `endpoint` is the backend as model-manager dials it; `agentEndpoint`
         the backend as agent pods dial it (what ModelConfigs point at), when
         the backend has one. Render controls per capability flag. `loading`
         says how the backend brings models into memory and lets them go —
         use it to word a not-loaded model ("loads on first request" versus
-        "not serving"), never the backend name.
+        "not serving"), never the backend name. `backends` names every
+        configured backend; a client that sees more than one switches to
+        `GET /api/v1/backends`.
       operationId: getBackend
       x-mcp-tool: get_backend
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
           description: backend descriptor
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Backend" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
   /api/v1/openapi.yaml:
     get:
       tags: [backend]
@@ -104,12 +148,14 @@ paths:
   /api/v1/models:
     get:
       tags: [models]
-      summary: Downloaded models (inventory), enriched with loaded state and ModelConfig
+      summary: Downloaded models (inventory) of one or every backend, enriched with loaded state and ModelConfig
       operationId: listModels
       x-mcp-tool: list_models
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
-          description: inventory
+          description: inventory; `errors` names the backends that could not be read (their models are missing)
           content:
             application/json:
               schema:
@@ -119,10 +165,13 @@ paths:
                   models:
                     type: array
                     items: { $ref: "#/components/schemas/Model" }
+                  errors: { $ref: "#/components/schemas/BackendErrors" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/{name}:
     parameters:
       - $ref: "#/components/parameters/ModelName"
+      - $ref: "#/components/parameters/BackendQuery"
     get:
       tags: [models]
       summary: One downloaded model
@@ -134,7 +183,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Model" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Ambiguous" }
         "502": { $ref: "#/components/responses/BackendError" }
     delete:
       tags: [models]
@@ -154,21 +205,26 @@ paths:
               schema:
                 type: object
                 properties:
+                  backend: { type: string, description: the backend the model was deleted from }
                   model: { type: string }
                   deleted: { type: boolean }
                   unwired: { type: boolean }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/loaded:
     get:
       tags: [models]
-      summary: Models currently loaded / serving
+      summary: Models currently loaded / serving, on one or every backend that lists them
       operationId: listLoaded
       x-mcp-tool: list_loaded_models
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
-          description: loaded models
+          description: loaded models; `errors` names the backends that could not be read
           content:
             application/json:
               schema:
@@ -178,6 +234,8 @@ paths:
                   loaded:
                     type: array
                     items: { $ref: "#/components/schemas/LoadedModel" }
+                  errors: { $ref: "#/components/schemas/BackendErrors" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/pull:
@@ -192,7 +250,9 @@ paths:
         ModelConfig reference) unless `wire` is false or the server's autoWire
         is off. On kserve the job echoes `preset` and `node`: the values the
         request named right away, and the node model-manager picked itself
-        once the fit check ran.
+        once the fit check ran. The pull runs on `backend`, else on the
+        default backend (the first configured): a pull names a model that
+        does not exist yet, so nothing else can pick the backend.
       operationId: pullModel
       x-mcp-tool: pull_model
       requestBody:
@@ -203,6 +263,7 @@ paths:
               type: object
               required: [model]
               properties:
+                backend: { $ref: "#/components/schemas/BackendName" }
                 model:
                   type: string
                   description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; kserve Hugging Face repository owner/name[:revision])"
@@ -262,6 +323,7 @@ paths:
             schema:
               type: object
               properties:
+                backend: { $ref: "#/components/schemas/BackendName" }
                 model: { type: string, description: model reference; required unless preset is given }
                 keepAlive:
                   type: string
@@ -287,7 +349,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: an InferenceService of that name exists for another model or is not managed by model-manager
+          description: an InferenceService of that name exists for another model or is not managed by model-manager; or the reference exists on several backends and none was named
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -323,6 +385,7 @@ paths:
             schema:
               type: object
               properties:
+                backend: { $ref: "#/components/schemas/BackendName", description: "the backend to check on; required only when several configured backends offer fit checks (else 409)" }
                 model: { type: string, description: Hugging Face repository owner/name; required unless preset is given }
                 preset: { type: string }
                 node: { type: string, description: "node to check against — must be eligible (GET /api/v1/nodes); default = the eligible node with the most free budget, cache nodes first" }
@@ -334,12 +397,13 @@ paths:
               schema: { $ref: "#/components/schemas/FitResult" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/presets:
     get:
       tags: [serving]
-      summary: Curated serving presets (kserve)
+      summary: Curated serving presets (kserve), of one or every backend that offers them
       description: |
         The published `ServingPreset` ConfigMaps of the platform
         (`agent-platform.giantswarm.io/serving-preset=true`), resolved to what a
@@ -347,6 +411,8 @@ paths:
         requirements, arguments.
       operationId: listPresets
       x-mcp-tool: list_presets
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
           description: presets
@@ -359,15 +425,18 @@ paths:
                   presets:
                     type: array
                     items: { $ref: "#/components/schemas/Preset" }
+                  errors: { $ref: "#/components/schemas/BackendErrors" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/search:
     get:
       tags: [serving]
-      summary: Search the model hub (kserve — Hugging Face Hub)
+      summary: Search the model hub (kserve — Hugging Face Hub) of one or every backend that has one
       operationId: searchModels
       x-mcp-tool: search_models
       parameters:
+        - $ref: "#/components/parameters/BackendQuery"
         - name: q
           in: query
           required: true
@@ -388,6 +457,7 @@ paths:
                   results:
                     type: array
                     items: { $ref: "#/components/schemas/SearchResult" }
+                  errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
@@ -447,9 +517,11 @@ paths:
         `inventory: models`). Always eligible.
       operationId: listNodes
       x-mcp-tool: list_nodes
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
-          description: nodes
+          description: nodes of one or every backend that reports them; `errors` names the backends that could not be read
           content:
             application/json:
               schema:
@@ -459,6 +531,8 @@ paths:
                   nodes:
                     type: array
                     items: { $ref: "#/components/schemas/NodeInfo" }
+                  errors: { $ref: "#/components/schemas/BackendErrors" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/unload:
@@ -480,9 +554,12 @@ paths:
               schema:
                 type: object
                 properties:
+                  backend: { type: string, description: the backend the model was unloaded from }
                   model: { type: string }
                   loaded: { type: boolean, const: false }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/wire:
@@ -504,11 +581,13 @@ paths:
               schema:
                 type: object
                 properties:
+                  backend: { type: string, description: the backend the model was wired on }
                   model: { type: string }
                   modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: a ModelConfig with the derived name exists but is not managed by model-manager
+          description: a ModelConfig with the derived name exists but is not managed by model-manager; or the reference exists on several backends and none was named
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -517,6 +596,11 @@ paths:
     post:
       tags: [wiring]
       summary: Delete the ModelConfig model-manager created for a model (never one created by someone else)
+      description: |
+        Without `backend` the managed ModelConfigs are consulted first — the
+        model may be gone from its backend: one backend wiring the reference
+        is unambiguous, several answer `409`, none falls back to resolving the
+        reference across backends (absent everywhere counts as success).
       operationId: unwireModel
       x-mcp-tool: unwire_model
       requestBody:
@@ -532,15 +616,20 @@ paths:
               schema:
                 type: object
                 properties:
+                  backend: { type: string, description: the backend whose ModelConfig was removed; absent when nothing was found }
                   model: { type: string }
                   modelConfig: { type: "null" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
   /api/v1/jobs:
     get:
       tags: [jobs]
-      summary: List jobs, newest first
+      summary: List jobs, newest first, of one or every backend
       operationId: listJobs
       x-mcp-tool: list_jobs
+      parameters:
+        - $ref: "#/components/parameters/BackendQuery"
       responses:
         "200":
           description: jobs
@@ -592,7 +681,18 @@ components:
       description: Model reference; may contain `/` and `:` (the remainder of the path is the name).
       schema: { type: string }
       example: smollm2:135m
+    BackendQuery:
+      name: backend
+      in: query
+      required: false
+      description: "Restrict the operation to one configured backend (`GET /api/v1/backends` lists them). Reads without it aggregate every backend; a reference without it is resolved to the one backend holding it. An unknown or unconfigured name answers 400."
+      schema: { $ref: "#/components/schemas/BackendName" }
   responses:
+    Ambiguous:
+      description: the reference exists on several backends and the request named none — repeat it with `backend`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     NotFound:
       description: model or job not found
       content:
@@ -631,10 +731,20 @@ components:
               type: string
               enum: [not_found, invalid_request, unsupported, conflict, does_not_fit, backend_error]
             message: { type: string }
+    BackendName:
+      type: string
+      enum: [ollama, kserve, lemonade]
+      description: a configured backend's driver name
+    BackendErrors:
+      type: object
+      description: "per-backend failures of an aggregate read, keyed by backend name: the named backends could not be read (host server down, API unavailable) and their items are missing; absent when every backend answered"
+      additionalProperties: { type: string }
+      example: { lemonade: "dial tcp 172.21.0.1:13305: connection refused" }
     ModelRequest:
       type: object
       required: [model]
       properties:
+        backend: { $ref: "#/components/schemas/BackendName" }
         model: { type: string }
     Capabilities:
       type: object
@@ -659,6 +769,11 @@ components:
         backend:
           type: string
           enum: [ollama, kserve, lemonade]
+        backends:
+          type: array
+          items: { $ref: "#/components/schemas/BackendName" }
+          description: "every configured backend in order, the first being the default backend — only on the descriptor GET /api/v1/backend answers; a client that sees more than one name reads GET /api/v1/backends"
+          example: [ollama, lemonade]
         version: { type: string, description: backend server version }
         endpoint: { type: string, description: backend endpoint as reached by model-manager }
         agentEndpoint:
@@ -727,6 +842,7 @@ components:
       required: [name, sizeBytes, loaded]
       properties:
         name: { type: string, example: smollm2:135m }
+        backend: { $ref: "#/components/schemas/BackendName" }
         digest: { type: string }
         sizeBytes: { type: integer, format: int64 }
         modifiedAt: { type: string, format: date-time }
@@ -754,6 +870,7 @@ components:
       required: [name, sizeBytes]
       properties:
         name: { type: string }
+        backend: { $ref: "#/components/schemas/BackendName" }
         digest: { type: string }
         sizeBytes: { type: integer, format: int64, description: "memory footprint (kserve — the preset's weights; lemonade — the catalog size, Lemonade reports no per-model memory)" }
         vramBytes: { type: integer, format: int64 }
@@ -786,6 +903,7 @@ components:
       required: [name, namespace, ready, managed]
       properties:
         name: { type: string, example: smollm2-135m }
+        backend: { $ref: "#/components/schemas/BackendName", description: "the backend the ModelConfig belongs to (label model-manager.giantswarm.io/backend); with the model reference it identifies the ModelConfig — the same reference on two backends is two ModelConfigs, the second named <derived>-<backend>. Absent on a ModelConfig without the label." }
         namespace: { type: string, example: kagent }
         apiVersion: { type: string, example: kagent.dev/v1alpha2 }
         provider: { type: string, example: Ollama }
@@ -800,6 +918,7 @@ components:
       required: [id, type, model, phase, bytesCompleted, bytesTotal, percent, createdAt, wire]
       properties:
         id: { type: string }
+        backend: { $ref: "#/components/schemas/BackendName", description: "the backend the job runs on; the same reference pulled on two backends is two jobs" }
         type:
           type: string
           enum: [pull, load]
@@ -837,6 +956,7 @@ components:
       required: [name, displayName, model, gpus, weightsBytes, overheadBytes, requiredBytes]
       properties:
         name: { type: string, example: qwen3-14b, description: also the InferenceService name a load creates }
+        backend: { $ref: "#/components/schemas/BackendName" }
         displayName: { type: string }
         description: { type: string, description: operator notes (markdown) }
         source: { type: string, enum: [shipped, values], description: where the preset came from }
@@ -874,6 +994,7 @@ components:
       required: [model, fits, weightsBytes, overheadBytes, requiredBytes, budgetBytes, reservedBytes, freeBytes, gated, private, tokenConfigured, cached]
       properties:
         model: { type: string }
+        backend: { $ref: "#/components/schemas/BackendName" }
         fits: { type: boolean }
         reason: { type: string, description: human-readable explanation of the numbers }
         preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
@@ -897,6 +1018,7 @@ components:
       required: [name, ready, eligible, allocatableMemoryBytes, gpuCount, budgetBytes, reservedBytes, freeBytes]
       properties:
         name: { type: string }
+        backend: { $ref: "#/components/schemas/BackendName" }
         ready: { type: boolean }
         eligible: { type: boolean, description: "a model can be served on this node right now (kserve: ready, inside the serving node selector, able to mount the cache claim when predictors mount it; ollama, lemonade: always true, the host is the only serving target); pull, load and fit-check refuse a node with eligible=false and echo the reason" }
         eligibilityReason: { type: string, description: "why eligible is false, human-readable, several reasons joined with `; ` (kserve: `not ready`, `outside the serving node selector (k=v)`, `cache claim <claim> is pinned to <node>`); absent when eligible" }

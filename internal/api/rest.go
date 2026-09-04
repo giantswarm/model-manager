@@ -41,6 +41,7 @@ func NewREST(svc *service.Service, log *slog.Logger) *REST {
 // Register mounts the routes on mux.
 func (h *REST) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+Prefix+"/backend", h.getBackend)
+	mux.HandleFunc("GET "+Prefix+"/backends", h.listBackends)
 	mux.HandleFunc("GET "+Prefix+"/openapi.yaml", h.getOpenAPI)
 	mux.HandleFunc("GET "+Prefix+"/models", h.listModels)
 	mux.HandleFunc("GET "+Prefix+"/loaded", h.listLoaded)
@@ -61,7 +62,11 @@ func (h *REST) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+Prefix+"/nodes", h.listNodes)
 }
 
+// modelRequest is the body of the mutating model routes. Backend names the
+// driver the request addresses; empty resolves the reference across the
+// configured backends (pull: the default backend).
 type modelRequest struct {
+	Backend   string `json:"backend,omitempty"`
 	Model     string `json:"model"`
 	Wire      *bool  `json:"wire,omitempty"`
 	KeepAlive string `json:"keepAlive,omitempty"`
@@ -80,8 +85,30 @@ type errorDetail struct {
 	Message string `json:"message"`
 }
 
+// backendQuery is the optional ?backend= filter of the read routes.
+func backendQuery(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get(argBackend))
+}
+
+// withErrors adds the per-backend failures of an aggregate read to a body.
+func withErrors(body map[string]any, errs service.Errors) map[string]any {
+	if len(errs) > 0 {
+		body["errors"] = errs
+	}
+	return body
+}
+
 func (h *REST) getBackend(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.svc.Backend(r.Context()))
+	resp, err := h.svc.Backend(r.Context(), backendQuery(r))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *REST) listBackends(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"backends": h.svc.Backends(r.Context())})
 }
 
 func (h *REST) getOpenAPI(w http.ResponseWriter, _ *http.Request) {
@@ -91,16 +118,16 @@ func (h *REST) getOpenAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *REST) listModels(w http.ResponseWriter, r *http.Request) {
-	models, err := h.svc.ListModels(r.Context())
+	models, errs, err := h.svc.ListModels(r.Context(), backendQuery(r))
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{"models": models}, errs))
 }
 
 func (h *REST) getModel(w http.ResponseWriter, r *http.Request) {
-	m, err := h.svc.GetModel(r.Context(), r.PathValue("name"))
+	m, err := h.svc.GetModel(r.Context(), backendQuery(r), r.PathValue("name"))
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -111,20 +138,21 @@ func (h *REST) getModel(w http.ResponseWriter, r *http.Request) {
 func (h *REST) deleteModel(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	unwire := !strings.EqualFold(r.URL.Query().Get("unwire"), "false")
-	if err := h.svc.Delete(r.Context(), name, unwire); err != nil {
-		h.writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{argModel: name, "deleted": true, "unwired": unwire})
-}
-
-func (h *REST) listLoaded(w http.ResponseWriter, r *http.Request) {
-	loaded, err := h.svc.ListLoaded(r.Context())
+	b, err := h.svc.Delete(r.Context(), backendQuery(r), name, unwire)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"loaded": loaded})
+	writeJSON(w, http.StatusOK, map[string]any{argBackend: b, argModel: name, "deleted": true, "unwired": unwire})
+}
+
+func (h *REST) listLoaded(w http.ResponseWriter, r *http.Request) {
+	loaded, errs, err := h.svc.ListLoaded(r.Context(), backendQuery(r))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{"loaded": loaded}, errs))
 }
 
 func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +160,7 @@ func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	job, created, err := h.svc.Pull(r.Context(), service.PullOptions{Model: req.Model, Wire: req.Wire, Preset: req.Preset, Node: req.Node})
+	job, created, err := h.svc.Pull(r.Context(), service.PullOptions{Backend: req.Backend, Model: req.Model, Wire: req.Wire, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -145,7 +173,7 @@ func (h *REST) load(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.svc.Load(r.Context(), service.LoadOptions{Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node})
+	m, err := h.svc.Load(r.Context(), service.LoadOptions{Backend: req.Backend, Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -158,7 +186,7 @@ func (h *REST) fitCheck(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := h.svc.FitCheck(r.Context(), backend.FitRequest{Model: req.Model, Preset: req.Preset, Node: req.Node})
+	res, err := h.svc.FitCheck(r.Context(), req.Backend, backend.FitRequest{Model: req.Model, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -167,12 +195,12 @@ func (h *REST) fitCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) listPresets(w http.ResponseWriter, r *http.Request) {
-	presets, err := h.svc.Presets(r.Context())
+	presets, errs, err := h.svc.Presets(r.Context(), backendQuery(r))
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"presets": presets})
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{"presets": presets}, errs))
 }
 
 func (h *REST) search(w http.ResponseWriter, r *http.Request) {
@@ -186,21 +214,21 @@ func (h *REST) search(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	hits, err := h.svc.Search(r.Context(), q.Get("q"), limit)
+	hits, errs, err := h.svc.Search(r.Context(), backendQuery(r), q.Get("q"), limit)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"query": q.Get("q"), "results": hits})
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{"query": q.Get("q"), "results": hits}, errs))
 }
 
 func (h *REST) listNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := h.svc.Nodes(r.Context())
+	nodes, errs, err := h.svc.Nodes(r.Context(), backendQuery(r))
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{"nodes": nodes}, errs))
 }
 
 func (h *REST) unload(w http.ResponseWriter, r *http.Request) {
@@ -208,11 +236,12 @@ func (h *REST) unload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.Unload(r.Context(), req.Model); err != nil {
+	b, err := h.svc.Unload(r.Context(), req.Backend, req.Model)
+	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{argModel: req.Model, "loaded": false})
+	writeJSON(w, http.StatusOK, map[string]any{argBackend: b, argModel: req.Model, "loaded": false})
 }
 
 func (h *REST) wire(w http.ResponseWriter, r *http.Request) {
@@ -220,12 +249,12 @@ func (h *REST) wire(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ref, err := h.svc.Wire(r.Context(), req.Model)
+	ref, err := h.svc.Wire(r.Context(), req.Backend, req.Model)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{argModel: req.Model, "modelConfig": ref})
+	writeJSON(w, http.StatusOK, map[string]any{argBackend: ref.Backend, argModel: req.Model, "modelConfig": ref})
 }
 
 func (h *REST) unwire(w http.ResponseWriter, r *http.Request) {
@@ -233,15 +262,25 @@ func (h *REST) unwire(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.Unwire(r.Context(), req.Model); err != nil {
+	b, err := h.svc.Unwire(r.Context(), req.Backend, req.Model)
+	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{argModel: req.Model, "modelConfig": nil})
+	body := map[string]any{argModel: req.Model, "modelConfig": nil}
+	if b != "" {
+		body[argBackend] = b
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
-func (h *REST) listJobs(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": h.svc.Jobs()})
+func (h *REST) listJobs(w http.ResponseWriter, r *http.Request) {
+	list, err := h.svc.Jobs(backendQuery(r))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": list})
 }
 
 func (h *REST) getJob(w http.ResponseWriter, r *http.Request) {

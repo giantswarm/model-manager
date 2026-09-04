@@ -1,4 +1,5 @@
-model-manager is running with the {{ .Values.backend }} backend.
+{{- $backends := include "model-manager.backends" . | fromJsonArray }}
+model-manager is running with the {{ join ", " $backends }} backend{{ if gt (len $backends) 1 }}s (the first is the default backend; GET /api/v1/backends lists them){{ end }}.
 
   REST API : http://{{ include "model-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/v1
   Contract : http://{{ include "model-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/v1/openapi.yaml
@@ -9,7 +10,7 @@ model-manager is running with the {{ .Values.backend }} backend.
 Try it:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "model-manager.fullname" . }} 8080:{{ .Values.service.port }}
-  curl -s localhost:8080/api/v1/backend
+  curl -s localhost:8080/api/v1/backends
   curl -s localhost:8080/api/v1/models
 {{- if .Values.muster.mcpServer.enabled }}
 
