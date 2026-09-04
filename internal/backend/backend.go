@@ -1,9 +1,11 @@
 // Package backend defines the serving-backend abstraction behind model-manager's
 // API. One API — inventory of downloaded and loaded models, import with
 // progress, load/unload, delete, wire-to-agents — implemented by
-// per-installation drivers: `ollama` (host Ollama, the agentlab dev loop) and
+// per-installation drivers: `ollama` (host Ollama, the agentlab dev loop),
 // `kserve` (InferenceServices, HF cache inventory per node, download Jobs,
-// presets). Drivers report what they support as explicit capability flags so
+// presets) and `lemonade` (a Lemonade Server — FastFlowLM on AMD Ryzen AI NPUs,
+// llama.cpp on GPUs and CPUs — on laptops and workstations). Drivers report
+// what they support as explicit capability flags so
 // clients (portal, MCP) render per flag, never per backend name.
 package backend
 
@@ -21,6 +23,9 @@ const (
 	NameOllama Name = "ollama"
 	// NameKServe is the KServe/vLLM driver (GPU installs).
 	NameKServe Name = "kserve"
+	// NameLemonade is the Lemonade Server driver (AMD Ryzen AI hosts: FastFlowLM
+	// on the NPU, llama.cpp on GPU and CPU).
+	NameLemonade Name = "lemonade"
 )
 
 // Sentinel errors drivers return so the API layer can map them to status
@@ -65,7 +70,8 @@ type Capabilities struct {
 	// NodeInventory reports nodes with their memory budget and what loaded
 	// models reserve (kserve: the accelerator nodes with their download cache
 	// and whether each is a serving target; ollama: the proxied host, budget
-	// from /proc/meminfo).
+	// from /proc/meminfo; lemonade: the proxied host as Lemonade's system-info
+	// reports it — memory, accelerators, model store).
 	NodeInventory bool `json:"nodeInventory"`
 	// Search proxies a model hub search (kserve: Hugging Face Hub).
 	Search bool `json:"search"`
@@ -88,12 +94,14 @@ const (
 // backend name.
 type Loading struct {
 	// OnDemand is true when the backend loads a model on the first inference
-	// request naming it (ollama): agents work on a not-loaded model, the first
+	// request naming it (ollama, lemonade): agents work on a not-loaded model, the first
 	// turn pays the cold start. False means a model must be loaded / served
 	// explicitly before agents can use it (kserve).
 	OnDemand bool `json:"onDemand"`
 	// IdleEviction is true when the backend evicts idle models on its own
-	// (ollama keep-alive). False means a loaded model stays until unloaded.
+	// (ollama keep-alive). False means a loaded model stays until unloaded
+	// (kserve; lemonade also lets another model of the same type take the
+	// slot, but never for being idle).
 	IdleEviction bool `json:"idleEviction"`
 	// KeepAliveDefault is model-manager's default keep-alive for a Load
 	// request that carries none (ollama, the configured --default-keep-alive).
@@ -114,7 +122,8 @@ type Info struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	// AgentEndpoint is the backend as reached by agent pods — the host the
 	// driver writes into ModelConfigs (ollama: the agent host, which may
-	// differ from Endpoint). Empty when the backend has no single agent-facing
+	// differ from Endpoint; lemonade: the agent host plus /api/v1, the
+	// OpenAI-compatible base URL). Empty when the backend has no single agent-facing
 	// endpoint (kserve: every served model has its own predictor URL).
 	// Clients that match ModelConfigs to models by hostname compare against
 	// this, not Endpoint.
@@ -133,12 +142,17 @@ type Model struct {
 	Name          string    `json:"name"`
 	Digest        string    `json:"digest,omitempty"`
 	SizeBytes     int64     `json:"sizeBytes"`
-	ModifiedAt    time.Time `json:"modifiedAt,omitempty"`
+	ModifiedAt    time.Time `json:"modifiedAt,omitzero"`
 	Format        string    `json:"format,omitempty"`
 	Family        string    `json:"family,omitempty"`
 	ParameterSize string    `json:"parameterSize,omitempty"`
 	Quantization  string    `json:"quantization,omitempty"`
 	ContextLength int64     `json:"contextLength,omitempty"`
+	// Runtime is what the backend runs the model with, on backends that have
+	// several (lemonade: the recipe — flm for FastFlowLM on the NPU, llamacpp,
+	// ryzenai-llm, ...). Empty on a backend with one runtime (ollama) or where
+	// the preset says (kserve).
+	Runtime string `json:"runtime,omitempty"`
 	// Capabilities are model features as reported by the backend
 	// (e.g. completion, tools, vision, embedding, thinking).
 	Capabilities []string `json:"capabilities,omitempty"`
@@ -184,6 +198,13 @@ type LoadedModel struct {
 	// ManagedBy is the app.kubernetes.io/managed-by label of the serving
 	// object (kserve: model-manager, backstage, ...; empty when unlabelled).
 	ManagedBy string `json:"managedBy,omitempty"`
+	// Device is where the model runs as the backend reports it (lemonade:
+	// npu, gpu, cpu, or several such as "gpu npu"). Absent when the backend
+	// does not say (ollama: VRAMBytes tells; kserve: GPUs).
+	Device string `json:"device,omitempty"`
+	// Pinned is true when the model is exempt from the backend's slot
+	// eviction (lemonade: loaded with keepAlive -1).
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // Progress is a pull-progress sample.
@@ -216,7 +237,8 @@ type PullRequest struct {
 type LoadRequest struct {
 	Name string `json:"name"`
 	// KeepAlive is how long the model stays loaded after the last request
-	// (ollama: duration string or "-1" for forever).
+	// (ollama: duration string or "-1" for forever). lemonade has no timer:
+	// "-1" pins the model against slot eviction, any other value is ignored.
 	KeepAlive string `json:"keepAlive,omitempty"`
 	// Preset selects a curated serving preset (kserve).
 	Preset string `json:"preset,omitempty"`
@@ -332,7 +354,8 @@ type NodeInfo struct {
 	// (the node's model-manager.giantswarm.io/memory-budget-gib annotation
 	// overrode the configured source), host-meminfo (ollama: MemTotal of
 	// /proc/meminfo as the model-manager pod sees it) or override (ollama:
-	// the operator's ollama.memoryBudgetGiB replaced that figure).
+	// the operator's ollama.memoryBudgetGiB replaced that figure) or
+	// system-info (lemonade: the host memory Lemonade Server reports).
 	BudgetBytes  int64  `json:"budgetBytes"`
 	BudgetSource string `json:"budgetSource,omitempty"`
 	// Message notes a budget derivation problem, e.g. an ignored, unparsable
@@ -342,7 +365,7 @@ type NodeInfo struct {
 	ReservedBytes int64 `json:"reservedBytes"`
 	FreeBytes     int64 `json:"freeBytes"`
 	// Cache describes the download cache on this node; nil when the node
-	// holds no cache (always on ollama).
+	// holds no cache (always on ollama; lemonade: the model store).
 	Cache *NodeCache `json:"cache,omitempty"`
 }
 
@@ -357,7 +380,8 @@ type NodeCache struct {
 	// same contents are visible from every node.
 	Shared bool `json:"shared,omitempty"`
 	// Inventory says how the contents were read: "pod" (a short-lived scan
-	// pod on the node) or "daemonset" (the cache-agent DaemonSet pod there).
+	// pod on the node), "daemonset" (the cache-agent DaemonSet pod there) or
+	// "models" (lemonade: the backend's own model list, no scan).
 	Inventory string `json:"inventory,omitempty"`
 	// Error is the last inventory failure; the listed contents may be stale.
 	Error string `json:"error,omitempty"`

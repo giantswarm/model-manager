@@ -1,6 +1,6 @@
 apiVersion: v2
 name: model-manager
-description: Model management service for the Agent Platform — backend-abstracted (ollama, kserve) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
+description: Model management service for the Agent Platform — backend-abstracted (ollama, kserve, lemonade) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -13,6 +13,7 @@ keywords:
   - models
   - ollama
   - kserve
+  - lemonade
   - kagent
   - agent-platform
 maintainers:

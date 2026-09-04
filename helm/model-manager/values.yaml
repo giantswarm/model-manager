@@ -30,10 +30,12 @@ nameOverride: ""
 # Service name through this).
 fullnameOverride: ""
 
-# -- Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop)
-# or `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving
-# presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks).
-# The API reports the backend and its capability flags at /api/v1/backend.
+# -- Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop),
+# `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving
+# presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or
+# `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs,
+# llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports
+# the backend and its capability flags at /api/v1/backend.
 backend: ollama
 
 ollama:
@@ -56,6 +58,19 @@ ollama:
   # `model-manager.giantswarm.io/memory-budget-gib`.
   memoryBudgetGiB: 0  # @schema type: [number, string]; minimum: 0
 
+lemonade:
+  # -- Lemonade Server base URL as reached from pods (its API is under
+  # `/api/v1`; Lemonade listens on 13305 by default). Bind Lemonade to every
+  # interface (`lemonade config set host=0.0.0.0`, or `host` in its
+  # config.json) so the kind docker network gateway reaches it, for example
+  # http://172.21.0.1:13305; Docker Desktop resolves host.docker.internal.
+  endpoint: http://host.docker.internal:13305
+  # -- Lemonade Server base URL as reached by agent pods, written into kagent
+  # ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/api/v1`
+  # appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty
+  # means the same as `lemonade.endpoint`.
+  agentHost: ""
+
 kagent:
   # -- Namespace where kagent ModelConfigs are created (RBAC is scoped here).
   namespace: kagent
@@ -71,7 +86,7 @@ kagent:
   # -- Disable all ModelConfig management; the `wire` capability reports false.
   # The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC)
   # regardless — it needs the API for InferenceServices, Jobs and nodes; only
-  # the ollama backend runs without the API when wiring is off.
+  # the ollama and lemonade backends run without the API when wiring is off.
   disableWiring: false
 
 mcp:
@@ -201,7 +216,8 @@ networkPolicy:
   # -- Namespaces allowed to reach the API (label kubernetes.io/metadata.name).
   # Empty allows ingress from the release namespace only.
   ingressNamespaces: []
-  # -- Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32).
+  # -- Extra egress CIDRs (the host Ollama or Lemonade endpoint, e.g.
+  # 172.21.0.1/32).
   egressCIDRs: []
   # -- Allow egress to the Kubernetes API server (needed for wiring and by the
   # kserve backend).

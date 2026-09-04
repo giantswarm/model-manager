@@ -6,7 +6,9 @@ info:
     Backend-agnostic model management for the Giant Swarm Agent Platform.
 
     One API implemented by per-installation serving backends (`ollama` for
-    laptop/agentlab installs, `kserve` for GPU installs). Clients MUST call
+    laptop/agentlab installs, `kserve` for GPU installs, `lemonade` for hosts
+    running Lemonade Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on
+    GPU and CPU). Clients MUST call
     `GET /api/v1/backend` first and render only what the returned capability
     flags allow: a false flag means the matching operation answers
     `501 unsupported` on this installation.
@@ -53,7 +55,7 @@ paths:
       tags: [health]
       summary: Readiness (the API is serving)
       description: |
-        Does not depend on the serving backend: with the host Ollama down the
+        Does not depend on the serving backend: with the host Ollama or Lemonade Server down the
         API stays reachable and `GET /api/v1/backend` reports `healthy: false`.
       operationId: readyz
       responses:
@@ -203,11 +205,11 @@ paths:
               properties:
                 model:
                   type: string
-                  description: Model reference (ollama registry tag or hf.co/... GGUF ref; kserve Hugging Face repository owner/name[:revision])
+                  description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; kserve Hugging Face repository owner/name[:revision])"
                   example: smollm2:135m
                 wire:
                   type: boolean
-                  description: Create a ModelConfig on completion (default = server autoWire; kserve refuses true — models are wired when served)
+                  description: Create a ModelConfig on completion (ollama, lemonade; default = server autoWire; kserve refuses true — models are wired when served)
                 preset:
                   type: string
                   description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
@@ -243,7 +245,14 @@ paths:
         creates it; the response has `loaded=true` with `running.status`
         `Pending` until the predictor is ready, and a `load` job (see
         `GET /api/v1/jobs`) follows readiness and wires the model into kagent.
-        Loading an already-served preset again is a no-op.
+        Loading an already-served preset again is a no-op. lemonade: `POST
+        /api/v1/load` on the Lemonade Server, which starts the model's
+        backend process (FastFlowLM on the NPU, llama.cpp, ...) and answers
+        once it is ready — no keep-alive: the model stays until unloaded or
+        until another model of its type needs the slot; `keepAlive: "-1"`
+        pins it against that displacement, other values are ignored. The
+        response is the loaded model with `running.device` and
+        `running.pinned`.
       operationId: loadModel
       x-mcp-tool: load_model
       requestBody:
@@ -260,7 +269,9 @@ paths:
                     ollama keep-alive after this load (duration such as 10m; -1 = forever).
                     Default = model-manager's `--default-keep-alive`, reported as
                     `loading.keepAliveDefault`. Later inference requests replace it
-                    with their own keep-alive.
+                    with their own keep-alive. lemonade: only `-1` has a meaning —
+                    it pins the model against slot eviction; every other value is
+                    ignored (no idle timer).
                 preset:
                   type: string
                   description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
@@ -269,7 +280,7 @@ paths:
                   description: "kserve — pin the predictor to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no InferenceService is created."
       responses:
         "200":
-          description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; kserve with `status` Pending)
+          description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; lemonade with `device` and `pinned`; kserve with `status` Pending)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Model" }
@@ -424,6 +435,16 @@ paths:
         observable through Ollama's API; the per-model share is
         `running.vramBytes` on `/models` and `/loaded` — and there is no
         `cache`. `message` explains the figures.
+
+        lemonade: one node, the proxied host (`name` = the host agents dial),
+        described by Lemonade's own `GET /api/v1/system-info`: `budgetBytes`
+        (= `allocatableMemoryBytes`) is the host memory Lemonade reports
+        (`budgetSource: system-info`), `gpuCount` and `gpuProduct` are the
+        accelerators Lemonade found available — the NPU (named) and the GPUs
+        — `reservedBytes` is the sum of the catalog sizes of the loaded models
+        (Lemonade reports no per-model memory), and `cache` is Lemonade's
+        model store (`mountPath`, the downloaded models and their sizes,
+        `inventory: models`). Always eligible.
       operationId: listNodes
       x-mcp-tool: list_nodes
       responses:
@@ -629,7 +650,7 @@ components:
         wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
         presets: { type: boolean, description: curated serving presets (kserve) }
         fitCheck: { type: boolean, description: node-memory fit check (kserve) }
-        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps)" }
+        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps; lemonade: the proxied host from Lemonade's system-info)" }
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
@@ -637,7 +658,7 @@ components:
       properties:
         backend:
           type: string
-          enum: [ollama, kserve]
+          enum: [ollama, kserve, lemonade]
         version: { type: string, description: backend server version }
         endpoint: { type: string, description: backend endpoint as reached by model-manager }
         agentEndpoint:
@@ -645,7 +666,8 @@ components:
           description: |
             Backend endpoint as reached by agent pods — the host written into
             ModelConfigs (ollama: `--ollama-agent-host`, defaulting to
-            `endpoint`). Clients that match ModelConfigs to models by hostname
+            `endpoint`; lemonade: `--lemonade-agent-host` plus `/api/v1`, the
+            OpenAI-compatible base URL). Clients that match ModelConfigs to models by hostname
             compare against this, not `endpoint`. Absent when the backend has
             no single agent-facing endpoint (kserve: every served model has its
             own predictor URL in `running.endpoint` / `modelConfig.endpoint`).
@@ -669,15 +691,19 @@ components:
         request" when `onDemand`, "not serving, agents fail" when not — and
         never from the backend name. ollama: `onDemand` and `idleEviction`
         true, `keepAliveScope: request`. kserve: both false, no keep-alive
-        fields. Older model-managers omit the block: treat that as unknown.
+        fields. lemonade: `onDemand` true, `idleEviction` false, no keep-alive
+        fields — a loaded model stays until unloaded or until another model of
+        its type needs the slot (Lemonade's `max_loaded_models`, one per type
+        by default); that is displacement, not idle eviction. Older
+        model-managers omit the block: treat that as unknown.
       required: [onDemand, idleEviction]
       properties:
         onDemand:
           type: boolean
-          description: the backend loads a model on the first inference request naming it (ollama); false means it must be loaded / served explicitly before agents can use it (kserve)
+          description: the backend loads a model on the first inference request naming it (ollama, lemonade); false means it must be loaded / served explicitly before agents can use it (kserve)
         idleEviction:
           type: boolean
-          description: the backend evicts idle models on its own (ollama keep-alive); false means a loaded model stays until unloaded (kserve)
+          description: the backend evicts idle models on its own (ollama keep-alive); false means a loaded model stays until unloaded (kserve; lemonade — until unloaded or displaced by another model of its type)
         keepAliveDefault:
           type: string
           description: |
@@ -709,9 +735,10 @@ components:
         parameterSize: { type: string, example: 134.52M }
         quantization: { type: string, example: Q8_0 }
         contextLength: { type: integer, format: int64 }
+        runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama (one runtime) and kserve (the preset says)" }
         capabilities:
           type: array
-          description: model features (completion, tools, vision, embedding, thinking)
+          description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...)"
           items: { type: string }
         node: { type: string, description: node holding the cache entry (kserve) }
         downloaded:
@@ -728,7 +755,7 @@ components:
       properties:
         name: { type: string }
         digest: { type: string }
-        sizeBytes: { type: integer, format: int64, description: memory footprint (kserve — the preset's weights) }
+        sizeBytes: { type: integer, format: int64, description: "memory footprint (kserve — the preset's weights; lemonade — the catalog size, Lemonade reports no per-model memory)" }
         vramBytes: { type: integer, format: int64 }
         contextLength: { type: integer, format: int64 }
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
@@ -736,18 +763,21 @@ components:
         node: { type: string }
         status:
           type: string
-          description: ollama `loaded`; kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`
+          description: "ollama and lemonade `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers); kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
           example: loaded
         message: { type: string, description: kserve — why the model is not ready }
         resource: { type: string, description: kserve — InferenceService name (also the served model name) }
         preset: { type: string, description: kserve — preset the InferenceService was created from }
         gpus: { type: integer, format: int64, description: kserve — accelerators the predictor requests }
         managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the InferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
+        device: { type: string, example: npu, description: "lemonade — where the model runs as Lemonade reports it: npu, gpu, cpu, or several such as `gpu npu`" }
+        pinned: { type: boolean, description: lemonade — exempt from slot eviction (loaded with keepAlive -1) }
     ModelConfigRef:
       type: object
       description: |
-        kagent ModelConfig of a model. ollama: named after the model reference
-        (`smollm2:135m` → `smollm2-135m`). kserve: named after the
+        kagent ModelConfig of a model. ollama and lemonade: named after the model
+        reference (`smollm2:135m` → `smollm2-135m`, `qwen3-it-4b-FLM` →
+        `qwen3-it-4b-flm`). kserve: named after the
         InferenceService (`qwen3-8-27b`), the same rule the portal's serve flow
         applies; a ModelConfig someone else created for the same predictor
         (same host, same served model name) counts as the model's wiring and is
@@ -789,10 +819,10 @@ components:
         wire: { type: boolean, description: whether the job wires the model on success }
         node:
           type: string
-          description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama and on a shared cache."
+          description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama and lemonade, and on a shared cache."
         preset:
           type: string
-          description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama."
+          description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama and lemonade."
         requestedBy:
           type: string
           description: "the caller who started the job (email, else the IdP subject) when the server runs with OAuth; absent for jobs the service starts on its own (adopted downloads) and on servers without OAuth"
@@ -868,22 +898,22 @@ components:
       properties:
         name: { type: string }
         ready: { type: boolean }
-        eligible: { type: boolean, description: "a model can be served on this node right now (kserve: ready, inside the serving node selector, able to mount the cache claim when predictors mount it; ollama: always true, the host is the only serving target); pull, load and fit-check refuse a node with eligible=false and echo the reason" }
+        eligible: { type: boolean, description: "a model can be served on this node right now (kserve: ready, inside the serving node selector, able to mount the cache claim when predictors mount it; ollama, lemonade: always true, the host is the only serving target); pull, load and fit-check refuse a node with eligible=false and echo the reason" }
         eligibilityReason: { type: string, description: "why eligible is false, human-readable, several reasons joined with `; ` (kserve: `not ready`, `outside the serving node selector (k=v)`, `cache claim <claim> is pinned to <node>`); absent when eligible" }
         architecture: { type: string, example: arm64 }
         allocatableMemoryBytes: { type: integer, format: int64 }
-        gpuCount: { type: integer, format: int64, description: accelerators on the node (kserve, from the GPU resource / feature-discovery labels); 0 on ollama, whose API does not expose them }
+        gpuCount: { type: integer, format: int64, description: "accelerators on the node (kserve: from the GPU resource / feature-discovery labels; lemonade: the NPU and the GPUs Lemonade found available); 0 on ollama, whose API does not expose them" }
         gpuMemoryBytes: { type: integer, format: int64, description: memory of one GPU from the node labels }
-        gpuProduct: { type: string }
+        gpuProduct: { type: string, description: "kserve — from the node labels; lemonade — the NPU when there is one, else the first GPU" }
         accelerated: { type: boolean, description: "ollama only: true when any loaded model has memory on an accelerator (`size_vram` > 0 in /api/ps, i.e. `running.vramBytes` > 0), false when none has or nothing is loaded; absent on backends that count accelerators in gpuCount" }
         budgetBytes: { type: integer, format: int64 }
-        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo, override], description: "how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node (kserve); `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama); `override` = set by the operator through the chart value `ollama.memoryBudgetGiB` / `--ollama-memory-budget-gib` (ollama)" }
+        budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation, host-meminfo, override, system-info], description: "how the budget was derived; `annotation` = overridden by `model-manager.giantswarm.io/memory-budget-gib` on the node (kserve); `host-meminfo` = MemTotal of /proc/meminfo as the model-manager pod sees it (ollama); `override` = set by the operator through the chart value `ollama.memoryBudgetGiB` / `--ollama-memory-budget-gib` (ollama); `system-info` = the host memory Lemonade Server reports (lemonade)" }
         message: { type: string, description: "a budget derivation note — an ignored, unparsable budget annotation (kserve); what the host figures mean, whether /proc/meminfo could be read and whether an operator override applied or was ignored (ollama)" }
-        reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps)" }
+        reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps; lemonade: Σ catalog sizes of the loaded models)" }
         freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
         cache:
           type: object
-          description: the download cache on this node; absent when the node holds none (always on ollama)
+          description: the download cache on this node; absent when the node holds none (always on ollama; lemonade — the model store)
           required: [claim, mountPath, models, bytesUsed]
           properties:
             claim: { type: string }
@@ -892,5 +922,5 @@ components:
             bytesUsed: { type: integer, format: int64 }
             scannedAt: { type: string, format: date-time }
             shared: { type: boolean, description: network storage visible from every node }
-            inventory: { type: string, enum: [pod, daemonset], description: how the contents were read — a short-lived scan pod on the node, or the cache-agent DaemonSet pod there (kserve.inventory.mode) }
+            inventory: { type: string, enum: [pod, daemonset, models], description: how the contents were read — a short-lived scan pod on the node, the cache-agent DaemonSet pod there (kserve.inventory.mode), or the backend's own model list (lemonade) }
             error: { type: string, description: last scan failure (e.g. no cache-agent pod on the node); contents may be stale }

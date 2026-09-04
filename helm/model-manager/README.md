@@ -2,7 +2,7 @@
 
 ![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.1.0](https://img.shields.io/badge/AppVersion-0.1.0-informational?style=flat-square)
 
-Model management service for the Agent Platform — backend-abstracted (ollama, kserve) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
+Model management service for the Agent Platform — backend-abstracted (ollama, kserve, lemonade) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
 (contract: `/api/v1/openapi.yaml`) and the MCP streamable-HTTP endpoint under
@@ -97,15 +97,17 @@ can stay empty.
 | imagePullSecrets | list | `[]` | Image pull secrets. |
 | nameOverride | string | `""` | Override the chart name. |
 | fullnameOverride | string | `""` | Override the fully qualified release name (the umbrella chart pins the Service name through this). |
-| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop) or `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks). The API reports the backend and its capability flags at /api/v1/backend. |
+| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend. |
 | ollama.endpoint | string | `"http://host.docker.internal:11434"` | Ollama API base URL as reached from pods. On kind this is the docker network gateway (for example http://172.21.0.1:11434 — agentlab sets it); Docker Desktop resolves host.docker.internal. |
 | ollama.agentHost | string | `""` | Ollama host written into kagent ModelConfigs, as reached by agent pods; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `ollama.endpoint`. |
 | ollama.memoryBudgetGiB | int | `0` | Memory budget of the proxied host in GiB (a number; decimals allowed, also as a string so `--set` can carry them), reported as `budgetBytes` on `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is not the host's: Docker Desktop or another VM-backed runtime (the pod sees the VM's memory), an Ollama on another machine. 0 is off; a value that is not a positive number of GiB is ignored and named in the node's `message`. The ollama counterpart of the kserve node annotation `model-manager.giantswarm.io/memory-budget-gib`. |
+| lemonade.endpoint | string | `"http://host.docker.internal:13305"` | Lemonade Server base URL as reached from pods (its API is under `/api/v1`; Lemonade listens on 13305 by default). Bind Lemonade to every interface (`lemonade config set host=0.0.0.0`, or `host` in its config.json) so the kind docker network gateway reaches it, for example http://172.21.0.1:13305; Docker Desktop resolves host.docker.internal. |
+| lemonade.agentHost | string | `""` | Lemonade Server base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/api/v1` appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `lemonade.endpoint`. |
 | kagent.namespace | string | `"kagent"` | Namespace where kagent ModelConfigs are created (RBAC is scoped here). |
 | kagent.apiVersion | string | `"auto"` | kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version. |
 | kagent.modelConfigPrefix | string | `""` | Prefix for generated ModelConfig names (empty: the sanitized model name, e.g. smollm2:135m -> smollm2-135m). |
 | kagent.autoWire | bool | `true` | Create a ModelConfig automatically when a pull completes or a model is loaded. |
-| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama backend runs without the API when wiring is off. |
+| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama and lemonade backends run without the API when wiring is off. |
 | mcp.enabled | bool | `true` | Serve the MCP streamable-HTTP endpoint alongside the REST API. |
 | mcp.path | string | `"/mcp"` | MCP endpoint path. |
 | oauth.enabled | bool | `false` | Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's id_token through the gateway; both are validated against the IdP's JWKS when their audience is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount — only for a server nothing but a trusted proxy can reach. |
@@ -136,7 +138,7 @@ can stay empty.
 | httpRoute.labels | object | `{}` | Labels on the HTTPRoute. |
 | networkPolicy.enabled | bool | `false` | Create a Kubernetes NetworkPolicy for the pod. |
 | networkPolicy.ingressNamespaces | list | `[]` | Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only. |
-| networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32). |
+| networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama or Lemonade endpoint, e.g. 172.21.0.1/32). |
 | networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring and by the kserve backend). |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |

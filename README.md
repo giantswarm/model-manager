@@ -9,14 +9,16 @@ per-installation **serving backends**:
 |---|---|---|
 | `ollama` | laptop / agentlab installs (host Ollama through the kind docker-network gateway) | `/api/tags`, `/api/ps`, streamed `/api/pull`, `/api/delete`, `keep_alive` load/unload |
 | `kserve` | GPU installs (KServe + the platform's `modelServing` component) | InferenceServices composed from serving presets, per-node HF cache inventory, pre-warm download Jobs with progress, Hugging Face Hub search, node fit checks |
+| `lemonade` | AMD Ryzen AI laptops / workstations running [Lemonade Server](https://lemonade-server.ai) on the host (FastFlowLM on the NPU, llama.cpp on GPU / CPU) | `/api/v1/health` (loaded models), `/api/v1/models`, streamed `/api/v1/pull`, `/api/v1/load`, `/api/v1/unload`, `/api/v1/delete`, `/api/v1/system-info` |
 
 The API reports the backend and **explicit capability flags**
 (`GET /api/v1/backend`), so clients render only what an installation supports
 instead of switching on the backend name. Pulled or loaded models are wired
 into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
-for the ollama backend; `OpenAI` provider against the predictor URL plus a
-placeholder API-key Secret for kserve, created once the InferenceService is
-ready), so agents can use them without manual steps.
+for the ollama backend; `OpenAI` provider plus a placeholder API-key Secret —
+against the predictor URL for kserve, created once the InferenceService is
+ready, and against Lemonade's `/api/v1` for lemonade), so agents can use them
+without manual steps.
 
 The same operations are exposed twice from one process:
 
@@ -29,8 +31,8 @@ The same operations are exposed twice from one process:
   `search_models`, `check_fit`, `list_nodes` (through muster: `x_<server>_<tool>`).
 
 Part of [Model management in the Agent Platform](https://github.com/giantswarm/giantswarm/issues/37590);
-decision records: Model Manager PDR and the Ollama-backend ADR in the team's
-decision log.
+decision records: Model Manager PDR, the Ollama-backend ADR and the
+Lemonade-backend ADR in the team's decision log.
 
 ## API at a glance
 
@@ -63,12 +65,14 @@ unwired on unload — never after a pull, since a cached model has no endpoint.
 Capability flags: `pull`, `pullProgress`, `delete`, `load`, `unload`,
 `loadedModels`, `wire` (Kubernetes access present), `presets`, `fitCheck`,
 `nodeInventory`, `search` (`presets`, `fitCheck` and `search` are kserve
-concerns and false on ollama).
+concerns and false on ollama and lemonade).
 
 `GET /api/v1/backend` reports two addresses: `endpoint`, the backend as
 model-manager dials it, and `agentEndpoint`, the backend as **agent pods** dial
 it — the host written into ModelConfigs (ollama: `--ollama-agent-host`,
-defaulting to the endpoint). A client that matches ModelConfigs it did not
+defaulting to the endpoint; lemonade: `--lemonade-agent-host` plus `/api/v1`,
+the OpenAI-compatible base URL the ModelConfigs carry). A client that matches
+ModelConfigs it did not
 create to models by hostname (the portal's "Used by") compares against
 `agentEndpoint`. kserve omits it: every served model has its own predictor URL
 (`running.endpoint`, `modelConfig.endpoint`).
@@ -96,6 +100,11 @@ counterpart of the kserve node annotation
 number of GiB is ignored and named in `message`; the budget then comes from
 `/proc/meminfo` as before.
 
+On lemonade the host node comes from Lemonade's own `GET /api/v1/system-info`
+instead (`budgetSource: system-info`, the accelerators Lemonade enumerates as
+`gpuCount` / `gpuProduct`, the model store as `cache`) — see
+[The lemonade backend](#the-lemonade-backend).
+
 ## Load semantics: on-demand load and keep-alive
 
 `GET /api/v1/backend` also carries a `loading` block so a client can word a
@@ -122,6 +131,13 @@ not-loaded model correctly without keying off the backend name:
 - **kserve** — `onDemand: false`, `idleEviction: false`, no keep-alive fields:
   a stopped InferenceService does not come back on request, agents on its
   ModelConfig fail at their first turn, and a running one stays until unloaded.
+- **lemonade** — `onDemand: true`: Lemonade loads a model on the first
+  completion naming it (a few seconds for a 4B model on the NPU), so a
+  not-loaded model is idle, not broken. `idleEviction: false`, no keep-alive
+  fields: nothing evicts an idle model, but a loaded model gives way when
+  another model of its type is requested and the slot is taken
+  (`max_loaded_models`, one per type by default; least recently used first)
+  unless it was loaded with `keepAlive: "-1"`, which pins it.
 
 The knob that changes what agents experience on Ollama is host-side, not a
 model-manager flag: set `OLLAMA_KEEP_ALIVE=30m` (or `-1` for never) in the
@@ -129,6 +145,65 @@ Ollama service environment — the systemd unit's `Environment=` on Linux —
 and restart Ollama. `keepAliveDefault` is model-manager's default for its own
 load requests; the host's `OLLAMA_KEEP_ALIVE` is not observable through the
 API, which is why the block does not claim to report it.
+
+## The lemonade backend
+
+[Lemonade Server](https://lemonade-server.ai) is AMD's local model server: one
+OpenAI-compatible API (`/api/v1`) in front of several runtimes — "recipes" —
+of which FastFlowLM (`flm`) runs models on the Ryzen AI NPU and llama.cpp
+(`llamacpp`) on the GPU (Vulkan, ROCm) or CPU. Like Ollama it ships its
+management surface on the same port, and the driver has the same shape as the
+ollama one: a proxy of `GET /api/v1/health` (the loaded models),
+`GET /api/v1/models`, the streamed `POST /api/v1/pull`, `POST /api/v1/load`,
+`POST /api/v1/unload`, `POST /api/v1/delete` and `GET /api/v1/system-info`.
+Lemonade stays on the host — that is where the NPU driver is — and pods reach
+it through the docker network gateway, so bind it to every interface
+(`lemonade config set host=0.0.0.0`; its port is 13305 by default) and let
+the bridge subnets through the host firewall, as for Ollama.
+
+- **Inventory** — `GET /api/v1/models` lists the downloaded models: the
+  Lemonade id is the `name` (`qwen3-it-4b-FLM`, `Qwen3-0.6B-GGUF`), `size` in
+  GB becomes `sizeBytes`, the recipe is reported as `runtime` (`flm`,
+  `llamacpp`, ...), the format and quantization are read off the checkpoint
+  (`unsloth/Qwen3-0.6B-GGUF:Q4_0` → `gguf`, `Q4_0`) and Lemonade's labels are
+  mapped onto the capability vocabulary the other backends use (`chat` →
+  `completion`, `tool-calling` → `tools`, `reasoning` → `thinking`,
+  `embeddings` → `embedding`, `vision` stays; a text recipe without a
+  deployment label is a `completion` model). Everything Lemonade has
+  downloaded is listed — transcription, image or speech models included —
+  and the capabilities say what each one is.
+- **Pull** — `POST /api/v1/models/pull` takes a Lemonade catalog model name
+  (`lemonade list`, or `GET /api/v1/models?show_all=true` on the server) and
+  streams Lemonade's install (`stream: true`): the job reports bytes done
+  against the whole download when Lemonade says how big it is, else against
+  the current file. A name that is not in the catalog fails with `not_found`
+  (registering a `user.*` model from a Hugging Face checkpoint is not offered
+  here). On success the model is wired into kagent, as on ollama.
+- **Load / unload** — `POST /api/v1/load` starts the model's backend process
+  (FastFlowLM on the NPU, llama.cpp, ...) and answers once it is ready; a
+  load is bounded by ten minutes, not the usual call timeout. Lemonade has no
+  keep-alive: a loaded model stays until it is unloaded or until another
+  model of its type needs the slot (`max_loaded_models`, one per type by
+  default; least recently used first). `keepAlive: "-1"` pins the model
+  against that displacement (Lemonade's `pinned`, reported as
+  `running.pinned`); every other keep-alive is ignored. `running.device` says
+  where the model runs (`npu`, `gpu`, `cpu`). Unloading a model that is not
+  loaded is a no-op.
+- **Wiring** — a kagent `ModelConfig` named after the model
+  (`qwen3-it-4b-FLM` → `qwen3-it-4b-flm`) with `provider: OpenAI`,
+  `openAI.baseUrl` = the agent host plus `/api/v1` (`--lemonade-agent-host`,
+  defaulting to the endpoint; reported as `agentEndpoint`) and the
+  placeholder `OPENAI_API_KEY` Secret the kagent runtime insists on — the
+  same path the kserve backend takes to a vLLM predictor.
+- **Node** — `GET /api/v1/nodes` reports the host as Lemonade sees it: memory
+  from `Physical Memory` of `GET /api/v1/system-info` (`budgetSource:
+  system-info`), the accelerators Lemonade found available as `gpuCount` /
+  `gpuProduct` (the NPU when there is one — `AMD NPU (NPU Strix)` — else the
+  first GPU), reservations as the catalog sizes of the loaded models (Lemonade
+  reports no per-model memory), and Lemonade's model store as the node's
+  `cache` (`mountPath`, models, bytes).
+
+Nothing here needs Kubernetes access beyond wiring, exactly as for ollama.
 
 ## The kserve backend
 
@@ -238,7 +313,8 @@ list, not the work — kserve pulls are Kubernetes Jobs that model-manager
 re-adopts on start (`GET /api/v1/jobs` lists them again as running pulls,
 node and preset read back from the Job's annotations), a kserve `load` is
 recovered by the reconcile loop that wires ready InferenceServices without a
-job, and an ollama pull simply is re-issued (Ollama resumes the layers it has).
+job, and an ollama or lemonade pull simply is re-issued (Ollama resumes the layers
+it has, Lemonade the files).
 A persistent job store is deliberately not built until a second replica or a
 job history across restarts is needed; until then, treat the job list as a
 progress view, and the backend (Jobs, InferenceServices, Ollama) as the truth.
@@ -252,6 +328,16 @@ model-manager serve \
   --ollama-agent-host http://172.21.0.1:11434 \        # as reached by agent pods (written into ModelConfigs)
   --kubeconfig ~/.kube/config --kube-context kind-agentlab \
   --kagent-namespace kagent
+```
+
+Against a Lemonade Server on the host (AMD Ryzen AI NPU):
+
+```sh
+model-manager serve \
+  --backend lemonade \
+  --lemonade-endpoint http://127.0.0.1:13305 \      # as reached by model-manager
+  --lemonade-agent-host http://172.21.0.1:13305 \   # as reached by agent pods (+ /api/v1 in ModelConfigs)
+  --kubeconfig ~/.kube/config --kube-context kind-agentlab
 ```
 
 Every flag has an environment variable (`model-manager serve --help`). Without
@@ -302,7 +388,8 @@ and the OAuth metadata stay public.
 
 `helm/model-manager` — see its [README](helm/model-manager/README.md). Keys the
 umbrella chart (`agent-platform-standalone`) sets: `backend`, `ollama.endpoint`,
-`ollama.agentHost`, `kagent.namespace`, `image.*`, `mcp.enabled`,
+`ollama.agentHost`, `lemonade.endpoint`, `lemonade.agentHost`,
+`kagent.namespace`, `image.*`, `mcp.enabled`,
 `muster.mcpServer.*`; for kserve `kserve.namespace` (the serving namespace),
 `kserve.discovery.*`, `kserve.hf.tokenSecret.*` and the `kserve.*` overrides. Optional, off by default: `muster.mcpServer.enabled`
 (renders an `mcpservers.muster.giantswarm.io` CR), `httpRoute.enabled`,

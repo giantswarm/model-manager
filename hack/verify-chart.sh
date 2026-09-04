@@ -57,4 +57,34 @@ got=$(trusted --set oauth.enabled=true --set oauth.provider=google \
 got=$(trusted)
 [ -z "$got" ] || fail "oauth disabled: want no --oauth-trusted-audiences, got '$got'"
 
+# The lemonade backend renders its own flags and none of ollama's or kserve's.
+args() {
+  helm template mm "$CHART" --show-only templates/deployment.yaml "$@" \
+    | { grep -o -- '--[a-z-]*=[^ ]*' || true; }
+}
+got=$(args --set backend=lemonade --set lemonade.endpoint=http://172.21.0.1:13305 \
+  --set lemonade.agentHost=http://172.21.0.1:13305)
+echo "$got" | grep -q -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
+  || fail "lemonade backend: --lemonade-endpoint not rendered, got '$got'"
+echo "$got" | grep -q -- '^--lemonade-agent-host=http://172.21.0.1:13305$' \
+  || fail "lemonade backend: --lemonade-agent-host not rendered, got '$got'"
+if echo "$got" | grep -q -- '^--ollama-\|^--kserve-'; then
+  fail "lemonade backend renders ollama or kserve flags: '$got'"
+fi
+echo "$got" | grep -q -- '^--in-cluster=true$' \
+  || fail "lemonade backend with wiring on: Kubernetes access expected (wiring)"
+
+# Without an agent host only the endpoint flag renders; the default backend
+# renders no lemonade flag at all.
+got=$(args --set backend=lemonade)
+echo "$got" | grep -q -- '^--lemonade-endpoint=http://host.docker.internal:13305$' \
+  || fail "lemonade backend: default endpoint not rendered, got '$got'"
+if echo "$got" | grep -q -- '^--lemonade-agent-host'; then
+  fail "lemonade backend: agent host flag rendered without a value"
+fi
+got=$(args)
+if echo "$got" | grep -q -- '^--lemonade-'; then
+  fail "ollama backend renders lemonade flags: '$got'"
+fi
+
 echo "verify-chart: ok"

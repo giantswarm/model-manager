@@ -30,7 +30,8 @@ func newRootCmd() *cobra.Command {
 		Use:   "model-manager",
 		Short: "Model management service for the Agent Platform",
 		Long: `model-manager exposes one API over per-installation serving backends
-(ollama for laptop/agentlab installs, kserve for GPU installs): list downloaded
+(ollama for laptop/agentlab installs, kserve for GPU installs, lemonade for
+AMD Ryzen AI hosts running Lemonade Server): list downloaded
 and loaded models, pull/import with progress, load/unload, delete, and wire
 models into kagent ModelConfigs so agents can use them. The API is served as
 REST/JSON (portal) and as MCP tools (muster) from one process.`,
