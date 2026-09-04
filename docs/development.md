@@ -2,7 +2,7 @@
 
 ```sh
 make build          # binary for the current platform
-go test ./...       # unit tests (httptest fake Ollama, fake dynamic kube client)
+go test ./...       # unit tests (httptest fake Ollama and Lemonade, fake dynamic kube client)
 make lint           # golangci-lint with the pre-commit linters (gosec, goconst, govet)
 make helm-schema    # regenerate helm/model-manager/values.schema.json
 make helm-docs      # regenerate helm/model-manager/README.md
@@ -14,8 +14,10 @@ make helm-docs      # regenerate helm/model-manager/README.md
 - `internal/backend` — the `Backend` interface, capability flags, shared types
   and the driver registry, plus the optional interfaces a driver may implement
   (`PresetLister`, `Searcher`, `FitChecker`, `NodeLister`, `ServeLifecycle`,
-  `PullAdopter`). `internal/backend/ollama` is the host-Ollama driver.
-  `internal/backend/kserve` is the KServe driver: `config.go` (discovery
+  `PullAdopter`). `internal/backend/ollama` is the host-Ollama driver;
+  `internal/backend/lemonade` the Lemonade Server driver (`client.go` — the
+  management API including the SSE pull, `backend.go`, `nodes.go` — the host
+  from system-info). `internal/backend/kserve` is the KServe driver: `config.go` (discovery
   ConfigMap + flag overrides), `presets.go`, `hub.go` (Hugging Face Hub),
   `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods and
   the cache-agent client), `internal/cacheagent` (the DaemonSet's HTTP
@@ -52,6 +54,29 @@ curl -s -X POST localhost:18080/api/v1/models/load -d '{"model":"smollm2:135m","
 curl -s -X POST localhost:18080/api/v1/models/unload -d '{"model":"smollm2:135m"}'
 curl -s -X DELETE localhost:18080/api/v1/models/smollm2:135m
 ```
+
+## Local loop against a Lemonade Server (AMD Ryzen AI NPU)
+
+Lemonade listens on 13305 by default; the `*-FLM` models are the NPU ones.
+
+```sh
+./model-manager serve --listen 127.0.0.1:18080 --backend lemonade \
+  --lemonade-endpoint http://localhost:13305 --lemonade-agent-host http://172.21.0.1:13305 \
+  --kubeconfig ~/.kube/config --kube-context kind-agentlab --kagent-namespace kagent -v
+
+curl -s localhost:18080/api/v1/backend            # lemonade, version, agentEndpoint …/api/v1, loading
+curl -s localhost:18080/api/v1/models             # runtime: flm / llamacpp, mapped capabilities
+curl -s -X POST localhost:18080/api/v1/models/pull -d '{"model":"Qwen3-0.6B-GGUF"}'
+curl -s -X POST localhost:18080/api/v1/models/load -d '{"model":"qwen3-it-4b-FLM","keepAlive":"-1"}'
+curl -s localhost:18080/api/v1/loaded             # device: npu, pinned: true
+curl -s localhost:18080/api/v1/nodes              # budgetSource: system-info, gpuProduct: the NPU, cache: the model store
+curl -s -X POST localhost:18080/api/v1/models/unload -d '{"model":"qwen3-it-4b-FLM"}'
+```
+
+In the lab, install the chart with `--set backend=lemonade --set
+lemonade.endpoint=http://172.21.0.1:13305` (the kind docker network gateway;
+Lemonade bound to `0.0.0.0`, port 13305 open to the bridge subnets) next to
+the umbrella's release, as in the ollama recipe below.
 
 ## In the lab (agentlab)
 

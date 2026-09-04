@@ -62,12 +62,12 @@ const (
 func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("model-manager", version,
 		mcpserver.WithToolCapabilities(false),
-		mcpserver.WithInstructions("Manage the models a serving backend (ollama or kserve) holds: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Call get_backend first to learn which capabilities this installation supports; on kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
+		mcpserver.WithInstructions("Manage the models a serving backend (ollama, kserve or lemonade) holds: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Call get_backend first to learn which capabilities this installation supports; on kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)
 	t := &tools{svc: svc}
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
-		mcp.WithDescription("Report the serving backend (ollama|kserve), its health/version and the capability flags clients must honor."),
+		mcp.WithDescription("Report the serving backend (ollama|kserve|lemonade), its health/version, its load semantics and the capability flags clients must honor."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.getBackend)
 
@@ -88,17 +88,17 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
-		mcp.WithDescription("Start importing a model: an Ollama registry tag or hf.co/... GGUF reference (ollama), or a Hugging Face repository owner/name (kserve: a pre-warm download Job into the node cache after a fit check). Returns a job immediately; poll get_job for progress. On ollama the model is wired into kagent on success unless wire=false; on kserve models are wired when served."),
+		mcp.WithDescription("Start importing a model: an Ollama registry tag or hf.co/... GGUF reference (ollama), a Lemonade catalog model name such as Qwen3-0.6B-GGUF (lemonade: `lemonade list`, GET /api/v1/models?show_all=true on the server), or a Hugging Face repository owner/name (kserve: a pre-warm download Job into the node cache after a fit check). Returns a job immediately; poll get_job for progress. On ollama and lemonade the model is wired into kagent on success unless wire=false; on kserve models are wired when served."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference to pull")),
-		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama; default: the server's autoWire setting)")),
+		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade; default: the server's autoWire setting)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its InferenceService mounts the resulting cache directory); default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve). On kserve a `load` job follows the model to readiness and then wires it into kagent."),
+		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve). On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
-		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever)")),
+		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the InferenceService from; default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: pin the predictor to this node")),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -125,7 +125,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.checkFit)
 
 	s.AddTool(mcp.NewTool(ToolListNodes,
-		mcp.WithDescription("List nodes with their serving memory budget, what loaded models reserve and the download cache each node holds. kserve: the accelerator nodes only (GPU resource or gpu-feature-discovery labels), budget from GPU labels or allocatable memory, and eligible / eligibilityReason saying whether a model can be served there (ready, inside the serving node selector, able to mount the cache claim) — load_model, pull_model and check_fit refuse a node with eligible=false and echo the reason. ollama: the proxied host (always eligible), budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU."),
+		mcp.WithDescription("List nodes with their serving memory budget, what loaded models reserve and the download cache each node holds. kserve: the accelerator nodes only (GPU resource or gpu-feature-discovery labels), budget from GPU labels or allocatable memory, and eligible / eligibilityReason saying whether a model can be served there (ready, inside the serving node selector, able to mount the cache claim) — load_model, pull_model and check_fit refuse a node with eligible=false and echo the reason. ollama: the proxied host (always eligible), budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU. lemonade: the proxied host as Lemonade's system-info reports it (always eligible) — budget from the host memory (budgetSource system-info), gpuCount/gpuProduct from the accelerators Lemonade enumerates (the NPU, the GPUs), reservations = the catalog sizes of the loaded models, and the model store as the cache."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listNodes)
 
@@ -155,7 +155,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		mcp.WithDescription("List jobs (newest first) with phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for."),
+		mcp.WithDescription("List jobs (newest first) with phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for (ollama and lemonade jobs carry neither)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listJobs)
 

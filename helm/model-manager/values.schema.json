@@ -10,7 +10,7 @@
         },
         "backend": {
             "type": "string",
-            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop) or `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks). The API reports the backend and its capability flags at /api/v1/backend."
+            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend."
         },
         "baseDomain": {
             "type": "string"
@@ -171,7 +171,7 @@
                 },
                 "disableWiring": {
                     "type": "boolean",
-                    "description": "Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama backend runs without the API when wiring is off."
+                    "description": "Disable all ModelConfig management; the `wire` capability reports false. The kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only the ollama and lemonade backends run without the API when wiring is off."
                 },
                 "modelConfigPrefix": {
                     "type": "string",
@@ -442,6 +442,20 @@
                 }
             }
         },
+        "lemonade": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "agentHost": {
+                    "type": "string",
+                    "description": "Lemonade Server base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/api/v1` appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `lemonade.endpoint`."
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "Lemonade Server base URL as reached from pods (its API is under `/api/v1`; Lemonade listens on 13305 by default). Bind Lemonade to every interface (`lemonade config set host=0.0.0.0`, or `host` in its config.json) so the kind docker network gateway reaches it, for example http://172.21.0.1:13305; Docker Desktop resolves host.docker.internal."
+                }
+            }
+        },
         "logging": {
             "type": "object",
             "additionalProperties": false,
@@ -526,7 +540,7 @@
                 },
                 "egressCIDRs": {
                     "type": "array",
-                    "description": "Extra egress CIDRs (the host Ollama endpoint, e.g. 172.21.0.1/32)."
+                    "description": "Extra egress CIDRs (the host Ollama or Lemonade endpoint, e.g. 172.21.0.1/32)."
                 },
                 "enabled": {
                     "type": "boolean",

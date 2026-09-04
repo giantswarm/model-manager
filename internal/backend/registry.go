@@ -14,8 +14,9 @@ import (
 
 // Options carries per-driver configuration. Each driver reads its own block.
 type Options struct {
-	Ollama OllamaOptions
-	KServe KServeOptions
+	Ollama   OllamaOptions
+	KServe   KServeOptions
+	Lemonade LemonadeOptions
 }
 
 // KServeOptions configures the kserve driver. Empty strings mean "take it
@@ -117,6 +118,22 @@ type OllamaOptions struct {
 	// host's. Empty or 0: none. Parsed by the driver so that an unusable value
 	// is reported on the node rather than dropped.
 	MemoryBudgetGiB string
+}
+
+// LemonadeOptions configures the lemonade driver.
+type LemonadeOptions struct {
+	// Endpoint is the Lemonade Server base URL as reached by model-manager
+	// (its API lives under /api/v1).
+	Endpoint string
+	// AgentHost is the Lemonade Server base URL as reached by agent pods; the
+	// driver appends /api/v1 and writes it into kagent ModelConfigs as the
+	// OpenAI-compatible baseUrl. Defaults to Endpoint.
+	AgentHost string
+	// Timeout bounds non-streaming API calls.
+	Timeout time.Duration
+	// LoadTimeout bounds a load: Lemonade starts the backend process and reads
+	// the weights before it answers (0: 10 minutes).
+	LoadTimeout time.Duration
 }
 
 // Factory builds a Backend from Options.

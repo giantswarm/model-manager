@@ -31,9 +31,11 @@ spec:
       Kubernetes access. The kserve driver talks to the API for everything it
       does (InferenceServices, download Jobs, cache scans, nodes), so it keeps
       the ServiceAccount token even with kagent.disableWiring: that flag only
-      switches off the ModelConfig management. Only the ollama driver runs
+      switches off the ModelConfig management. Only the ollama and lemonade drivers run
       without the API once wiring is off; without the token the kserve pod
       fails with "the kserve backend needs Kubernetes access" and crash-loops.
+      The lemonade driver behaves like ollama: a host server proxied over HTTP,
+      no Kubernetes access of its own.
       rbac.yaml follows the same rule (the kserve Roles render regardless of
       kagent.disableWiring).
       */}}
@@ -58,6 +60,12 @@ spec:
             {{- end }}
             {{- if .Values.ollama.memoryBudgetGiB }}
             - --ollama-memory-budget-gib={{ .Values.ollama.memoryBudgetGiB }}
+            {{- end }}
+            {{- end }}
+            {{- if eq .Values.backend "lemonade" }}
+            - --lemonade-endpoint={{ required "lemonade.endpoint is required for the lemonade backend" .Values.lemonade.endpoint }}
+            {{- if .Values.lemonade.agentHost }}
+            - --lemonade-agent-host={{ .Values.lemonade.agentHost }}
             {{- end }}
             {{- end }}
             {{- if eq .Values.backend "kserve" }}
