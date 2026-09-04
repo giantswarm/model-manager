@@ -34,3 +34,7 @@ helm-schema: ## Regenerate values.schema.json (needs the helm schema plugin and 
 .PHONY: helm-docs
 helm-docs: ## Regenerate the chart README.
 	helm-docs --chart-search-root=helm --sort-values-order=file
+
+.PHONY: helm-verify
+helm-verify: ## Render assertions for the chart (hack/verify-chart.sh).
+	hack/verify-chart.sh

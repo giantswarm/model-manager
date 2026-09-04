@@ -269,8 +269,15 @@ to model-manager itself: muster forwards the session's IdP id_token
 byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
 and the portal sends the signed-in user's id_token through the gateway;
 model-manager validates them against the IdP's JWKS when their audience is one
-of `--oauth-trusted-audiences` (the platform's OAuth client). The caller — the
-`email`, else the `sub` — is on every mutation's log line and recorded as
+of `--oauth-trusted-audiences`. The chart passes the platform's OAuth client
+(`oauth.trustedAudiences`, else `global.identity.clientId`) plus the
+MCPServer's `requiredAudiences`: every forwarded token carries those by
+construction and they are what the kube-apiserver trusts, so a portal session
+— whose id_token carries them but not the platform client — is accepted too.
+An id_token whose audience matches none of them is refused with 401, and the
+refusal names the token's `aud` next to the trusted audiences (the log line
+and the `WWW-Authenticate` `error_description`). The caller — the `email`,
+else the `sub` — is on every mutation's log line and recorded as
 `requestedBy` on jobs.
 
 `--downstream-oauth` goes one step further: everything a request does against
@@ -281,7 +288,10 @@ Roles and ClusterRoles; the caller's RBAC is the only RBAC. That needs an
 apiserver that trusts the IdP and the token's audience — a Dex install lists
 the cross-client audience the apiserver trusts in the MCPServer's
 `requiredAudiences` (muster requests it at login), a Google install's client
-id is the apiserver's `--oidc-client-id`. Nothing runs without a caller: the
+id is the apiserver's `--oidc-client-id`. A request whose bearer yields no
+IdP token to present (one this server neither issued nor trusts as a forwarded
+id_token) is refused with 401 instead of running as the permissionless
+ServiceAccount. Nothing runs without a caller: the
 wiring reconciler and the re-adoption of running downloads after a restart
 are off, and a job that outlives its caller's token (a download longer than
 the token lives) fails on the apiserver's 401 — attributed to the caller,

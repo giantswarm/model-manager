@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers"
 	"github.com/giantswarm/mcp-oauth/providers/dex"
 	"github.com/giantswarm/mcp-oauth/providers/google"
+	"github.com/giantswarm/mcp-oauth/providers/oidc"
 	"github.com/giantswarm/mcp-oauth/security"
 	"github.com/giantswarm/mcp-oauth/storage/memory"
 
@@ -58,9 +60,12 @@ type OAuthConfig struct {
 	GoogleClientID     string
 	GoogleClientSecret string
 
-	// TrustedAudiences are the OAuth client ids whose IdP tokens are accepted
-	// (SSO token forwarding): the platform client muster and the portal log
-	// in with. Empty: only tokens this server issued itself.
+	// TrustedAudiences are the OAuth client ids whose IdP id_tokens are
+	// accepted as bearer tokens (SSO token forwarding): the platform client
+	// MCP clients and the muster CLI log in with, plus the audiences the
+	// MCPServer requires — every forwarded token carries those and the
+	// kube-apiserver trusts them (the chart passes both). Empty: only tokens
+	// this server issued itself.
 	TrustedAudiences []string
 	// SSOAllowPrivateIPs lets the JWKS endpoint used for forwarded tokens
 	// resolve to a private address (an in-cluster Dex).
@@ -71,7 +76,8 @@ type OAuthConfig struct {
 	// DownstreamOAuth puts the caller's IdP token on the request so
 	// Kubernetes API calls are made as the caller instead of the
 	// ServiceAccount (the apiserver must trust the IdP and the token's
-	// audience). Background work keeps the ServiceAccount.
+	// audience). The ServiceAccount holds no permissions then, so a request
+	// that yields no IdP token to present is refused (401).
 	DownstreamOAuth bool
 }
 
@@ -222,7 +228,9 @@ func (o *oauthRuntime) protect(next http.Handler) http.Handler {
 // attachIdentity translates the validated mcp-oauth user into the request's
 // identity and, with DownstreamOAuth, resolves the IdP token to present to
 // the Kubernetes API: a forwarded id_token is the bearer itself; for a token
-// this server issued, the provider's id_token is looked up in the store.
+// this server issued, the provider's id_token is looked up in the store. A
+// request that yields neither is refused: the ServiceAccount holds no
+// permissions, so there is nothing else to run as.
 func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -238,19 +246,24 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 		}
 		ctx = identity.ContextWith(ctx, id)
 		if o.cfg.DownstreamOAuth {
-			if tok := o.downstreamToken(ctx, r, info); tok != "" {
-				ctx = identity.ContextWithToken(ctx, tok)
-			} else {
-				o.log.Warn("no IdP token for downstream Kubernetes access; the request runs as the ServiceAccount", "caller", id.String(), "source", id.Source)
+			bearer := bearerToken(r)
+			tok := o.downstreamToken(ctx, bearer, info)
+			if tok == "" {
+				o.refuseWithoutToken(w, r, id, bearer)
+				return
 			}
+			ctx = identity.ContextWithToken(ctx, tok)
 		}
 		o.log.Debug("authenticated request", "caller", id.String(), "source", id.Source, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func (o *oauthRuntime) downstreamToken(ctx context.Context, r *http.Request, info *providers.UserInfo) string {
-	bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+func bearerToken(r *http.Request) string {
+	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+}
+
+func (o *oauthRuntime) downstreamToken(ctx context.Context, bearer string, info *providers.UserInfo) string {
 	if bearer == "" {
 		return ""
 	}
@@ -264,6 +277,59 @@ func (o *oauthRuntime) downstreamToken(ctx context.Context, r *http.Request, inf
 	// mcp-oauth keeps the provider's id_token as the oauth2 token extra.
 	idToken, _ := tok.Extra("id_token").(string)
 	return idToken
+}
+
+// refuseWithoutToken answers 401 for a validated caller whose bearer yields no
+// IdP token to present downstream, and names the cause. The common one: the
+// bearer is an IdP id_token whose audience matches none of TrustedAudiences.
+// mcp-oauth then does not treat it as a forwarded id_token but validates it
+// through the IdP's userinfo endpoint — Dex answers for any id_token it
+// signed — so the caller is known, yet the token is not one this server may
+// present. A portal session's token, which carries the audience the
+// kube-apiserver trusts but not the platform client, looks exactly like that
+// until that audience is trusted (the chart trusts the MCPServer's
+// requiredAudiences for this reason). The refusal carries the token's aud
+// and the trusted audiences in the log line and in the WWW-Authenticate
+// error_description, which muster surfaces in its forwarding hint.
+func (o *oauthRuntime) refuseWithoutToken(w http.ResponseWriter, r *http.Request, id *identity.Identity, bearer string) {
+	desc := "no IdP token to present to the Kubernetes API (the ServiceAccount holds no permissions)"
+	attrs := []any{"caller", id.String(), "source", id.Source, "path", r.URL.Path}
+	if aud := jwtAudience(bearer); len(aud) > 0 {
+		desc = fmt.Sprintf("the bearer is an id_token for audience [%s], which matches none of the trusted audiences [%s]: it was validated through the IdP's userinfo endpoint, not as a forwarded id_token, so there is no IdP token to present to the Kubernetes API. Trust the audience every forwarded token carries (--oauth-trusted-audiences; chart: oauth.trustedAudiences or muster.mcpServer.auth.requiredAudiences)",
+			strings.Join(aud, ", "), strings.Join(o.cfg.TrustedAudiences, ", "))
+		attrs = append(attrs, "aud", aud, "trustedAudiences", o.cfg.TrustedAudiences)
+	}
+	o.log.Warn("request refused: "+desc, attrs...)
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s", error="%s", error_description="%s"`,
+		o.server.Config.ProtectedResourceMetadataEndpoint(), errInvalidToken, headerQuoted(desc)))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": errInvalidToken, "error_description": desc})
+}
+
+// errInvalidToken is the RFC 6750 error code for a bearer the resource
+// server does not accept.
+const errInvalidToken = "invalid_token"
+
+// jwtAudience is the unverified aud claim of a JWT bearer, nil for anything
+// else. Informational only: the bearer was validated by mcp-oauth before it
+// got here, this merely says which audiences it named.
+func jwtAudience(bearer string) []string {
+	if !oidc.IsJWT(bearer) {
+		return nil
+	}
+	claims, err := oidc.ParseUnverifiedClaims(bearer)
+	if err != nil {
+		return nil
+	}
+	return oidc.GetAudienceFromClaims(claims)
+}
+
+// headerQuoted escapes s for an RFC 7230 quoted-string header parameter; the
+// audiences come from the caller's token, so nothing of them may break out of
+// the quotes or the header line.
+func headerQuoted(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\r\n", " ", "\r", " ", "\n", " ").Replace(s)
 }
 
 func (o *oauthRuntime) shutdown(ctx context.Context) {
