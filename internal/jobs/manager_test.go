@@ -175,3 +175,26 @@ func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 	assert.Empty(t, anon.RequestedBy, "jobs the service starts on its own carry no caller")
 	waitDone(t, m, anon.ID)
 }
+
+func TestStartDedupesPerBackend(t *testing.T) {
+	m := NewManager()
+	block := make(chan struct{})
+	run := func(ctx context.Context, _ func(backend.Progress)) (any, error) {
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}
+	ollama, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameOllama, Model: "shared:1b"}, run)
+	require.True(t, created)
+	assert.Equal(t, backend.NameOllama, ollama.Backend)
+	lemonade, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
+	require.True(t, created, "the same reference on another backend is another job")
+	assert.NotEqual(t, ollama.ID, lemonade.ID)
+	joined, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
+	assert.False(t, created, "the same (type, backend, model) joins the running job")
+	assert.Equal(t, lemonade.ID, joined.ID)
+	close(block)
+	m.Wait()
+}

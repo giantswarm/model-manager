@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -49,7 +50,7 @@ func callTool(t *testing.T, srv interface {
 func TestMCPToolsMirrorREST(t *testing.T) {
 	fb := newFakeBackend()
 	fw := newFakeWirer()
-	svc := service.New(fb, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	srv := NewMCPServer(svc, "test")
 
 	// tools/list exposes every tool.

@@ -24,9 +24,11 @@ import (
 	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
-// fakeBackend is an in-memory backend.Backend.
+// fakeBackend is an in-memory backend.Backend. name is its driver name
+// (ollama when empty), so two fakes can stand in for two backends.
 type fakeBackend struct {
 	mu     sync.Mutex
+	name   backend.Name
 	models map[string]backend.Model
 	loaded map[string]bool
 	// expires is the keep-alive deadline of a loaded model, as Ollama's
@@ -51,11 +53,16 @@ func newFakeBackend() *fakeBackend {
 // the API reports.
 const fakeDriverKeepAlive = "1m"
 
-func (f *fakeBackend) Name() backend.Name                 { return backend.NameOllama }
+func (f *fakeBackend) Name() backend.Name {
+	if f.name != "" {
+		return f.name
+	}
+	return backend.NameOllama
+}
 func (f *fakeBackend) Capabilities() backend.Capabilities { return f.caps }
 func (f *fakeBackend) Info(context.Context) backend.Info {
 	return backend.Info{
-		Backend: backend.NameOllama, Version: "fake", Endpoint: "http://fake:11434", AgentEndpoint: "http://172.21.0.1:11434", Healthy: true,
+		Backend: f.Name(), Version: "fake", Endpoint: "http://fake:11434", AgentEndpoint: "http://172.21.0.1:11434", Healthy: true,
 		Loading: backend.Loading{OnDemand: true, IdleEviction: true, KeepAliveDefault: fakeDriverKeepAlive, KeepAliveScope: backend.KeepAliveScopeRequest},
 	}
 }
@@ -142,7 +149,8 @@ func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 }
 
 // fakeWirer records ModelConfigs in memory: refs holds model-manager's own
-// (keyed by model reference), foreign holds ModelConfigs created by others.
+// (keyed by backend and model reference), foreign holds ModelConfigs created
+// by others.
 type fakeWirer struct {
 	mu      sync.Mutex
 	refs    map[string]wiring.ModelConfigRef
@@ -150,6 +158,16 @@ type fakeWirer struct {
 }
 
 func newFakeWirer() *fakeWirer { return &fakeWirer{refs: map[string]wiring.ModelConfigRef{}} }
+
+func refKey(b backend.Name, model string) string { return string(b) + "|" + model }
+
+// get returns model-manager's own ModelConfig for (b, model), if any.
+func (w *fakeWirer) get(b backend.Name, model string) (wiring.ModelConfigRef, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	r, ok := w.refs[refKey(b, model)]
+	return r, ok
+}
 
 func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndpoint) (*wiring.ModelConfigRef, error) {
 	w.mu.Lock()
@@ -162,14 +180,14 @@ func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndp
 	if endpoint == "" {
 		endpoint = ep.Host
 	}
-	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true}
-	w.refs[model] = ref
+	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend}
+	w.refs[refKey(ep.Backend, model)] = ref
 	return &ref, nil
 }
-func (w *fakeWirer) Remove(_ context.Context, model string) error {
+func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.refs, model)
+	delete(w.refs, refKey(b, model))
 	return nil
 }
 func (w *fakeWirer) ListAll(context.Context) ([]wiring.ModelConfigRef, error) {
@@ -181,20 +199,20 @@ func (w *fakeWirer) ListAll(context.Context) ([]wiring.ModelConfigRef, error) {
 	}
 	return out, nil
 }
-func (w *fakeWirer) Lookup(_ context.Context, model string) (*wiring.ModelConfigRef, error) {
+func (w *fakeWirer) Lookup(_ context.Context, b backend.Name, model string) (*wiring.ModelConfigRef, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if r, ok := w.refs[model]; ok {
+	if r, ok := w.refs[refKey(b, model)]; ok {
 		return &r, nil
 	}
 	return nil, nil
 }
-func (w *fakeWirer) List(context.Context) (map[string]wiring.ModelConfigRef, error) {
+func (w *fakeWirer) List(context.Context) ([]wiring.ModelConfigRef, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make(map[string]wiring.ModelConfigRef, len(w.refs))
-	for k, v := range w.refs {
-		out[k] = v
+	out := make([]wiring.ModelConfigRef, 0, len(w.refs))
+	for _, v := range w.refs {
+		out = append(out, v)
 	}
 	return out, nil
 }
@@ -218,7 +236,7 @@ func newFixture(t *testing.T, withWirer bool) *fixture {
 		w = fw
 		info = &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}
 	}
-	svc := service.New(fb, jobs.NewManager(), w, info, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), w, info, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -269,6 +287,7 @@ func TestBackendEndpoint(t *testing.T) {
 	status, body := f.do(t, http.MethodGet, Prefix+"/backend", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "ollama", body["backend"])
+	assert.Equal(t, []any{"ollama"}, body["backends"], "the compat descriptor names every configured backend")
 	assert.Equal(t, true, body["healthy"])
 	assert.Equal(t, "http://fake:11434", body["endpoint"])
 	assert.Equal(t, "http://172.21.0.1:11434", body["agentEndpoint"], "the host agents dial is reported next to the one model-manager dials")
@@ -324,6 +343,7 @@ func TestPullFlowWiresAndEnrichesInventory(t *testing.T) {
 	assert.Equal(t, true, body["created"])
 	job := body["job"].(map[string]any)
 	assert.Equal(t, "smollm2:135m", job["model"])
+	assert.Equal(t, "ollama", job["backend"], "every job names its backend")
 	assert.Equal(t, true, job["wire"])
 	assert.NotContains(t, job, "node", "ollama has no placement")
 	assert.NotContains(t, job, "preset")
@@ -352,7 +372,10 @@ func TestPullFlowWiresAndEnrichesInventory(t *testing.T) {
 	}
 	require.NotNil(t, pulled)
 	assert.Equal(t, false, pulled["loaded"])
+	assert.Equal(t, "ollama", pulled["backend"], "every model names its backend")
 	assert.Equal(t, "smollm2-135m", pulled["modelConfig"].(map[string]any)["name"])
+	assert.Equal(t, "ollama", pulled["modelConfig"].(map[string]any)["backend"])
+	assert.NotContains(t, list, "errors", "no per-backend failure to report")
 
 	status, one := f.do(t, http.MethodGet, Prefix+"/models/smollm2:135m", nil)
 	require.Equal(t, http.StatusOK, status)
@@ -436,6 +459,7 @@ func TestLoadUnloadDelete(t *testing.T) {
 	status, body = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Equal(t, true, body["deleted"])
+	assert.Equal(t, "ollama", body["backend"], "the delete echoes the backend it resolved to")
 	assert.Equal(t, true, body["unwired"])
 	assert.Empty(t, f.wirer.refs, "delete unwires by default")
 	status, _ = f.do(t, http.MethodGet, Prefix+"/models/qwen3:0.6b", nil)

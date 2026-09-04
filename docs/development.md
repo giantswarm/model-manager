@@ -38,6 +38,21 @@ make helm-docs      # regenerate helm/model-manager/README.md
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 - `helm/model-manager` — the chart.
 
+## Local loop against a host Ollama and a Lemonade Server at once
+
+```sh
+./model-manager serve --listen 127.0.0.1:18080 --backends ollama,lemonade \
+  --ollama-endpoint http://localhost:11434 --ollama-agent-host http://172.21.0.1:11434 \
+  --lemonade-endpoint http://localhost:13305 --lemonade-agent-host http://172.21.0.1:13305 \
+  --kubeconfig ~/.kube/config --kube-context kind-agentlab --kagent-namespace kagent -v
+
+curl -s localhost:18080/api/v1/backends                       # both descriptors, ollama first (the default)
+curl -s localhost:18080/api/v1/models                         # every model, each with "backend"
+curl -s -X POST localhost:18080/api/v1/models/pull -d '{"model":"qwen3-4b-FLM","backend":"lemonade"}'
+curl -s -X POST localhost:18080/api/v1/models/load -d '{"model":"qwen3-4b-FLM","keepAlive":"-1"}'   # unique: no backend needed
+curl -s 'localhost:18080/api/v1/models/qwen3:0.6b?backend=ollama'
+```
+
 ## Local loop against a host Ollama and the agentlab kind cluster
 
 ```sh

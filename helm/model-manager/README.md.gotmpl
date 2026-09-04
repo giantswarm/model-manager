@@ -7,9 +7,12 @@
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
 (contract: `/api/v1/openapi.yaml`) and the MCP streamable-HTTP endpoint under
-`/mcp`. Pick the serving backend with `backend`; the API reports the backend
-and its capability flags at `GET /api/v1/backend` so clients render only what
-the installation supports.
+`/mcp`. Pick the serving backend with `backend`, or several at once with
+`backends` (one process in front of every server the host runs, e.g.
+`[ollama, lemonade]`); the API reports each backend and its capability flags
+at `GET /api/v1/backends` so clients render only what the installation
+supports. `GET /api/v1/backend` describes the first (default) backend and
+names the others.
 
 - `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
   kind the docker network gateway). Agent wiring uses kagent's native keyless
@@ -23,6 +26,21 @@ the installation supports.
 Used as a dependency of `agent-platform-standalone` behind a `condition`;
 standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
 `mcp.enabled` and `muster.mcpServer.*`.
+
+### Several backends at once
+
+`backends: [ollama, lemonade]` runs both drivers in one process: the Deployment
+passes `--backends` and the flags of every listed driver (each reads its own
+block — `ollama.*`, `lemonade.*`, `kserve.*`), the ServiceAccount token, the
+kserve Roles, the cache-agent DaemonSet and the Hugging Face token Secret
+render when kserve is listed. The order is the operator's: the first backend
+is the **default backend** — the one `GET /api/v1/backend` describes and the
+one `POST /api/v1/models/pull` uses when the request names none (a pull names a
+model that does not exist yet, so nothing else can pick). Every model, loaded
+entry, job, node and ModelConfig reference carries `backend`; reads take
+`?backend=`, mutations a `backend` field, and an unqualified reference that
+exists on two backends answers `409 conflict`. `backend: ollama` alone renders
+exactly what it always did.
 
 ### kserve backend
 

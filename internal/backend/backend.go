@@ -1,12 +1,12 @@
 // Package backend defines the serving-backend abstraction behind model-manager's
 // API. One API — inventory of downloaded and loaded models, import with
-// progress, load/unload, delete, wire-to-agents — implemented by
-// per-installation drivers: `ollama` (host Ollama, the agentlab dev loop),
-// `kserve` (InferenceServices, HF cache inventory per node, download Jobs,
-// presets) and `lemonade` (a Lemonade Server — FastFlowLM on AMD Ryzen AI NPUs,
-// llama.cpp on GPUs and CPUs — on laptops and workstations). Drivers report
-// what they support as explicit capability flags so
-// clients (portal, MCP) render per flag, never per backend name.
+// progress, load/unload, delete, wire-to-agents — implemented by drivers:
+// `ollama` (host Ollama, the agentlab dev loop), `kserve` (InferenceServices,
+// HF cache inventory per node, download Jobs, presets) and `lemonade` (a host
+// Lemonade Server). One process runs one or several of them at once; the
+// service stamps every object with the driver's Name. Drivers report what
+// they support as explicit capability flags so clients (portal, MCP) render
+// per flag, never per backend name.
 package backend
 
 import (
@@ -139,15 +139,19 @@ type Info struct {
 type Model struct {
 	// Name is the backend's canonical reference (e.g. "smollm2:135m",
 	// "hf.co/org/repo:Q4_K_M", "org/repo" for an HF cache entry).
-	Name          string    `json:"name"`
-	Digest        string    `json:"digest,omitempty"`
-	SizeBytes     int64     `json:"sizeBytes"`
-	ModifiedAt    time.Time `json:"modifiedAt,omitzero"`
-	Format        string    `json:"format,omitempty"`
-	Family        string    `json:"family,omitempty"`
-	ParameterSize string    `json:"parameterSize,omitempty"`
-	Quantization  string    `json:"quantization,omitempty"`
-	ContextLength int64     `json:"contextLength,omitempty"`
+	Name       string    `json:"name"`
+	Digest     string    `json:"digest,omitempty"`
+	SizeBytes  int64     `json:"sizeBytes"`
+	ModifiedAt time.Time `json:"modifiedAt,omitzero"`
+	// Backend is the driver holding this model (ollama, kserve, lemonade);
+	// set by the service, so clients can group and route by it when one
+	// model-manager runs several backends.
+	Backend       Name   `json:"backend,omitempty"`
+	Format        string `json:"format,omitempty"`
+	Family        string `json:"family,omitempty"`
+	ParameterSize string `json:"parameterSize,omitempty"`
+	Quantization  string `json:"quantization,omitempty"`
+	ContextLength int64  `json:"contextLength,omitempty"`
 	// Runtime is what the backend runs the model with, on backends that have
 	// several (lemonade: the recipe — flm for FastFlowLM on the NPU, llamacpp,
 	// ryzenai-llm, ...). Empty on a backend with one runtime (ollama) or where
@@ -173,7 +177,9 @@ type Model struct {
 
 // LoadedModel is a model currently loaded in memory / serving.
 type LoadedModel struct {
-	Name          string     `json:"name"`
+	Name string `json:"name"`
+	// Backend is the driver serving this model; set by the service.
+	Backend       Name       `json:"backend,omitempty"`
 	Digest        string     `json:"digest,omitempty"`
 	SizeBytes     int64      `json:"sizeBytes"`
 	VRAMBytes     int64      `json:"vramBytes,omitempty"`
@@ -248,7 +254,9 @@ type LoadRequest struct {
 
 // Preset is a curated serving recipe (kserve: a published ServingPreset).
 type Preset struct {
-	Name          string            `json:"name"`
+	Name string `json:"name"`
+	// Backend is the driver offering this preset; set by the service.
+	Backend       Name              `json:"backend,omitempty"`
 	DisplayName   string            `json:"displayName"`
 	Description   string            `json:"description,omitempty"`
 	Source        string            `json:"source,omitempty"`
@@ -294,6 +302,8 @@ type FitRequest struct {
 // FitResult is the outcome of a fit check.
 type FitResult struct {
 	Model string `json:"model"`
+	// Backend is the driver the check ran on; set by the service.
+	Backend Name `json:"backend,omitempty"`
 	// Fits is true when RequiredBytes <= BudgetBytes on Node.
 	Fits   bool   `json:"fits"`
 	Reason string `json:"reason,omitempty"`
@@ -327,7 +337,9 @@ type FitResult struct {
 
 // NodeInfo is one node's serving budget and cache state.
 type NodeInfo struct {
-	Name         string `json:"name"`
+	Name string `json:"name"`
+	// Backend is the driver reporting this node; set by the service.
+	Backend      Name   `json:"backend,omitempty"`
 	Ready        bool   `json:"ready"`
 	Architecture string `json:"architecture,omitempty"`
 	// Eligible is true when a model can be served on this node right now:
@@ -430,6 +442,11 @@ type PullAdopter interface {
 type AgentEndpoint struct {
 	// Provider is the kagent ModelConfig provider ("Ollama", "OpenAI").
 	Provider string `json:"provider"`
+	// Backend is the driver the endpoint belongs to; the wiring layer records
+	// it on the ModelConfig (label model-manager.giantswarm.io/backend), which
+	// together with the model reference identifies the ModelConfig. Set by
+	// the service.
+	Backend Name `json:"backend,omitempty"`
 	// Host is the Ollama API host (provider Ollama).
 	Host string `json:"host,omitempty"`
 	// BaseURL is the OpenAI-compatible base URL (provider OpenAI).

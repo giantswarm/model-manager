@@ -99,7 +99,7 @@ func TestNodesAreAcceleratorsWithEligibility(t *testing.T) {
 
 	// The same through the REST API: the flag and reason on GET /nodes, the
 	// reason as 412 does_not_fit on load, fits=false on the fit check.
-	svc := service.New(f.b, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{f.b}, jobs.NewManager(), nil, nil, service.Config{}, nil)
 	mux := http.NewServeMux()
 	api.NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)

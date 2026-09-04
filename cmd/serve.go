@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +32,8 @@ type serveOptions struct {
 	listen string
 
 	backendName           string
+	backendNameSet        bool
+	backends              string
 	ollamaEndpoint        string
 	ollamaAgentHost       string
 	ollamaMemoryBudgetGiB string
@@ -112,12 +115,14 @@ func newServeCmd() *cobra.Command {
 		Long: `Run the model-manager server. Every flag can also be set through the
 environment variable named next to it; flags win over the environment.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			o.backendNameSet = cmd.Flags().Changed("backend") || os.Getenv("MODEL_MANAGER_BACKEND") != ""
 			return runServe(cmd.Context(), o)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("MODEL_MANAGER_LISTEN", ":8080"), "Listen address (MODEL_MANAGER_LISTEN)")
-	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve|lemonade (MODEL_MANAGER_BACKEND)")
+	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve|lemonade — the one-backend form of --backends (MODEL_MANAGER_BACKEND)")
+	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
 	f.StringVar(&o.ollamaEndpoint, "ollama-endpoint", envOr("OLLAMA_ENDPOINT", "http://127.0.0.1:11434"), "Ollama API base URL as reached by model-manager (OLLAMA_ENDPOINT)")
 	f.StringVar(&o.ollamaAgentHost, "ollama-agent-host", envOr("OLLAMA_AGENT_HOST", ""), "Ollama host written into kagent ModelConfigs, as reached by agent pods; defaults to --ollama-endpoint (OLLAMA_AGENT_HOST)")
 	f.StringVar(&o.ollamaMemoryBudgetGiB, "ollama-memory-budget-gib", envOr("MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB", ""), "Memory budget of the proxied host in GiB (decimals allowed), reported on /api/v1/nodes as budgetSource=override instead of MemTotal of the pod's /proc/meminfo — for Docker Desktop, another VM-backed runtime or an Ollama on another machine; empty or 0: the pod's view (MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB)")
@@ -189,13 +194,19 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return fmt.Errorf("--downstream-oauth needs --enable-oauth: without OAuth there is no caller token to present to the Kubernetes API")
 	}
 
+	names, err := backendNames(o.backendName, o.backendNameSet, o.backends)
+	if err != nil {
+		return err
+	}
+	hasKServe := slices.Contains(names, backend.NameKServe)
+
 	// Kubernetes access: required by the kserve driver, optional (wiring only)
 	// for ollama and lemonade.
 	var clients *kube.Clients
-	if !o.wiringDisabled || o.backendName == string(backend.NameKServe) {
+	if !o.wiringDisabled || hasKServe {
 		c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster, Logger: log})
 		if err != nil {
-			if o.backendName == string(backend.NameKServe) {
+			if hasKServe {
 				return fmt.Errorf("the kserve backend needs Kubernetes access: %w", err)
 			}
 			log.Warn("agent wiring disabled: no Kubernetes access", "error", err)
@@ -222,11 +233,15 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			return c.Clientset, c.Dynamic
 		}
 	}
-	b, err := backend.New(backend.Name(o.backendName), opts)
-	if err != nil {
-		return err
+	backends := make([]backend.Backend, 0, len(names))
+	for _, name := range names {
+		b, err := backend.New(name, opts)
+		if err != nil {
+			return err
+		}
+		log.Info("backend ready", "backend", b.Name(), "capabilities", b.Capabilities(), "default", len(backends) == 0)
+		backends = append(backends, b)
 	}
-	log.Info("backend ready", "backend", b.Name(), "capabilities", b.Capabilities())
 
 	var (
 		wirer      wiring.Wirer
@@ -246,7 +261,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 				apiVersion = wiring.DefaultAPIVersion
 			}
 		}
-		k := wiring.NewKagent(clients.Dynamic, o.kagentNamespace, apiVersion, o.modelConfigPrefix, b.Name()).
+		k := wiring.NewKagent(clients.Dynamic, o.kagentNamespace, apiVersion, o.modelConfigPrefix).
 			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
 		wirer = k
 		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion()}
@@ -254,7 +269,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
-	svc := service.New(b, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
+	svc := service.New(backends, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
 
 	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath}
 	if o.oauthEnabled {
@@ -288,6 +303,27 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	jm.Wait()
 	return nil
+}
+
+// backendNames is the ordered list of drivers to run: --backends when set,
+// else --backend alone. Names must be distinct; an explicit --backend next to
+// --backends must be one of them.
+func backendNames(single string, singleSet bool, list string) ([]backend.Name, error) {
+	raw := splitList(list)
+	if len(raw) == 0 {
+		raw = []string{strings.TrimSpace(single)}
+	} else if singleSet && !slices.Contains(raw, strings.TrimSpace(single)) {
+		return nil, fmt.Errorf("--backend=%s is not in --backends=%s: name it in the list or drop the flag", single, list)
+	}
+	names := make([]backend.Name, 0, len(raw))
+	for _, r := range raw {
+		n := backend.Name(r)
+		if slices.Contains(names, n) {
+			return nil, fmt.Errorf("--backends lists %s twice: one process runs each driver at most once", n)
+		}
+		names = append(names, n)
+	}
+	return names, nil
 }
 
 func (k kserveFlags) options() backend.KServeOptions {

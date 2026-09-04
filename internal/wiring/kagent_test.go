@@ -25,11 +25,15 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 		testGVR:   "ModelConfigList",
 		secretGVR: "SecretList",
 	}, objs...)
-	return NewKagent(client, "kagent", "v1alpha2", "", backend.NameOllama), client
+	return NewKagent(client, "kagent", "v1alpha2", ""), client
 }
 
 func ollamaEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model}
+	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model}
+}
+
+func lemonadeEndpoint(model string) backend.AgentEndpoint {
+	return backend.AgentEndpoint{Backend: backend.NameLemonade, Provider: "OpenAI", BaseURL: "http://172.21.0.1:13305/api/v1", Model: model, PlaceholderAPIKey: true}
 }
 
 func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
@@ -42,6 +46,7 @@ func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	assert.Equal(t, "kagent", ref.Namespace)
 	assert.Equal(t, "Ollama", ref.Provider)
 	assert.Equal(t, "smollm2:135m", ref.Model)
+	assert.Equal(t, backend.NameOllama, ref.Backend, "the ref carries the backend label")
 	assert.False(t, ref.Ready, "no controller has reconciled yet")
 	assert.Equal(t, "kagent.dev/v1alpha2", ref.APIVersion)
 
@@ -121,7 +126,7 @@ func TestEnsureOpenAIPlaceholderSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ManagedByValue, sec.GetLabels()[ManagedByLabel])
 
-	require.NoError(t, k.Remove(ctx, "org/qwen3-8b"))
+	require.NoError(t, k.Remove(ctx, "", "org/qwen3-8b"))
 	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "org-qwen3-8b-api-key", metav1.GetOptions{})
 	require.Error(t, err, "placeholder secret goes with the ModelConfig")
 }
@@ -134,23 +139,30 @@ func TestLookupListRemove(t *testing.T) {
 	_, err = k.Ensure(ctx, "qwen3:0.6b", ollamaEndpoint("qwen3:0.6b"))
 	require.NoError(t, err)
 
-	ref, err := k.Lookup(ctx, "qwen3:0.6b")
+	ref, err := k.Lookup(ctx, backend.NameOllama, "qwen3:0.6b")
 	require.NoError(t, err)
 	require.NotNil(t, ref)
 	assert.Equal(t, "qwen3-0-6b", ref.Name)
 
-	missing, err := k.Lookup(ctx, "nope:1b")
+	missing, err := k.Lookup(ctx, backend.NameOllama, "nope:1b")
 	require.NoError(t, err)
 	assert.Nil(t, missing)
+	other, err := k.Lookup(ctx, backend.NameLemonade, "qwen3:0.6b")
+	require.NoError(t, err)
+	assert.Nil(t, other, "another backend's ModelConfig is not this backend's")
 
 	all, err := k.List(ctx)
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
-	assert.Contains(t, all, "smollm2:135m")
-	assert.Contains(t, all, "qwen3:0.6b")
+	models := map[string]backend.Name{}
+	for _, r := range all {
+		models[r.Model] = r.Backend
+	}
+	assert.Equal(t, backend.NameOllama, models["smollm2:135m"])
+	assert.Equal(t, backend.NameOllama, models["qwen3:0.6b"])
 
-	require.NoError(t, k.Remove(ctx, "smollm2:135m"))
-	require.NoError(t, k.Remove(ctx, "smollm2:135m"), "removing twice is fine")
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m"))
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m"), "removing twice is fine")
 	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1)
@@ -211,13 +223,13 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	again, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "qwen3-8-27b", again.Name)
-	require.NoError(t, k.Remove(ctx, "Inferact/Qwen3.8-27B-NVFP4"))
+	require.NoError(t, k.Remove(ctx, "", "Inferact/Qwen3.8-27B-NVFP4"))
 	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, list.Items)
 
 	// A prefix still applies to backend-chosen names.
-	kp := NewKagent(client, "kagent", "v1alpha2", "mm", backend.NameKServe)
+	kp := NewKagent(client, "kagent", "v1alpha2", "mm")
 	pref, err := kp.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "mm-qwen3-8-27b", pref.Name)
@@ -252,8 +264,89 @@ func TestListAllReportsForeignModelConfigs(t *testing.T) {
 	owned, err := k.List(ctx)
 	require.NoError(t, err)
 	assert.Len(t, owned, 1, "List stays model-manager's own")
-	require.NoError(t, k.Remove(ctx, "qwen3-8-27b"), "absent from the owned set: a no-op")
+	require.NoError(t, k.Remove(ctx, "", "qwen3-8-27b"), "absent from the owned set: a no-op")
 	all, err = k.ListAll(ctx)
 	require.NoError(t, err)
 	assert.Len(t, all, 2, "foreign ModelConfigs are never deleted")
+}
+
+func TestSameReferenceOnTwoBackendsIsTwoModelConfigs(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+
+	// The first backend keeps the plain derived name.
+	first, err := k.Ensure(ctx, "shared:1b", ollamaEndpoint("shared:1b"))
+	require.NoError(t, err)
+	assert.Equal(t, "shared-1b", first.Name)
+	assert.Equal(t, backend.NameOllama, first.Backend)
+
+	// The same reference on another backend: the derived name is taken by a
+	// managed ModelConfig of another backend, so this one carries its backend.
+	second, err := k.Ensure(ctx, "shared:1b", lemonadeEndpoint("shared:1b"))
+	require.NoError(t, err)
+	assert.Equal(t, "shared-1b-lemonade", second.Name)
+	assert.Equal(t, backend.NameLemonade, second.Backend)
+	assert.Equal(t, "shared:1b", second.Model)
+
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2, "one ModelConfig per (backend, model)")
+
+	// Idempotent per backend, and each side finds only its own.
+	again, err := k.Ensure(ctx, "shared:1b", lemonadeEndpoint("shared:1b"))
+	require.NoError(t, err)
+	assert.Equal(t, "shared-1b-lemonade", again.Name)
+	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2, "a repeated Ensure neither duplicates nor renames")
+	ol, err := k.Lookup(ctx, backend.NameOllama, "shared:1b")
+	require.NoError(t, err)
+	require.NotNil(t, ol)
+	assert.Equal(t, "shared-1b", ol.Name)
+	le, err := k.Lookup(ctx, backend.NameLemonade, "shared:1b")
+	require.NoError(t, err)
+	require.NotNil(t, le)
+	assert.Equal(t, "shared-1b-lemonade", le.Name)
+
+	// Remove is per backend: the other backend's ModelConfig stays.
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "shared:1b"))
+	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, "shared-1b-lemonade", list.Items[0].GetName())
+	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "shared-1b-lemonade-api-key", metav1.GetOptions{})
+	require.NoError(t, err, "the lemonade placeholder secret survives the ollama unwire")
+
+	// With the plain name free again, the lemonade ModelConfig keeps its
+	// suffixed name: converging would delete and recreate it for nothing.
+	again, err = k.Ensure(ctx, "shared:1b", lemonadeEndpoint("shared:1b"))
+	require.NoError(t, err)
+	assert.Equal(t, "shared-1b-lemonade", again.Name)
+}
+
+func TestLegacyModelConfigWithoutBackendLabelMatchesAnyBackend(t *testing.T) {
+	legacy := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kagent.dev/v1alpha2",
+		"kind":       "ModelConfig",
+		"metadata": map[string]any{"name": "old-1b", "namespace": "kagent",
+			"labels":      map[string]any{ManagedByLabel: ManagedByValue},
+			"annotations": map[string]any{ModelAnnotation: "old:1b"}},
+		"spec": map[string]any{"provider": "Ollama", "model": "old:1b", "ollama": map[string]any{"host": "http://172.21.0.1:11434"}},
+	}}
+	k, client := newFakeKagent(t, legacy)
+	ctx := context.Background()
+
+	ref, err := k.Lookup(ctx, backend.NameOllama, "old:1b")
+	require.NoError(t, err)
+	require.NotNil(t, ref, "a ModelConfig written before the backend label existed belongs to whichever backend asks")
+	assert.Equal(t, backend.Name(""), ref.Backend)
+
+	// Ensure adopts it under the backend's label instead of creating a second one.
+	updated, err := k.Ensure(ctx, "old:1b", ollamaEndpoint("old:1b"))
+	require.NoError(t, err)
+	assert.Equal(t, "old-1b", updated.Name)
+	assert.Equal(t, backend.NameOllama, updated.Backend)
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
 }

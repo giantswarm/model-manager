@@ -43,7 +43,7 @@ subjects:
     name: {{ include "model-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if and $rbac (eq .Values.backend "kserve") }}
+{{- if and $rbac (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) }}
 {{- /*
 KServe backend, in the serving namespace: InferenceServices; download Jobs and
 their pods (progress from pod logs); the short-lived cache-tool pods that scan

@@ -1,4 +1,4 @@
-{{- if and (eq .Values.backend "kserve") (eq .Values.kserve.inventory.mode "daemonset") }}
+{{- if and (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (eq .Values.kserve.inventory.mode "daemonset") }}
 {{- $agent := .Values.kserve.inventory.agent }}
 {{- $claim := required "kserve.cache.claimName is required when kserve.inventory.mode is daemonset: the DaemonSet mounts the cache claim, and the chart cannot read the discovery ConfigMap at render time (set it to the modelServing cache claim, e.g. hf-cache)" .Values.kserve.cache.claimName }}
 # The DaemonSet inventory (kserve.inventory.mode: daemonset): one cache-agent

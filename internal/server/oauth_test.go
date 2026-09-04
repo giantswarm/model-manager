@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/api"
+	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
@@ -354,7 +355,7 @@ func TestRefusalHeaderIsQuoted(t *testing.T) {
 // server: probes stay open, the API and the MCP endpoint demand a token.
 func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	idp := newFakeIdP(t)
-	svc := service.New(downBackend{}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
 	cfg := idp.config(false)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true, OAuth: &cfg}, svc, api.NewMCPServer(svc, "test"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)

@@ -39,7 +39,7 @@ func (downBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 }
 
 func TestReadinessDoesNotTrackBackend(t *testing.T) {
-	svc := service.New(downBackend{}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, "test"), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())

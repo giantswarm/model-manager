@@ -65,19 +65,29 @@ type ModelConfigRef struct {
 	ProviderModel string `json:"providerModel,omitempty"`
 	// Endpoint is the provider endpoint: openAI.baseUrl or ollama.host.
 	Endpoint string `json:"endpoint,omitempty"`
+	// Backend is the driver that produced the ModelConfig (the
+	// model-manager.giantswarm.io/backend label); together with Model it
+	// identifies the ModelConfig when one model-manager runs several
+	// backends. Empty on a ModelConfig without the label.
+	Backend backend.Name `json:"backend,omitempty"`
 }
 
-// Wirer manages the agent-facing configuration for models.
+// Wirer manages the agent-facing configuration for models. A ModelConfig is
+// identified by (backend, model): the backend label plus the model
+// annotation, so the same reference on two backends is two ModelConfigs.
 type Wirer interface {
-	// Ensure creates or updates the ModelConfig for model (idempotent).
+	// Ensure creates or updates the ModelConfig for model on ep.Backend
+	// (idempotent).
 	Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error)
-	// Remove deletes the ModelConfig for model; absent is not an error. Only
-	// model-manager's own ModelConfigs are ever deleted.
-	Remove(ctx context.Context, model string) error
-	// Lookup returns the ModelConfig for model, or nil when none exists.
-	Lookup(ctx context.Context, model string) (*ModelConfigRef, error)
-	// List returns all model-manager-owned ModelConfigs keyed by model reference.
-	List(ctx context.Context) (map[string]ModelConfigRef, error)
+	// Remove deletes the ModelConfig for model on backend b; absent is not an
+	// error. Only model-manager's own ModelConfigs are ever deleted.
+	Remove(ctx context.Context, b backend.Name, model string) error
+	// Lookup returns the ModelConfig for model on backend b, or nil when none
+	// exists.
+	Lookup(ctx context.Context, b backend.Name, model string) (*ModelConfigRef, error)
+	// List returns all model-manager-owned ModelConfigs, each with its
+	// backend and model reference.
+	List(ctx context.Context) ([]ModelConfigRef, error)
 	// ListAll returns every ModelConfig in the namespace, whoever created it,
 	// so callers can recognise a model that is already wired by someone else.
 	ListAll(ctx context.Context) ([]ModelConfigRef, error)
@@ -90,11 +100,12 @@ type Kagent struct {
 	gvr       schema.GroupVersionResource
 	namespace string
 	prefix    string
-	backend   backend.Name
 }
 
 // NewKagent builds a Wirer writing into namespace with the given API version.
-func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string, b backend.Name) *Kagent {
+// The backend a ModelConfig belongs to comes with every AgentEndpoint, so one
+// wirer serves every backend of the process.
+func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string) *Kagent {
 	if apiVersion == "" {
 		apiVersion = DefaultAPIVersion
 	}
@@ -103,7 +114,6 @@ func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string, b
 		gvr:       schema.GroupVersionResource{Group: KagentGroup, Version: apiVersion, Resource: ModelConfigResource},
 		namespace: namespace,
 		prefix:    prefix,
-		backend:   b,
 	}
 }
 
@@ -169,22 +179,38 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
-	name := ModelConfigName(k.prefix, model)
+	target := ModelConfigName(k.prefix, model)
 	if ep.Name != "" {
-		name = k.prefixed(ep.Name)
+		target = k.prefixed(ep.Name)
 	}
-	desired := k.build(name, model, ep)
-
 	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
-	// Converge: an owned ModelConfig for this model under another name (an
-	// earlier naming rule) is replaced, never duplicated.
-	if old, err := k.find(ctx, model); err != nil {
+	// The derived name may already belong to the same reference on ANOTHER
+	// backend (one model-manager, several backends): that ModelConfig keeps
+	// the plain name, this one gets the backend appended. The annotation
+	// still names the exact reference on both.
+	if taken, gerr := res.Get(ctx, target, metav1.GetOptions{}); gerr == nil && ownedByOtherBackend(taken, ep.Backend) {
+		target = suffixed(target, ep.Backend)
+	}
+	// An owned ModelConfig for this (backend, model) keeps the name it has —
+	// plain or suffixed — so a repeated Ensure never deletes and recreates
+	// it. Only a backend-chosen name (ep.Name, the kserve InferenceService
+	// rule) converges an older derived name onto the new one, replacing it,
+	// never duplicating it.
+	name := target
+	old, err := k.find(ctx, ep.Backend, model)
+	if err != nil {
 		return nil, err
-	} else if old != nil && old.GetName() != name {
-		if err := k.removeObj(ctx, old.GetName()); err != nil {
-			return nil, err
+	}
+	if old != nil {
+		if ep.Name != "" && old.GetName() != target {
+			if err := k.removeObj(ctx, old.GetName()); err != nil {
+				return nil, err
+			}
+		} else {
+			name = old.GetName()
 		}
 	}
+	desired := k.build(name, model, ep)
 	existing, err := res.Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
@@ -238,8 +264,8 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 }
 
 // Remove implements Wirer.
-func (k *Kagent) Remove(ctx context.Context, model string) error {
-	obj, err := k.find(ctx, model)
+func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error {
+	obj, err := k.find(ctx, b, model)
 	if err != nil {
 		return err
 	}
@@ -267,8 +293,8 @@ func (k *Kagent) removeObj(ctx context.Context, name string) error {
 }
 
 // Lookup implements Wirer.
-func (k *Kagent) Lookup(ctx context.Context, model string) (*ModelConfigRef, error) {
-	obj, err := k.find(ctx, model)
+func (k *Kagent) Lookup(ctx context.Context, b backend.Name, model string) (*ModelConfigRef, error) {
+	obj, err := k.find(ctx, b, model)
 	if err != nil || obj == nil {
 		return nil, err
 	}
@@ -276,24 +302,20 @@ func (k *Kagent) Lookup(ctx context.Context, model string) (*ModelConfigRef, err
 }
 
 // List implements Wirer.
-func (k *Kagent) List(ctx context.Context) (map[string]ModelConfigRef, error) {
+func (k *Kagent) List(ctx context.Context) ([]ModelConfigRef, error) {
 	list, err := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: ManagedByLabel + "=" + ManagedByValue,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
-	out := make(map[string]ModelConfigRef, len(list.Items))
+	out := make([]ModelConfigRef, 0, len(list.Items))
 	for i := range list.Items {
-		item := &list.Items[i]
-		model := item.GetAnnotations()[ModelAnnotation]
-		if model == "" {
-			model, _, _ = unstructured.NestedString(item.Object, "spec", "model")
-		}
-		if model == "" {
+		ref := toRef(&list.Items[i])
+		if ref.Model == "" {
 			continue
 		}
-		out[model] = *toRef(item)
+		out = append(out, *ref)
 	}
 	return out, nil
 }
@@ -319,26 +341,52 @@ func (k *Kagent) prefixed(name string) string {
 	return ModelConfigName(k.prefix, name)
 }
 
-// find returns the owned ModelConfig for model, matching the annotation first
-// and the derived name second.
-func (k *Kagent) find(ctx context.Context, model string) (*unstructured.Unstructured, error) {
+// find returns the owned ModelConfig for model on backend b, matching the
+// annotation first and the derived name second. A ModelConfig without the
+// backend label (written before the label existed) matches any backend; an
+// empty b matches any label.
+func (k *Kagent) find(ctx context.Context, b backend.Name, model string) (*unstructured.Unstructured, error) {
 	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
 	list, err := res.List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
 	for i := range list.Items {
-		if list.Items[i].GetAnnotations()[ModelAnnotation] == model {
+		if list.Items[i].GetAnnotations()[ModelAnnotation] == model && backendMatches(&list.Items[i], b) {
 			return &list.Items[i], nil
 		}
 	}
 	name := ModelConfigName(k.prefix, model)
 	for i := range list.Items {
-		if list.Items[i].GetName() == name {
+		if list.Items[i].GetName() == name && backendMatches(&list.Items[i], b) {
 			return &list.Items[i], nil
 		}
 	}
 	return nil, nil
+}
+
+// backendMatches reports whether obj belongs to backend b: its backend label
+// is b, or either side does not say.
+func backendMatches(obj *unstructured.Unstructured, b backend.Name) bool {
+	labelled := obj.GetLabels()[BackendLabel]
+	return b == "" || labelled == "" || labelled == string(b)
+}
+
+// ownedByOtherBackend reports whether obj is a managed ModelConfig of a
+// backend other than b (the name-collision case between backends).
+func ownedByOtherBackend(obj *unstructured.Unstructured, b backend.Name) bool {
+	labels := obj.GetLabels()
+	return labels[ManagedByLabel] == ManagedByValue && labels[BackendLabel] != "" && labels[BackendLabel] != string(b)
+}
+
+// suffixed appends the backend to a ModelConfig name within the 63-character
+// limit.
+func suffixed(name string, b backend.Name) string {
+	suffix := "-" + string(b)
+	if len(name)+len(suffix) > maxNameLength {
+		name = name[:maxNameLength-len(suffix)]
+	}
+	return strings.TrimRight(name, "-") + suffix
 }
 
 func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructured.Unstructured {
@@ -359,16 +407,17 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 		spec["apiKeySecret"] = placeholderSecretName(name)
 		spec["apiKeySecretKey"] = placeholderSecretKey
 	}
+	labels := map[string]any{ManagedByLabel: ManagedByValue}
+	if ep.Backend != "" {
+		labels[BackendLabel] = string(ep.Backend)
+	}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": k.gvr.Group + "/" + k.gvr.Version,
 		"kind":       "ModelConfig",
 		"metadata": map[string]any{
 			"name":      name,
 			"namespace": k.namespace,
-			"labels": map[string]any{
-				ManagedByLabel: ManagedByValue,
-				BackendLabel:   string(k.backend),
-			},
+			"labels":    labels,
 			"annotations": map[string]any{
 				ModelAnnotation: model,
 			},
@@ -426,6 +475,7 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 		ref.Model = m
 	}
 	ref.Managed = obj.GetLabels()[ManagedByLabel] == ManagedByValue
+	ref.Backend = backend.Name(obj.GetLabels()[BackendLabel])
 	if u, _, _ := unstructured.NestedString(obj.Object, "spec", "openAI", "baseUrl"); u != "" {
 		ref.Endpoint = u
 	} else if h, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "host"); h != "" {
