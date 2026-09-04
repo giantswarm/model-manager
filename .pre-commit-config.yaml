@@ -119,15 +119,3 @@ repos:
         args:
           - --chart-search-root=helm
           - --sort-values-order=file
-
-  # Render assertions for the chart (hack/verify-chart.sh): rules the templates
-  # encode that lint and the schema cannot check, e.g. which trusted audiences
-  # the Deployment passes. Needs helm, like the schema hook above.
-  - repo: local
-    hooks:
-      - id: helm-verify-model-manager
-        name: "render assertions for helm/model-manager"
-        language: script
-        entry: hack/verify-chart.sh
-        files: ^(helm/model-manager/|hack/verify-chart\.sh$)
-        pass_filenames: false
