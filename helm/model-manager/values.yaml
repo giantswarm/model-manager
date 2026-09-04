@@ -126,8 +126,13 @@ oauth:
   # renders a Secret from the values above.
   existingSecret: ""
   # -- OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO
-  # token forwarding): the platform client muster forwards tokens for and the
-  # portal logs in with. Empty falls back to `[global.identity.clientId]`.
+  # token forwarding). Empty falls back to `[global.identity.clientId]`, the
+  # platform client MCP clients and the muster CLI log in with. The server
+  # trusts the union of this list and `muster.mcpServer.auth.requiredAudiences`
+  # (in that order, without duplicates): every token muster forwards carries
+  # the required audiences by construction and they are what the
+  # kube-apiserver trusts, so a portal session — whose id_token carries them
+  # but not the platform client — is accepted without listing its client here.
   trustedAudiences: []
   sso:
     # -- Let the IdP's JWKS endpoint resolve to a private address when
@@ -165,12 +170,14 @@ muster:
     labels: {}  # @schema additionalProperties: true
     # -- How muster authenticates to this server; rendered only with
     # `oauth.enabled`. `forwardToken` makes muster forward the session's IdP
-    # id_token byte-identical (the SSO path this chart trusts through
-    # `oauth.trustedAudiences`). `requiredAudiences` are extra audiences that
-    # token must carry — the Dex cross-client audience the kube-apiserver
-    # trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is
+    # id_token byte-identical (the SSO path this chart trusts through its
+    # trusted audiences). `requiredAudiences` are extra audiences that token
+    # must carry — the Dex cross-client audience the kube-apiserver trusts
+    # (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is
     # `kubernetes`) so `oauth.downstream` works; muster requests them at
-    # login, so users re-login after a change. A Google IdP has no
+    # login, so users re-login after a change. They are trusted as bearer
+    # audiences by construction, since the server's trusted audiences are
+    # `oauth.trustedAudiences` plus this list. A Google IdP has no
     # cross-client audiences: leave the list empty.
     auth:
       forwardToken: true

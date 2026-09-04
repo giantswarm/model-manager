@@ -2,9 +2,10 @@
 {{- /*
 Registers this server with muster. Tools appear as x_<name>_<tool>. With
 oauth.enabled the CR carries the auth block: muster forwards the session's IdP
-id_token (forwardToken), which this server validates through
-oauth.trustedAudiences, and requests the requiredAudiences at login. Without
-OAuth muster connects anonymously.
+id_token (forwardToken), which this server validates against its trusted
+audiences (oauth.trustedAudiences plus the requiredAudiences below), and
+requests the requiredAudiences at login. Without OAuth muster connects
+anonymously.
 */}}
 apiVersion: muster.giantswarm.io/v1alpha1
 kind: MCPServer
