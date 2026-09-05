@@ -1,0 +1,8 @@
+# tests/test-values.yaml points model-manager at the platform's `kagent`
+# namespace (ModelConfigs live there; the chart's Role/RoleBinding for them
+# render into it). The umbrella creates that namespace on a real platform; the
+# ATS kind cluster is bare, so it goes on with the CRDs.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagent

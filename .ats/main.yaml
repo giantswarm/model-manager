@@ -15,14 +15,15 @@
 app-tests-app-config-file: tests/test-values.yaml
 app-tests-deploy-namespace: agent-platform
 
-# CRDs applied before the install. ATS passes the value to one
+# Manifests applied before the install. ATS passes the value to one
 # `kubectl apply --server-side -f`, so a comma-separated list works: ATS's
-# bundled set (/etc/ats/crds) plus the kagent ModelConfig CRD model-manager
+# bundled CRDs (/etc/ats/crds), the `kagent` namespace the test values point
+# the chart at (tests/ats/cluster-prerequisites), plus the kagent ModelConfig CRD model-manager
 # discovers at startup and wires models into. Without it the service logs a
 # discovery warning and falls back to its default API version; with it the
 # smoke covers the discovery path. Bump the pin together with the platform's
 # kagent.
-cluster-crds: /etc/ats/crds,https://raw.githubusercontent.com/giantswarm/kagent/v0.1.42/helm/kagent/crds/kagent.dev/kagent.dev_modelconfigs.yaml
+cluster-crds: /etc/ats/crds,tests/ats/cluster-prerequisites,https://raw.githubusercontent.com/giantswarm/kagent/v0.1.42/helm/kagent/crds/kagent.dev/kagent.dev_modelconfigs.yaml
 
 # functional: no second scenario. upgrade: an upgrade from the last release in
 # the catalog is a follow-up (agent-platform-standalone has the recipe).
