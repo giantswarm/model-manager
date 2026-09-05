@@ -1,5 +1,7 @@
 # Values for chart tests / local installs on kind: the host Ollama through the
-# docker network gateway (agentlab default network).
+# docker network gateway (agentlab default network). On the ATS kind cluster of
+# execute-chart-tests the endpoint is unreachable, which the smoke tolerates:
+# /readyz does not depend on the backend (see .ats/main.yaml).
 backend: ollama
 ollama:
   endpoint: http://172.21.0.1:11434
