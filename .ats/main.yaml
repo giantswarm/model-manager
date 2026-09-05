@@ -1,14 +1,29 @@
-# app-test-suite config, consumed by the generated `run-tests-with-ats`
-# CircleCI job (execute-chart-tests).
+# app-test-suite (ATS >= 1.0) config, consumed by the generated
+# `run-tests-with-ats` CircleCI job (execute-chart-tests). The job creates a
+# kind cluster; ATS applies the CRDs listed below, installs the packaged chart
+# with `helm upgrade --install --wait` (tests/test-values.yaml, the namespace
+# below) and runs `pytest -m smoke` in tests/ats.
 #
-# The cluster test steps are skipped on purpose, as in agent-platform: the
-# chart's readiness probe needs a reachable serving backend (a host Ollama or
-# KServe), which a bare app-test-suite kind cluster does not have, so an ATS
-# smoke would only ever time out on an unready Deployment. What gates the PR
-# is the build-chart job (app-build-suite lint + package + values.schema.json
-# validation). Behavior is verified end to end in agentlab against the lab
-# host's Ollama.
+# The smoke (tests/ats/test_smoke.py) is the chart-level install check: the
+# chart installs on a bare cluster and its Deployment becomes ready with the
+# image the branch build pushed (branchPublish in giantswarm/github makes
+# execute-chart-tests wait on that push; the chart resolves the image tag from
+# the stamped appVersion). No serving backend is reachable from the ATS
+# cluster, and none is needed: /readyz answers unconditionally, backend health
+# is reported by /backendz and GET /api/v1/backend instead. Behaviour against
+# real backends (Ollama, KServe, Lemonade) is verified in agentlab.
 app-tests-app-config-file: tests/test-values.yaml
 app-tests-deploy-namespace: agent-platform
 
-skip-steps: [smoke, functional, upgrade]
+# CRDs applied before the install. ATS passes the value to one
+# `kubectl apply --server-side -f`, so a comma-separated list works: ATS's
+# bundled set (/etc/ats/crds) plus the kagent ModelConfig CRD model-manager
+# discovers at startup and wires models into. Without it the service logs a
+# discovery warning and falls back to its default API version; with it the
+# smoke covers the discovery path. Bump the pin together with the platform's
+# kagent.
+cluster-crds: /etc/ats/crds,https://raw.githubusercontent.com/giantswarm/kagent/v0.1.42/helm/kagent/crds/kagent.dev/kagent.dev_modelconfigs.yaml
+
+# functional: no second scenario. upgrade: an upgrade from the last release in
+# the catalog is a follow-up (agent-platform-standalone has the recipe).
+skip-steps: [functional, upgrade]
