@@ -122,14 +122,16 @@ type modelsResponse struct {
 }
 
 // downloadJob is the answer of POST /models/download and of the status job
-// it starts.
+// it starts. The counters are float64 because LM Studio reports a fractional
+// rate (bytes_per_second: 5248034.973097618) — an int64 field fails the whole
+// decode on it, and the byte counts are the same kind of number.
 type downloadJob struct {
-	JobID           string `json:"job_id"`
-	Status          string `json:"status"`
-	TotalSizeBytes  int64  `json:"total_size_bytes"`
-	DownloadedBytes int64  `json:"downloaded_bytes"`
-	BytesPerSecond  int64  `json:"bytes_per_second"`
-	Error           string `json:"error"`
+	JobID           string  `json:"job_id"`
+	Status          string  `json:"status"`
+	TotalSizeBytes  float64 `json:"total_size_bytes"`
+	DownloadedBytes float64 `json:"downloaded_bytes"`
+	BytesPerSecond  float64 `json:"bytes_per_second"`
+	Error           string  `json:"error"`
 }
 
 // loadResponse is the answer of POST /models/load.

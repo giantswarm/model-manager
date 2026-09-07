@@ -59,7 +59,7 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if _, ok := f.models[req.Model]; ok {
-			_ = json.NewEncoder(w).Encode(downloadJob{JobID: "job_dup", Status: statusAlreadyDownloaded, TotalSizeBytes: f.models[req.Model].SizeBytes})
+			_ = json.NewEncoder(w).Encode(downloadJob{JobID: "job_dup", Status: statusAlreadyDownloaded, TotalSizeBytes: float64(f.models[req.Model].SizeBytes)})
 			return
 		}
 		if req.Model == "" {
@@ -89,7 +89,7 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		if f.pollsLeft > 0 {
 			f.pollsLeft--
 			job.DownloadedBytes += 700_000_000
-			job.BytesPerSecond = 50_000_000
+			job.BytesPerSecond = 5248034.973097618
 			_ = json.NewEncoder(w).Encode(job)
 			return
 		}
@@ -97,7 +97,7 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		// The download landed: the model is in the library now.
 		ref := f.jobs[id+"_ref"]
 		if ref != nil {
-			f.models[ref.JobID] = llm(ref.JobID, job.TotalSizeBytes, true)
+			f.models[ref.JobID] = llm(ref.JobID, int64(job.TotalSizeBytes), true)
 		}
 		_ = json.NewEncoder(w).Encode(job)
 	})
@@ -408,6 +408,31 @@ func TestPullFailsBeforeTheJobStarts(t *testing.T) {
 	// Not a not-found and not an invalid request: the service answers 502.
 	assert.NotErrorIs(t, err, backend.ErrNotFound)
 	assert.NotErrorIs(t, err, backend.ErrInvalid)
+}
+
+// LM Studio reports the download rate — and potentially any counter — as a
+// fractional number. An int64 field fails the whole decode on it, which
+// showed up as a pull that failed at 0 bytes against a real server, so the
+// exact wire shape is pinned here.
+func TestDownloadStatusDecodesFractionalNumbers(t *testing.T) {
+	const body = `{"job_id":"job_de02c8379c","status":"downloading","total_size_bytes":2099535505,` +
+		`"downloaded_bytes":104857600.5,"bytes_per_second":5248034.973097618,` +
+		`"started_at":"2026-09-07T12:29:15.686Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, nil, 0)
+
+	job, err := c.DownloadStatus(context.Background(), "job_de02c8379c")
+	require.NoError(t, err)
+	assert.Equal(t, statusDownloading, job.Status)
+	assert.Equal(t, int64(2099535505), int64(job.TotalSizeBytes))
+	assert.Equal(t, int64(104857600), int64(job.DownloadedBytes))
+	// The rate only words a progress line, so precision does not matter —
+	// decoding at all does.
+	assert.Greater(t, job.BytesPerSecond, 0.0)
+	assert.Equal(t, "downloading (5.2 MB/s)", describe(job))
 }
 
 func TestPullHonoursContextCancellation(t *testing.T) {

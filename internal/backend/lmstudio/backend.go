@@ -211,7 +211,7 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 		if progress == nil {
 			return
 		}
-		progress(backend.Progress{Status: status, BytesCompleted: j.DownloadedBytes, BytesTotal: j.TotalSizeBytes})
+		progress(backend.Progress{Status: status, BytesCompleted: int64(j.DownloadedBytes), BytesTotal: int64(j.TotalSizeBytes)})
 	}
 	if done, err := pullDone(job, ref); done || err != nil {
 		if err == nil {
@@ -275,7 +275,7 @@ func pullDone(job *downloadJob, ref string) (bool, error) {
 // describe words a progress event.
 func describe(job *downloadJob) string {
 	if job.BytesPerSecond > 0 {
-		return fmt.Sprintf("downloading (%s/s)", humanBytes(job.BytesPerSecond))
+		return fmt.Sprintf("downloading (%s/s)", humanBytes(int64(job.BytesPerSecond)))
 	}
 	return "downloading"
 }
