@@ -12,12 +12,17 @@ kind: MCPServer
 metadata:
   name: {{ .Values.muster.mcpServer.name }}
   namespace: {{ .Release.Namespace }}
+  {{- /*
+  The chart's labels, the muster identity (muster.giantswarm.io/type) and the
+  Agent Platform tier (agent-platform.giantswarm.io/tool-group: agent-platform,
+  the platform's own management surface -- the tier the portal, the toolset
+  presets and the docs group this server under). muster.mcpServer.labels adds
+  to and overrides all of them.
+  */}}
+  {{- $labels := include "model-manager.labels" . | fromYaml }}
+  {{- $labels = mergeOverwrite $labels (dict "muster.giantswarm.io/type" "model-manager" "agent-platform.giantswarm.io/tool-group" "agent-platform") (.Values.muster.mcpServer.labels | default dict) }}
   labels:
-    muster.giantswarm.io/type: model-manager
-    {{- include "model-manager.labels" . | nindent 4 }}
-    {{- with .Values.muster.mcpServer.labels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
+    {{- toYaml $labels | nindent 4 }}
 spec:
   autoStart: {{ .Values.muster.mcpServer.autoStart }}
   type: streamable-http
