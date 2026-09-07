@@ -45,6 +45,26 @@ helm template mm "$CHART" --show-only templates/mcpserver.yaml "${DEX[@]}" \
   | grep -q -- '^ *- kubernetes$' \
   || fail "the MCPServer CR does not list requiredAudiences"
 
+# The MCPServer CR carries the Agent Platform tier label next to the muster
+# identity label, and muster.mcpServer.labels still adds to and overrides them
+# (merged, so an override renders one key, not a duplicate).
+mcpserver() {
+  helm template mm "$CHART" --show-only templates/mcpserver.yaml \
+    --set muster.mcpServer.enabled=true "$@"
+}
+got=$(mcpserver)
+echo "$got" | grep -q -- '^    agent-platform.giantswarm.io/tool-group: agent-platform$' \
+  || fail "the MCPServer CR lacks agent-platform.giantswarm.io/tool-group: agent-platform"
+echo "$got" | grep -q -- '^    muster.giantswarm.io/type: model-manager$' \
+  || fail "the MCPServer CR lacks muster.giantswarm.io/type: model-manager"
+got=$(mcpserver --set-json 'muster.mcpServer.labels={"agent-platform.giantswarm.io/tool-group":"infrastructure","example.com/extra":"extra"}')
+echo "$got" | grep -q -- '^    agent-platform.giantswarm.io/tool-group: infrastructure$' \
+  || fail "muster.mcpServer.labels does not override the tier label"
+[ "$(echo "$got" | grep -c -- 'agent-platform.giantswarm.io/tool-group:')" = 1 ] \
+  || fail "the overridden tier label renders more than once"
+echo "$got" | grep -q -- '^    example.com/extra: extra$' \
+  || fail "muster.mcpServer.labels does not add labels"
+
 # A Google install (no cross-client audiences) trusts the client id alone.
 got=$(trusted --set oauth.enabled=true --set oauth.provider=google \
   --set oauth.baseURL=https://mm.example.test --set oauth.google.clientID=g.apps \
