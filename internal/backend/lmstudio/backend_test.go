@@ -386,6 +386,30 @@ func TestPullFailureAndEmptyRef(t *testing.T) {
 	assert.ErrorIs(t, err, backend.ErrInvalid)
 }
 
+// A download can fail before it becomes a job at all — LM Studio answers
+// HTTP 500 when it cannot write to its models folder, for instance. The
+// message has to survive: it is the only thing that says what to fix.
+func TestPullFailsBeforeTheJobStarts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/models/download" {
+			writeErr(w, http.StatusInternalServerError, "unknown",
+				"Download failed: EPERM: operation not permitted, mkdir '/Volumes/Dev/LLMs/lm-studio/x'")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(modelsResponse{Models: &[]apiModel{}})
+	}))
+	defer srv.Close()
+	b, err := New(backend.LMStudioOptions{Endpoint: srv.URL})
+	require.NoError(t, err)
+
+	err = b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "operation not permitted")
+	// Not a not-found and not an invalid request: the service answers 502.
+	assert.NotErrorIs(t, err, backend.ErrNotFound)
+	assert.NotErrorIs(t, err, backend.ErrInvalid)
+}
+
 func TestPullHonoursContextCancellation(t *testing.T) {
 	f, b := newTestBackend(t)
 	// Never finishes on its own.
