@@ -17,6 +17,14 @@ names the others.
 - `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
   kind the docker network gateway). Agent wiring uses kagent's native keyless
   `Ollama` provider with `ollama.agentHost` (defaults to the endpoint).
+- `lemonade` — proxies a host Lemonade Server (`lemonade.endpoint`; FastFlowLM
+  on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU). Agent wiring uses kagent's
+  `OpenAI` provider against `lemonade.agentHost` plus `/api/v1`.
+- `lmstudio` — proxies a host LM Studio (`lmstudio.endpoint`, 0.4.0 or newer;
+  llama.cpp on GPU and CPU, MLX on Apple silicon). Agent wiring uses kagent's
+  `OpenAI` provider against `lmstudio.agentHost` plus `/v1`. It serves no
+  delete: that call answers `501 unsupported`, and a model is removed with
+  `lms rm` on the host.
 - `kserve` — InferenceServices composed from the platform's serving presets,
   the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
   download Jobs with progress, Hugging Face Hub search and node fit checks.
@@ -31,7 +39,7 @@ standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
 
 `backends: [ollama, lemonade]` runs both drivers in one process: the Deployment
 passes `--backends` and the flags of every listed driver (each reads its own
-block — `ollama.*`, `lemonade.*`, `kserve.*`), the ServiceAccount token, the
+block — `ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`), the ServiceAccount token, the
 kserve Roles, the cache-agent DaemonSet and the Hugging Face token Secret
 render when kserve is listed. The order is the operator's: the first backend
 is the **default backend** — the one `GET /api/v1/backend` describes and the

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `agent-platform.giantswarm.io/tool-group: agent-platform` on the muster `MCPServer` CR, next to `muster.giantswarm.io/type`: model-manager is part of the Agent Platform's own management surface, the tier the portal's MCP servers page, the toolset presets and the docs group it under. `muster.mcpServer.labels` still adds to and overrides the CR's labels; the passthrough is merged instead of appended, so an override renders one key instead of a duplicate.
+- `lmstudio` backend: an LM Studio on the host (llama.cpp on GPU and CPU, MLX on Apple silicon) as a serving backend, proxying its `/api/v1` API — the library, the download that backs a pull with real byte progress, and load/unload. Agent wiring uses kagent's `OpenAI` provider against the agent host plus `/v1` with the placeholder key. LM Studio serves no delete (`lms rm` is host-only), so the backend reports `delete: false` and the call answers `501 unsupported`; it exposes no host hardware, so `nodeInventory` is false too. Chart values `lmstudio.endpoint` / `lmstudio.agentHost`, flags `--lmstudio-endpoint` / `--lmstudio-agent-host`. Requires LM Studio 0.4.0+.
 
 ### Fixed
 

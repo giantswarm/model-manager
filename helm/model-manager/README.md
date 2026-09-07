@@ -16,6 +16,14 @@ names the others.
 - `ollama` — proxies a host Ollama (`ollama.endpoint`, reached from pods; on
   kind the docker network gateway). Agent wiring uses kagent's native keyless
   `Ollama` provider with `ollama.agentHost` (defaults to the endpoint).
+- `lemonade` — proxies a host Lemonade Server (`lemonade.endpoint`; FastFlowLM
+  on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU). Agent wiring uses kagent's
+  `OpenAI` provider against `lemonade.agentHost` plus `/api/v1`.
+- `lmstudio` — proxies a host LM Studio (`lmstudio.endpoint`, 0.4.0 or newer;
+  llama.cpp on GPU and CPU, MLX on Apple silicon). Agent wiring uses kagent's
+  `OpenAI` provider against `lmstudio.agentHost` plus `/v1`. It serves no
+  delete: that call answers `501 unsupported`, and a model is removed with
+  `lms rm` on the host.
 - `kserve` — InferenceServices composed from the platform's serving presets,
   the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
   download Jobs with progress, Hugging Face Hub search and node fit checks.
@@ -30,7 +38,7 @@ standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
 
 `backends: [ollama, lemonade]` runs both drivers in one process: the Deployment
 passes `--backends` and the flags of every listed driver (each reads its own
-block — `ollama.*`, `lemonade.*`, `kserve.*`), the ServiceAccount token, the
+block — `ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`), the ServiceAccount token, the
 kserve Roles, the cache-agent DaemonSet and the Hugging Face token Secret
 render when kserve is listed. The order is the operator's: the first backend
 is the **default backend** — the one `GET /api/v1/backend` describes and the
@@ -115,13 +123,15 @@ can stay empty.
 | imagePullSecrets | list | `[]` | Image pull secrets. |
 | nameOverride | string | `""` | Override the chart name. |
 | fullnameOverride | string | `""` | Override the fully qualified release name (the umbrella chart pins the Service name through this). |
-| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. |
-| backends | list | `[]` | Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone. |
+| backend | string | `"ollama"` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. |
+| backends | list | `[]` | Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone. |
 | ollama.endpoint | string | `"http://host.docker.internal:11434"` | Ollama API base URL as reached from pods. On kind this is the docker network gateway (for example http://172.21.0.1:11434 — agentlab sets it); Docker Desktop resolves host.docker.internal. |
 | ollama.agentHost | string | `""` | Ollama host written into kagent ModelConfigs, as reached by agent pods; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `ollama.endpoint`. |
 | ollama.memoryBudgetGiB | int | `0` | Memory budget of the proxied host in GiB (a number; decimals allowed, also as a string so `--set` can carry them), reported as `budgetBytes` on `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is not the host's: Docker Desktop or another VM-backed runtime (the pod sees the VM's memory), an Ollama on another machine. 0 is off; a value that is not a positive number of GiB is ignored and named in the node's `message`. The ollama counterpart of the kserve node annotation `model-manager.giantswarm.io/memory-budget-gib`. |
 | lemonade.endpoint | string | `"http://host.docker.internal:13305"` | Lemonade Server base URL as reached from pods (its API is under `/api/v1`; Lemonade listens on 13305 by default). Bind Lemonade to every interface (`lemonade config set host=0.0.0.0`, or `host` in its config.json) so the kind docker network gateway reaches it, for example http://172.21.0.1:13305; Docker Desktop resolves host.docker.internal. |
 | lemonade.agentHost | string | `""` | Lemonade Server base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/api/v1` appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `lemonade.endpoint`. |
+| lmstudio.endpoint | string | `"http://host.docker.internal:1234"` | LM Studio base URL as reached from pods (its API is under `/api/v1`; LM Studio listens on 1234 by default). Serve it on the local network (`lms server start --bind 0.0.0.0`, or the app's "Serve on Local Network" toggle) so the kind docker network gateway reaches it, for example http://172.21.0.1:1234; Docker Desktop resolves host.docker.internal. LM Studio 0.4.0 or newer is required — the `/api/v1` API is what this driver speaks. |
+| lmstudio.agentHost | string | `""` | LM Studio base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/v1` appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `lmstudio.endpoint`. |
 | kagent.namespace | string | `"kagent"` | Namespace where kagent ModelConfigs are created (RBAC is scoped here). |
 | kagent.apiVersion | string | `"auto"` | kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version. |
 | kagent.modelConfigPrefix | string | `""` | Prefix for generated ModelConfig names (empty: the sanitized model name, e.g. smollm2:135m -> smollm2-135m). |
@@ -157,7 +167,7 @@ can stay empty.
 | httpRoute.labels | object | `{}` | Labels on the HTTPRoute. |
 | networkPolicy.enabled | bool | `false` | Create a Kubernetes NetworkPolicy for the pod. |
 | networkPolicy.ingressNamespaces | list | `[]` | Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only. |
-| networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama or Lemonade endpoint, e.g. 172.21.0.1/32). |
+| networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama, Lemonade or LM Studio endpoint, e.g. 172.21.0.1/32). |
 | networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring and by the kserve backend). |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |

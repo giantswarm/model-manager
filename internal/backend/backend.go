@@ -26,6 +26,9 @@ const (
 	// NameLemonade is the Lemonade Server driver (AMD Ryzen AI hosts: FastFlowLM
 	// on the NPU, llama.cpp on GPU and CPU).
 	NameLemonade Name = "lemonade"
+	// NameLMStudio is the LM Studio driver (desktop hosts: llama.cpp on GPU
+	// and CPU, MLX on Apple silicon). It offers no delete.
+	NameLMStudio Name = "lmstudio"
 )
 
 // Sentinel errors drivers return so the API layer can map them to status

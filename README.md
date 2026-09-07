@@ -10,9 +10,10 @@ Model management service for the Giant Swarm Agent Platform. One API over
 | `ollama` | laptop / agentlab installs (host Ollama through the kind docker-network gateway) | `/api/tags`, `/api/ps`, streamed `/api/pull`, `/api/delete`, `keep_alive` load/unload |
 | `kserve` | GPU installs (KServe + the platform's `modelServing` component) | InferenceServices composed from serving presets, per-node HF cache inventory, pre-warm download Jobs with progress, Hugging Face Hub search, node fit checks |
 | `lemonade` | AMD Ryzen AI laptops / workstations running [Lemonade Server](https://lemonade-server.ai) on the host (FastFlowLM on the NPU, llama.cpp on GPU / CPU) | `/api/v1/health` (loaded models), `/api/v1/models`, streamed `/api/v1/pull`, `/api/v1/load`, `/api/v1/unload`, `/api/v1/delete`, `/api/v1/system-info` |
+| `lmstudio` | desktop installs running [LM Studio](https://lmstudio.ai) on the host (llama.cpp on GPU / CPU, MLX on Apple silicon) | `/api/v1/models` (the library and its loaded instances), `/api/v1/models/download` + its status job, `/api/v1/models/load`, `/api/v1/models/unload` — **no delete** |
 
-One model-manager runs every backend the host has (`--backends=ollama,lemonade`,
-chart value `backends: [ollama, lemonade]`): the API reports each backend and
+One model-manager runs every backend the host has (`--backends=ollama,lmstudio`,
+chart value `backends: [ollama, lmstudio]`): the API reports each backend and
 its **explicit capability flags** (`GET /api/v1/backends`), every model, job and
 node names its `backend`, every request may name one, and an unqualified
 model reference is resolved to the one backend that holds it (`409 conflict`
@@ -158,6 +159,13 @@ not-loaded model correctly without keying off the backend name:
   another model of its type is requested and the slot is taken
   (`max_loaded_models`, one per type by default; least recently used first)
   unless it was loaded with `keepAlive: "-1"`, which pins it.
+- **lmstudio** — `onDemand: true`: with LM Studio's just-in-time loading on
+  (its default) the first completion naming a downloaded model loads it, so a
+  not-loaded model is idle, not broken. `idleEviction: false`, no keep-alive
+  fields: nothing evicts a loaded model and there is no timer to re-arm, so a
+  load only **pre-warms** and every keep-alive is ignored. Turning
+  just-in-time loading off in LM Studio is what breaks an agent on a
+  not-loaded model — the request then fails instead of waiting.
 
 The knob that changes what agents experience on Ollama is host-side, not a
 model-manager flag: set `OLLAMA_KEEP_ALIVE=30m` (or `-1` for never) in the
@@ -222,6 +230,68 @@ the bridge subnets through the host firewall, as for Ollama.
   first GPU), reservations as the catalog sizes of the loaded models (Lemonade
   reports no per-model memory), and Lemonade's model store as the node's
   `cache` (`mountPath`, models, bytes).
+
+Nothing here needs Kubernetes access beyond wiring, exactly as for ollama.
+
+## The lmstudio backend
+
+[LM Studio](https://lmstudio.ai) is a desktop model runner — llama.cpp on GPU
+and CPU, MLX on Apple silicon — with its own API (`/api/v1`, 0.4.0 and newer)
+next to an OpenAI-compatible one (`/v1`). The driver proxies the library
+(`GET /api/v1/models`), the download that backs a pull
+(`POST /api/v1/models/download` plus
+`GET /api/v1/models/download/status/{job_id}`) and
+`POST /api/v1/models/load` / `POST /api/v1/models/unload`. Like Ollama and
+Lemonade it stays on the host, so serve it on the local network
+(`lms server start --bind 0.0.0.0`, the app's Developer → "Serve on Local
+Network" toggle, or `LMS_SERVER_HOST=0.0.0.0`; its port is 1234 by default)
+and let the bridge subnets through the host firewall.
+
+Two traits set it apart from the other host backends:
+
+- **It has no delete.** Removing a model is `lms rm` on the host, which a pod
+  cannot run, so the driver reports `delete: false` and the API answers
+  `501 unsupported`. Use `POST /api/v1/models/unwire` to drop just the
+  ModelConfig; the weights stay on the host until someone removes them there.
+- **It has no version or health endpoint, and it answers HTTP 200 with an
+  `{"error": …}` document for every path outside `/api/v1`** — Ollama's
+  `/api/version`, `/api/tags` and `/api/show` included. Nothing may read a
+  status code as proof that it reached an LM Studio: health here means
+  `GET /api/v1/models` answering with a `models` array, and `version` stays
+  empty because the server reports none.
+
+- **Inventory** — `GET /api/v1/models` is the local library, so every entry is
+  downloaded: the `key` is the name (`ibm/granite-4-micro`), `size_bytes`
+  becomes `sizeBytes` unchanged, `format` and `quantization.name` are reported
+  as they come (`gguf`, `Q4_K_M`), `architecture` as `family`,
+  `max_context_length` as `contextLength`, and the capability object is mapped
+  onto the vocabulary the other backends use (`trained_for_tool_use` →
+  `tools`, `vision` → `vision`, `reasoning` → `thinking`, on top of
+  `completion`). Embedding models carry no capability object at all and are
+  reported as `embedding`, listed like any other model — as on lemonade.
+  `trained_for_tool_use` is the flag that matters for agents: LM Studio will
+  accept `tools` for any model and emulate them through the prompt, but only
+  a model trained for them calls them reliably.
+- **Pull** — `POST /api/v1/models/download` takes an LM Studio hub reference
+  (`lms ls` for what is already there) and answers with a job; the driver
+  follows it through `GET /api/v1/models/download/status/{job_id}` and reports
+  `downloaded_bytes` against `total_size_bytes`, so progress is real bytes. A
+  model that is already downloaded reports complete straight away
+  (`already_downloaded`), and a reference LM Studio does not know fails with
+  `not_found`. On success the model is wired into kagent, as on ollama.
+- **Load / unload** — `POST /api/v1/models/load` reads the weights and answers
+  with an instance id; a load is bounded by ten minutes, not the usual call
+  timeout. LM Studio evicts an *instance*, not a model, so unload looks the
+  model's loaded instances up first; unloading a model that is not loaded is a
+  no-op, as on ollama and lemonade. There is no keep-alive and no pinning.
+- **Wiring** — a kagent `ModelConfig` named after the model
+  (`ibm/granite-4-micro` → `ibm-granite-4-micro`) with `provider: OpenAI`,
+  `openAI.baseUrl` = the agent host plus `/v1` (`--lmstudio-agent-host`,
+  defaulting to the endpoint; reported as `agentEndpoint`) and the placeholder
+  `OPENAI_API_KEY` Secret the kagent runtime insists on. LM Studio needs no
+  key of its own.
+- **Node** — none. LM Studio exposes no host hardware, so the driver reports
+  `nodeInventory: false` and `GET /api/v1/nodes` answers `501 unsupported`.
 
 Nothing here needs Kubernetes access beyond wiring, exactly as for ollama.
 
@@ -360,6 +430,16 @@ model-manager serve \
   --kubeconfig ~/.kube/config --kube-context kind-agentlab
 ```
 
+Against an LM Studio on the host:
+
+```sh
+model-manager serve \
+  --backend lmstudio \
+  --lmstudio-endpoint http://127.0.0.1:1234 \       # as reached by model-manager
+  --lmstudio-agent-host http://172.21.0.1:1234 \    # as reached by agent pods (+ /v1 in ModelConfigs)
+  --kubeconfig ~/.kube/config --kube-context kind-agentlab
+```
+
 Every flag has an environment variable (`model-manager serve --help`). Without
 Kubernetes access the server still runs; `wire` reports `false` and wiring
 operations answer 501.
@@ -409,7 +489,7 @@ and the OAuth metadata stay public.
 `helm/model-manager` — see its [README](helm/model-manager/README.md). Keys the
 umbrella chart (`agent-platform-standalone`) sets: `backend`, `ollama.endpoint`,
 `ollama.agentHost`, `lemonade.endpoint`, `lemonade.agentHost`,
-`kagent.namespace`, `image.*`, `mcp.enabled`,
+`lmstudio.endpoint`, `lmstudio.agentHost`, `kagent.namespace`, `image.*`, `mcp.enabled`,
 `muster.mcpServer.*`; for kserve `kserve.namespace` (the serving namespace),
 `kserve.discovery.*`, `kserve.hf.tokenSecret.*` and the `kserve.*` overrides. Optional, off by default: `muster.mcpServer.enabled`
 (renders an `mcpservers.muster.giantswarm.io` CR), `httpRoute.enabled`,

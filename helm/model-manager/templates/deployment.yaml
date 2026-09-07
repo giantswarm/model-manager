@@ -77,6 +77,12 @@ spec:
             - --lemonade-agent-host={{ .Values.lemonade.agentHost }}
             {{- end }}
             {{- end }}
+            {{- if include "model-manager.hasBackend" (dict "root" . "name" "lmstudio") }}
+            - --lmstudio-endpoint={{ required "lmstudio.endpoint is required for the lmstudio backend" .Values.lmstudio.endpoint }}
+            {{- if .Values.lmstudio.agentHost }}
+            - --lmstudio-agent-host={{ .Values.lmstudio.agentHost }}
+            {{- end }}
+            {{- end }}
             {{- if include "model-manager.hasBackend" (dict "root" . "name" "kserve") }}
             {{- $k := .Values.kserve }}
             - --kserve-namespace={{ include "model-manager.kserveNamespace" . }}

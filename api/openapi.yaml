@@ -7,7 +7,8 @@ info:
 
     One API implemented by serving backends (`ollama` for laptop/agentlab
     installs, `kserve` for GPU installs, `lemonade` for hosts running Lemonade
-    Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU). One
+    Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU —
+    and `lmstudio` for hosts running LM Studio, which serves no delete). One
     model-manager runs one or several of them at once (`--backends`, chart
     value `backends`). Clients MUST call `GET /api/v1/backends` first and
     render only what each backend's capability flags allow: a false flag
@@ -266,11 +267,11 @@ paths:
                 backend: { $ref: "#/components/schemas/BackendName" }
                 model:
                   type: string
-                  description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; kserve Hugging Face repository owner/name[:revision])"
+                  description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; lmstudio hub reference such as ibm/granite-4-micro — `lms ls`; kserve Hugging Face repository owner/name[:revision])"
                   example: smollm2:135m
                 wire:
                   type: boolean
-                  description: Create a ModelConfig on completion (ollama, lemonade; default = server autoWire; kserve refuses true — models are wired when served)
+                  description: Create a ModelConfig on completion (ollama, lemonade, lmstudio; default = server autoWire; kserve refuses true — models are wired when served)
                 preset:
                   type: string
                   description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
@@ -733,7 +734,7 @@ components:
             message: { type: string }
     BackendName:
       type: string
-      enum: [ollama, kserve, lemonade]
+      enum: [ollama, kserve, lemonade, lmstudio]
       description: a configured backend's driver name
     BackendErrors:
       type: object
@@ -753,14 +754,14 @@ components:
       properties:
         pull: { type: boolean, description: import a model by reference }
         pullProgress: { type: boolean, description: pull jobs report bytes completed/total }
-        delete: { type: boolean }
+        delete: { type: boolean, description: "remove a downloaded model; false on lmstudio, which removes models only through its `lms rm` CLI on the host — the call then answers 501 unsupported" }
         load: { type: boolean, description: load into memory / start serving }
         unload: { type: boolean, description: evict / stop serving }
         loadedModels: { type: boolean, description: list loaded models with memory use }
         wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
         presets: { type: boolean, description: curated serving presets (kserve) }
         fitCheck: { type: boolean, description: node-memory fit check (kserve) }
-        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps; lemonade: the proxied host from Lemonade's system-info)" }
+        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps; lemonade: the proxied host from Lemonade's system-info; false on lmstudio, which reports no host hardware)" }
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
@@ -768,7 +769,7 @@ components:
       properties:
         backend:
           type: string
-          enum: [ollama, kserve, lemonade]
+          enum: [ollama, kserve, lemonade, lmstudio]
         backends:
           type: array
           items: { $ref: "#/components/schemas/BackendName" }
@@ -854,7 +855,7 @@ components:
         runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama (one runtime) and kserve (the preset says)" }
         capabilities:
           type: array
-          description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...)"
+          description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...); lmstudio maps its capability object (trained_for_tool_use → tools, vision → vision, reasoning → thinking) and reports embedding models as embedding"
           items: { type: string }
         node: { type: string, description: node holding the cache entry (kserve) }
         downloaded:
