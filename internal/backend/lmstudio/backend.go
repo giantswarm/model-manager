@@ -321,7 +321,7 @@ func pullDone(job *downloadJob, ref string) (bool, error) {
 		if msg == "" {
 			msg = "download failed"
 		}
-		return false, &APIError{Status: http.StatusOK, Code: statusFailed, Message: msg}
+		return false, fmt.Errorf("lmstudio: pull %s: download failed: %s", ref, msg)
 	default:
 		// Including `paused`: not an end, and not necessarily permanent — a
 		// download may sit there while it is queued. The caller's bound on
@@ -330,8 +330,13 @@ func pullDone(job *downloadJob, ref string) (bool, error) {
 	}
 }
 
-// describe words a progress event.
+// describe words a progress event. A job that is not downloading says so —
+// the minute a paused download spends under the give-up bound is otherwise
+// rendered as progress.
 func describe(job *downloadJob) string {
+	if job.Status != statusDownloading && job.Status != "" {
+		return job.Status
+	}
 	if job.BytesPerSecond > 0 {
 		return fmt.Sprintf("downloading (%s/s)", humanBytes(int64(job.BytesPerSecond)))
 	}
@@ -370,8 +375,9 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	return nil
 }
 
-// instancesOf are the resident instance ids of a model, nil when it holds
-// none; found is false when the library does not know the model at all.
+// instancesOf are the resident instance ids of a model. It answers nil both
+// for a model the library does not know and for a known one holding no
+// instance — Load and Unload want the same thing of either.
 func (b *Backend) instancesOf(ctx context.Context, name string) ([]string, error) {
 	models, err := b.client.Models(ctx)
 	if err != nil {

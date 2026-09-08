@@ -498,9 +498,15 @@ func TestPullGivesUpOnAPausedDownload(t *testing.T) {
 	f, b := newTestBackend(t)
 	f.stuckStatus = statusPaused
 
-	err := b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, nil)
+	var seen []string
+	err := b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, func(p backend.Progress) {
+		seen = append(seen, p.Status)
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resume or cancel it in LM Studio")
+	// The wait before the give-up must not read as progress.
+	assert.Contains(t, seen, statusPaused)
+	assert.NotContains(t, seen, "downloading (0 B/s)")
 }
 
 func TestPullFailureAndEmptyRef(t *testing.T) {
@@ -511,6 +517,9 @@ func TestPullFailureAndEmptyRef(t *testing.T) {
 	err := b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no space left on device")
+	// A download that failed is not an HTTP 200; saying so would mislead
+	// wherever the job's error is rendered.
+	assert.NotContains(t, err.Error(), "HTTP 200")
 
 	err = b.Pull(context.Background(), backend.PullRequest{Ref: " "}, nil)
 	assert.ErrorIs(t, err, backend.ErrInvalid)
