@@ -480,7 +480,7 @@
                 },
                 "endpoint": {
                     "type": "string",
-                    "description": "LM Studio base URL as reached from pods (its API is under `/api/v1`; LM Studio listens on 1234 by default). Serve it on the local network toggle) so the kind docker network gateway reaches it, for example http://172.21.0.1:1234; Docker Desktop resolves host.docker.internal. LM Studio 0.4.0 or newer is required — the `/api/v1` API is what this driver speaks."
+                    "description": "LM Studio base URL as reached from pods (its API is under `/api/v1`; LM Studio listens on 1234 by default). Serve it on the local network rather than loopback — `LMS_SERVER_HOST=0.0.0.0`, or the app's \"Serve on Local Network\" toggle — so the kind docker network gateway reaches it, for example http://172.21.0.1:1234; Docker Desktop resolves host.docker.internal. LM Studio 0.4.0 or newer is required — the `/api/v1` API is what this driver speaks."
                 }
             }
         },

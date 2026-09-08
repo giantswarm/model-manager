@@ -162,8 +162,16 @@ not-loaded model correctly without keying off the backend name:
 - **lmstudio** — `onDemand: true`: with LM Studio's just-in-time loading on
   (its default) the first completion naming a downloaded model loads it, so a
   not-loaded model is idle, not broken. `idleEviction: false`, no keep-alive
-  fields: nothing evicts a loaded model and there is no timer to re-arm, so a
-  load only **pre-warms** and every keep-alive is ignored. Turning
+  fields: `POST /api/v1/models/load` is an **explicit** load, which LM Studio
+  treats as manual — no idle TTL, and Auto-Evict leaves "non-JIT loaded
+  models" alone — so a model loaded through model-manager stays resident
+  until something unloads it. The endpoint accepts no `ttl`, which is why a
+  keep-alive has nothing to map onto. **The two paths differ, and it matters
+  for agents**: a model LM Studio JIT-loaded (what an agent turn does to a
+  not-loaded model) *does* get its default idle TTL — 60 minutes — and *is*
+  subject to Auto-Evict, so it can be gone later, while one loaded through
+  this backend will not be. `loading` describes the backend's own loads.
+  Turning
   just-in-time loading off in LM Studio is what breaks an agent on a
   not-loaded model — the request then fails instead of waiting.
 
@@ -268,7 +276,9 @@ Two traits set it apart from the other host backends:
   onto the vocabulary the other backends use (`trained_for_tool_use` →
   `tools`, `vision` → `vision`, `reasoning` → `thinking`, on top of
   `completion`). Embedding models carry no capability object at all and are
-  reported as `embedding`, listed like any other model — as on lemonade.
+  reported as `embedding`, listed like any other model — as on lemonade. The
+  vision-language type (`vlm`) is a chat model: it is reported with
+  `completion` plus whatever its capability object says, not as an embedding.
   `trained_for_tool_use` is the flag that matters for agents: LM Studio will
   accept `tools` for any model and emulate them through the prompt, but only
   a model trained for them calls them reliably.
@@ -279,11 +289,25 @@ Two traits set it apart from the other host backends:
   model that is already downloaded reports complete straight away
   (`already_downloaded`), and a reference LM Studio does not know fails with
   `not_found`. On success the model is wired into kagent, as on ollama.
+  One caveat the API forces: LM Studio does not promise that the `key` a
+  download lands under is the reference that was asked for — the download
+  answers no key, there is no resolve call, and Hugging Face artifacts are
+  keyed per weight set (sometimes with an `@<quant>` suffix) while catalog
+  models keep their canonical `publisher/model`. Since the ModelConfig is
+  wired with the reference the caller gave, the pull resolves it against the
+  library before reporting success and fails naming the mismatch, rather than
+  leaving a ModelConfig whose model the server does not serve.
 - **Load / unload** — `POST /api/v1/models/load` reads the weights and answers
   with an instance id; a load is bounded by ten minutes, not the usual call
   timeout. LM Studio evicts an *instance*, not a model, so unload looks the
   model's loaded instances up first; unloading a model that is not loaded is a
-  no-op, as on ollama and lemonade. There is no keep-alive and no pinning.
+  no-op, as on ollama and lemonade. A **load** of an already-resident model is
+  a no-op too, for the same reason the instance list exists: LM Studio loads
+  an instance, not a model, so a repeated load would pin a second copy of a
+  multi-GB model rather than answer "already loaded". Neither call takes a
+  2xx as proof: both answers have to name the instance, because an LM Studio
+  without these endpoints answers 200 with an error document. There is no
+  keep-alive and no pinning.
 - **Wiring** — a kagent `ModelConfig` named after the model
   (`ibm/granite-4-micro` → `ibm-granite-4-micro`) with `provider: OpenAI`,
   `openAI.baseUrl` = the agent host plus `/v1` (`--lmstudio-agent-host`,

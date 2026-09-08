@@ -31,6 +31,15 @@ type fakeLMStudio struct {
 	// pollsLeft counts how many status reads stay "downloading" before the
 	// job completes; 0 completes on the first read.
 	pollsLeft int
+	// stuckStatus makes every status read report this instead of finishing,
+	// standing in for a state pullDone does not know (a cancelled download,
+	// a rename in a later 0.4.x).
+	stuckStatus string
+	// loadAnswersEmpty makes /models/load answer 200 without an instance id.
+	loadAnswersEmpty bool
+	// landsAs makes a finished download appear in the library under this key
+	// instead of the requested reference.
+	landsAs string
 	// downloadFail makes a started download fail instead of completing.
 	downloadFail string
 	srv          *httptest.Server
@@ -59,7 +68,10 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if _, ok := f.models[req.Model]; ok {
-			_ = json.NewEncoder(w).Encode(downloadJob{JobID: "job_dup", Status: statusAlreadyDownloaded, TotalSizeBytes: float64(f.models[req.Model].SizeBytes)})
+			// The real server sends no counters for a model that is already
+			// there: only the status. Filling them in here is what hid the
+			// 0 B / 0 B report.
+			_ = json.NewEncoder(w).Encode(downloadJob{JobID: "job_dup", Status: statusAlreadyDownloaded})
 			return
 		}
 		if req.Model == "" {
@@ -86,6 +98,11 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 			_ = json.NewEncoder(w).Encode(job)
 			return
 		}
+		if f.stuckStatus != "" {
+			job.Status = f.stuckStatus
+			_ = json.NewEncoder(w).Encode(job)
+			return
+		}
 		if f.pollsLeft > 0 {
 			f.pollsLeft--
 			job.DownloadedBytes += 700_000_000
@@ -97,7 +114,11 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		// The download landed: the model is in the library now.
 		ref := f.jobs[id+"_ref"]
 		if ref != nil {
-			f.models[ref.JobID] = llm(ref.JobID, int64(job.TotalSizeBytes), true)
+			key := ref.JobID
+			if f.landsAs != "" {
+				key = f.landsAs
+			}
+			f.models[key] = llm(key, int64(job.TotalSizeBytes), true)
 		}
 		_ = json.NewEncoder(w).Encode(job)
 	})
@@ -112,6 +133,12 @@ func newFakeLMStudio(t *testing.T) *fakeLMStudio {
 		m, ok := f.models[req.Model]
 		if !ok {
 			writeErr(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("Model %s not found in downloaded models", req.Model))
+			return
+		}
+		if f.loadAnswersEmpty {
+			// What an LM Studio without this endpoint answers: 200 and an
+			// error document, which decodes to an empty instance id.
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unexpected endpoint or method. (POST /api/v1/models/load)"})
 			return
 		}
 		inst := loadedInstance{ID: m.Key}
@@ -371,6 +398,109 @@ func TestPullAlreadyDownloaded(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, seen, 1, "nothing to download, so one final event")
 	assert.Equal(t, "success", seen[0].Status)
+	// LM Studio sends no counters for a model that is already there, so the
+	// size comes from the library: a re-pull reporting 0 B / 0 B reads like a
+	// broken pull wherever the numbers are rendered.
+	assert.Equal(t, int64(2_100_000_000), seen[0].BytesTotal)
+	assert.Equal(t, seen[0].BytesTotal, seen[0].BytesCompleted)
+}
+
+// A pull whose reference is not the key LM Studio landed it under must fail
+// at pull time: the service wires the ModelConfig with the caller's
+// reference, so reporting success would leave a ModelConfig naming a model
+// the server does not serve.
+func TestPullFailsWhenTheRefIsNotTheKey(t *testing.T) {
+	f := newFakeLMStudio(t)
+	b, err := New(backend.LMStudioOptions{Endpoint: f.srv.URL})
+	require.NoError(t, err)
+	b.pollInterval = time.Millisecond
+	// The download completes but lands under a different key, as LM Studio
+	// does for a Hugging Face artifact.
+	f.landsAs = "lmstudio-community/qwen3-4b-gguf@q4_k_m"
+
+	err = b.Pull(context.Background(), backend.PullRequest{Ref: "lmstudio-community/Qwen3-4B-GGUF"}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keyed it differently")
+	assert.ErrorIs(t, err, backend.ErrNotFound)
+}
+
+// A vlm is a chat model with vision, not an embedding model: keying on `llm`
+// filed it as one, hiding it from every chat-model picker.
+func TestVLMIsAChatModel(t *testing.T) {
+	f, b := newTestBackend(t)
+	vlm := llm("qwen/qwen2.5-vl-7b", 6_000_000_000, true)
+	vlm.Type = "vlm"
+	vlm.Capabilities.Vision = true
+	f.add(vlm)
+	// A type LM Studio has not shipped yet is a chat model too.
+	future := llm("someone/future-arch", 1_000_000_000, false)
+	future.Type = "reranker"
+	f.add(future)
+	f.add(embedding(modelEmbed, 84_106_624))
+
+	models, err := b.ListModels(context.Background())
+	require.NoError(t, err)
+	byName := map[string][]string{}
+	for _, m := range models {
+		byName[m.Name] = m.Capabilities
+	}
+	assert.Equal(t, []string{"completion", "tools", "vision"}, byName["qwen/qwen2.5-vl-7b"])
+	assert.Equal(t, []string{"completion"}, byName["someone/future-arch"])
+	assert.Equal(t, []string{"embedding"}, byName[modelEmbed])
+}
+
+// A 2xx is not proof of a load: an LM Studio without the endpoint answers 200
+// with an error document, and taking that as success would have the service
+// wire a ModelConfig for a model that was never loaded.
+func TestLoadRejectsAnAnswerWithoutAnInstance(t *testing.T) {
+	f, b := newTestBackend(t)
+	f.add(llm(modelGranite, 2_100_000_000, true))
+	f.loadAnswersEmpty = true
+
+	err := b.Load(context.Background(), backend.LoadRequest{Name: modelGranite})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without an instance id")
+	loaded, err := b.ListLoaded(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, loaded, "nothing was loaded")
+}
+
+// Loading twice must not pin a second copy of a multi-GB model: load_model is
+// annotated idempotent for MCP clients, which retry.
+func TestLoadIsIdempotent(t *testing.T) {
+	f, b := newTestBackend(t)
+	f.add(llm(modelGranite, 2_100_000_000, true))
+	ctx := context.Background()
+
+	require.NoError(t, b.Load(ctx, backend.LoadRequest{Name: modelGranite}))
+	require.NoError(t, b.Load(ctx, backend.LoadRequest{Name: modelGranite}))
+	loaded, err := b.ListLoaded(ctx)
+	require.NoError(t, err)
+	assert.Len(t, loaded, 1, "a repeat load must not add an instance")
+}
+
+// A status neither `downloading` nor an end pullDone knows must not poll
+// forever: the job context outlives the request, and a job stuck pending
+// blocks every later pull of the same model.
+func TestPullGivesUpOnAStatusItDoesNotKnow(t *testing.T) {
+	f, b := newTestBackend(t)
+	f.stuckStatus = "cancelled"
+
+	err := b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"cancelled"`)
+	assert.Contains(t, err.Error(), "neither progress nor an end")
+}
+
+// A paused download is not instantly fatal — it may be queued — but it does
+// not poll forever either, and the message says what to do.
+func TestPullGivesUpOnAPausedDownload(t *testing.T) {
+	f, b := newTestBackend(t)
+	f.stuckStatus = statusPaused
+
+	err := b.Pull(context.Background(), backend.PullRequest{Ref: modelGranite}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "resume or cancel it in LM Studio")
 }
 
 func TestPullFailureAndEmptyRef(t *testing.T) {

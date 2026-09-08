@@ -86,9 +86,10 @@ lemonade:
 lmstudio:
   # -- LM Studio base URL as reached from pods (its API is under `/api/v1`;
   # LM Studio listens on 1234 by default). Serve it on the local network
-  # (`lms server start --bind 0.0.0.0`, or the app's "Serve on Local Network"
-  # toggle) so the kind docker network gateway reaches it, for example
-  # http://172.21.0.1:1234; Docker Desktop resolves host.docker.internal.
+  # rather than loopback — `LMS_SERVER_HOST=0.0.0.0`, or the app's "Serve on
+  # Local Network" toggle — so the kind docker network gateway reaches it,
+  # for example http://172.21.0.1:1234; Docker Desktop resolves
+  # host.docker.internal.
   # LM Studio 0.4.0 or newer is required — the `/api/v1` API is what this
   # driver speaks.
   endpoint: http://host.docker.internal:1234

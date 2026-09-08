@@ -39,12 +39,25 @@ const (
 	// defaultPollInterval is how often a running download is asked for
 	// progress.
 	defaultPollInterval = 2 * time.Second
+	// maxUnknownStatuses is how many consecutive polls may report a status
+	// that is neither `downloading` nor an end pullDone knows before the
+	// pull gives up (see the loop in Pull).
+	maxUnknownStatuses = 30
 )
 
-// loading is how LM Studio manages memory: with just-in-time loading on (its
-// default) the first completion that names a downloaded model loads it, and
-// it stays resident until it is unloaded. There is no idle timer and no
-// keep-alive, so a load only pre-warms.
+// loading is how LM Studio manages memory, as it applies to the loads THIS
+// driver performs. POST /api/v1/models/load is an explicit load: LM Studio
+// treats it as manual, so it has no idle TTL, Auto-Evict leaves it alone
+// ("non-JIT loaded models are not affected"), and it stays resident until
+// something unloads it. The endpoint accepts no ttl either, which is why
+// LoadRequest.KeepAlive has nothing to map onto.
+//
+// OnDemand is true for the other path: with just-in-time loading on (its
+// default) the first completion naming a downloaded model loads it, which is
+// what an agent turn does. Note the asymmetry — a JIT-loaded model DOES get
+// LM Studio's default idle TTL (60 minutes) and is subject to Auto-Evict, so
+// a model an agent warmed up can be gone later, while one loaded through
+// this driver will not be. IdleEviction describes the driver's own loads.
 var loading = backend.Loading{OnDemand: true, IdleEviction: false}
 
 // Backend is the lmstudio driver.
@@ -214,12 +227,10 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 		progress(backend.Progress{Status: status, BytesCompleted: int64(j.DownloadedBytes), BytesTotal: int64(j.TotalSizeBytes)})
 	}
 	if done, err := pullDone(job, ref); done || err != nil {
-		if err == nil {
-			// already_downloaded reports no bytes; call the whole size done.
-			job.DownloadedBytes = job.TotalSizeBytes
-			report(job, "success")
+		if err != nil {
+			return err
 		}
-		return err
+		return b.finishPull(ctx, job, ref, report)
 	}
 	if job.JobID == "" {
 		return fmt.Errorf("lmstudio: pull %s: the download answered no job id", ref)
@@ -227,6 +238,11 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 	report(job, "downloading")
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
+	// A status the driver does not know reads as "still going", so bound it:
+	// the job context outlives the request (jobs.Manager keeps it), and a
+	// pending job blocks every later pull of the same model, so an
+	// unrecognised terminal state must not poll forever.
+	unknown := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -242,14 +258,55 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 			return err
 		}
 		if done {
-			if job.TotalSizeBytes > 0 {
-				job.DownloadedBytes = job.TotalSizeBytes
+			return b.finishPull(ctx, job, ref, report)
+		}
+		if job.Status != statusDownloading {
+			unknown++
+			if unknown > maxUnknownStatuses {
+				hint := "giving up rather than polling forever"
+				if job.Status == statusPaused {
+					hint = "resume or cancel it in LM Studio"
+				}
+				return fmt.Errorf("lmstudio: pull %s: the download has reported %q for %s, which is neither progress nor an end — %s",
+					ref, job.Status, time.Duration(unknown)*b.pollInterval, hint)
 			}
-			report(job, "success")
-			return nil
+		} else {
+			unknown = 0
 		}
 		report(job, describe(job))
 	}
+}
+
+// finishPull closes a completed download: it resolves the reference against
+// the library and reports the whole size done.
+//
+// The resolve is not a formality. LM Studio does not promise that the `key` a
+// download lands under is the reference that was asked for — the download
+// answer carries no key, there is no resolve call, and keys come from
+// model.yaml (a canonical publisher/model) while Hugging Face artifacts are
+// keyed per weight set and may carry an @<quant> suffix. The service wires
+// the ModelConfig with the reference the CALLER gave, so a divergence would
+// leave a ModelConfig whose model LM Studio's /v1 API does not serve: the
+// agent's first turn would fail with a model-not-found, long after the pull
+// reported success. Failing here instead names it at pull time.
+//
+// The size comes from the library too: LM Studio sends no counters for a
+// model that was already there (already_downloaded), and a re-pull reporting
+// 0 B / 0 B reads like a broken pull wherever the numbers are rendered.
+func (b *Backend) finishPull(ctx context.Context, job *downloadJob, ref string, report func(*downloadJob, string)) error {
+	m, err := b.GetModel(ctx, ref)
+	if err != nil {
+		if errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("lmstudio: pulled %s, but the library has no model under that name: LM Studio keyed it differently (it keys Hugging Face artifacts per weight set, sometimes with an @<quant> suffix). Pull the key `GET /api/v1/models` reports, so the wired ModelConfig names a model the server serves: %w", ref, err)
+		}
+		return err
+	}
+	if job.TotalSizeBytes <= 0 && m.SizeBytes > 0 {
+		job.TotalSizeBytes = float64(m.SizeBytes)
+	}
+	job.DownloadedBytes = job.TotalSizeBytes
+	report(job, "success")
+	return nil
 }
 
 // pullDone reads a download job's state: done once the model is on disk,
@@ -265,9 +322,10 @@ func pullDone(job *downloadJob, ref string) (bool, error) {
 			msg = "download failed"
 		}
 		return false, &APIError{Status: http.StatusOK, Code: statusFailed, Message: msg}
-	case statusPaused:
-		return false, fmt.Errorf("lmstudio: pull %s: the download is paused (resume it in LM Studio)", ref)
 	default:
+		// Including `paused`: not an end, and not necessarily permanent — a
+		// download may sit there while it is queued. The caller's bound on
+		// non-progress statuses is what stops a pull that stays paused.
 		return false, nil
 	}
 }
@@ -289,15 +347,51 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 		backend.ErrUnsupported, backend.NameLMStudio)
 }
 
-// Load implements backend.Backend. LM Studio has no keep-alive timer and no
-// pinning, so KeepAlive is ignored: a load pre-warms, nothing evicts.
+// Load implements backend.Backend. Loading a model that is already resident
+// is a no-op, as on ollama and lemonade: LM Studio loads an *instance*, and
+// one model can hold several, so a second load would pin another copy of a
+// multi-GB model rather than answer "already loaded" — and load_model is
+// annotated idempotent for MCP clients, which retry.
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
-	_, err := b.client.Load(ctx, name)
-	return mapErr(err, name)
+	loaded, err := b.instancesOf(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(loaded) > 0 {
+		return nil
+	}
+	if _, err := b.client.Load(ctx, name); err != nil {
+		return mapErr(err, name)
+	}
+	return nil
+}
+
+// instancesOf are the resident instance ids of a model, nil when it holds
+// none; found is false when the library does not know the model at all.
+func (b *Backend) instancesOf(ctx context.Context, name string) ([]string, error) {
+	models, err := b.client.Models(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range models {
+		if !strings.EqualFold(m.Key, name) {
+			continue
+		}
+		ids := make([]string, 0, len(m.LoadedInstances))
+		for _, inst := range m.LoadedInstances {
+			id := inst.ID
+			if id == "" {
+				id = m.Key
+			}
+			ids = append(ids, id)
+		}
+		return ids, nil
+	}
+	return nil, nil
 }
 
 // Unload implements backend.Backend. LM Studio evicts a resident instance,
@@ -308,26 +402,17 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
-	models, err := b.client.Models(ctx)
+	ids, err := b.instancesOf(ctx, name)
 	if err != nil {
 		return err
 	}
-	for _, m := range models {
-		if !strings.EqualFold(m.Key, name) {
-			continue
+	// A model with no resident instance — or one the library does not know
+	// at all — is already in the state unload asks for.
+	for _, id := range ids {
+		if err := b.client.Unload(ctx, id); err != nil && !isNotLoaded(err) {
+			return mapErr(err, name)
 		}
-		for _, inst := range m.LoadedInstances {
-			id := inst.ID
-			if id == "" {
-				id = m.Key
-			}
-			if err := b.client.Unload(ctx, id); err != nil && !isNotLoaded(err) {
-				return mapErr(err, name)
-			}
-		}
-		return nil
 	}
-	// Not in the library at all: unloading it is still a no-op, but say so.
 	return nil
 }
 
@@ -373,12 +458,13 @@ func toModel(m apiModel) backend.Model {
 // other backends report (completion, tools, vision, thinking, embedding).
 // An embedding model carries no capability object at all.
 func capabilitiesOf(m apiModel) []string {
-	if m.Type != typeLLM {
-		if m.Type != "" {
-			return []string{"embedding"}
-		}
-		return nil
+	if isEmbedding(m.Type) {
+		return []string{"embedding"}
 	}
+	// Everything else is a chat model: llm, vlm, an absent type, and
+	// whatever a later LM Studio adds. The capability object below says what
+	// it can do beyond completions — a vlm reaches here so its vision and
+	// tool-use flags are reported, instead of being filed as an embedding.
 	// completion first, as ollama lists it.
 	out := []string{"completion"}
 	if m.Capabilities == nil {
@@ -394,6 +480,13 @@ func capabilitiesOf(m apiModel) []string {
 		out = append(out, "thinking")
 	}
 	return out
+}
+
+// isEmbedding reports whether LM Studio's model type is the one type that
+// does not serve completions. Both spellings: /api/v1 says embedding,
+// /api/v0 said embeddings.
+func isEmbedding(t string) bool {
+	return t == typeEmbedding || t == typeEmbeddings
 }
 
 // hostOf is the hostname of a base URL, without scheme or port — the node

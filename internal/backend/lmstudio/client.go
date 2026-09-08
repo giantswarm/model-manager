@@ -52,8 +52,16 @@ const (
 	statusFailed            = "failed"
 	statusAlreadyDownloaded = "already_downloaded"
 
-	// The model types LM Studio reports; only llm serves agents.
-	typeLLM = "llm"
+	// The model types LM Studio reports: llm, vlm (vision-language) and
+	// embedding. Only the embedding one is not a chat model — a vlm serves
+	// completions like an llm and says `vision` in its capabilities — so the
+	// driver keys on the embedding type rather than on llm, and a type a
+	// later release adds is treated as a chat model too.
+	typeLLM       = "llm"
+	typeEmbedding = "embedding"
+	// typeEmbeddings is the /api/v0 spelling, kept so a mixed answer cannot
+	// slip through as a chat model.
+	typeEmbeddings = "embeddings"
 )
 
 // NewClient returns a client for the given base URL (e.g. http://127.0.0.1:1234).
@@ -74,7 +82,7 @@ type apiModel struct {
 	Key         string `json:"key"`
 	DisplayName string `json:"display_name"`
 	Publisher   string `json:"publisher"`
-	// Type is llm, embedding or vlm.
+	// Type is llm, vlm or embedding (isEmbedding is what reads it).
 	Type         string `json:"type"`
 	Architecture string `json:"architecture"`
 	Quantization *struct {
@@ -140,6 +148,12 @@ type loadResponse struct {
 	Status     string `json:"status"`
 }
 
+// unloadResponse is the answer of POST /models/unload: the instance it
+// evicted.
+type unloadResponse struct {
+	InstanceID string `json:"instance_id"`
+}
+
 // Models lists the local library.
 func (c *Client) Models(ctx context.Context) ([]apiModel, error) {
 	var out modelsResponse
@@ -178,19 +192,36 @@ func (c *Client) DownloadStatus(ctx context.Context, jobID string) (*downloadJob
 	return &out, nil
 }
 
-// Load makes a downloaded model resident and returns the instance id.
+// Load makes a downloaded model resident and returns the instance id. A 2xx
+// is not proof on its own: an LM Studio without this endpoint (before 0.4.0)
+// answers 200 with an {"error": ...} document, which decodes to an empty
+// instance id — so that is what says whether anything was loaded.
 func (c *Client) Load(ctx context.Context, key string) (string, error) {
 	hc := &http.Client{Transport: c.http.Transport, Timeout: c.loadTimeout}
 	var out loadResponse
 	if err := c.do(ctx, hc, http.MethodPost, "/models/load", map[string]any{keyModel: key}, &out); err != nil {
 		return "", err
 	}
+	if out.InstanceID == "" {
+		return "", &APIError{Status: http.StatusOK, Message: fmt.Sprintf(
+			"POST %s/models/load answered without an instance id (not an LM Studio 0.4.0+ API)", apiPrefix)}
+	}
 	return out.InstanceID, nil
 }
 
-// Unload evicts one resident instance, addressed by its instance id.
+// Unload evicts one resident instance, addressed by its instance id. As for
+// Load, the answer has to name the instance: a 200 carrying an error
+// document would otherwise read as a successful eviction.
 func (c *Client) Unload(ctx context.Context, instanceID string) error {
-	return c.do(ctx, c.http, http.MethodPost, "/models/unload", map[string]any{keyInstanceID: instanceID}, nil)
+	var out unloadResponse
+	if err := c.do(ctx, c.http, http.MethodPost, "/models/unload", map[string]any{keyInstanceID: instanceID}, &out); err != nil {
+		return err
+	}
+	if out.InstanceID == "" {
+		return &APIError{Status: http.StatusOK, Message: fmt.Sprintf(
+			"POST %s/models/unload answered without an instance id (not an LM Studio 0.4.0+ API)", apiPrefix)}
+	}
+	return nil
 }
 
 func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, in, out any) error {
