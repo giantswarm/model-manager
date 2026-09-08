@@ -99,4 +99,4 @@ require (
 // golang.org/x/mod < v0.40.0 (CVE-2026-56864, CVE-2026-56865). The module is
 // not imported by model-manager, so a plain `go get` bump is dropped by
 // `go mod tidy`; the replace pins the graph to a fixed version instead.
-replace golang.org/x/mod => golang.org/x/mod v0.40.0
+replace golang.org/x/mod => golang.org/x/mod v0.41.0
