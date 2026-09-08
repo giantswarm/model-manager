@@ -20,6 +20,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/backend/kserve"
 	"github.com/giantswarm/model-manager/internal/backend/lemonade"
+	"github.com/giantswarm/model-manager/internal/backend/lmstudio"
 	"github.com/giantswarm/model-manager/internal/backend/ollama"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/kube"
@@ -40,6 +41,9 @@ type serveOptions struct {
 
 	lemonadeEndpoint  string
 	lemonadeAgentHost string
+
+	lmstudioEndpoint  string
+	lmstudioAgentHost string
 
 	kserve kserveFlags
 
@@ -121,13 +125,15 @@ environment variable named next to it; flags win over the environment.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("MODEL_MANAGER_LISTEN", ":8080"), "Listen address (MODEL_MANAGER_LISTEN)")
-	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve|lemonade — the one-backend form of --backends (MODEL_MANAGER_BACKEND)")
-	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
+	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve|lemonade|lmstudio — the one-backend form of --backends (MODEL_MANAGER_BACKEND)")
+	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,lmstudio,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
 	f.StringVar(&o.ollamaEndpoint, "ollama-endpoint", envOr("OLLAMA_ENDPOINT", "http://127.0.0.1:11434"), "Ollama API base URL as reached by model-manager (OLLAMA_ENDPOINT)")
 	f.StringVar(&o.ollamaAgentHost, "ollama-agent-host", envOr("OLLAMA_AGENT_HOST", ""), "Ollama host written into kagent ModelConfigs, as reached by agent pods; defaults to --ollama-endpoint (OLLAMA_AGENT_HOST)")
 	f.StringVar(&o.ollamaMemoryBudgetGiB, "ollama-memory-budget-gib", envOr("MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB", ""), "Memory budget of the proxied host in GiB (decimals allowed), reported on /api/v1/nodes as budgetSource=override instead of MemTotal of the pod's /proc/meminfo — for Docker Desktop, another VM-backed runtime or an Ollama on another machine; empty or 0: the pod's view (MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB)")
 	f.StringVar(&o.lemonadeEndpoint, "lemonade-endpoint", envOr("LEMONADE_ENDPOINT", lemonade.DefaultEndpoint), "Lemonade Server base URL as reached by model-manager; its API is under /api/v1 (LEMONADE_ENDPOINT)")
 	f.StringVar(&o.lemonadeAgentHost, "lemonade-agent-host", envOr("LEMONADE_AGENT_HOST", ""), "Lemonade Server base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible baseUrl with /api/v1 appended; defaults to --lemonade-endpoint (LEMONADE_AGENT_HOST)")
+	f.StringVar(&o.lmstudioEndpoint, "lmstudio-endpoint", envOr("LMSTUDIO_ENDPOINT", lmstudio.DefaultEndpoint), "LM Studio base URL as reached by model-manager; its API is under /api/v1 (LMSTUDIO_ENDPOINT)")
+	f.StringVar(&o.lmstudioAgentHost, "lmstudio-agent-host", envOr("LMSTUDIO_AGENT_HOST", ""), "LM Studio base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible baseUrl with /v1 appended; defaults to --lmstudio-endpoint (LMSTUDIO_AGENT_HOST)")
 
 	k := &o.kserve
 	f.StringVar(&k.discoveryNamespace, "kserve-discovery-namespace", envOr("KSERVE_DISCOVERY_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace of the model-serving discovery ConfigMap; defaults to the pod's namespace (KSERVE_DISCOVERY_NAMESPACE, POD_NAMESPACE)")
@@ -218,10 +224,12 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	backend.Register(backend.NameOllama, ollama.Factory)
 	backend.Register(backend.NameKServe, kserve.Factory)
 	backend.Register(backend.NameLemonade, lemonade.Factory)
+	backend.Register(backend.NameLMStudio, lmstudio.Factory)
 	opts := backend.Options{
 		Ollama:   backend.OllamaOptions{Endpoint: o.ollamaEndpoint, AgentHost: o.ollamaAgentHost, MemoryBudgetGiB: o.ollamaMemoryBudgetGiB},
 		KServe:   o.kserve.options(),
 		Lemonade: backend.LemonadeOptions{Endpoint: o.lemonadeEndpoint, AgentHost: o.lemonadeAgentHost},
+		LMStudio: backend.LMStudioOptions{Endpoint: o.lmstudioEndpoint, AgentHost: o.lmstudioAgentHost},
 	}
 	if clients != nil {
 		opts.KServe.Dynamic = clients.Dynamic

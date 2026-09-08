@@ -17,6 +17,7 @@ type Options struct {
 	Ollama   OllamaOptions
 	KServe   KServeOptions
 	Lemonade LemonadeOptions
+	LMStudio LMStudioOptions
 }
 
 // KServeOptions configures the kserve driver. Empty strings mean "take it
@@ -133,6 +134,22 @@ type LemonadeOptions struct {
 	Timeout time.Duration
 	// LoadTimeout bounds a load: Lemonade starts the backend process and reads
 	// the weights before it answers (0: 10 minutes).
+	LoadTimeout time.Duration
+}
+
+// LMStudioOptions configures the lmstudio driver.
+type LMStudioOptions struct {
+	// Endpoint is the LM Studio base URL as reached by model-manager (its
+	// API lives under /api/v1).
+	Endpoint string
+	// AgentHost is the LM Studio base URL as reached by agent pods; the
+	// driver appends /v1 and writes it into kagent ModelConfigs as the
+	// OpenAI-compatible baseUrl. Defaults to Endpoint.
+	AgentHost string
+	// Timeout bounds non-streaming API calls.
+	Timeout time.Duration
+	// LoadTimeout bounds a load: LM Studio reads the weights before it
+	// answers (0: 10 minutes).
 	LoadTimeout time.Duration
 }
 

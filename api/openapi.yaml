@@ -7,7 +7,8 @@ info:
 
     One API implemented by serving backends (`ollama` for laptop/agentlab
     installs, `kserve` for GPU installs, `lemonade` for hosts running Lemonade
-    Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU). One
+    Server — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU —
+    and `lmstudio` for hosts running LM Studio, which serves no delete). One
     model-manager runs one or several of them at once (`--backends`, chart
     value `backends`). Clients MUST call `GET /api/v1/backends` first and
     render only what each backend's capability flags allow: a false flag
@@ -266,11 +267,11 @@ paths:
                 backend: { $ref: "#/components/schemas/BackendName" }
                 model:
                   type: string
-                  description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; kserve Hugging Face repository owner/name[:revision])"
+                  description: "Model reference (ollama registry tag or hf.co/... GGUF ref; lemonade catalog model name such as Qwen3-0.6B-GGUF — `lemonade list`; lmstudio hub reference such as ibm/granite-4-micro — `lms ls`; kserve Hugging Face repository owner/name[:revision])"
                   example: smollm2:135m
                 wire:
                   type: boolean
-                  description: Create a ModelConfig on completion (ollama, lemonade; default = server autoWire; kserve refuses true — models are wired when served)
+                  description: Create a ModelConfig on completion (ollama, lemonade, lmstudio; default = server autoWire; kserve refuses true — models are wired when served)
                 preset:
                   type: string
                   description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
@@ -313,7 +314,13 @@ paths:
         until another model of its type needs the slot; `keepAlive: "-1"`
         pins it against that displacement, other values are ignored. The
         response is the loaded model with `running.device` and
-        `running.pinned`.
+        `running.pinned`. lmstudio: `POST /api/v1/models/load`, which reads
+        the weights and answers with the resident instance; the load persists
+        until unloaded (LM Studio exempts an explicit load from its idle TTL
+        and from Auto-Evict) and `keepAlive` has nothing to map onto, since
+        the endpoint takes no TTL. Loading an already-resident model is a
+        no-op: LM Studio loads an instance, not a model, so a repeat would
+        pin a second copy.
       operationId: loadModel
       x-mcp-tool: load_model
       requestBody:
@@ -333,7 +340,9 @@ paths:
                     `loading.keepAliveDefault`. Later inference requests replace it
                     with their own keep-alive. lemonade: only `-1` has a meaning —
                     it pins the model against slot eviction; every other value is
-                    ignored (no idle timer).
+                    ignored (no idle timer). lmstudio: ignored entirely — its
+                    load endpoint accepts no TTL, and an explicitly loaded
+                    model has no idle timer to set.
                 preset:
                   type: string
                   description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
@@ -733,7 +742,7 @@ components:
             message: { type: string }
     BackendName:
       type: string
-      enum: [ollama, kserve, lemonade]
+      enum: [ollama, kserve, lemonade, lmstudio]
       description: a configured backend's driver name
     BackendErrors:
       type: object
@@ -753,14 +762,14 @@ components:
       properties:
         pull: { type: boolean, description: import a model by reference }
         pullProgress: { type: boolean, description: pull jobs report bytes completed/total }
-        delete: { type: boolean }
+        delete: { type: boolean, description: "remove a downloaded model; false on lmstudio, which removes models only through its `lms rm` CLI on the host — the call then answers 501 unsupported" }
         load: { type: boolean, description: load into memory / start serving }
         unload: { type: boolean, description: evict / stop serving }
         loadedModels: { type: boolean, description: list loaded models with memory use }
         wire: { type: boolean, description: create kagent ModelConfigs (needs Kubernetes access) }
         presets: { type: boolean, description: curated serving presets (kserve) }
         fitCheck: { type: boolean, description: node-memory fit check (kserve) }
-        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps; lemonade: the proxied host from Lemonade's system-info)" }
+        nodeInventory: { type: boolean, description: "GET /nodes reports nodes with memory budgets and reservations (kserve: the accelerator nodes with their download cache and eligibility; ollama: the proxied host from /proc/meminfo and /api/ps; lemonade: the proxied host from Lemonade's system-info; false on lmstudio, which reports no host hardware)" }
         search: { type: boolean, description: model hub search (kserve) }
     Backend:
       type: object
@@ -768,7 +777,7 @@ components:
       properties:
         backend:
           type: string
-          enum: [ollama, kserve, lemonade]
+          enum: [ollama, kserve, lemonade, lmstudio]
         backends:
           type: array
           items: { $ref: "#/components/schemas/BackendName" }
@@ -782,7 +791,8 @@ components:
             Backend endpoint as reached by agent pods — the host written into
             ModelConfigs (ollama: `--ollama-agent-host`, defaulting to
             `endpoint`; lemonade: `--lemonade-agent-host` plus `/api/v1`, the
-            OpenAI-compatible base URL). Clients that match ModelConfigs to models by hostname
+            OpenAI-compatible base URL; lmstudio: `--lmstudio-agent-host` plus
+            `/v1`, likewise OpenAI-compatible). Clients that match ModelConfigs to models by hostname
             compare against this, not `endpoint`. Absent when the backend has
             no single agent-facing endpoint (kserve: every served model has its
             own predictor URL in `running.endpoint` / `modelConfig.endpoint`).
@@ -809,16 +819,23 @@ components:
         fields. lemonade: `onDemand` true, `idleEviction` false, no keep-alive
         fields — a loaded model stays until unloaded or until another model of
         its type needs the slot (Lemonade's `max_loaded_models`, one per type
-        by default); that is displacement, not idle eviction. Older
-        model-managers omit the block: treat that as unknown.
+        by default); that is displacement, not idle eviction. lmstudio:
+        `onDemand` true, `idleEviction` false, no keep-alive fields — a load
+        through this API is explicit, which LM Studio exempts from its idle
+        TTL and from Auto-Evict, so the model stays until unloaded. Mind the
+        asymmetry there: a model LM Studio JIT-loaded instead (what an agent
+        turn does to a not-loaded model) does get its default idle TTL, so
+        `idleEviction` describes the backend's own loads, not every way a
+        model can reach memory. Older model-managers omit the block: treat
+        that as unknown.
       required: [onDemand, idleEviction]
       properties:
         onDemand:
           type: boolean
-          description: the backend loads a model on the first inference request naming it (ollama, lemonade); false means it must be loaded / served explicitly before agents can use it (kserve)
+          description: the backend loads a model on the first inference request naming it (ollama, lemonade, lmstudio — the latter only while its just-in-time loading is on); false means it must be loaded / served explicitly before agents can use it (kserve)
         idleEviction:
           type: boolean
-          description: the backend evicts idle models on its own (ollama keep-alive); false means a loaded model stays until unloaded (kserve; lemonade — until unloaded or displaced by another model of its type)
+          description: the backend evicts idle models on its own (ollama keep-alive); false means a loaded model stays until unloaded (kserve; lemonade — until unloaded or displaced by another model of its type; lmstudio — an explicitly loaded model is exempt from LM Studio's idle TTL, though a JIT-loaded one is not)
         keepAliveDefault:
           type: string
           description: |
@@ -854,7 +871,7 @@ components:
         runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama (one runtime) and kserve (the preset says)" }
         capabilities:
           type: array
-          description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...)"
+          description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...); lmstudio maps its capability object (trained_for_tool_use → tools, vision → vision, reasoning → thinking) and reports embedding models as embedding"
           items: { type: string }
         node: { type: string, description: node holding the cache entry (kserve) }
         downloaded:
@@ -872,7 +889,7 @@ components:
         name: { type: string }
         backend: { $ref: "#/components/schemas/BackendName" }
         digest: { type: string }
-        sizeBytes: { type: integer, format: int64, description: "memory footprint (kserve — the preset's weights; lemonade — the catalog size, Lemonade reports no per-model memory)" }
+        sizeBytes: { type: integer, format: int64, description: "memory footprint (kserve — the preset's weights; lemonade — the catalog size, Lemonade reports no per-model memory; lmstudio — the model's size on disk, LM Studio reports no per-instance memory either)" }
         vramBytes: { type: integer, format: int64 }
         contextLength: { type: integer, format: int64 }
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
@@ -880,7 +897,7 @@ components:
         node: { type: string }
         status:
           type: string
-          description: "ollama and lemonade `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers); kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
+          description: "ollama, lemonade and lmstudio `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers; lmstudio lists an instance only once it is resident); kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
           example: loaded
         message: { type: string, description: kserve — why the model is not ready }
         resource: { type: string, description: kserve — InferenceService name (also the served model name) }
@@ -892,7 +909,7 @@ components:
     ModelConfigRef:
       type: object
       description: |
-        kagent ModelConfig of a model. ollama and lemonade: named after the model
+        kagent ModelConfig of a model. ollama, lemonade and lmstudio: named after the model
         reference (`smollm2:135m` → `smollm2-135m`, `qwen3-it-4b-FLM` →
         `qwen3-it-4b-flm`). kserve: named after the
         InferenceService (`qwen3-8-27b`), the same rule the portal's serve flow
@@ -938,10 +955,10 @@ components:
         wire: { type: boolean, description: whether the job wires the model on success }
         node:
           type: string
-          description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama and lemonade, and on a shared cache."
+          description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama, lemonade and lmstudio, and on a shared cache."
         preset:
           type: string
-          description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama and lemonade."
+          description: "kserve — serving preset the download is for: the one the request named, else the single preset serving the model. Absent on ollama, lemonade and lmstudio."
         requestedBy:
           type: string
           description: "the caller who started the job (email, else the IdP subject) when the server runs with OAuth; absent for jobs the service starts on its own (adopted downloads) and on servers without OAuth"

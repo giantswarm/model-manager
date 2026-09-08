@@ -2,7 +2,7 @@
 
 ```sh
 make build          # binary for the current platform
-go test ./...       # unit tests (httptest fake Ollama and Lemonade, fake dynamic kube client)
+go test ./...       # unit tests (httptest fake Ollama, Lemonade and LM Studio, fake dynamic kube client)
 make lint           # golangci-lint with the pre-commit linters (gosec, goconst, govet)
 make helm-schema    # regenerate helm/model-manager/values.schema.json
 make helm-docs      # regenerate helm/model-manager/README.md
@@ -17,7 +17,9 @@ make helm-docs      # regenerate helm/model-manager/README.md
   `PullAdopter`). `internal/backend/ollama` is the host-Ollama driver;
   `internal/backend/lemonade` the Lemonade Server driver (`client.go` — the
   management API including the SSE pull, `backend.go`, `nodes.go` — the host
-  from system-info). `internal/backend/kserve` is the KServe driver: `config.go` (discovery
+  from system-info); `internal/backend/lmstudio` the LM Studio driver
+  (`client.go` — the /api/v1 API, `backend.go`; no `nodes.go`, LM Studio
+  exposes no host hardware, and no delete). `internal/backend/kserve` is the KServe driver: `config.go` (discovery
   ConfigMap + flag overrides), `presets.go`, `hub.go` (Hugging Face Hub),
   `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods and
   the cache-agent client), `internal/cacheagent` (the DaemonSet's HTTP
@@ -92,6 +94,36 @@ In the lab, install the chart with `--set backend=lemonade --set
 lemonade.endpoint=http://172.21.0.1:13305` (the kind docker network gateway;
 Lemonade bound to `0.0.0.0`, port 13305 open to the bridge subnets) next to
 the umbrella's release, as in the ollama recipe below.
+
+## Local loop against an LM Studio
+
+LM Studio listens on 1234 by default and needs 0.4.0 or newer (the `/api/v1`
+API). Start it with `lms server start --bind 0.0.0.0`, or the app's Developer
+→ "Serve on Local Network" toggle.
+
+```sh
+./model-manager serve --listen 127.0.0.1:18080 --backend lmstudio \
+  --lmstudio-endpoint http://localhost:1234 --lmstudio-agent-host http://172.21.0.1:1234 \
+  --kubeconfig ~/.kube/config --kube-context kind-agentlab --kagent-namespace kagent -v
+
+curl -s localhost:18080/api/v1/backend            # lmstudio, agentEndpoint …/v1, delete: false, no version
+curl -s localhost:18080/api/v1/models             # the library; capabilities from trained_for_tool_use, vision, reasoning
+curl -s -X POST localhost:18080/api/v1/models/pull -d '{"model":"ibm/granite-4-micro"}'
+curl -s -X POST localhost:18080/api/v1/models/load -d '{"model":"ibm/granite-4-micro"}'
+curl -s localhost:18080/api/v1/loaded             # the loaded instances
+curl -s -X POST localhost:18080/api/v1/models/unload -d '{"model":"ibm/granite-4-micro"}'
+curl -s -X DELETE localhost:18080/api/v1/models/ibm/granite-4-micro   # 501 unsupported: use `lms rm` on the host
+```
+
+Two things to expect while developing against it. LM Studio answers **HTTP 200
+with an `{"error": …}` body for every path outside `/api/v1`** (including
+Ollama's `/api/version`), so a probe must check the shape of the answer, never
+its status code. And the model key carries a slash — the REST routes take it
+raw (`{name...}`), so `GET /api/v1/models/ibm/granite-4-micro` is the shape,
+not a percent-encoded one.
+
+In the lab, install the chart with `--set backend=lmstudio --set
+lmstudio.endpoint=http://172.21.0.1:1234`.
 
 ## In the lab (agentlab)
 

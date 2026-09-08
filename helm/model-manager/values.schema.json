@@ -10,17 +10,18 @@
         },
         "backend": {
             "type": "string",
-            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`."
+            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`."
         },
         "backends": {
             "type": "array",
-            "description": "Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone.",
+            "description": "Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone.",
             "items": {
                 "type": "string",
                 "enum": [
                     "ollama",
                     "kserve",
-                    "lemonade"
+                    "lemonade",
+                    "lmstudio"
                 ]
             },
             "uniqueItems": true
@@ -469,6 +470,20 @@
                 }
             }
         },
+        "lmstudio": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "agentHost": {
+                    "type": "string",
+                    "description": "LM Studio base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible `openAI.baseUrl` with `/v1` appended; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `lmstudio.endpoint`."
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "LM Studio base URL as reached from pods (its API is under `/api/v1`; LM Studio listens on 1234 by default). Serve it on the local network rather than loopback — `LMS_SERVER_HOST=0.0.0.0`, or the app's \"Serve on Local Network\" toggle — so the kind docker network gateway reaches it, for example http://172.21.0.1:1234; Docker Desktop resolves host.docker.internal. LM Studio 0.4.0 or newer is required — the `/api/v1` API is what this driver speaks."
+                }
+            }
+        },
         "logging": {
             "type": "object",
             "additionalProperties": false,
@@ -553,7 +568,7 @@
                 },
                 "egressCIDRs": {
                     "type": "array",
-                    "description": "Extra egress CIDRs (the host Ollama or Lemonade endpoint, e.g. 172.21.0.1/32)."
+                    "description": "Extra egress CIDRs (the host Ollama, Lemonade or LM Studio endpoint, e.g. 172.21.0.1/32)."
                 },
                 "enabled": {
                     "type": "boolean",

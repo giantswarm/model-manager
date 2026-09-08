@@ -88,8 +88,8 @@ echo "$got" | grep -q -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
   || fail "lemonade backend: --lemonade-endpoint not rendered, got '$got'"
 echo "$got" | grep -q -- '^--lemonade-agent-host=http://172.21.0.1:13305$' \
   || fail "lemonade backend: --lemonade-agent-host not rendered, got '$got'"
-if echo "$got" | grep -q -- '^--ollama-\|^--kserve-'; then
-  fail "lemonade backend renders ollama or kserve flags: '$got'"
+if echo "$got" | grep -q -- '^--ollama-\|^--kserve-\|^--lmstudio-'; then
+  fail "lemonade backend renders ollama, kserve or lmstudio flags: '$got'"
 fi
 echo "$got" | grep -q -- '^--in-cluster=true$' \
   || fail "lemonade backend with wiring on: Kubernetes access expected (wiring)"
@@ -103,8 +103,29 @@ if echo "$got" | grep -q -- '^--lemonade-agent-host'; then
   fail "lemonade backend: agent host flag rendered without a value"
 fi
 got=$(args)
-if echo "$got" | grep -q -- '^--lemonade-'; then
-  fail "ollama backend renders lemonade flags: '$got'"
+if echo "$got" | grep -q -- '^--lemonade-\|^--lmstudio-'; then
+  fail "ollama backend renders lemonade or lmstudio flags: '$got'"
+fi
+
+# The lmstudio backend renders its own flags and none of the others'.
+got=$(args --set backend=lmstudio --set lmstudio.endpoint=http://172.21.0.1:1234 \
+  --set lmstudio.agentHost=http://172.21.0.1:1234)
+echo "$got" | grep -q -- '^--lmstudio-endpoint=http://172.21.0.1:1234$' \
+  || fail "lmstudio backend: --lmstudio-endpoint not rendered, got '$got'"
+echo "$got" | grep -q -- '^--lmstudio-agent-host=http://172.21.0.1:1234$' \
+  || fail "lmstudio backend: --lmstudio-agent-host not rendered, got '$got'"
+if echo "$got" | grep -q -- '^--ollama-\|^--kserve-\|^--lemonade-'; then
+  fail "lmstudio backend renders ollama, kserve or lemonade flags: '$got'"
+fi
+echo "$got" | grep -q -- '^--in-cluster=true$' \
+  || fail "lmstudio backend with wiring on: Kubernetes access expected (wiring)"
+
+# Without an agent host only the endpoint flag renders.
+got=$(args --set backend=lmstudio)
+echo "$got" | grep -q -- '^--lmstudio-endpoint=http://host.docker.internal:1234$' \
+  || fail "lmstudio backend: default endpoint not rendered, got '$got'"
+if echo "$got" | grep -q -- '^--lmstudio-agent-host'; then
+  fail "lmstudio backend: agent host flag rendered without a value"
 fi
 
 # Several backends at once: `backends` renders the list flag plus every listed
@@ -123,6 +144,16 @@ fi
 if echo "$got" | grep -q -- '^--kserve-'; then
   fail "backends list without kserve renders kserve flags: '$got'"
 fi
+
+# An lmstudio next to the other host drivers renders all three.
+got=$(args --set 'backends={ollama,lemonade,lmstudio}' --set ollama.endpoint=http://172.21.0.1:11434 \
+  --set lemonade.endpoint=http://172.21.0.1:13305 --set lmstudio.endpoint=http://172.21.0.1:1234)
+echo "$got" | grep -q -- '^--backends=ollama,lemonade,lmstudio$' \
+  || fail "three host backends: --backends not rendered, got '$got'"
+for flag in --ollama-endpoint --lemonade-endpoint --lmstudio-endpoint; do
+  echo "$got" | grep -q -- "^$flag=" \
+    || fail "three host backends: $flag must render, got '$got'"
+done
 
 # kserve in the list brings its flags, the Kubernetes access and its Roles even
 # with wiring off — as `backend: kserve` alone does.

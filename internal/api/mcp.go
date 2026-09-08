@@ -61,7 +61,7 @@ const (
 
 // backendArg is the optional backend argument every tool takes.
 func backendArg(what string) mcp.ToolOption {
-	return mcp.WithString(argBackend, mcp.Description("Backend (ollama|kserve|lemonade) "+what+"; one model-manager may run several — list_backends names them. Optional when one backend is configured."))
+	return mcp.WithString(argBackend, mcp.Description("Backend (ollama|kserve|lemonade|lmstudio) "+what+"; one model-manager may run several — list_backends names them. Optional when one backend is configured."))
 }
 
 // NewMCPServer builds an MCP server exposing the same operations as the REST
@@ -69,12 +69,12 @@ func backendArg(what string) mcp.ToolOption {
 func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("model-manager", version,
 		mcpserver.WithToolCapabilities(false),
-		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
+		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)
 	t := &tools{svc: svc}
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
-		mcp.WithDescription("Report one serving backend (ollama|kserve|lemonade) — the named one, else the default (first configured) — with its health/version, its load semantics, the capability flags clients must honor, and the names of every configured backend."),
+		mcp.WithDescription("Report one serving backend (ollama|kserve|lemonade|lmstudio) — the named one, else the default (first configured) — with its health/version, its load semantics, the capability flags clients must honor, and the names of every configured backend."),
 		backendArg("to describe"),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.getBackend)
@@ -104,19 +104,19 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
-		mcp.WithDescription("Start importing a model: an Ollama registry tag or hf.co/... GGUF reference (ollama), a Lemonade catalog model name such as Qwen3-0.6B-GGUF (lemonade: `lemonade list`, GET /api/v1/models?show_all=true on the server), or a Hugging Face repository owner/name (kserve: a pre-warm download Job into the node cache after a fit check). Returns a job immediately; poll get_job for progress. On ollama and lemonade the model is wired into kagent on success unless wire=false; on kserve models are wired when served."),
+		mcp.WithDescription("Start importing a model: an Ollama registry tag or hf.co/... GGUF reference (ollama), a Lemonade catalog model name such as Qwen3-0.6B-GGUF (lemonade: `lemonade list`, GET /api/v1/models?show_all=true on the server), an LM Studio hub reference such as ibm/granite-4-micro (lmstudio: `lms ls`), or a Hugging Face repository owner/name (kserve: a pre-warm download Job into the node cache after a fit check). Returns a job immediately; poll get_job for progress. On ollama, lemonade and lmstudio the model is wired into kagent on success unless wire=false; on kserve models are wired when served."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference to pull")),
 		backendArg("to pull on; default: the default (first configured) backend"),
-		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade; default: the server's autoWire setting)")),
+		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade, lmstudio; default: the server's autoWire setting)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its InferenceService mounts the resulting cache directory); default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve). On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored."),
+		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve). On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
-		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model)")),
+		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the InferenceService from; default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: pin the predictor to this node")),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -146,7 +146,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.checkFit)
 
 	s.AddTool(mcp.NewTool(ToolListNodes,
-		mcp.WithDescription("List nodes with their backend, serving memory budget, what loaded models reserve and the download cache each node holds. kserve: the accelerator nodes only (GPU resource or gpu-feature-discovery labels), budget from GPU labels or allocatable memory, and eligible / eligibilityReason saying whether a model can be served there (ready, inside the serving node selector, able to mount the cache claim) — load_model, pull_model and check_fit refuse a node with eligible=false and echo the reason. ollama: the proxied host (always eligible), budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU. lemonade: the proxied host as Lemonade's system-info reports it (always eligible) — budget from the host memory (budgetSource system-info), gpuCount/gpuProduct from the accelerators Lemonade enumerates (the NPU, the GPUs), reservations = the catalog sizes of the loaded models, and the model store as the cache."),
+		mcp.WithDescription("List nodes with their backend, serving memory budget, what loaded models reserve and the download cache each node holds. kserve: the accelerator nodes only (GPU resource or gpu-feature-discovery labels), budget from GPU labels or allocatable memory, and eligible / eligibilityReason saying whether a model can be served there (ready, inside the serving node selector, able to mount the cache claim) — load_model, pull_model and check_fit refuse a node with eligible=false and echo the reason. ollama: the proxied host (always eligible), budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU. lemonade: the proxied host as Lemonade's system-info reports it (always eligible) — budget from the host memory (budgetSource system-info), gpuCount/gpuProduct from the accelerators Lemonade enumerates (the NPU, the GPUs), reservations = the catalog sizes of the loaded models, and the model store as the cache. lmstudio reports no nodes at all — LM Studio exposes no host hardware, so the call answers 501 unsupported."),
 		backendArg("to list nodes of"),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listNodes)
@@ -159,7 +159,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.unload)
 
 	s.AddTool(mcp.NewTool(ToolDeleteModel,
-		mcp.WithDescription("Delete a downloaded model and, by default, its kagent ModelConfig."),
+		mcp.WithDescription("Delete a downloaded model and, by default, its kagent ModelConfig. Not every backend can: lmstudio answers 501 unsupported (LM Studio removes models only through its `lms rm` CLI on the host) — check the delete capability from list_backends, and use unwire_model there to drop just the ModelConfig."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argUnwire, mcp.Description("Also remove the ModelConfig (default true)")),
@@ -181,7 +181,7 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		mcp.WithDescription("List jobs (newest first) with their backend, phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for (ollama and lemonade jobs carry neither)."),
+		mcp.WithDescription("List jobs (newest first) with their backend, phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for (ollama, lemonade and lmstudio jobs carry neither)."),
 		backendArg("to list jobs of"),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listJobs)
