@@ -321,7 +321,9 @@ Nothing here needs Kubernetes access beyond wiring, exactly as for ollama.
 
 ## The kserve backend
 
-The driver consumes the `modelServing` contract of `agent-platform-standalone`:
+The driver consumes the `modelServing` contract of the
+[`giantswarm/agent-platform`](https://github.com/giantswarm/agent-platform)
+meta chart, rendered by its `agent-platform-connectivity` chart:
 the discovery ConfigMap `agent-platform-model-serving` (kind
 `ModelServingConfig`) for the serving namespace, runtime, GPU resource name,
 cache claim and preset selector; the `ServingPreset` ConfigMaps
@@ -511,9 +513,10 @@ and the OAuth metadata stay public.
 ## Helm chart
 
 `helm/model-manager` — see its [README](helm/model-manager/README.md). Keys the
-umbrella chart (`agent-platform-standalone`) sets: `backend`, `ollama.endpoint`,
+[`giantswarm/agent-platform`](https://github.com/giantswarm/agent-platform)
+meta chart sets for its `model-manager` component: `backend`, `ollama.endpoint`,
 `ollama.agentHost`, `lemonade.endpoint`, `lemonade.agentHost`,
-`lmstudio.endpoint`, `lmstudio.agentHost`, `kagent.namespace`, `image.*`, `mcp.enabled`,
+`lmstudio.endpoint`, `lmstudio.agentHost`, `kagent.namespace`, `mcp.enabled`, `oauth.*`,
 `muster.mcpServer.*`; for kserve `kserve.namespace` (the serving namespace),
 `kserve.discovery.*`, `kserve.hf.tokenSecret.*` and the `kserve.*` overrides. Optional, off by default: `muster.mcpServer.enabled`
 (renders an `mcpservers.muster.giantswarm.io` CR), `httpRoute.enabled`,

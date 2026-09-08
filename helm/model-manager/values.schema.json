@@ -90,7 +90,7 @@
         },
         "global": {
             "type": "object",
-            "description": "Platform-wide values an umbrella chart (agent-platform-standalone) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly.",
+            "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly.",
             "additionalProperties": true
         },
         "httpRoute": {

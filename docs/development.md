@@ -143,23 +143,25 @@ muster (`x_model-manager_*`).
 
 The lab has the KServe CRDs but no controller and no GPUs, which is enough for
 everything except a real vLLM start. Install a second release in its own
-namespace with the modelServing ConfigMaps rendered from
-`agent-platform-standalone` and a local-path cache claim.
+namespace with the modelServing ConfigMaps rendered from the
+`agent-platform-connectivity` chart (the wiring chart of the `agent-platform`
+meta chart) and a local-path cache claim.
 
-Render the ConfigMaps from the umbrella chart with the lab's own values file
-(`state/agent-platform-values.yaml` in the agentlab checkout): a defaults-only
-render fails on the umbrella's valkey/gateway validation guards, and
-`components.modelServing.namespace.name` moves the ConfigMaps into the release
-namespace. Use chart 0.14.0 or newer; that is where the serving-namespace
-network policies and the discovery `networkPolicy` field arrive. `yq` below is
+Render the ConfigMaps from the connectivity chart with the lab's own values
+file (`state/agent-platform-values.yaml` in the agentlab checkout): the meta
+chart forwards its values tree to the connectivity release minus its own
+`gitops` block, which the connectivity schema rejects, so strip that key first.
+A defaults-only render fails on the chart's gateway validation guards,
+`components.modelServing.enabled` turns the layer on, and
+`modelServing.namespace.name` moves the ConfigMaps into the release namespace. `yq` below is
 the Python jq wrapper (`-y` for YAML output); with the Go yq drop `-y`:
 
 ```sh
 kubectl create ns mm-kserve
-helm pull oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-standalone --version 0.14.0 --untar
-helm template lab ./agent-platform-standalone -n mm-kserve \
-  -f ~/projects/giantswarm/agentlab/state/agent-platform-values.yaml \
-  --set components.modelServing.enabled=true --set components.modelServing.namespace.name=mm-kserve \
+helm pull oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-connectivity --untar
+yq -y 'del(.gitops)' ~/projects/giantswarm/agentlab/state/agent-platform-values.yaml \
+  | helm template lab ./agent-platform-connectivity -n mm-kserve -f - \
+  --set components.modelServing.enabled=true --set modelServing.namespace.name=mm-kserve \
   --api-versions serving.kserve.io/v1alpha1 --api-versions serving.kserve.io/v1beta1 \
   | yq -y 'select(.kind == "ConfigMap" and .metadata.labels."app.kubernetes.io/component" == "model-serving")' \
   | kubectl -n mm-kserve apply -f -

@@ -1,11 +1,11 @@
 # Default values for model-manager.
 
-# -- Platform-wide values an umbrella chart (agent-platform-standalone) shares
+# -- Platform-wide values a parent chart (the `agent-platform` meta chart) shares
 # with every component; Helm forwards them to this chart. `oauth.*` reads the
 # identity contract as its defaults: `global.identity.issuerUrl`,
 # `global.identity.clientId`, `global.identity.existingSecret`,
 # `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth
-# base URL. Empty here; a standalone install sets `oauth.*` directly.
+# base URL. Empty here; a chart installed on its own sets `oauth.*` directly.
 global: {}  # @schema type: object; additionalProperties: true
 
 # -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless

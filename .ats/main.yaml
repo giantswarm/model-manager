@@ -26,5 +26,5 @@ app-tests-deploy-namespace: agent-platform
 cluster-crds: /etc/ats/crds,tests/ats/cluster-prerequisites,https://raw.githubusercontent.com/giantswarm/kagent/v0.1.42/helm/kagent/crds/kagent.dev/kagent.dev_modelconfigs.yaml
 
 # functional: no second scenario. upgrade: an upgrade from the last release in
-# the catalog is a follow-up (agent-platform-standalone has the recipe).
+# the catalog is a follow-up.
 skip-steps: [functional, upgrade]

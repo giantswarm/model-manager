@@ -13,15 +13,15 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 )
 
-// Labels of the modelServing contract (agent-platform-standalone,
-// templates/model-serving/).
+// Labels of the modelServing contract (the agent-platform-connectivity chart
+// of giantswarm/agent-platform, templates/model-serving/).
 const (
 	PresetLabel       = "agent-platform.giantswarm.io/preset"
 	PresetSourceLabel = "agent-platform.giantswarm.io/preset-source"
 )
 
 // servingPreset is a published ServingPreset document (schema:
-// files/model-serving/serving-preset.schema.json in agent-platform-standalone).
+// files/model-serving/serving-preset.schema.json in agent-platform-connectivity).
 type servingPreset struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`

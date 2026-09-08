@@ -3,7 +3,7 @@
 // short-lived pod) plus the InferenceServices of the serving namespace; pull
 // is a pre-warm download Job into that cache; load composes an
 // InferenceService from a curated serving preset (the modelServing contract of
-// agent-platform-standalone); unload deletes it. Sizes come from the Hugging
+// the agent-platform connectivity chart); unload deletes it. Sizes come from the Hugging
 // Face Hub and are fit-checked against node memory budgets before any download
 // or start. Agents reach a served model through kagent's OpenAI provider with
 // a placeholder API key.

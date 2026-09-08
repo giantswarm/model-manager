@@ -30,9 +30,10 @@ names the others.
   Agent wiring uses kagent's `OpenAI` provider against the predictor URL with
   a placeholder API-key Secret, created when the InferenceService is ready.
 
-Used as a dependency of `agent-platform-standalone` behind a `condition`;
-standalone installs set `ollama.endpoint`, `kagent.namespace`, `image.*`,
-`mcp.enabled` and `muster.mcpServer.*`.
+A component of the [`giantswarm/agent-platform`](https://github.com/giantswarm/agent-platform)
+meta chart (`components.model-manager.enabled`), which sets `backend`, the
+backend endpoints (`ollama.*`, `lemonade.*`, `lmstudio.*`), `kagent.namespace`,
+`mcp.enabled`, `oauth.*` and `muster.mcpServer.*`.
 
 ### Several backends at once
 
@@ -52,7 +53,8 @@ exactly what it always did.
 ### kserve backend
 
 `backend: kserve` needs the KServe CRDs and the platform's model-serving layer
-(`components.modelServing` of `agent-platform-standalone`): the discovery
+(`components.modelServing` of the `agent-platform` meta chart, rendered by its
+connectivity chart): the discovery
 ConfigMap `agent-platform-model-serving` (`kserve.discovery.*`), the
 `ServingPreset` ConfigMaps and the cache `PersistentVolumeClaim` in the serving
 namespace. `kserve.namespace` must equal the platform's serving namespace: the
@@ -114,7 +116,7 @@ can stay empty.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| global | object | `{}` | Platform-wide values an umbrella chart (agent-platform-standalone) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly. |
+| global | object | `{}` | Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly. |
 | replicaCount | int | `1` | Number of replicas. Jobs are tracked in memory, so keep this at 1 unless clients pin to one pod. |
 | image.registry | string | `"gsoci.azurecr.io"` | Image registry. |
 | image.repository | string | `"giantswarm/model-manager"` | Image repository. |
