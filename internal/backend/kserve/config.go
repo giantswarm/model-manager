@@ -70,8 +70,8 @@ const (
 	gib                    int64 = 1 << 30
 )
 
-// discoveryDoc is the ModelServingConfig document the umbrella chart
-// publishes (agent-platform-standalone, templates/model-serving/config.yaml).
+// discoveryDoc is the ModelServingConfig document the platform's connectivity
+// chart publishes (agent-platform-connectivity, templates/model-serving/config.yaml).
 type discoveryDoc struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`

@@ -250,8 +250,8 @@ func quantityValue(v any) int64 {
 }
 
 // compose builds the InferenceService for a preset following the modelServing
-// contract's composition recipe (agent-platform-standalone README, "Model
-// serving"): predictor.model from the preset, defaults from discovery,
+// contract's composition recipe (agent-platform-connectivity,
+// templates/model-serving/): predictor.model from the preset, defaults from discovery,
 // scheduling merged, chat template mounted, spec.predictor extras copied on
 // top verbatim.
 func (b *Backend) compose(p *servingPreset, s settings, node string) *unstructured.Unstructured {
