@@ -425,7 +425,7 @@ func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
 			if os.Getenv("UPDATE_GOLDEN") != "" {
 				require.NoError(t, os.WriteFile(path, got, 0o600))
 			}
-			want, err := os.ReadFile(path)
+			want, err := os.ReadFile(path) //nolint:gosec // a golden file under testdata, named by the test
 			require.NoError(t, err)
 			assert.Equal(t, string(want), string(got))
 		})
