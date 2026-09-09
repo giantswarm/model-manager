@@ -2,6 +2,8 @@ package wiring
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,11 +14,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
 
-var testGVR = schema.GroupVersionResource{Group: KagentGroup, Version: "v1alpha2", Resource: ModelConfigResource}
+// testGVR is the ModelConfig resource in the version kagent API v2 serves.
+var testGVR = schema.GroupVersionResource{Group: KagentGroup, Version: DefaultAPIVersion, Resource: ModelConfigResource}
+
+// testAPIVersion is the apiVersion of the objects the fakes hold.
+const testAPIVersion = KagentGroup + "/" + DefaultAPIVersion
 
 func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
@@ -25,7 +32,7 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 		testGVR:   "ModelConfigList",
 		secretGVR: "SecretList",
 	}, objs...)
-	return NewKagent(client, "kagent", "v1alpha2", ""), client
+	return NewKagent(client, "kagent", DefaultAPIVersion, ""), client
 }
 
 func ollamaEndpoint(model string) backend.AgentEndpoint {
@@ -48,7 +55,7 @@ func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	assert.Equal(t, "smollm2:135m", ref.Model)
 	assert.Equal(t, backend.NameOllama, ref.Backend, "the ref carries the backend label")
 	assert.False(t, ref.Ready, "no controller has reconciled yet")
-	assert.Equal(t, "kagent.dev/v1alpha2", ref.APIVersion)
+	assert.Equal(t, "kagent.dev/v1alpha3", ref.APIVersion)
 
 	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "smollm2-135m", metav1.GetOptions{})
 	require.NoError(t, err)
@@ -72,10 +79,14 @@ func TestEnsureIsIdempotentAndUpdates(t *testing.T) {
 	_, err := k.Ensure(ctx, "smollm2:135m", ollamaEndpoint("smollm2:135m"))
 	require.NoError(t, err)
 
-	// Simulate the controller setting status.
+	// Simulate the controller setting status (kagent API v2: Accepted and
+	// ResolvedRefs, both True).
 	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "smollm2-135m", metav1.GetOptions{})
 	require.NoError(t, err)
-	obj.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Accepted", "status": "True", "message": "Model configuration accepted"}}}
+	obj.Object["status"] = map[string]any{"conditions": []any{
+		map[string]any{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "ModelConfig configuration accepted"},
+		map[string]any{"type": "ResolvedRefs", "status": "True", "reason": "Resolved", "message": "All referenced secrets and config maps resolved"},
+	}}
 	_, err = client.Resource(testGVR).Namespace("kagent").Update(ctx, obj, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
@@ -84,7 +95,7 @@ func TestEnsureIsIdempotentAndUpdates(t *testing.T) {
 	ref, err := k.Ensure(ctx, "smollm2:135m", ep)
 	require.NoError(t, err)
 	assert.True(t, ref.Ready)
-	assert.Equal(t, "Model configuration accepted", ref.Message)
+	assert.Equal(t, "ModelConfig configuration accepted", ref.Message)
 
 	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
@@ -95,7 +106,7 @@ func TestEnsureIsIdempotentAndUpdates(t *testing.T) {
 
 func TestEnsureRefusesForeignModelConfig(t *testing.T) {
 	foreign := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "kagent.dev/v1alpha2",
+		"apiVersion": testAPIVersion,
 		"kind":       "ModelConfig",
 		"metadata":   map[string]any{"name": "smollm2-135m", "namespace": "kagent", "labels": map[string]any{ManagedByLabel: "agentlab"}},
 		"spec":       map[string]any{"provider": "OpenAI", "model": "smollm2:135m"},
@@ -229,7 +240,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	assert.Empty(t, list.Items)
 
 	// A prefix still applies to backend-chosen names.
-	kp := NewKagent(client, "kagent", "v1alpha2", "mm")
+	kp := NewKagent(client, "kagent", DefaultAPIVersion, "mm")
 	pref, err := kp.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "mm-qwen3-8-27b", pref.Name)
@@ -237,7 +248,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 
 func TestListAllReportsForeignModelConfigs(t *testing.T) {
 	portal := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "kagent.dev/v1alpha2",
+		"apiVersion": testAPIVersion,
 		"kind":       "ModelConfig",
 		"metadata":   map[string]any{"name": "qwen3-8-27b", "namespace": "kagent", "labels": map[string]any{ManagedByLabel: "backstage"}},
 		"spec": map[string]any{"provider": "OpenAI", "model": "qwen3-8-27b", "apiKeySecret": "qwen3-8-27b-key", "apiKeySecretKey": "OPENAI_API_KEY", // #nosec G101 -- Secret name and key, not a credential
@@ -326,7 +337,7 @@ func TestSameReferenceOnTwoBackendsIsTwoModelConfigs(t *testing.T) {
 
 func TestLegacyModelConfigWithoutBackendLabelMatchesAnyBackend(t *testing.T) {
 	legacy := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "kagent.dev/v1alpha2",
+		"apiVersion": testAPIVersion,
 		"kind":       "ModelConfig",
 		"metadata": map[string]any{"name": "old-1b", "namespace": "kagent",
 			"labels":      map[string]any{ManagedByLabel: ManagedByValue},
@@ -349,4 +360,74 @@ func TestLegacyModelConfigWithoutBackendLabelMatchesAnyBackend(t *testing.T) {
 	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1)
+}
+
+func TestReadyNeedsAcceptedAndResolvedRefs(t *testing.T) {
+	cond := func(typ, status, message string) map[string]any {
+		return map[string]any{"type": typ, "status": status, "message": message}
+	}
+	cases := map[string]struct {
+		conditions []any
+		ready      bool
+		message    string
+	}{
+		"no status yet": {nil, false, "not yet reconciled"},
+		"accepted only (kagent 0.x, v1alpha2)": {
+			[]any{cond("Accepted", "True", "Model configuration accepted")}, true, "Model configuration accepted"},
+		"accepted and resolved (kagent API v2, v1alpha3)": {
+			[]any{cond("Accepted", "True", "ModelConfig configuration accepted"), cond("ResolvedRefs", "True", "All referenced secrets and config maps resolved")},
+			true, "ModelConfig configuration accepted"},
+		"accepted but the secret is missing": {
+			[]any{cond("Accepted", "True", "ModelConfig configuration accepted"), cond("ResolvedRefs", "False", "secret qwen3-4b-flm-api-key not found")},
+			false, "secret qwen3-4b-flm-api-key not found"},
+		"rejected spec": {
+			[]any{cond("Accepted", "False", "ollama model config is required"), cond("ResolvedRefs", "True", "All referenced secrets and config maps resolved")},
+			false, "ollama model config is required"},
+		"resolved but never accepted": {
+			[]any{cond("ResolvedRefs", "True", "All referenced secrets and config maps resolved")}, false, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			obj := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": testAPIVersion,
+				"kind":       "ModelConfig",
+				"metadata":   map[string]any{"name": "m", "namespace": "kagent"},
+				"spec":       map[string]any{"provider": "Ollama", "model": "m"},
+			}}
+			if tc.conditions != nil {
+				obj.Object["status"] = map[string]any{"conditions": tc.conditions}
+			}
+			ref := toRef(obj)
+			assert.Equal(t, tc.ready, ref.Ready)
+			assert.Equal(t, tc.message, ref.Message)
+		})
+	}
+}
+
+// TestBuildPinsTheV1alpha3Shape compares what Ensure writes for the lab's
+// proof models with testdata/*.yaml — the files
+// `kubectl -n kagent create --dry-run=server -f` validates against a kagent
+// API v2 cluster (v1alpha3: the provider-specific block only with its
+// provider, apiKeySecret and apiKeySecretKey together). UPDATE_GOLDEN=1
+// rewrites them.
+func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
+	k, _ := newFakeKagent(t)
+	goldens := map[string]*unstructured.Unstructured{
+		"modelconfig-v1alpha3-ollama.yaml":        k.build("qwen2-5-0-5b", "qwen2.5:0.5b", ollamaEndpoint("qwen2.5:0.5b")),
+		"modelconfig-v1alpha3-openai.yaml":        k.build("qwen3-4b-flm", "qwen3-4b-FLM", lemonadeEndpoint("qwen3-4b-FLM")),
+		"modelconfig-v1alpha3-openai-secret.yaml": k.placeholderSecret("qwen3-4b-flm"),
+	}
+	for file, obj := range goldens {
+		t.Run(file, func(t *testing.T) {
+			got, err := yaml.Marshal(obj.Object)
+			require.NoError(t, err)
+			path := filepath.Join("testdata", file)
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				require.NoError(t, os.WriteFile(path, got, 0o600))
+			}
+			want, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, string(want), string(got))
+		})
+	}
 }

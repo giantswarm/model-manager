@@ -806,7 +806,7 @@ components:
           description: present when wire=true
           properties:
             namespace: { type: string }
-            apiVersion: { type: string, example: v1alpha2 }
+            apiVersion: { type: string, example: v1alpha3, description: the kagent.dev API version the ModelConfigs are written in — the one the cluster serves (kagent API v2 serves v1alpha3 only) }
             autoWire: { type: boolean }
     Loading:
       type: object
@@ -922,14 +922,14 @@ components:
         name: { type: string, example: smollm2-135m }
         backend: { $ref: "#/components/schemas/BackendName", description: "the backend the ModelConfig belongs to (label model-manager.giantswarm.io/backend); with the model reference it identifies the ModelConfig — the same reference on two backends is two ModelConfigs, the second named <derived>-<backend>. Absent on a ModelConfig without the label." }
         namespace: { type: string, example: kagent }
-        apiVersion: { type: string, example: kagent.dev/v1alpha2 }
+        apiVersion: { type: string, example: kagent.dev/v1alpha3 }
         provider: { type: string, example: Ollama }
         model: { type: string, description: the backend's model reference }
         providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the InferenceService name) }
         endpoint: { type: string, description: openAI.baseUrl or ollama.host }
         managed: { type: boolean, description: created by model-manager (only these are updated or deleted) }
-        ready: { type: boolean, description: mirrors the kagent Accepted condition }
-        message: { type: string }
+        ready: { type: boolean, description: "kagent's Accepted condition is True and its ResolvedRefs condition (the referenced API-key Secret exists and holds the key) is not False — kagent API v2 reports a missing Secret there while Accepted stays True" }
+        message: { type: string, description: the message of the condition holding ready back, or the Accepted message once ready }
     Job:
       type: object
       required: [id, type, model, phase, bytesCompleted, bytesTotal, percent, createdAt, wire]

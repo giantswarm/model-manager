@@ -57,7 +57,7 @@ func newMultiFixture(t *testing.T, backends ...backend.Backend) *multiFixture {
 		backends = []backend.Backend{ollama, lemonade}
 	}
 	fw := newFakeWirer()
-	svc := service.New(backends, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
+	svc := service.New(backends, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha3"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
