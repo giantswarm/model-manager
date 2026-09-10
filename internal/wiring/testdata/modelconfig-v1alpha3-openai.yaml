@@ -1,0 +1,17 @@
+apiVersion: kagent.dev/v1alpha3
+kind: ModelConfig
+metadata:
+  annotations:
+    model-manager.giantswarm.io/model: qwen3-4b-FLM
+  labels:
+    app.kubernetes.io/managed-by: model-manager
+    model-manager.giantswarm.io/backend: lemonade
+  name: qwen3-4b-flm
+  namespace: kagent
+spec:
+  apiKeySecret: qwen3-4b-flm-api-key
+  apiKeySecretKey: OPENAI_API_KEY
+  model: qwen3-4b-FLM
+  openAI:
+    baseUrl: http://172.21.0.1:13305/api/v1
+  provider: OpenAI

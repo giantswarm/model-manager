@@ -18,12 +18,15 @@ app-tests-deploy-namespace: agent-platform
 # Manifests applied before the install. ATS passes the value to one
 # `kubectl apply --server-side -f`, so a comma-separated list works: ATS's
 # bundled CRDs (/etc/ats/crds), the `kagent` namespace the test values point
-# the chart at (tests/ats/cluster-prerequisites), plus the kagent ModelConfig CRD model-manager
-# discovers at startup and wires models into. Without it the service logs a
-# discovery warning and falls back to its default API version; with it the
-# smoke covers the discovery path. Bump the pin together with the platform's
-# kagent.
-cluster-crds: /etc/ats/crds,tests/ats/cluster-prerequisites,https://raw.githubusercontent.com/giantswarm/kagent/v0.1.42/helm/kagent/crds/kagent.dev/kagent.dev_modelconfigs.yaml
+# the chart at (tests/ats/cluster-prerequisites), plus the kagent ModelConfig
+# CRD model-manager discovers at startup and wires models into. Without it the
+# service logs a discovery warning and falls back to its default API version;
+# with it the smoke covers the discovery path. The CRD is the kagent API v2
+# one (kagent.dev/v1alpha3) from the platform's kagent line,
+# giantswarm/kagent-upstream, pinned by commit: the `giantswarm` branch is
+# rebased on upstream, so a branch URL would move under the pin. Bump it
+# together with the platform's kagent (to the release tag once one exists).
+cluster-crds: /etc/ats/crds,tests/ats/cluster-prerequisites,https://raw.githubusercontent.com/giantswarm/kagent-upstream/0ac524031db451634359df3081d7d5d08cea4c93/helm/kagent-crds/templates/kagent.dev_modelconfigs.yaml
 
 # functional: no second scenario. upgrade: an upgrade from the last release in
 # the catalog is a follow-up.

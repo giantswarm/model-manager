@@ -3,6 +3,14 @@
 // kagent's native keyless Ollama provider; OpenAI-compatible endpoints get a
 // placeholder API-key secret (kagent's OpenAI runtime refuses to start without
 // one even when the endpoint never checks it).
+//
+// The ModelConfig is written in the kagent.dev API version the apiserver
+// serves — kagent API v2 serves v1alpha3 only (no v1alpha2, no conversion
+// webhook). The spec fields model-manager writes (provider, model,
+// ollama.host, openAI.baseUrl, apiKeySecret/apiKeySecretKey) are the same in
+// v1alpha2 and v1alpha3; the status is not: v1alpha3 reports Accepted (the
+// spec is valid) and ResolvedRefs (the referenced Secret exists and holds the
+// key) as separate conditions, so a ModelConfig is ready only when both hold.
 package wiring
 
 import (
@@ -35,12 +43,14 @@ const (
 	// KagentGroup / ModelConfigResource identify the CRD.
 	KagentGroup         = "kagent.dev"
 	ModelConfigResource = "modelconfigs"
-	// DefaultAPIVersion is used when discovery is unavailable.
-	DefaultAPIVersion = "v1alpha2"
+	// DefaultAPIVersion is used when discovery is unavailable: the version
+	// kagent API v2 serves.
+	DefaultAPIVersion = "v1alpha3"
 
 	placeholderSecretKey   = "OPENAI_API_KEY" // #nosec G101 -- env var name, not a credential
 	placeholderSecretValue = "placeholder"
 	acceptedCondition      = "Accepted"
+	resolvedRefsCondition  = "ResolvedRefs"
 	maxNameLength          = 63
 )
 
@@ -53,8 +63,14 @@ type ModelConfigRef struct {
 	APIVersion string `json:"apiVersion,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model,omitempty"`
-	// Ready mirrors the kagent Accepted condition.
-	Ready   bool   `json:"ready"`
+	// Ready is true when kagent has accepted the ModelConfig (condition
+	// Accepted) and, where the controller reports it, resolved what it
+	// references (condition ResolvedRefs: the API-key Secret exists and holds
+	// the key). A status without ResolvedRefs (kagent 0.x) is judged by
+	// Accepted alone.
+	Ready bool `json:"ready"`
+	// Message is the message of the condition holding Ready back, or the
+	// Accepted message once ready.
 	Message string `json:"message,omitempty"`
 	// Managed is true when model-manager created the ModelConfig; others
 	// (the portal's, hand-written ones) are reported but never modified.
@@ -141,8 +157,12 @@ func (k *Kagent) Namespace() string { return k.namespace }
 // APIVersion returns the CRD version in use.
 func (k *Kagent) APIVersion() string { return k.gvr.Version }
 
-// DiscoverAPIVersion returns the API server's preferred version of the
-// ModelConfig CRD.
+// DiscoverAPIVersion returns the kagent.dev version the API server serves
+// ModelConfigs in: the group's preferred version when it has the resource,
+// else the first other version that does. So a kagent 0.x cluster yields
+// v1alpha2 and a kagent API v2 cluster v1alpha3; without the group (kagent
+// not installed, discovery unreachable) it errs and the caller falls back to
+// DefaultAPIVersion.
 func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 	groups, err := dc.ServerGroups()
 	if err != nil {
@@ -428,7 +448,8 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 }
 
 func (k *Kagent) ensurePlaceholderSecret(ctx context.Context, mcName string) error {
-	name := placeholderSecretName(mcName)
+	sec := k.placeholderSecret(mcName)
+	name := sec.GetName()
 	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
 	_, err := secrets.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
@@ -437,21 +458,27 @@ func (k *Kagent) ensurePlaceholderSecret(ctx context.Context, mcName string) err
 	if !errors.IsNotFound(err) {
 		return fmt.Errorf("get Secret %s/%s: %w", k.namespace, name, err)
 	}
-	sec := &unstructured.Unstructured{Object: map[string]any{
+	if _, err := secrets.Create(ctx, sec, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("create Secret %s/%s: %w", k.namespace, name, err)
+	}
+	return nil
+}
+
+// placeholderSecret is the API-key Secret an OpenAI-compatible ModelConfig
+// references (spec.apiKeySecret / apiKeySecretKey); kagent resolves it into
+// the ResolvedRefs condition.
+func (k *Kagent) placeholderSecret(mcName string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
-			"name":      name,
+			"name":      placeholderSecretName(mcName),
 			"namespace": k.namespace,
 			"labels":    map[string]any{ManagedByLabel: ManagedByValue},
 		},
 		"type":       "Opaque",
 		"stringData": map[string]any{placeholderSecretKey: placeholderSecretValue},
 	}}
-	if _, err := secrets.Create(ctx, sec, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("create Secret %s/%s: %w", k.namespace, name, err)
-	}
-	return nil
 }
 
 func placeholderSecretName(mcName string) string {
@@ -482,20 +509,41 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 		ref.Endpoint = h
 	}
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	ref.Ready, ref.Message = readiness(conds)
+	return ref
+}
+
+// readiness derives Ready and Message from a ModelConfig's status conditions:
+// Accepted must be True and ResolvedRefs, when the controller reports it, must
+// be True too — kagent API v2 reports a missing or incomplete Secret there
+// while Accepted stays True. The message is the failing condition's, or
+// Accepted's when nothing fails.
+func readiness(conds []any) (ready bool, message string) {
+	if len(conds) == 0 {
+		return false, "not yet reconciled"
+	}
+	var accepted, unresolved bool
+	var acceptedMsg, unresolvedMsg string
 	for _, c := range conds {
 		cm, ok := c.(map[string]any)
-		if !ok || cm["type"] != acceptedCondition {
+		if !ok {
 			continue
 		}
-		ref.Ready = cm["status"] == "True"
-		if msg, ok := cm["message"].(string); ok {
-			ref.Message = msg
+		msg, _ := cm["message"].(string)
+		switch cm["type"] {
+		case acceptedCondition:
+			accepted, acceptedMsg = cm["status"] == "True", msg
+		case resolvedRefsCondition:
+			unresolved, unresolvedMsg = cm["status"] != "True", msg
 		}
 	}
-	if len(conds) == 0 {
-		ref.Message = "not yet reconciled"
+	switch {
+	case !accepted:
+		return false, acceptedMsg
+	case unresolved:
+		return false, unresolvedMsg
 	}
-	return ref
+	return true, acceptedMsg
 }
 
 // ModelConfigName derives a DNS-1123 label from a model reference:

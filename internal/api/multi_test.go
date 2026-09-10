@@ -14,6 +14,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
+	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
 // failingBackend is a fakeBackend whose reads fail (its host server is down).
@@ -57,7 +58,7 @@ func newMultiFixture(t *testing.T, backends ...backend.Backend) *multiFixture {
 		backends = []backend.Backend{ollama, lemonade}
 	}
 	fw := newFakeWirer()
-	svc := service.New(backends, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
+	svc := service.New(backends, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)

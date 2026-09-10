@@ -1,0 +1,15 @@
+apiVersion: kagent.dev/v1alpha3
+kind: ModelConfig
+metadata:
+  annotations:
+    model-manager.giantswarm.io/model: qwen2.5:0.5b
+  labels:
+    app.kubernetes.io/managed-by: model-manager
+    model-manager.giantswarm.io/backend: ollama
+  name: qwen2-5-0-5b
+  namespace: kagent
+spec:
+  model: qwen2.5:0.5b
+  ollama:
+    host: http://172.21.0.1:11434
+  provider: Ollama

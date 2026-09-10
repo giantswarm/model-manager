@@ -154,7 +154,7 @@ func newServingFixture(t *testing.T) *servingFixture {
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny", Path: "tiny", Node: "n1"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
