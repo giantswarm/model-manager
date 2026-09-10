@@ -25,7 +25,10 @@ into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
 for the ollama backend; `OpenAI` provider plus a placeholder API-key Secret —
 against the predictor URL for kserve, created once the InferenceService is
 ready, and against Lemonade's `/api/v1` for lemonade), so agents can use them
-without manual steps.
+without manual steps. They are written in the kagent.dev API version the
+cluster serves (`v1alpha3` on kagent API v2, discovered at start-up), and a
+ModelConfig is `ready` once kagent has accepted it and resolved its Secret
+(conditions `Accepted` and `ResolvedRefs`).
 
 The same operations are exposed twice from one process:
 

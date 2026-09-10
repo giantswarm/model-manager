@@ -234,7 +234,7 @@ func newFixture(t *testing.T, withWirer bool) *fixture {
 	if withWirer {
 		fw = newFakeWirer()
 		w = fw
-		info = &service.WiringInfo{Namespace: "kagent", APIVersion: "v1alpha2"}
+		info = &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}
 	}
 	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), w, info, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
