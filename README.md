@@ -8,7 +8,7 @@ Model management service for the Giant Swarm Agent Platform. One API over
 | Backend | Where | What it proxies |
 |---|---|---|
 | `ollama` | laptop / agentlab installs (host Ollama through the kind docker-network gateway) | `/api/tags`, `/api/ps`, streamed `/api/pull`, `/api/delete`, `keep_alive` load/unload |
-| `kserve` | GPU installs (KServe + the platform's `modelServing` component) | InferenceServices composed from serving presets, per-node HF cache inventory, pre-warm download Jobs with progress, Hugging Face Hub search, node fit checks |
+| `kserve` | GPU installs (KServe + the platform's `modelServing` component) | LLMInferenceServices (or classic InferenceServices) composed from serving presets, per-node HF cache inventory, pre-warm download Jobs with progress, Hugging Face Hub search, node fit checks |
 | `lemonade` | AMD Ryzen AI laptops / workstations running [Lemonade Server](https://lemonade-server.ai) on the host (FastFlowLM on the NPU, llama.cpp on GPU / CPU) | `/api/v1/health` (loaded models), `/api/v1/models`, streamed `/api/v1/pull`, `/api/v1/load`, `/api/v1/unload`, `/api/v1/delete`, `/api/v1/system-info` |
 | `lmstudio` | desktop installs running [LM Studio](https://lmstudio.ai) on the host (llama.cpp on GPU / CPU, MLX on Apple silicon) | `/api/v1/models` (the library and its loaded instances), `/api/v1/models/download` + its status job, `/api/v1/models/load`, `/api/v1/models/unload` — **no delete** |
 
@@ -400,16 +400,44 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   into `<claim>/<preset name>` — the directory the preset's InferenceService
   mounts — reporting bytes on disk against the repository size. Gated models
   need a token Secret (`--kserve-hf-token-secret`).
-- **Serve / stop** — `load` composes an InferenceService from the preset
-  (runtime, format, storageUri, args, env, chat-template mount, GPU count;
-  nodeSelector, runtimeClassName, deployment strategy and timeout from
-  discovery; `spec.predictor` extras verbatim) after a fit check against the
-  node's free budget; `unload` deletes it (the cache persists); `delete`
-  removes the cache directory (refused while served).
+- **Serve / stop** — `load` composes the serving object from the preset
+  after a fit check against the node's free budget; `unload` deletes it (the
+  cache persists); `delete` removes the cache directory (refused while
+  served). The kind is `--kserve-serving-kind` (`kserve.servingKind`):
+  `auto` (default) composes an **`LLMInferenceService`**
+  (`serving.kserve.io/v1alpha2`, the llm-d control plane) wherever that API
+  is served and a classic `InferenceService` elsewhere; both kinds are
+  listed, stopped and deleted, and a loaded model names its `kind`.
+  - **`LLMInferenceService`, by spec shape**: `spec.model.uri` from the
+    preset's `storageUri` (`hf://`, or `pvc://` into the cache),
+    `spec.model.name` from `model.id`, `replicas: 1`,
+    `router: {route: {}, scheduler: {}}` (KServe renders the `HTTPRoute` on
+    the configured ingress gateway and the scheduler creates the
+    `InferencePool`), `template.containers[main]` with the preset's `args`,
+    `env` and `resources` (GPU count under the discovery's resource name),
+    `scheduling` as the template's `nodeSelector`/`tolerations` (merged with
+    the discovery selector and the node pin), the chat template mounted, and
+    **`template.runtimeClassName` from the discovery ConfigMap's
+    `runtimeClassName`** when non-empty — absent when empty (the same rule
+    as the classic predictor). **No `baseRefs`**: KServe chooses its
+    well-known `LLMInferenceServiceConfig`s from the spec's shape and
+    appends them itself; a preset that names a custom config
+    (`spec.baseRefs: [{name: …}]`) is the only `baseRefs` case. **No
+    image**: the container runs the image the well-known template names
+    (`llm-d-cuda`, mirrored through the platform's registry override); a
+    preset overrides it with `spec.template.containers[{name: main, image:
+    …}]` when it has a reason — `spec.template` extras are copied on top,
+    containers merged by name. model-manager creates and lists no
+    `LLMInferenceServiceConfig`; `list_presets` lists one kind.
+  - **`InferenceService`** (classic): `predictor.model` from the preset
+    (runtime, format, storageUri, args, env, chat-template mount, GPU
+    count); nodeSelector, runtimeClassName, deployment strategy and timeout
+    from discovery; `spec.predictor` extras verbatim.
 - **Wiring** — on ready, a kagent `ModelConfig` **named after the
   InferenceService** (`provider: OpenAI`, `baseUrl` = predictor URL + `/v1`,
-  `model` = InferenceService name, which vLLM serves under
-  `--served-model-name {{.Name}}`) plus the placeholder `OPENAI_API_KEY`
+  `model` = the served model name: the InferenceService name, which the
+  ClusterServingRuntime serves under `--served-model-name {{.Name}}`, or an
+  LLMInferenceService's `spec.model.name`) plus the placeholder `OPENAI_API_KEY`
   Secret the go ADK runtime insists on — the same rule the portal's serve
   flow applies. A ModelConfig that already points at the predictor (same
   host, same served model name), whoever created it, counts as the model's

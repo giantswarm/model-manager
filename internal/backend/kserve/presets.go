@@ -65,7 +65,16 @@ type presetSpec struct {
 		NodeSelector map[string]string `json:"nodeSelector"`
 		Tolerations  []map[string]any  `json:"tolerations"`
 	} `json:"scheduling"`
-	Predictor map[string]any `json:"predictor"`
+	// Predictor holds extra InferenceService predictor fields copied on top
+	// verbatim (classic kind); Template the LLMInferenceService's
+	// spec.template extras, with containers merged by name so a preset can
+	// override template.containers[main].image without repeating the rest.
+	// BaseRefs names custom LLMInferenceServiceConfigs; absent for every
+	// shipped preset — KServe picks its well-known configs from the spec's
+	// shape and appends them itself.
+	Predictor map[string]any   `json:"predictor"`
+	Template  map[string]any   `json:"template"`
+	BaseRefs  []map[string]any `json:"baseRefs"`
 }
 
 func (p *servingPreset) name() string { return p.Metadata.Name }

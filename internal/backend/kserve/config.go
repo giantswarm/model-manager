@@ -9,6 +9,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -68,7 +70,24 @@ const (
 	// overrode the configured source.
 	budgetSourceAnnotation       = "annotation"
 	gib                    int64 = 1 << 30
+
+	// ServingKindLLM composes presets into LLMInferenceServices
+	// (serving.kserve.io/v1alpha2, the llm-d control plane); ServingKindClassic
+	// into InferenceServices on the vLLM ClusterServingRuntime; ServingKindAuto
+	// picks the first wherever its API is served.
+	ServingKindAuto    = "auto"
+	ServingKindLLM     = "LLMInferenceService"
+	ServingKindClassic = "InferenceService"
 )
+
+// validServingKind reports whether k is one of the three ServingKind values.
+func validServingKind(k string) bool {
+	switch k {
+	case ServingKindAuto, ServingKindLLM, ServingKindClassic:
+		return true
+	}
+	return false
+}
 
 // discoveryDoc is the ModelServingConfig document the platform's connectivity
 // chart publishes (agent-platform-connectivity, templates/model-serving/config.yaml).
@@ -113,6 +132,12 @@ type settings struct {
 	CacheRedirectPolicy    bool
 	PresetNamespace        string
 	PresetSelector         string
+	// ServingKind is the kind presets are composed into, ServingKindLLM or
+	// ServingKindClassic (never auto); LLMServed whether the
+	// LLMInferenceService API is served on the cluster, in which case the
+	// serving namespace's LLMInferenceServices are listed too.
+	ServingKind string
+	LLMServed   bool
 	// DiscoveryFound reports whether the discovery ConfigMap was read.
 	DiscoveryFound bool
 	DiscoveryError string
@@ -154,8 +179,11 @@ func (c *config) last() settings {
 	if c.cached != nil {
 		return *c.cached
 	}
-	s := settings{Namespace: DefaultNamespace}
+	s := settings{Namespace: DefaultNamespace, ServingKind: ServingKindClassic}
 	setIf(&s.Namespace, c.opts.Namespace)
+	if c.opts.ServingKind == ServingKindLLM {
+		s.ServingKind = ServingKindLLM
+	}
 	return s
 }
 
@@ -204,7 +232,47 @@ func (c *config) resolve(ctx context.Context) settings {
 	if s.PresetNamespace == "" {
 		s.PresetNamespace = s.Namespace
 	}
+	s.LLMServed = c.apiServed(ctx, llmisvcGVR)
+	s.ServingKind = o.ServingKind
+	if s.ServingKind == ServingKindAuto || s.ServingKind == "" {
+		s.ServingKind = ServingKindClassic
+		if s.LLMServed {
+			s.ServingKind = ServingKindLLM
+		}
+	}
 	return s
+}
+
+// clientset returns the clientset a resolve should use: the caller's when the
+// request carries a caller token (downstream OAuth: the ServiceAccount cannot
+// read the ConfigMap), else the configured one; nil without either.
+func (c *config) clientset(ctx context.Context) kubernetes.Interface {
+	cs := c.opts.Clientset
+	if c.opts.ClientsFor != nil {
+		if caller, _ := c.opts.ClientsFor(ctx); caller != nil {
+			cs = caller
+		}
+	}
+	return cs
+}
+
+// apiServed reports whether the API server serves gvr (a false answer when
+// the discovery request fails: the kind is then not usable either way).
+func (c *config) apiServed(ctx context.Context, gvr schema.GroupVersionResource) bool {
+	cs := c.clientset(ctx)
+	if cs == nil {
+		return false
+	}
+	list, err := cs.Discovery().ServerResourcesForGroupVersion(gvr.GroupVersion().String())
+	if err != nil {
+		return false
+	}
+	for _, r := range list.APIResources {
+		if r.Name == gvr.Resource {
+			return true
+		}
+	}
+	return false
 }
 
 // discover reads the ModelServingConfig ConfigMap; nil when it does not exist.
@@ -213,15 +281,7 @@ func (c *config) discover(ctx context.Context) (*discoveryDoc, error) {
 	if o.DiscoveryConfigMap == "" || o.DiscoveryNamespace == "" || o.Clientset == nil {
 		return nil, nil
 	}
-	// The caller's clients when the request carries a caller token
-	// (downstream OAuth: the ServiceAccount cannot read the ConfigMap).
-	cs := o.Clientset
-	if o.ClientsFor != nil {
-		if c, _ := o.ClientsFor(ctx); c != nil {
-			cs = c
-		}
-	}
-	cm, err := cs.CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
+	cm, err := c.clientset(ctx).CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -264,6 +324,7 @@ func applyDefaults(o *backend.KServeOptions) {
 	defaultIf(&o.DownloadImage, DefaultDownloadImage)
 	defaultIf(&o.InitImage, DefaultInitImage)
 	defaultIf(&o.BudgetSource, DefaultBudgetSource)
+	defaultIf(&o.ServingKind, ServingKindAuto)
 	defaultIf(&o.InventoryMode, InventoryModePod)
 	defaultIf(&o.InventoryAgentSelector, DefaultInventoryAgentSelector)
 	if o.InventoryAgentPort <= 0 {

@@ -452,7 +452,11 @@
                 },
                 "runtime": {
                     "type": "string",
-                    "description": "ClusterServingRuntime for presets that name none; empty takes the discovery value (default `kserve-vllm`)."
+                    "description": "ClusterServingRuntime for presets that name none (classic kind); empty takes the discovery value (default `kserve-vllm`)."
+                },
+                "servingKind": {
+                    "type": "string",
+                    "description": "Kind a serving preset is composed into: `LLMInferenceService` (the llm-d control plane: KServe's own router and well-known configs), `InferenceService` (the classic predictor on the vLLM ClusterServingRuntime) or empty for `auto` — `LLMInferenceService` wherever its API is served, else the classic kind."
                 }
             }
         },

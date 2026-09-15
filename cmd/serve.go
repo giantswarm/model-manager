@@ -85,6 +85,7 @@ type kserveFlags struct {
 	discoveryNamespace  string
 	discoveryConfigMap  string
 	namespace           string
+	servingKind         string
 	runtime             string
 	gpuResourceName     string
 	cacheClaim          string
@@ -139,6 +140,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&k.discoveryNamespace, "kserve-discovery-namespace", envOr("KSERVE_DISCOVERY_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace of the model-serving discovery ConfigMap; defaults to the pod's namespace (KSERVE_DISCOVERY_NAMESPACE, POD_NAMESPACE)")
 	f.StringVar(&k.discoveryConfigMap, "kserve-discovery-configmap", envOr("KSERVE_DISCOVERY_CONFIGMAP", kserve.DefaultDiscoveryConfigMap), "Name of the discovery ConfigMap (kind ModelServingConfig, key config.yaml) (KSERVE_DISCOVERY_CONFIGMAP)")
 	f.StringVar(&k.namespace, "kserve-namespace", envOr("KSERVE_NAMESPACE", ""), "Serving namespace for InferenceServices, download Jobs and the cache claim; empty: discovery, else "+kserve.DefaultNamespace+" (KSERVE_NAMESPACE)")
+	f.StringVar(&k.servingKind, "kserve-serving-kind", envOr("KSERVE_SERVING_KIND", kserve.ServingKindAuto), "Kind a serving preset is composed into: "+kserve.ServingKindLLM+" (llm-d control plane, KServe's own router and well-known configs), "+kserve.ServingKindClassic+" (predictor on the vLLM ClusterServingRuntime) or "+kserve.ServingKindAuto+": "+kserve.ServingKindLLM+" wherever its API is served, else the classic kind (KSERVE_SERVING_KIND)")
 	f.StringVar(&k.runtime, "kserve-runtime", envOr("KSERVE_RUNTIME", ""), "ClusterServingRuntime for presets without one; empty: discovery, else "+kserve.DefaultRuntime+" (KSERVE_RUNTIME)")
 	f.StringVar(&k.gpuResourceName, "kserve-gpu-resource", envOr("KSERVE_GPU_RESOURCE", ""), "Accelerator resource name; empty: discovery, else "+kserve.DefaultGPUResourceName+" (KSERVE_GPU_RESOURCE)")
 	f.StringVar(&k.cacheClaim, "kserve-cache-claim", envOr("KSERVE_CACHE_CLAIM", ""), "PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty: discovery, else "+kserve.DefaultCacheClaim+" (KSERVE_CACHE_CLAIM)")
@@ -340,6 +342,7 @@ func (k kserveFlags) options() backend.KServeOptions {
 		DiscoveryConfigMap:     k.discoveryConfigMap,
 		Namespace:              k.namespace,
 		Runtime:                k.runtime,
+		ServingKind:            k.servingKind,
 		GPUResourceName:        k.gpuResourceName,
 		CacheClaim:             k.cacheClaim,
 		CacheMountPath:         k.cacheMountPath,

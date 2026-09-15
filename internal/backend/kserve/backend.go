@@ -89,6 +89,9 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		return nil, fmt.Errorf("kserve backend needs Kubernetes access")
 	}
 	applyDefaults(&opts)
+	if !validServingKind(opts.ServingKind) {
+		return nil, fmt.Errorf("kserve: serving kind %q; want %s, %s or %s", opts.ServingKind, ServingKindAuto, ServingKindLLM, ServingKindClassic)
+	}
 	switch opts.BudgetSource {
 	case budgetSourceAuto, budgetSourceGPULabels, budgetSourceAllocatable:
 	default:
@@ -139,16 +142,17 @@ func (b *Backend) Capabilities() backend.Capabilities {
 // answers in the serving namespace.
 func (b *Backend) Info(ctx context.Context) backend.Info {
 	s := b.cfg.settings(ctx)
+	gvr := gvrFor(s.ServingKind)
 	info := backend.Info{
 		Backend:  backend.NameKServe,
-		Version:  isvcGVR.Group + "/" + isvcGVR.Version,
-		Endpoint: fmt.Sprintf("%s.%s/%s", isvcGVR.Resource, isvcGVR.Group, s.Namespace),
+		Version:  gvr.Group + "/" + gvr.Version,
+		Endpoint: fmt.Sprintf("%s.%s/%s", gvr.Resource, gvr.Group, s.Namespace),
 		// An InferenceService serves only while it exists: nothing loads a
 		// stopped model on request and nothing evicts a running one.
 		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
 	}
-	if _, err := b.dynamic(ctx).Resource(isvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
-		info.Message = fmt.Sprintf("InferenceService API not available in %s: %v", s.Namespace, err)
+	if _, err := b.dynamic(ctx).Resource(gvr).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		info.Message = fmt.Sprintf("%s API not available in %s: %v", s.ServingKind, s.Namespace, err)
 		return info
 	}
 	info.Healthy = true
@@ -396,6 +400,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Status:    sv.Status,
 			Message:   sv.Message,
 			Resource:  sv.Name,
+			Kind:      sv.Kind,
 			Preset:    sv.Preset,
 			GPUs:      sv.GPUs,
 			ManagedBy: sv.ManagedBy,
@@ -498,26 +503,26 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 		return fmt.Errorf("%w: no serving preset serves %s; presets are curated in the platform chart (components.modelServing.presets)", backend.ErrInvalid, plan.Repo)
 	}
 	s := b.cfg.settings(ctx)
-	existing, err := b.getISVC(ctx, s.Namespace, plan.Preset.name())
+	existing, err := b.findServing(ctx, s, plan.Preset.name())
 	if err != nil {
 		return err
 	}
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s.GPUResourceName)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
-			b.log.Info("InferenceService already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
+			b.log.Info("serving object already exists", "kind", sv.Kind, "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
 			return nil
 		}
-		return fmt.Errorf("%w: InferenceService %s/%s exists (model %s, managed by %q)", backend.ErrConflict, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
+		return fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, sv.Kind, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
 	}
 	if !plan.Result.Fits {
 		return fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
 	obj := b.compose(plan.Preset, s, req.Node)
-	if err := b.createISVC(ctx, obj); err != nil {
+	if err := b.createServing(ctx, obj); err != nil {
 		return err
 	}
-	b.log.Info("InferenceService created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
+	b.log.Info("serving object created", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
 	b.inv.invalidate()
 	return nil
 }
@@ -539,14 +544,14 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 	}
 	for _, sv := range matches {
 		if !sv.manageable() {
-			return fmt.Errorf("%w: InferenceService %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Namespace, sv.Name, sv.ManagedBy)
+			return fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Kind, sv.Namespace, sv.Name, sv.ManagedBy)
 		}
 	}
 	for _, sv := range matches {
-		if err := b.deleteISVC(ctx, sv.Namespace, sv.Name); err != nil {
+		if err := b.deleteServing(ctx, sv.Kind, sv.Namespace, sv.Name); err != nil {
 			return err
 		}
-		b.log.Info("InferenceService deleted", "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
+		b.log.Info("serving object deleted", "kind", sv.Kind, "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
 	}
 	return nil
 }
@@ -614,16 +619,17 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	b.mu.Unlock()
 	for _, sv := range servedList {
 		if strings.EqualFold(sv.Model, repo) || sv.Name == model {
-			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.Name, PlaceholderAPIKey: true, Name: sv.Name}
+			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), PlaceholderAPIKey: true, Name: sv.Name}
 		}
 	}
-	name := dnsLabel(repo)
-	idx := indexPresets(presets)
-	if p, err := idx.resolve(repo, ""); err == nil && p != nil {
-		name = p.name()
+	// Not served (yet): the object the preset would create, in the
+	// configured kind.
+	s := b.cfg.last()
+	sv := served{Kind: s.ServingKind, Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo}
+	if p, err := indexPresets(presets).resolve(repo, ""); err == nil && p != nil {
+		sv.Name, sv.Model = p.name(), p.Spec.Model.ID
 	}
-	ns := b.cfg.last().Namespace
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: predictorURL(name, ns) + "/v1", Model: name, PlaceholderAPIKey: true, Name: name}
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.defaultURL() + "/v1", Model: sv.servedName(), PlaceholderAPIKey: true, Name: sv.Name}
 }
 
 // ListPresets implements backend.PresetLister.
