@@ -911,6 +911,7 @@ components:
           example: loaded
         message: { type: string, description: kserve — why the model is not ready }
         resource: { type: string, description: kserve — InferenceService name (also the served model name) }
+        kind: { type: string, enum: [InferenceService, LLMInferenceService], description: kserve — the serving object's kind behind `resource` }
         preset: { type: string, description: kserve — preset the InferenceService was created from }
         gpus: { type: integer, format: int64, description: kserve — accelerators the predictor requests }
         managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the InferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }

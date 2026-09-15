@@ -168,7 +168,7 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 		cacheEntry{Dir: "xet", Bytes: 99, Files: 4},
 	)
 	// A served model whose weights are not cached.
-	require.NoError(t, f.b.createISVC(ctx, f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
+	require.NoError(t, f.b.createServing(ctx, f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
 
 	models, err := f.b.ListModels(ctx)
 	require.NoError(t, err)

@@ -201,8 +201,10 @@ type LoadedModel struct {
 	// message or modelStatus failure).
 	Message string `json:"message,omitempty"`
 	// Resource is the serving object behind this entry (kserve: the
-	// InferenceService name, which is also the served model name).
+	// InferenceService or LLMInferenceService name, which is also the served
+	// model name); Kind says which of the two it is.
 	Resource string `json:"resource,omitempty"`
+	Kind     string `json:"kind,omitempty"`
 	// Preset is the serving preset the entry was created from (kserve).
 	Preset string `json:"preset,omitempty"`
 	// GPUs is the accelerator count the predictor requests (kserve).

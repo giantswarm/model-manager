@@ -43,8 +43,15 @@ type KServeOptions struct {
 
 	// Namespace is the serving namespace (InferenceServices, Jobs, cache).
 	Namespace string
-	// Runtime is the ClusterServingRuntime name a preset without one uses.
+	// Runtime is the ClusterServingRuntime name a preset without one uses
+	// (classic InferenceService path only).
 	Runtime string
+	// ServingKind is what a preset is composed into: LLMInferenceService
+	// (serving.kserve.io/v1alpha2, the llm-d control plane), InferenceService
+	// (the classic predictor on the vLLM ClusterServingRuntime), or auto
+	// (default): LLMInferenceService wherever its API is served, else the
+	// classic kind.
+	ServingKind string
 	// GPUResourceName is the accelerator resource (nvidia.com/gpu).
 	GPUResourceName string
 	// CacheClaim / CacheMountPath describe the HF cache claim in Namespace.
