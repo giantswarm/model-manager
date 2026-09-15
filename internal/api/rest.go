@@ -340,6 +340,8 @@ func statusFor(err error) (int, string) {
 	switch {
 	case errors.Is(err, backend.ErrNotFound), errors.Is(err, jobs.ErrNotFound):
 		return http.StatusNotFound, "not_found"
+	case errors.Is(err, backend.ErrNoBackend):
+		return http.StatusPreconditionFailed, "no_backend"
 	case errors.Is(err, backend.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, backend.ErrUnsupported):

@@ -783,6 +783,16 @@ components:
           items: { $ref: "#/components/schemas/BackendName" }
           description: "every configured backend in order, the first being the default backend — only on the descriptor GET /api/v1/backend answers; a client that sees more than one name reads GET /api/v1/backends"
           example: [ollama, lemonade]
+        source:
+          type: string
+          enum: [static, person, cluster-manager]
+          description: "where the backend came from: static (--backends / chart values), or a backend document registered at runtime by a person or by cluster-manager (docs/backends.md)"
+        target:
+          type: object
+          description: "kserve on a target cluster (a registered document's `kserve.target`): cluster and organization only, never the apiserver; absent for the local cluster and for host backends. Also stamped on the backend's models, nodes and presets"
+          properties:
+            cluster: { type: string }
+            organization: { type: string }
         version: { type: string, description: backend server version }
         endpoint: { type: string, description: backend endpoint as reached by model-manager }
         agentEndpoint:

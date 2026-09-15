@@ -1,0 +1,46 @@
+{{- /*
+Backend documents (docs/backends.md): ConfigMaps in the release namespace
+labelled agent-platform.giantswarm.io/model-backend=true. model-manager watches
+them with the ServiceAccount — the one background read it keeps under
+oauth.downstream, since its own configuration is not per-caller data — so the
+read half renders whenever rbac.create is on. The write half (add_backend /
+remove_backend) acts as the caller: under oauth.downstream the caller's own
+RBAC governs and nothing is granted here; otherwise the ServiceAccount may
+write exactly the four document names.
+*/}}
+{{- if .Values.rbac.create }}
+{{- $downstream := and .Values.oauth.enabled .Values.oauth.downstream.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "model-manager.fullname" . }}-backends
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  {{- if not $downstream }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["model-backend-ollama", "model-backend-lmstudio", "model-backend-lemonade", "model-backend-kserve"]
+    verbs: ["create", "update", "patch", "delete"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-backends
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "model-manager.fullname" . }}-backends
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

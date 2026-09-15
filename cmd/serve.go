@@ -24,6 +24,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend/ollama"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/kube"
+	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/server"
 	"github.com/giantswarm/model-manager/internal/service"
 	"github.com/giantswarm/model-manager/internal/wiring"
@@ -47,6 +48,7 @@ type serveOptions struct {
 
 	kserve kserveFlags
 
+	namespace         string
 	kubeconfig        string
 	kubeContext       string
 	inCluster         bool
@@ -125,7 +127,8 @@ environment variable named next to it; flags win over the environment.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("MODEL_MANAGER_LISTEN", ":8080"), "Listen address (MODEL_MANAGER_LISTEN)")
-	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", string(backend.NameOllama)), "Serving backend: ollama|kserve|lemonade|lmstudio — the one-backend form of --backends (MODEL_MANAGER_BACKEND)")
+	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", ""), "Static serving backend: ollama|kserve|lemonade|lmstudio — the one-backend form of --backends. Empty, like --backends, starts with no backend: backends are then registered at runtime with add_backend (MODEL_MANAGER_BACKEND)")
+	f.StringVar(&o.namespace, "namespace", envOr("MODEL_MANAGER_NAMESPACE", envOr("POD_NAMESPACE", "")), "model-manager's own namespace, where backend documents (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true) are watched and written; empty disables runtime registration (MODEL_MANAGER_NAMESPACE, POD_NAMESPACE)")
 	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,lmstudio,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
 	f.StringVar(&o.ollamaEndpoint, "ollama-endpoint", envOr("OLLAMA_ENDPOINT", "http://127.0.0.1:11434"), "Ollama API base URL as reached by model-manager (OLLAMA_ENDPOINT)")
 	f.StringVar(&o.ollamaAgentHost, "ollama-agent-host", envOr("OLLAMA_AGENT_HOST", ""), "Ollama host written into kagent ModelConfigs, as reached by agent pods; defaults to --ollama-endpoint (OLLAMA_AGENT_HOST)")
@@ -206,19 +209,17 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	hasKServe := slices.Contains(names, backend.NameKServe)
 
-	// Kubernetes access: required by the kserve driver, optional (wiring only)
-	// for ollama and lemonade.
+	// Kubernetes access: required by the kserve driver and by runtime
+	// backend registration (the documents are ConfigMaps), optional (wiring
+	// only) otherwise.
 	var clients *kube.Clients
-	if !o.wiringDisabled || hasKServe {
-		c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster, Logger: log})
-		if err != nil {
-			if hasKServe {
-				return fmt.Errorf("the kserve backend needs Kubernetes access: %w", err)
-			}
-			log.Warn("agent wiring disabled: no Kubernetes access", "error", err)
-		} else {
-			clients = c
+	if c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster, Logger: log}); err != nil {
+		if hasKServe {
+			return fmt.Errorf("the kserve backend needs Kubernetes access: %w", err)
 		}
+		log.Warn("no Kubernetes access: agent wiring and runtime backend registration are off", "error", err)
+	} else {
+		clients = c
 	}
 
 	backend.Register(backend.NameOllama, ollama.Factory)
@@ -279,6 +280,24 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
 	svc := service.New(backends, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
 
+	var (
+		reg     *registry.Registry
+		mcpOpts []api.Option
+	)
+	switch {
+	case clients == nil:
+		// Already warned above.
+	case o.namespace == "":
+		log.Warn("runtime backend registration off: --namespace (POD_NAMESPACE) is empty")
+	default:
+		reg = registry.New(clients.Clientset, o.namespace, backendBuilder(opts, log), svc, log)
+		store := registry.NewStore(func(ctx context.Context) kubernetes.Interface { return clients.For(ctx).Clientset }, o.namespace)
+		mcpOpts = append(mcpOpts, api.WithBackendStore(store))
+	}
+	if len(backends) == 0 {
+		log.Info("no static backend: waiting for backend documents", "namespace", o.namespace, "registration", reg != nil)
+	}
+
 	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath}
 	if o.oauthEnabled {
 		cfg.OAuth = &server.OAuthConfig{
@@ -297,7 +316,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			DownstreamOAuth:               o.downstreamOAuth,
 		}
 	}
-	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, version), log)
+	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, version, mcpOpts...), log)
 	if err != nil {
 		return err
 	}
@@ -306,6 +325,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go svc.Run(ctx)
+	if reg != nil {
+		go func() {
+			if err := reg.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("backend document watch stopped", "error", err)
+			}
+		}()
+	}
 	if err := srv.Run(ctx); err != nil {
 		return err
 	}
@@ -319,6 +345,9 @@ func runServe(ctx context.Context, o *serveOptions) error {
 func backendNames(single string, singleSet bool, list string) ([]backend.Name, error) {
 	raw := splitList(list)
 	if len(raw) == 0 {
+		if strings.TrimSpace(single) == "" {
+			return nil, nil
+		}
 		raw = []string{strings.TrimSpace(single)}
 	} else if singleSet && !slices.Contains(raw, strings.TrimSpace(single)) {
 		return nil, fmt.Errorf("--backend=%s is not in --backends=%s: name it in the list or drop the flag", single, list)
@@ -429,4 +458,30 @@ func envFloat(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// backendBuilder constructs the backend a registered document describes:
+// the document's driver block over the static flags' defaults, and for a
+// kserve document with a remote target, clients toward that apiserver that
+// present the caller's token.
+func backendBuilder(base backend.Options, log *slog.Logger) registry.Builder {
+	return func(doc *backend.Document) (backend.Backend, error) {
+		opts := doc.Options(base)
+		if doc.Spec.Kind == backend.NameKServe {
+			if t := doc.Spec.KServe.Target; !t.Local() {
+				tc, err := kube.NewForTarget(t.APIServer, []byte(t.CABundle), log)
+				if err != nil {
+					return nil, err
+				}
+				opts.KServe.Dynamic, opts.KServe.Clientset = tc.Dynamic, tc.Clientset
+				opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
+					c := tc.For(ctx)
+					return c.Clientset, c.Dynamic
+				}
+			} else if opts.KServe.Clientset == nil {
+				return nil, fmt.Errorf("the kserve backend needs Kubernetes access")
+			}
+		}
+		return backend.New(doc.Spec.Kind, opts)
+	}
 }

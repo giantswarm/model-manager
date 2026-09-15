@@ -50,6 +50,7 @@ Lemonade-backend ADR in the team's decision log.
 | Operation | REST | MCP tool |
 |---|---|---|
 | Every backend's identity, capabilities + load semantics (the first is the default) | `GET /api/v1/backends` | `list_backends` |
+| Register / remove a backend at runtime (a backend document, [docs/backends.md](docs/backends.md); `dryRun`, `mode: apply`) | — | `add_backend`, `remove_backend` |
 | One backend (the named one, else the default) plus the names of all | `GET /api/v1/backend[?backend=]` | `get_backend` |
 | Downloaded models (with loaded state + ModelConfig), of one or every backend | `GET /api/v1/models[?backend=]`, `GET /api/v1/models/{name}[?backend=]` | `list_models`, `get_model` |
 | Loaded / running models | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
@@ -184,6 +185,23 @@ Ollama service environment — the systemd unit's `Environment=` on Linux —
 and restart Ollama. `keepAliveDefault` is model-manager's default for its own
 load requests; the host's `OLLAMA_KEEP_ALIVE` is not observable through the
 API, which is why the block does not claim to report it.
+
+## Backends registered at runtime
+
+model-manager starts with **no backend** (chart default `backend: ""`, `backends: []`) and gets its
+backends at runtime: `add_backend` writes a **backend document** — a ConfigMap in model-manager's
+namespace labelled `agent-platform.giantswarm.io/model-backend=true`, named `model-backend-<kind>`,
+key `backend.yaml`, `kind: ModelBackend` — as the caller; model-manager watches the label, enforces
+the document's schema when it reads it (an invalid document is reported under `invalid` in
+`list_backends` with the failing field, and not loaded) and registers the backend without a
+restart. `remove_backend` drops the backend's ModelConfigs and the document. One backend per kind;
+`list_backends` reports every backend with `source: static | person | cluster-manager`, and a
+`kserve` document carries the **target cluster** (`{cluster, organization, apiServer, caBundle,
+servingNamespace}` — never credentials) the backend acts on, reported as `target` on the backend,
+its models, nodes and presets. Static `--backends` values keep working as `source: static`; a
+document naming a static kind is refused. With no backend at all every backend-scoped call answers
+`no_backend` with the fix. The contract — the label, keys, schema, tools, RBAC and what
+cluster-manager writes — is [docs/backends.md](docs/backends.md).
 
 ## The lemonade backend
 
@@ -439,6 +457,10 @@ job history across restarts is needed; until then, treat the job list as a
 progress view, and the backend (Jobs, InferenceServices, Ollama) as the truth.
 
 ## Running
+
+Without `--backend`/`--backends` the process starts with no backend and waits for backend
+documents in `--namespace` (`POD_NAMESPACE`); see [docs/backends.md](docs/backends.md). A static
+backend:
 
 ```sh
 model-manager serve \

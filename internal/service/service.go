@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -45,6 +47,9 @@ type Config struct {
 // BackendResponse is one backend's identity plus effective capabilities.
 type BackendResponse struct {
 	backend.Info
+	// Source says where the backend came from: static (--backends), person
+	// or cluster-manager (a registered document).
+	Source       string               `json:"source"`
 	Capabilities backend.Capabilities `json:"capabilities"`
 	// Wiring describes where ModelConfigs are created, when wiring is enabled.
 	Wiring *WiringInfo `json:"wiring,omitempty"`
@@ -98,57 +103,188 @@ type Errors map[backend.Name]string
 
 // Service is the orchestration layer.
 type Service struct {
+	mu sync.RWMutex
+	// backends holds the static backends in the operator's order, then the
+	// registered ones sorted by name; byName indexes them; sources records
+	// where each came from (static, person, cluster-manager).
 	backends []backend.Backend
 	byName   map[backend.Name]backend.Backend
-	jobs     *jobs.Manager
-	wirer    wiring.Wirer
-	wiring   *WiringInfo
-	cfg      Config
-	log      *slog.Logger
+	sources  map[backend.Name]string
+	problems map[string]string // invalid backend documents by ConfigMap name
+	static   int               // how many of backends are static
+
+	jobs   *jobs.Manager
+	wirer  wiring.Wirer
+	wiring *WiringInfo
+	cfg    Config
+	log    *slog.Logger
 }
 
-// New builds a Service over the configured backends, in the operator's order:
-// the first is the default backend. wirer may be nil (wiring disabled).
+// New builds a Service over the static backends, in the operator's order:
+// the first is the default backend. The list may be empty — backends are
+// then registered at runtime (Register) and every backend-scoped call
+// answers backend.ErrNoBackend until one is. wirer may be nil (wiring
+// disabled).
 func New(backends []backend.Backend, jm *jobs.Manager, wirer wiring.Wirer, info *WiringInfo, cfg Config, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	if len(backends) == 0 {
-		panic("service.New: at least one backend is required")
-	}
 	if info != nil {
 		info.AutoWire = cfg.AutoWire
 	}
-	s := &Service{backends: backends, byName: make(map[backend.Name]backend.Backend, len(backends)), jobs: jm, wirer: wirer, wiring: info, cfg: cfg, log: log}
+	s := &Service{byName: make(map[backend.Name]backend.Backend, len(backends)), sources: map[backend.Name]string{}, problems: map[string]string{}, jobs: jm, wirer: wirer, wiring: info, cfg: cfg, log: log}
 	for _, b := range backends {
 		if _, dup := s.byName[b.Name()]; dup {
 			panic(fmt.Sprintf("service.New: backend %s configured twice", b.Name()))
 		}
+		s.backends = append(s.backends, b)
 		s.byName[b.Name()] = b
+		s.sources[b.Name()] = backend.SourceStatic
 	}
+	s.static = len(s.backends)
 	return s
+}
+
+// ErrStaticBackend: a document names a kind --backends already configures.
+var ErrStaticBackend = errors.New("configured statically by --backends; remove it from the chart values to register it at runtime")
+
+// Register adds a backend registered at runtime (source person or
+// cluster-manager); a registered backend of the same name is replaced, a
+// static one is refused with ErrStaticBackend.
+func (s *Service) Register(b backend.Backend, source string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := b.Name()
+	if s.sources[name] == backend.SourceStatic {
+		return fmt.Errorf("%w: backend %s is %w", backend.ErrConflict, name, ErrStaticBackend)
+	}
+	s.byName[name] = b
+	s.sources[name] = source
+	s.rebuildLocked()
+	return nil
+}
+
+// Deregister drops a registered backend; a static or unknown name is a no-op
+// returning false.
+func (s *Service) Deregister(name backend.Name) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if src, ok := s.sources[name]; !ok || src == backend.SourceStatic {
+		return false
+	}
+	delete(s.byName, name)
+	delete(s.sources, name)
+	s.rebuildLocked()
+	return true
+}
+
+// rebuildLocked recomputes the ordered list: static first (operator order,
+// kept in place), then the registered backends sorted by name.
+func (s *Service) rebuildLocked() {
+	static := s.backends[:s.static]
+	registered := make([]backend.Backend, 0, len(s.byName)-s.static)
+	for name, b := range s.byName {
+		if s.sources[name] != backend.SourceStatic {
+			registered = append(registered, b)
+		}
+	}
+	sort.Slice(registered, func(i, j int) bool { return registered[i].Name() < registered[j].Name() })
+	s.backends = append(static[:len(static):len(static)], registered...)
+}
+
+// ReportDocument records (or, with an empty problem, clears) an invalid
+// backend document by ConfigMap name; list_backends reports them.
+func (s *Service) ReportDocument(configMap, problem string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if problem == "" {
+		delete(s.problems, configMap)
+		return
+	}
+	s.problems[configMap] = problem
+}
+
+// InvalidDocument is a backend document that failed the read-time schema.
+type InvalidDocument struct {
+	ConfigMap string `json:"configMap"`
+	Error     string `json:"error"`
+}
+
+// InvalidDocuments lists the documents that were reported, by ConfigMap name.
+func (s *Service) InvalidDocuments() []InvalidDocument {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]InvalidDocument, 0, len(s.problems))
+	for cm, p := range s.problems {
+		out = append(out, InvalidDocument{ConfigMap: cm, Error: p})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ConfigMap < out[j].ConfigMap })
+	return out
+}
+
+// all is a snapshot of the backends in order.
+func (s *Service) all() []backend.Backend {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.backends
+}
+
+// lookup returns the backend called name, if any.
+func (s *Service) lookup(name backend.Name) (backend.Backend, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.byName[name]
+	return b, ok
+}
+
+// Has reports whether a backend called name is configured, and its source.
+func (s *Service) Has(name backend.Name) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src, ok := s.sources[name]
+	return src, ok
+}
+
+// Source says where a backend came from: static, person or cluster-manager.
+func (s *Service) Source(name backend.Name) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sources[name]
 }
 
 // Names lists the configured backends in order.
 func (s *Service) Names() []backend.Name {
-	names := make([]backend.Name, 0, len(s.backends))
-	for _, b := range s.backends {
+	all := s.all()
+	names := make([]backend.Name, 0, len(all))
+	for _, b := range all {
 		names = append(names, b.Name())
 	}
 	return names
 }
 
-// Default is the first configured backend.
-func (s *Service) Default() backend.Backend { return s.backends[0] }
+// Default is the first configured backend, nil when none is.
+func (s *Service) Default() backend.Backend {
+	all := s.all()
+	if len(all) == 0 {
+		return nil
+	}
+	return all[0]
+}
 
 // named returns the backend called name; "" is the default backend.
 func (s *Service) named(name string) (backend.Backend, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return s.backends[0], nil
+		if b := s.Default(); b != nil {
+			return b, nil
+		}
+		return nil, backend.ErrNoBackend
 	}
-	if b, ok := s.byName[backend.Name(name)]; ok {
+	if b, ok := s.lookup(backend.Name(name)); ok {
 		return b, nil
+	}
+	if len(s.all()) == 0 {
+		return nil, backend.ErrNoBackend
 	}
 	return nil, fmt.Errorf("%w: unknown backend %q (configured: %s)", backend.ErrInvalid, name, joinNames(s.Names()))
 }
@@ -156,7 +292,11 @@ func (s *Service) named(name string) (backend.Backend, error) {
 // targets are the backends a read addresses: the named one, or all of them.
 func (s *Service) targets(name string) ([]backend.Backend, error) {
 	if strings.TrimSpace(name) == "" {
-		return s.backends, nil
+		all := s.all()
+		if len(all) == 0 {
+			return nil, backend.ErrNoBackend
+		}
+		return all, nil
 	}
 	b, err := s.named(name)
 	if err != nil {
@@ -200,7 +340,7 @@ func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 }
 
 func (s *Service) describe(ctx context.Context, b backend.Backend) BackendResponse {
-	resp := BackendResponse{Info: b.Info(ctx), Capabilities: s.capabilities(b)}
+	resp := BackendResponse{Info: b.Info(ctx), Source: s.Source(b.Name()), Capabilities: s.capabilities(b)}
 	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
 	// that is the default a client should report — not the driver's fallback.
 	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
@@ -214,8 +354,9 @@ func (s *Service) describe(ctx context.Context, b backend.Backend) BackendRespon
 
 // Backends describes every configured backend, in order.
 func (s *Service) Backends(ctx context.Context) []BackendResponse {
-	out := make([]BackendResponse, 0, len(s.backends))
-	for _, b := range s.backends {
+	all := s.all()
+	out := make([]BackendResponse, 0, len(all))
+	for _, b := range all {
 		out = append(out, s.describe(ctx, b))
 	}
 	return out
@@ -236,7 +377,7 @@ func (s *Service) Backend(ctx context.Context, name string) (BackendResponse, er
 // Ready reports whether every backend answers.
 func (s *Service) Ready(ctx context.Context) error {
 	var problems []string
-	for _, b := range s.backends {
+	for _, b := range s.all() {
 		info := b.Info(ctx)
 		if !info.Healthy {
 			problems = append(problems, fmt.Sprintf("backend %s not healthy: %s", info.Backend, info.Message))
@@ -306,7 +447,7 @@ func (s *Service) resolve(ctx context.Context, name, ref string) (backend.Backen
 	if ref == "" {
 		return nil, nil, fmt.Errorf("%w: model reference is required", backend.ErrInvalid)
 	}
-	if strings.TrimSpace(name) != "" || len(s.backends) == 1 {
+	if strings.TrimSpace(name) != "" || len(s.all()) == 1 {
 		b, err := s.named(name)
 		if err != nil {
 			return nil, nil, err
@@ -323,7 +464,7 @@ func (s *Service) resolve(ctx context.Context, name, ref string) (backend.Backen
 	}
 	var hits []hit
 	var failure error
-	for _, b := range s.backends {
+	for _, b := range s.all() {
 		m, err := b.GetModel(ctx, ref)
 		switch {
 		case err == nil:
@@ -594,7 +735,7 @@ func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, e
 		return "", fmt.Errorf("%w: model name is required", backend.ErrInvalid)
 	}
 	var b backend.Backend
-	if strings.TrimSpace(name) != "" || len(s.backends) == 1 {
+	if strings.TrimSpace(name) != "" || len(s.all()) == 1 {
 		var err error
 		if b, err = s.named(name); err != nil {
 			return "", err
@@ -606,7 +747,7 @@ func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, e
 		}
 		switch len(owners) {
 		case 1:
-			b = s.byName[owners[0]]
+			b, _ = s.lookup(owners[0])
 		case 0:
 		default:
 			return "", fmt.Errorf("%w: %s is wired on %s; name the backend", backend.ErrConflict, ref, joinNames(owners))
@@ -648,8 +789,10 @@ func (s *Service) wiredBackends(ctx context.Context, ref string) ([]backend.Name
 			continue
 		}
 		owner := r.Backend
-		if _, ok := s.byName[owner]; !ok {
-			owner = s.backends[0].Name()
+		if _, ok := s.lookup(owner); !ok {
+			if d := s.Default(); d != nil {
+				owner = d.Name()
+			}
 		}
 		if !seen[owner] {
 			seen[owner] = true
@@ -677,6 +820,7 @@ func (s *Service) Presets(ctx context.Context, name string) ([]backend.Preset, E
 		}
 		for i := range presets {
 			presets[i].Backend = b.Name()
+			presets[i].Target = backend.TargetOf(b)
 		}
 		return presets, nil
 	})
@@ -752,6 +896,7 @@ func (s *Service) Nodes(ctx context.Context, name string) ([]backend.NodeInfo, E
 		}
 		for i := range nodes {
 			nodes[i].Backend = b.Name()
+			nodes[i].Target = backend.TargetOf(b)
 		}
 		return nodes, nil
 	})
@@ -800,23 +945,20 @@ func (s *Service) Run(ctx context.Context) {
 		s.log.Info("caller-only mode: no download adoption and no wiring reconciler (every Kubernetes call carries the caller's token; the ServiceAccount holds no permissions)")
 		return
 	}
-	for _, b := range s.backends {
+	for _, b := range s.all() {
 		s.adoptPulls(ctx, b)
 	}
-	var lifecycle []backend.Backend
-	for _, b := range s.backends {
-		if _, ok := serveLifecycle(b); ok {
-			lifecycle = append(lifecycle, b)
-		}
-	}
-	if len(lifecycle) == 0 || s.cfg.ReconcileInterval <= 0 || s.wirer == nil || !s.cfg.AutoWire {
+	if s.cfg.ReconcileInterval <= 0 || s.wirer == nil || !s.cfg.AutoWire {
 		return
 	}
 	ticker := time.NewTicker(s.cfg.ReconcileInterval)
 	defer ticker.Stop()
 	for {
-		for _, b := range lifecycle {
-			s.reconcileWiring(ctx, b)
+		// Recomputed every tick: a backend registered at runtime joins.
+		for _, b := range s.all() {
+			if _, ok := serveLifecycle(b); ok {
+				s.reconcileWiring(ctx, b)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -1028,6 +1170,7 @@ func (s *Service) wiredIndex(ctx context.Context, b backend.Backend) wiredView {
 
 func (s *Service) view(b backend.Backend, m backend.Model, loaded map[string]backend.LoadedModel, wired wiredView) ModelView {
 	m.Backend = b.Name()
+	m.Target = backend.TargetOf(b)
 	v := ModelView{Model: m}
 	l, ok := loaded[m.Name]
 	if !ok && m.Path != "" {
@@ -1054,4 +1197,49 @@ func (s *Service) view(b backend.Backend, m backend.Model, loaded map[string]bac
 // IsNotFound reports whether err is a not-found from the backend or jobs.
 func IsNotFound(err error) bool {
 	return errors.Is(err, backend.ErrNotFound) || errors.Is(err, jobs.ErrNotFound)
+}
+
+// UnwireBackend removes every model-manager-owned ModelConfig of backend
+// name — what remove_backend does before the document goes. Nothing wired,
+// or wiring disabled, is not an error; the removed model references are
+// returned.
+func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]string, error) {
+	if s.wirer == nil {
+		return nil, nil
+	}
+	refs, err := s.wirer.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, r := range refs {
+		if r.Backend != name {
+			continue
+		}
+		if err := s.wirer.Remove(ctx, name, r.Model); err != nil {
+			return removed, fmt.Errorf("unwire %s on %s: %w", r.Model, name, err)
+		}
+		removed = append(removed, r.Model)
+		s.log.Info("model unwired with its backend", "backend", name, "model", r.Model, identity.LogAttr(ctx))
+	}
+	return removed, nil
+}
+
+// WiredModels lists the model references of backend name's model-manager-owned
+// ModelConfigs; nil when wiring is disabled.
+func (s *Service) WiredModels(ctx context.Context, name backend.Name) ([]string, error) {
+	if s.wirer == nil {
+		return nil, nil
+	}
+	refs, err := s.wirer.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range refs {
+		if r.Backend == name {
+			out = append(out, r.Model)
+		}
+	}
+	return out, nil
 }

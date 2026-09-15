@@ -38,8 +38,14 @@ fullnameOverride: ""
 # (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon;
 # proxied like ollama, but it serves no delete). The API reports the backend
 # and its capability flags at /api/v1/backend. The one-backend form of
-# `backends`.
-backend: ollama
+# `backends`. Empty (the default), like an empty `backends`, starts with no
+# static backend: backends are then registered at runtime with the
+# `add_backend` tool as backend documents — ConfigMaps in the release
+# namespace labelled `agent-platform.giantswarm.io/model-backend=true` —
+# and listed with `source: person` or `cluster-manager` (see
+# docs/backends.md); a static value here is listed as `source: static` and
+# cannot be registered again at runtime.
+backend: ""
 
 # -- Serving backends to run at once, in the operator's order — one process in
 # front of several servers, for example `[ollama, lemonade]` on a host running
@@ -47,7 +53,8 @@ backend: ollama
 # (`ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`). The first is the default backend: the
 # one `GET /api/v1/backend` describes and an unqualified pull goes to; every
 # model, job and node the API returns names its backend, every request may
-# name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone.
+# name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone —
+# and with `backend` empty too, no static backend at all.
 backends: []  # @schema item: string; itemEnum: [ollama, kserve, lemonade, lmstudio]; uniqueItems: true
 
 ollama:

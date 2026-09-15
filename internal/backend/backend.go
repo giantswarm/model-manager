@@ -119,8 +119,10 @@ type Loading struct {
 
 // Info is the backend identity and health as reported by the driver.
 type Info struct {
-	Backend Name   `json:"backend"`
-	Version string `json:"version,omitempty"`
+	Backend Name `json:"backend"`
+	// Target is the cluster a kserve backend acts on (cluster and organization; nil when local or not kserve).
+	Target  *Target `json:"target,omitempty"`
+	Version string  `json:"version,omitempty"`
 	// Endpoint is the backend as reached by model-manager.
 	Endpoint string `json:"endpoint,omitempty"`
 	// AgentEndpoint is the backend as reached by agent pods — the host the
@@ -149,12 +151,13 @@ type Model struct {
 	// Backend is the driver holding this model (ollama, kserve, lemonade);
 	// set by the service, so clients can group and route by it when one
 	// model-manager runs several backends.
-	Backend       Name   `json:"backend,omitempty"`
-	Format        string `json:"format,omitempty"`
-	Family        string `json:"family,omitempty"`
-	ParameterSize string `json:"parameterSize,omitempty"`
-	Quantization  string `json:"quantization,omitempty"`
-	ContextLength int64  `json:"contextLength,omitempty"`
+	Backend       Name    `json:"backend,omitempty"`
+	Target        *Target `json:"target,omitempty"`
+	Format        string  `json:"format,omitempty"`
+	Family        string  `json:"family,omitempty"`
+	ParameterSize string  `json:"parameterSize,omitempty"`
+	Quantization  string  `json:"quantization,omitempty"`
+	ContextLength int64   `json:"contextLength,omitempty"`
 	// Runtime is what the backend runs the model with, on backends that have
 	// several (lemonade: the recipe — flm for FastFlowLM on the NPU, llamacpp,
 	// ryzenai-llm, ...). Empty on a backend with one runtime (ollama) or where
@@ -260,6 +263,7 @@ type Preset struct {
 	Name string `json:"name"`
 	// Backend is the driver offering this preset; set by the service.
 	Backend       Name              `json:"backend,omitempty"`
+	Target        *Target           `json:"target,omitempty"`
 	DisplayName   string            `json:"displayName"`
 	Description   string            `json:"description,omitempty"`
 	Source        string            `json:"source,omitempty"`
@@ -342,9 +346,10 @@ type FitResult struct {
 type NodeInfo struct {
 	Name string `json:"name"`
 	// Backend is the driver reporting this node; set by the service.
-	Backend      Name   `json:"backend,omitempty"`
-	Ready        bool   `json:"ready"`
-	Architecture string `json:"architecture,omitempty"`
+	Backend      Name    `json:"backend,omitempty"`
+	Target       *Target `json:"target,omitempty"`
+	Ready        bool    `json:"ready"`
+	Architecture string  `json:"architecture,omitempty"`
 	// Eligible is true when a model can be served on this node right now:
 	// kserve — ready, inside the discovery node selector, and able to mount
 	// the cache claim when predictors mount it; ollama — always, the host is
@@ -482,4 +487,18 @@ type Backend interface {
 	Load(ctx context.Context, req LoadRequest) error
 	Unload(ctx context.Context, name string) error
 	AgentEndpoint(model string) AgentEndpoint
+}
+
+// Targeter is implemented by a backend acting on a target cluster; the
+// service stamps the target onto the models, nodes and presets it reports.
+type Targeter interface {
+	Target() *Target
+}
+
+// TargetOf returns b's target identity, nil when b has none.
+func TargetOf(b Backend) *Target {
+	if t, ok := b.(Targeter); ok {
+		return t.Target()
+	}
+	return nil
 }
