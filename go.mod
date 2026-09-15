@@ -7,7 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/giantswarm/mcp-oauth v1.4.2
 	github.com/go-jose/go-jose/v4 v4.1.5
-	github.com/mark3labs/mcp-go v1.0.0
+	github.com/mark3labs/mcp-go v1.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	k8s.io/api v0.37.0
