@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agent wiring targets kagent API v2: the ModelConfig API version used when discovery is unavailable is `kagent.dev/v1alpha3`, the only version kagent API v2 serves; `kagent.apiVersion: auto` keeps resolving whatever the cluster serves, so a kagent 0.x cluster still gets `v1alpha2`. The spec model-manager writes — `provider`, `model`, `ollama.host`, `openAI.baseUrl`, `apiKeySecret`/`apiKeySecretKey` — is the same in both versions. A ModelConfig's `ready` needs kagent's `ResolvedRefs` condition to be `True` beside `Accepted` whenever the controller reports it: kagent API v2 reports a missing or incomplete API-key Secret there while `Accepted` stays `True`, so such a ModelConfig read as ready before; `message` names the condition holding it back. The chart-test smoke applies the v2 `modelconfigs` CRD.
 
+- The chart README no longer renders a version badge (`chart.badgesSection` removed from `README.md.gotmpl`): a release PR bumping `Chart.yaml`'s `version` no longer changes the checked-in `README.md`, so the helm-docs pre-commit hook no longer fails on it. ([giantswarm/devctl#2180](https://github.com/giantswarm/devctl/issues/2180))
+
 ### Fixed
 
 - The `helm.sh/chart` label value is valid for every chart version: the 63-character cut of a branch build's version (`0.x.y-dev.<branch>.<timestamp>.<sha>`) could end on a `.`, which the API server rejects on every labelled object (the ATS smoke of a 16-character branch name failed that way). The helper trims a trailing `.` like it trims a trailing `-`.

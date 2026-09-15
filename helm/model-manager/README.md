@@ -1,7 +1,5 @@
 # model-manager
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.1.0](https://img.shields.io/badge/AppVersion-0.1.0-informational?style=flat-square)
-
 Model management service for the Agent Platform — backend-abstracted (ollama, kserve, lemonade) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
