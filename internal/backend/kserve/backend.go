@@ -150,6 +150,7 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		// An InferenceService serves only while it exists: nothing loads a
 		// stopped model on request and nothing evicts a running one.
 		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
+		Target:  b.Target(),
 	}
 	if _, err := b.dynamic(ctx).Resource(gvr).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		info.Message = fmt.Sprintf("%s API not available in %s: %v", s.ServingKind, s.Namespace, err)
@@ -771,3 +772,7 @@ func (b *Backend) hubToken(ctx context.Context) string {
 func (b *Backend) tokenConfigured(ctx context.Context) bool {
 	return b.hubToken(ctx) != ""
 }
+
+// Target is the cluster the backend acts on (backend.Targeter); nil for the
+// local cluster.
+func (b *Backend) Target() *backend.Target { return b.opts.Target.Identity() }

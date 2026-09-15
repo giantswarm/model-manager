@@ -172,10 +172,30 @@ fi
 
 # The one-backend form is untouched: `backend: ollama` renders --backend=ollama
 # and no --backends.
-got=$(args)
+got=$(args --set backend=ollama)
 echo "$got" | grep -q -- '^--backend=ollama$' || fail "single backend: --backend=ollama expected, got '$got'"
 if echo "$got" | grep -q -- '^--backends='; then
   fail "single backend renders --backends: '$got'"
+fi
+
+# Zero backends is the default: no --backend and no --backends, Kubernetes
+# access for the backend documents, and POD_NAMESPACE for --namespace.
+got=$(args)
+if echo "$got" | grep -q -- '^--backends\?='; then
+  fail "default values must render no static backend flag, got '$got'"
+fi
+echo "$got" | grep -q -- '^--in-cluster=true$' || fail "default values: Kubernetes access for backend documents expected, got '$got'"
+helm template mm "$CHART" --show-only templates/deployment.yaml \
+  | grep -q 'name: POD_NAMESPACE' || fail "default values: POD_NAMESPACE env expected"
+
+# The backend documents Role renders with and without oauth.downstream; the
+# write verbs only without (the caller's RBAC governs under downstream).
+got=$(helm template mm "$CHART" --show-only templates/rbac-backends.yaml)
+echo "$got" | grep -q -- '"create", "update", "patch", "delete"' || fail "backend documents Role: write verbs expected without downstream OAuth"
+got=$(helm template mm "$CHART" --show-only templates/rbac-backends.yaml "${DEX[@]}" --set oauth.downstream.enabled=true)
+echo "$got" | grep -q -- '"get", "list", "watch"' || fail "backend documents Role: read verbs expected under downstream OAuth"
+if echo "$got" | grep -q -- '"create"'; then
+  fail "backend documents Role: no write verbs under downstream OAuth"
 fi
 
 echo "verify-chart: ok"

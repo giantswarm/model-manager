@@ -40,7 +40,12 @@ spec:
       rbac.yaml follows the same rule (the kserve Roles render regardless of
       kagent.disableWiring).
       */}}
-      {{- $kubeAccess := or (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (not .Values.kagent.disableWiring) }}
+      {{- /*
+      The token is always mounted: runtime backend registration watches the
+      backend documents of the release namespace with the ServiceAccount, so
+      Kubernetes access is no longer a per-backend matter.
+      */}}
+      {{- $kubeAccess := true }}
       automountServiceAccountToken: {{ $kubeAccess }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -59,7 +64,7 @@ spec:
             */}}
             {{- if .Values.backends }}
             - --backends={{ join "," .Values.backends }}
-            {{- else }}
+            {{- else if .Values.backend }}
             - --backend={{ .Values.backend }}
             {{- end }}
             {{- if include "model-manager.hasBackend" (dict "root" . "name" "ollama") }}
@@ -185,8 +190,15 @@ spec:
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or .Values.oauth.enabled .Values.extraEnv }}
           env:
+            {{- /*
+            The namespace the backend documents are watched in and written
+            to (--namespace reads POD_NAMESPACE).
+            */}}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if .Values.oauth.enabled }}
             {{- if eq .Values.oauth.provider "google" }}
             {{- if .Values.oauth.google.clientID }}
@@ -215,7 +227,6 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}
           ports:
             - name: http
               containerPort: 8080

@@ -9,6 +9,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/service"
 )
 
@@ -43,6 +44,7 @@ func ToolNames() []string {
 		ToolPullModel, ToolLoadModel, ToolUnloadModel, ToolDeleteModel,
 		ToolWireModel, ToolUnwireModel, ToolListJobs, ToolGetJob, ToolCancelJob,
 		ToolListPresets, ToolSearchModels, ToolCheckFit, ToolListNodes,
+		ToolAddBackend, ToolRemoveBackend,
 	}
 }
 
@@ -66,12 +68,16 @@ func backendArg(what string) mcp.ToolOption {
 
 // NewMCPServer builds an MCP server exposing the same operations as the REST
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
-func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
+func NewMCPServer(svc *service.Service, version string, opts ...Option) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("model-manager", version,
 		mcpserver.WithToolCapabilities(false),
-		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
+		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet, and list_backends is then empty. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)
 	t := &tools{svc: svc}
+	for _, o := range opts {
+		o(t)
+	}
+	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
 		mcp.WithDescription("Report one serving backend (ollama|kserve|lemonade|lmstudio) — the named one, else the default (first configured) — with its health/version, its load semantics, the capability flags clients must honor, and the names of every configured backend."),
@@ -201,7 +207,8 @@ func NewMCPServer(svc *service.Service, version string) *mcpserver.MCPServer {
 }
 
 type tools struct {
-	svc *service.Service
+	svc   *service.Service
+	store *registry.Store // nil: no Kubernetes access, registration tools refuse
 }
 
 // withErrorsResult adds the per-backend failures of an aggregate read.
@@ -218,7 +225,11 @@ func (t *tools) getBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) listBackends(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return jsonResult(map[string]any{"backends": t.svc.Backends(ctx)})
+	out := map[string]any{"backends": t.svc.Backends(ctx)}
+	if invalid := t.svc.InvalidDocuments(); len(invalid) > 0 {
+		out["invalid"] = invalid
+	}
+	return jsonResult(out)
 }
 
 func (t *tools) listModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

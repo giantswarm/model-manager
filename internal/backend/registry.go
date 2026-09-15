@@ -64,6 +64,9 @@ type KServeOptions struct {
 	// which repository filled which cache directory (default
 	// model-manager-cache-index).
 	CacheIndexConfigMap string
+	// Target is the cluster the backend acts on (a registered document names
+	// it; empty: the local cluster, reported without a target).
+	Target Target
 	// PresetNamespace / PresetSelector locate the ServingPreset ConfigMaps.
 	PresetNamespace string
 	PresetSelector  string
