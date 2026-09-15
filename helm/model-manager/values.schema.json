@@ -450,6 +450,10 @@
                     "type": "string",
                     "description": "How long a load job waits for an InferenceService to become ready before it gives up on wiring."
                 },
+                "servingKind": {
+                    "type": "string",
+                    "enum": ["", "auto", "LLMInferenceService", "InferenceService"]
+                },
                 "runtime": {
                     "type": "string",
                     "description": "ClusterServingRuntime for presets that name none; empty takes the discovery value (default `kserve-vllm`)."

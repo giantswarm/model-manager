@@ -176,7 +176,8 @@ can stay empty.
 | kserve.namespace | string | `"model-serving"` | Serving namespace: InferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`. |
 | kserve.discovery.configMap | string | `"agent-platform-model-serving"` | Name of the platform's model-serving discovery ConfigMap (kind `ModelServingConfig`, key `config.yaml`) that carries the runtime, GPU resource name, cache claim and preset selector. Empty `kserve.*` overrides below take their value from it. |
 | kserve.discovery.namespace | string | `""` | Namespace of the discovery ConfigMap and, by default, of the preset ConfigMaps. Empty means the release namespace. |
-| kserve.runtime | string | `""` | ClusterServingRuntime for presets that name none; empty takes the discovery value (default `kserve-vllm`). |
+| kserve.servingKind | string | `""` | Kind a serving preset is composed into: `LLMInferenceService` (the llm-d control plane: KServe's own router and well-known configs), `InferenceService` (the classic predictor on the vLLM ClusterServingRuntime) or empty for `auto` — `LLMInferenceService` wherever its API is served, else the classic kind. |
+| kserve.runtime | string | `""` | ClusterServingRuntime for presets that name none (classic kind); empty takes the discovery value (default `kserve-vllm`). |
 | kserve.gpuResourceName | string | `""` | Accelerator resource name; empty takes the discovery value (default `nvidia.com/gpu`). |
 | kserve.cache.claimName | string | `""` | PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty takes the discovery value (default `hf-cache`). |
 | kserve.cache.mountPath | string | `""` | Where predictors mount the cache; empty takes the discovery value (default `/mnt/models`). |

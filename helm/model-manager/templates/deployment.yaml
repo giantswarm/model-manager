@@ -88,6 +88,9 @@ spec:
             - --kserve-namespace={{ include "model-manager.kserveNamespace" . }}
             - --kserve-discovery-configmap={{ $k.discovery.configMap }}
             - --kserve-discovery-namespace={{ include "model-manager.kserveDiscoveryNamespace" . }}
+            {{- with $k.servingKind }}
+            - --kserve-serving-kind={{ . }}
+            {{- end }}
             {{- with $k.runtime }}
             - --kserve-runtime={{ . }}
             {{- end }}

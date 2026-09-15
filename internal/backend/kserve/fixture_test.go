@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	discoveryfake "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
@@ -181,18 +182,25 @@ func presetConfigMap(name, doc string) *corev1.ConfigMap {
 func discoveryConfigMap() *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: DefaultDiscoveryConfigMap, Namespace: testPlatformNS},
-		Data:       map[string]string{discoveryConfigKey: discoveryDocYAML(nil, false)},
+		Data:       map[string]string{discoveryConfigKey: discoveryDocYAML(discoveryOpts{})},
 	}
 }
 
-// discoveryDocYAML renders the ModelServingConfig document with the given
-// serving node selector and cache redirect-policy flag (whether the Kyverno
-// policies mount the cache claim into every predictor).
-func discoveryDocYAML(nodeSelector map[string]string, redirectPolicy bool) string {
+// discoveryOpts are the ModelServingConfig fields the tests vary: the serving
+// node selector, the cache redirect-policy flag (whether the Kyverno policies
+// mount the cache claim into every predictor) and the RuntimeClass.
+type discoveryOpts struct {
+	nodeSelector     map[string]string
+	redirectPolicy   bool
+	runtimeClassName string
+}
+
+// discoveryDocYAML renders the ModelServingConfig document.
+func discoveryDocYAML(o discoveryOpts) string {
 	selector := "  nodeSelector: {}\n"
-	if len(nodeSelector) > 0 {
+	if len(o.nodeSelector) > 0 {
 		selector = "  nodeSelector:\n"
-		for k, v := range nodeSelector {
+		for k, v := range o.nodeSelector {
 			selector += fmt.Sprintf("    %s: %s\n", k, v)
 		}
 	}
@@ -202,7 +210,7 @@ spec:
   namespace: model-serving
   runtime: kserve-vllm
   gpuResourceName: nvidia.com/gpu
-  runtimeClassName: ""
+  runtimeClassName: %q
 %s  deploymentStrategyType: Recreate
   timeoutSeconds: 1800
   cache:
@@ -214,18 +222,39 @@ spec:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, selector, redirectPolicy)
+`, o.runtimeClassName, selector, o.redirectPolicy)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings
 // so the next call sees the change.
 func (f *fixture) setDiscovery(ctx context.Context, nodeSelector map[string]string, redirectPolicy bool) {
 	f.t.Helper()
+	f.setDiscoveryOpts(ctx, discoveryOpts{nodeSelector: nodeSelector, redirectPolicy: redirectPolicy})
+}
+
+func (f *fixture) setDiscoveryOpts(ctx context.Context, o discoveryOpts) {
+	f.t.Helper()
 	cm, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Get(ctx, DefaultDiscoveryConfigMap, metav1.GetOptions{})
 	require.NoError(f.t, err)
-	cm.Data[discoveryConfigKey] = discoveryDocYAML(nodeSelector, redirectPolicy)
+	cm.Data[discoveryConfigKey] = discoveryDocYAML(o)
 	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Update(ctx, cm, metav1.UpdateOptions{})
 	require.NoError(f.t, err)
+	f.resetSettings()
+}
+
+// serveLLMAPI makes the fake API server serve the LLMInferenceService API,
+// the way a cluster with the llmisvc control plane does.
+func (f *fixture) serveLLMAPI() {
+	f.t.Helper()
+	f.cs.Discovery().(*discoveryfake.FakeDiscovery).Resources = []*metav1.APIResourceList{{
+		GroupVersion: llmisvcGVR.GroupVersion().String(),
+		APIResources: []metav1.APIResource{{Name: llmisvcGVR.Resource, Kind: ServingKindLLM, Namespaced: true}},
+	}}
+	f.resetSettings()
+}
+
+// resetSettings drops the cached settings so the next call resolves again.
+func (f *fixture) resetSettings() {
 	f.b.cfg.mu.Lock()
 	f.b.cfg.cached = nil
 	f.b.cfg.mu.Unlock()
@@ -295,7 +324,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	}
 	cs := kubefake.NewSimpleClientset(append(base, objs...)...)
 	scheme := runtime.NewScheme()
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{isvcGVR: "InferenceServiceList"})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{isvcGVR: "InferenceServiceList", llmisvcGVR: "LLMInferenceServiceList"})
 	b, err := New(backend.KServeOptions{
 		Dynamic:            dyn,
 		Clientset:          cs,
