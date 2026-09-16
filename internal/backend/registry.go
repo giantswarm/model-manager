@@ -83,6 +83,12 @@ type KServeOptions struct {
 	// hub token (optional; gated repositories).
 	HFTokenSecret    string
 	HFTokenSecretKey string
+	// HFTimeout bounds the hub lookups of one fit check (repository metadata,
+	// file tree, safetensors index) or search: interactive calls that must
+	// answer — or fall back to the preset's requirements — within a client's
+	// meta-tool deadline, also when the hub does not answer at all (egress
+	// blocked). Download Jobs are not affected.
+	HFTimeout time.Duration
 
 	// DownloadImage runs pre-warm downloads (default: the KServe
 	// storage-initializer, so the cache holds exactly what an

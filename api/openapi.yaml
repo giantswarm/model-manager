@@ -384,7 +384,11 @@ paths:
         not listed there) answers `fits=false` with the eligibility reason
         and no `node`; pull and load refuse it the same way, before any Job
         or InferenceService is created. Without a `node` only eligible nodes
-        are considered.
+        are considered. The hub lookups are bounded (`--kserve-hf-timeout`,
+        default 4 s): when the hub does not answer, a preset's `weightsGiB`
+        sizes the model (`weightsSource: preset`) and `reason` says the hub did
+        not answer within the timeout; a model no preset serves answers an
+        error saying the same.
       operationId: fitCheck
       x-mcp-tool: check_fit
       requestBody:
@@ -1039,7 +1043,7 @@ components:
         model: { type: string }
         backend: { $ref: "#/components/schemas/BackendName" }
         fits: { type: boolean }
-        reason: { type: string, description: human-readable explanation of the numbers }
+        reason: { type: string, description: "human-readable explanation of the numbers; when weightsSource is preset, also why the preset stands in for the hub (it did not answer within the lookup timeout, refused the repository, or failed)" }
         preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
         presets: { type: array, items: { type: string }, description: every preset serving the model }
         weightsBytes: { type: integer, format: int64 }

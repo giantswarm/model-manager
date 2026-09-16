@@ -293,6 +293,10 @@
                             "type": "string",
                             "description": "Hugging Face Hub base URL (search, repository metadata, sizes)."
                         },
+                        "timeout": {
+                            "type": "string",
+                            "description": "Time budget of the Hugging Face Hub lookups of one fit check (repository metadata, file tree, safetensors index) or search. The hub answers in well under a second when reachable; when it does not answer (egress blocked), `check_fit` falls back to the preset's requirements within this budget, so keep it below the caller's meta-tool deadline (muster: 10s). Download Jobs are not affected."
+                        },
                         "token": {
                             "type": "string",
                             "description": "Render the token Secret (`kserve.hf.tokenSecret.name`, in the serving namespace) from this value. Prefer a pre-created Secret; this is for installs whose values are already secret-managed."

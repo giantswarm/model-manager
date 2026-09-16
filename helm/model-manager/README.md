@@ -186,6 +186,7 @@ can stay empty.
 | kserve.presets.namespace | string | `""` | Namespace of the serving-preset ConfigMaps; empty takes the discovery value, else `kserve.discovery.namespace`. |
 | kserve.presets.labelSelector | string | `""` | Label selector of the serving-preset ConfigMaps; empty takes the discovery value (default `agent-platform.giantswarm.io/serving-preset=true`). |
 | kserve.hf.endpoint | string | `"https://huggingface.co"` | Hugging Face Hub base URL (search, repository metadata, sizes). |
+| kserve.hf.timeout | string | `"4s"` | Time budget of the Hugging Face Hub lookups of one fit check (repository metadata, file tree, safetensors index) or search. The hub answers in well under a second when reachable; when it does not answer (egress blocked), `check_fit` falls back to the preset's requirements within this budget, so keep it below the caller's meta-tool deadline (muster: 10s). Download Jobs are not affected. |
 | kserve.hf.tokenSecret.name | string | `""` | Secret in the serving namespace holding a Hugging Face token for gated repositories (read by model-manager, mounted into download Jobs). Empty: anonymous hub access, gated models refused. |
 | kserve.hf.tokenSecret.key | string | `"token"` | Key of the token in that Secret. |
 | kserve.hf.token | string | `""` | Render the token Secret (`kserve.hf.tokenSecret.name`, in the serving namespace) from this value. Prefer a pre-created Secret; this is for installs whose values are already secret-managed. |

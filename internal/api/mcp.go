@@ -168,7 +168,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.search)
 
 	s.AddTool(mcp.NewTool(ToolCheckFit,
-		mcp.WithDescription("Check whether a model fits a node (kserve): resolves the weight size from the hub (safetensors index, else file tree, else the preset), adds the serving overhead and compares with the node's memory budget. Says which node, whether the model is cached there and whether a hub token is needed."),
+		mcp.WithDescription("Check whether a model fits a node (kserve): resolves the weight size from the hub (safetensors index, else file tree, else the preset), adds the serving overhead and compares with the node's memory budget. Says which node, whether the model is cached there and whether a hub token is needed. When the hub does not answer within its lookup timeout, the preset's requirements size the model (weightsSource preset) and reason says so."),
 		mcp.WithString(argModel, mcp.Description("Hugging Face repository owner/name (required unless preset is given)")),
 		backendArg("to check on (required when several backends offer fit checks)"),
 		mcp.WithString(argPreset, mcp.Description("Serving preset (overhead, model id)")),

@@ -121,6 +121,7 @@ spec:
             - --kserve-preset-selector={{ . }}
             {{- end }}
             - --kserve-hf-endpoint={{ $k.hf.endpoint }}
+            - --kserve-hf-timeout={{ $k.hf.timeout }}
             {{- with $k.hf.tokenSecret.name }}
             - --kserve-hf-token-secret={{ . }}
             - --kserve-hf-token-secret-key={{ $k.hf.tokenSecret.key }}
