@@ -85,7 +85,13 @@ func (r *Registry) upsert(obj any) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	kind, err := r.load(cm)
+	kind, b, source, err := r.load(cm)
+	if err == nil {
+		// Registered and no longer reported in one step: a reader that finds
+		// the backend must not find its document listed as invalid too
+		// (giantswarm/model-manager#101).
+		err = r.svc.RegisterDocument(b, source, cm.Name)
+	}
 	if err != nil {
 		r.svc.ReportDocument(cm.Name, err.Error())
 		r.log.Warn("backend document not loaded", "configMap", cm.Name, "error", err)
@@ -95,38 +101,35 @@ func (r *Registry) upsert(obj any) {
 		}
 		return
 	}
-	r.svc.ReportDocument(cm.Name, "")
+	r.log.Info("backend registered", "backend", kind, "source", source, "configMap", cm.Name)
 	if old, had := r.kinds[cm.Name]; had && old != kind {
 		r.forgetLocked(cm.Name, old)
 	}
 	r.kinds[cm.Name] = kind
 }
 
-// load parses, builds and registers cm's document; it returns the kind the
-// document names as soon as that is known, so the caller can retire what the
-// ConfigMap registered before.
-func (r *Registry) load(cm *corev1.ConfigMap) (backend.Name, error) {
+// load parses and builds cm's document without registering it; it returns
+// the kind the document names as soon as that is known, so the caller can
+// retire what the ConfigMap registered before, and the built backend with its
+// source for the caller to register.
+func (r *Registry) load(cm *corev1.ConfigMap) (kind backend.Name, b backend.Backend, source string, err error) {
 	raw, ok := cm.Data[backend.DocumentKey]
 	if !ok {
-		return "", fmt.Errorf("no %s key", backend.DocumentKey)
+		return "", nil, "", fmt.Errorf("no %s key", backend.DocumentKey)
 	}
 	doc, err := backend.ParseDocument([]byte(raw))
 	if err != nil {
-		return "", err
+		return "", nil, "", err
 	}
-	kind := doc.Spec.Kind
+	kind = doc.Spec.Kind
 	if cm.Name != backend.DocumentName(kind) {
-		return kind, fmt.Errorf("metadata.name: the ConfigMap of a %s document is named %s", kind, backend.DocumentName(kind))
+		return kind, nil, "", fmt.Errorf("metadata.name: the ConfigMap of a %s document is named %s", kind, backend.DocumentName(kind))
 	}
-	b, err := r.build(doc)
+	b, err = r.build(doc)
 	if err != nil {
-		return kind, fmt.Errorf("build %s backend: %w", kind, err)
+		return kind, nil, "", fmt.Errorf("build %s backend: %w", kind, err)
 	}
-	if err := r.svc.Register(b, doc.Spec.Source); err != nil {
-		return kind, err
-	}
-	r.log.Info("backend registered", "backend", kind, "source", doc.Spec.Source, "configMap", cm.Name)
-	return kind, nil
+	return kind, b, doc.Spec.Source, nil
 }
 
 func (r *Registry) delete(obj any) {

@@ -154,6 +154,26 @@ var ErrStaticBackend = errors.New("configured statically by --backends; remove i
 func (s *Service) Register(b backend.Backend, source string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.registerLocked(b, source)
+}
+
+// RegisterDocument registers the backend a document builds and clears the
+// document's report in the same step, so no reader sees the backend
+// registered while its ConfigMap is still listed as invalid — the window in
+// which list_backends answered both for a document that had just been fixed
+// (giantswarm/model-manager#101). A refused registration leaves the report
+// untouched; the caller records the refusal.
+func (s *Service) RegisterDocument(b backend.Backend, source, configMap string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.registerLocked(b, source); err != nil {
+		return err
+	}
+	delete(s.problems, configMap)
+	return nil
+}
+
+func (s *Service) registerLocked(b backend.Backend, source string) error {
 	name := b.Name()
 	if s.sources[name] == backend.SourceStatic {
 		return fmt.Errorf("%w: backend %s is %w", backend.ErrConflict, name, ErrStaticBackend)
