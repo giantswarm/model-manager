@@ -71,8 +71,8 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	if ns := p.nodeSelector(s, node); len(ns) > 0 {
 		template["nodeSelector"] = ns
 	}
-	if len(p.Spec.Scheduling.Tolerations) > 0 {
-		template["tolerations"] = mapsToAny(p.Spec.Scheduling.Tolerations)
+	if tols := p.tolerations(s); len(tols) > 0 {
+		template["tolerations"] = tols
 	}
 	if s.RuntimeClassName != "" {
 		template["runtimeClassName"] = s.RuntimeClassName

@@ -138,6 +138,10 @@ type Info struct {
 	// Loading is how the backend loads and evicts models; always reported,
 	// health does not change it.
 	Loading Loading `json:"loading"`
+	// GPUPool is the GPU node pool scheduling in effect (kserve: the pool
+	// taint tolerated and the pool label selected on scan pods, download
+	// Jobs and composed predictors); absent when none is configured.
+	GPUPool *GPUPool `json:"gpuPool,omitempty"`
 }
 
 // Model is a downloaded model in the backend's inventory.

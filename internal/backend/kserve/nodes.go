@@ -39,6 +39,7 @@ type nodeBudget struct {
 	Ready        bool
 	Architecture string
 	Labels       map[string]string
+	Taints       []corev1.Taint
 	Allocatable  int64
 	GPUCount     int64
 	GPUMemory    int64
@@ -74,10 +75,11 @@ func isAccelerator(n *corev1.Node, gpuResource string) bool {
 }
 
 // eligibility decides whether a node is a serving target: ready, inside the
-// discovery node selector, and able to mount the cache claim when predictors
-// mount it (cache enabled and the redirect policy on) and the claim is pinned
-// to nodes. Every failing rule adds one reason; the reasons are joined with
-// "; " for the API. An empty reason means eligible.
+// discovery node selector and the GPU pool's, every hard taint tolerated by
+// the pool toleration, and able to mount the cache claim when predictors
+// mount it (cache enabled and the redirect policy on) and the claim is
+// pinned to nodes. Every failing rule adds one reason; the reasons are
+// joined with "; " for the API. An empty reason means eligible.
 func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
 	var reasons []string
 	if !n.Ready {
@@ -85,6 +87,12 @@ func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
 	}
 	if !matchesSelector(n.Labels, s.NodeSelector) {
 		reasons = append(reasons, "outside the serving node selector ("+formatSelector(s.NodeSelector)+")")
+	}
+	if !matchesSelector(n.Labels, s.GPUPool.NodeSelector) {
+		reasons = append(reasons, "outside the GPU pool node selector ("+formatSelector(s.GPUPool.NodeSelector)+")")
+	}
+	if taints := s.untolerated(n.Taints); len(taints) > 0 {
+		reasons = append(reasons, "taint "+strings.Join(taints, ", ")+" not tolerated (set the GPU pool taint)")
 	}
 	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !containsString(loc.Nodes, n.Name) {
 		reasons = append(reasons, fmt.Sprintf("cache claim %s is pinned to %s", loc.Claim, strings.Join(loc.Nodes, ", ")))
@@ -111,7 +119,7 @@ func formatSelector(sel map[string]string) string {
 // memory (unified-memory nodes, or nodes without feature-discovery labels).
 // A valid BudgetAnnotation replaces the result of either source.
 func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
-	nb := nodeBudget{Name: n.Name, Labels: n.Labels, Architecture: n.Status.NodeInfo.Architecture}
+	nb := nodeBudget{Name: n.Name, Labels: n.Labels, Taints: n.Spec.Taints, Architecture: n.Status.NodeInfo.Architecture}
 	for _, c := range n.Status.Conditions {
 		if c.Type == corev1.NodeReady {
 			nb.Ready = c.Status == corev1.ConditionTrue

@@ -102,7 +102,10 @@ type discoveryDoc struct {
 		NodeSelector           map[string]string `json:"nodeSelector"`
 		DeploymentStrategyType string            `json:"deploymentStrategyType"`
 		TimeoutSeconds         int64             `json:"timeoutSeconds"`
-		Cache                  struct {
+		// GPUPool is the pool taint and label (the chart's
+		// modelServing.gpuPool); see backend.GPUPool.
+		GPUPool backend.GPUPool `json:"gpuPool"`
+		Cache   struct {
 			Enabled        bool   `json:"enabled"`
 			ClaimName      string `json:"claimName"`
 			MountPath      string `json:"mountPath"`
@@ -126,12 +129,16 @@ type settings struct {
 	NodeSelector           map[string]string
 	DeploymentStrategyType string
 	TimeoutSeconds         int64
-	CacheEnabled           bool
-	CacheClaim             string
-	CacheMountPath         string
-	CacheRedirectPolicy    bool
-	PresetNamespace        string
-	PresetSelector         string
+	// GPUPool is the pool scheduling every scan pod, download Job and
+	// composed predictor gets (scheduling.go): discovery's spec.gpuPool,
+	// the option's taint and selector replacing each when set.
+	GPUPool             backend.GPUPool
+	CacheEnabled        bool
+	CacheClaim          string
+	CacheMountPath      string
+	CacheRedirectPolicy bool
+	PresetNamespace     string
+	PresetSelector      string
 	// ServingKind is the kind presets are composed into, ServingKindLLM or
 	// ServingKindClassic (never auto); LLMServed whether the
 	// LLMInferenceService API is served on the cluster, in which case the
@@ -211,6 +218,7 @@ func (c *config) resolve(ctx context.Context) settings {
 		s.NodeSelector = sp.NodeSelector
 		s.DeploymentStrategyType = sp.DeploymentStrategyType
 		s.TimeoutSeconds = sp.TimeoutSeconds
+		s.GPUPool = sp.GPUPool
 		s.CacheEnabled = sp.Cache.Enabled
 		setIf(&s.CacheClaim, sp.Cache.ClaimName)
 		setIf(&s.CacheMountPath, sp.Cache.MountPath)
@@ -229,6 +237,12 @@ func (c *config) resolve(ctx context.Context) settings {
 	setIf(&s.CacheMountPath, o.CacheMountPath)
 	setIf(&s.PresetNamespace, o.PresetNamespace)
 	setIf(&s.PresetSelector, o.PresetSelector)
+	if o.GPUPool.Taint != nil {
+		s.GPUPool.Taint = o.GPUPool.Taint
+	}
+	if len(o.GPUPool.NodeSelector) > 0 {
+		s.GPUPool.NodeSelector = o.GPUPool.NodeSelector
+	}
 	if s.PresetNamespace == "" {
 		s.PresetNamespace = s.Namespace
 	}

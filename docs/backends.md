@@ -48,6 +48,12 @@ data:
         discovery:
           namespace: model-serving
           name: agent-platform-model-serving
+        gpuPool:
+          taint:
+            key: nvidia.com/gpu
+            effect: NoSchedule
+          nodeSelector:
+            giantswarm.io/machine-pool: gpu01-gpu-l4
 ```
 
 ### Schema (enforced when the document is read)
@@ -70,6 +76,9 @@ data:
 | `spec.kserve.target.servingNamespace` | yes | Namespace on the target holding the InferenceServices, download Jobs and the cache |
 | `spec.kserve.discovery.namespace` | no | Where the model-serving discovery ConfigMap (`kind: ModelServingConfig`) lives on the target; defaults to `servingNamespace` |
 | `spec.kserve.discovery.name` | no | Its name; defaults to `agent-platform-model-serving` |
+| `spec.kserve.gpuPool` | no | The GPU node pool's scheduling; replaces the discovery ConfigMap's `spec.gpuPool` (see below) |
+| `spec.kserve.gpuPool.taint.{key,value,effect}` | no | The pool's taint (`key` required; `effect` `NoSchedule` \| `PreferNoSchedule` \| `NoExecute`, empty for every effect). Tolerated by the inventory scan pods, the download Jobs and the predictors model-manager composes: `value` empty tolerates every value (`Exists`), set compares it (`Equal`) |
+| `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
@@ -86,6 +95,29 @@ Everything the document does not name — images, timeouts, inventory mode, the 
 the value of the chart's `kserve.*` values (the flags), which double as defaults for a registered
 kserve backend.
 
+### The GPU node pool input
+
+A GPU node pool created through the platform arrives tainted `nvidia.com/gpu` `NoSchedule` (only
+accelerator work lands there) and labelled `giantswarm.io/machine-pool=<cluster>-<pool>`. The
+kserve backend reads both as **one input, `gpuPool`**, from the discovery ConfigMap first — the
+`ModelServingConfig` document's `spec.gpuPool.taint` and `spec.gpuPool.nodeSelector`, which the
+platform chart renders from its `modelServing.gpuPool.taint` and `modelServing.gpuPool.nodeSelector`
+values — and from the registered document's `spec.kserve.gpuPool` second: a `taint` in the document
+replaces the discovery's taint, a `nodeSelector` in the document the discovery's selector. The
+serving runtime's and the presets' tolerations are the chart's; this input covers the three things
+model-manager schedules itself:
+
+| Object | Toleration | Node selector |
+|---|---|---|
+| Composed `LLMInferenceService` / `InferenceService` predictor | first, the preset's `scheduling.tolerations` after it (a repeated entry once) | merged under the preset's `scheduling.nodeSelector` and the node pin |
+| Download Job | always | only when the Job is not pinned to a cache node (a shared cache); a pinned Job keeps its node |
+| Inventory scan pod (`kserve.inventory.mode: pod`) | always | likewise; the chart's DaemonSet (`daemonset` mode) takes `kserve.inventory.agent.tolerations` / `.nodeSelector` |
+
+`GET /api/v1/nodes` reports a tainted GPU node as serving capacity once the taint is tolerated;
+before, its `eligibilityReason` names the taint (`taint nvidia.com/gpu:NoSchedule not tolerated
+(set the GPU pool taint)`), and a node outside the pool's selector says so. `GET /api/v1/backend`
+reports the input as `gpuPool`. Unset on both sides, nothing changes.
+
 ## Tools
 
 Both tools act as the caller (the request's forwarded token under `--downstream-oauth`, the
@@ -95,7 +127,9 @@ available yet and is refused with that message.
 
 **`add_backend`** — `kind` (required), `source` (default `person`), `endpoint`, `agentEndpoint`,
 `credentialsSecret`, `credentialsKey`, and for kserve `cluster`, `organization`, `apiServer`,
-`caBundle`, `servingNamespace`, `discoveryNamespace`, `discoveryName`. With `dryRun: true` it
+`caBundle`, `servingNamespace`, `discoveryNamespace`, `discoveryName`, `gpuPoolTaint`
+(`key[=value][:effect]`, kubectl's taint notation) and `gpuPoolNodeSelector`
+(`key=value[,key=value]`). With `dryRun: true` it
 answers the rendered document and the ConfigMap's namespace, name and labels without writing.
 Applied, it creates or replaces the kind's ConfigMap (`created: true|false`), waits for the watch
 to deliver it (`registered: true`) and returns the backend as `list_backends` reports it. A kind

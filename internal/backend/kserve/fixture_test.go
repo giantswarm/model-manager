@@ -193,6 +193,8 @@ type discoveryOpts struct {
 	nodeSelector     map[string]string
 	redirectPolicy   bool
 	runtimeClassName string
+	// gpuPool is the pool taint and label block (spec.gpuPool); absent when nil.
+	gpuPool *backend.GPUPool
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -202,6 +204,18 @@ func discoveryDocYAML(o discoveryOpts) string {
 		selector = "  nodeSelector:\n"
 		for k, v := range o.nodeSelector {
 			selector += fmt.Sprintf("    %s: %s\n", k, v)
+		}
+	}
+	if p := o.gpuPool; p != nil {
+		selector += "  gpuPool:\n"
+		if p.Taint != nil {
+			selector += fmt.Sprintf("    taint: {key: %q, value: %q, effect: %q}\n", p.Taint.Key, p.Taint.Value, p.Taint.Effect)
+		}
+		if len(p.NodeSelector) > 0 {
+			selector += "    nodeSelector:\n"
+			for k, v := range p.NodeSelector {
+				selector += fmt.Sprintf("      %s: %s\n", k, v)
+			}
 		}
 	}
 	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1

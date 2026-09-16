@@ -177,6 +177,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 			},
 		},
 	}
+	s.schedule(&job.Spec.Template.Spec)
 	return job
 }
 

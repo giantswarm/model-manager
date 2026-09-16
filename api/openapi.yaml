@@ -793,6 +793,21 @@ components:
           properties:
             cluster: { type: string }
             organization: { type: string }
+        gpuPool:
+          type: object
+          description: "kserve: the GPU node pool scheduling in effect — the pool taint tolerated and the pool label selected on the composed predictors, the download Jobs and the inventory scan pods (the discovery ConfigMap's `spec.gpuPool`, a registered document's `kserve.gpuPool` replacing it; docs/backends.md). Absent when none is configured"
+          properties:
+            taint:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string, example: nvidia.com/gpu }
+                value: { type: string, description: "empty: every value is tolerated (Exists)" }
+                effect: { type: string, enum: [NoSchedule, PreferNoSchedule, NoExecute], description: "empty: every effect" }
+            nodeSelector:
+              type: object
+              additionalProperties: { type: string }
+              example: { giantswarm.io/machine-pool: gpu01-gpu-l4 }
         version: { type: string, description: backend server version }
         endpoint: { type: string, description: backend endpoint as reached by model-manager }
         agentEndpoint:

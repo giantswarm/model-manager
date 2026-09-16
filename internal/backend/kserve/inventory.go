@@ -401,6 +401,7 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 			}},
 		},
 	}
+	s.schedule(&pod.Spec)
 	return pod
 }
 
