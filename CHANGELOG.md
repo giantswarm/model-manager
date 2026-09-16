@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- kserve: a GPU pool at scale-to-zero can be served (giantswarm/model-manager#90). When the pool selector (`spec.gpuPool.nodeSelector`) names a pool no node belongs to yet, `check_fit` answers `fits: true` without a node (`budgetSource: pool-scale-from-zero`, the reason says the fit is unverified) and `load_model` / `pull_model` proceed: the predictor carries the pool's toleration and selector, goes Pending, and the autoscaler launches the node. Before, `no eligible node` refused every load on an empty pool, so the first model could never be served on it. An explicit node, a pool whose nodes do not fit, or no pool selector keep the refusal.
+
 ### Added
 
 - `get_info` MCP tool: the build this server runs (`version` — the release, `dev` for an untagged local build —, `commit`, `built`), the names of its tools, the configured backends in order and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to — the same first call the other Agent Platform managers offer.
