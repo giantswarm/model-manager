@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -40,26 +41,48 @@ type fitPlan struct {
 // what the node's running InferenceServices already need; a pull only asks
 // whether the model can ever be served there.
 func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe bool) (*fitPlan, error) {
+	plan, idx, err := b.resolveFit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	note, err := b.sizeModel(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
+		return nil, err
+	}
+	if note != "" {
+		plan.Result.Reason += "; " + note
+	}
+	return plan, nil
+}
+
+// resolveFit turns the request into the plan's skeleton: the repository (the
+// model reference, else the preset's model), the preset that serves it and
+// the cache directory — plus the preset index the placement reads
+// reservations from.
+func (b *Backend) resolveFit(ctx context.Context, req backend.FitRequest) (*fitPlan, presetIndex, error) {
 	model := strings.TrimSpace(req.Model)
 	if model == "" && req.Preset == "" {
-		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+		return nil, presetIndex{}, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
 	}
 	repo, revision := splitRevision(model)
 
 	presets, _, err := b.presets(ctx)
 	if err != nil {
-		return nil, err
+		return nil, presetIndex{}, err
 	}
 	idx := indexPresets(presets)
 	p, err := idx.resolve(repo, req.Preset)
 	if err != nil {
-		return nil, err
+		return nil, idx, err
 	}
 	if p != nil && (repo == "" || repo == p.name()) {
 		repo = p.Spec.Model.ID
 	}
 	if !isRepoID(repo) {
-		return nil, fmt.Errorf("%w: %q is neither a Hugging Face repository (owner/name) nor a preset name", backend.ErrInvalid, model)
+		return nil, idx, fmt.Errorf("%w: %q is neither a Hugging Face repository (owner/name) nor a preset name", backend.ErrInvalid, model)
 	}
 
 	plan := &fitPlan{Preset: p, Repo: repo, Revision: revision}
@@ -75,21 +98,35 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	} else {
 		plan.Dir = dnsLabel(repo)
 	}
+	return plan, idx, nil
+}
 
-	// Size from the hub; the preset is the fallback when the hub cannot tell.
-	hub, err := b.hub.Model(ctx, repo)
+// sizeModel resolves the weights and what a pull downloads: from the hub —
+// the safetensors index, else the file tree — within the hub lookup timeout,
+// and from the preset's requirements when the hub cannot tell (gated without
+// a token, unreachable, not answering in time). It returns the note the
+// answer carries when the preset stood in for the hub.
+func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) {
+	res, p, repo := &plan.Result, plan.Preset, plan.Repo
+	// Bounded on the caller's context: a hub whose packets an egress policy
+	// drops must leave the fallback time to answer within the caller's
+	// meta-tool deadline (giantswarm/model-manager#88).
+	hctx, cancel := b.hubContext(ctx)
+	defer cancel()
+	var note string
+	hub, err := b.hub.Model(hctx, repo)
 	switch {
 	case err == nil:
 		plan.Hub = hub
 		res.Gated = hub.isGated()
 		res.Private = hub.Private
-		files, err := b.hub.Tree(ctx, repo, revision)
+		files, err := b.hub.Tree(hctx, repo, plan.Revision)
 		if err != nil {
-			return nil, err
+			return "", hubFailure(err, b.opts.HFTimeout)
 		}
 		plan.Files = files
 		res.DownloadBytes = downloadTotal(files, b.opts.DownloadIgnorePatterns)
-		total, err := b.hub.SafetensorsTotal(ctx, repo, revision, files)
+		total, err := b.hub.SafetensorsTotal(hctx, repo, plan.Revision, files)
 		if err != nil {
 			b.log.Warn("reading the safetensors index failed; summing the tree instead", "model", repo, "error", err)
 		}
@@ -102,15 +139,17 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 			res.WeightsBytes, res.WeightsSource = p.weightsBytes(), weightsSourcePreset
 		}
 	case p != nil:
-		// Gated without token, hub down: the preset's numbers still allow a fit check.
+		// Gated without token, hub down or silent: the preset's numbers still
+		// allow a fit check — and the answer says so.
 		b.log.Warn("hub lookup failed; using the preset's requirements", "model", repo, "error", err)
 		res.WeightsBytes, res.WeightsSource = p.weightsBytes(), weightsSourcePreset
 		res.Gated = errors.Is(err, backend.ErrInvalid)
+		note = "weights from the preset's requirements: " + describeHubFailure(err, b.opts.HFTimeout)
 	default:
-		return nil, err
+		return "", hubFailure(err, b.opts.HFTimeout)
 	}
 	if res.WeightsBytes <= 0 {
-		return nil, fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
+		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
 	}
 	if p != nil {
 		res.OverheadBytes = p.overheadBytes(b.opts.DefaultOverheadGiB)
@@ -118,16 +157,52 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 		res.OverheadBytes = gibToBytes(b.opts.DefaultOverheadGiB)
 	}
 	res.RequiredBytes = res.WeightsBytes + res.OverheadBytes
+	return note, nil
+}
 
-	// Target node.
+// hubContext bounds the hub lookups of one call (fit check, search) by
+// opts.HFTimeout.
+func (b *Backend) hubContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, b.opts.HFTimeout)
+}
+
+// hubFailure is the error a call answers when a hub lookup fails: a hub that
+// did not answer within the lookup timeout is named as such; every other
+// error passes through.
+func hubFailure(err error, timeout time.Duration) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", describeHubFailure(err, timeout), err)
+	}
+	return err
+}
+
+// describeHubFailure words a failed hub lookup for a person: the hub did not
+// answer in time, refused the repository (gated or private), or failed.
+func describeHubFailure(err error, timeout time.Duration) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("the Hugging Face Hub did not answer within %s", timeout)
+	case errors.Is(err, backend.ErrInvalid):
+		return "the Hugging Face Hub refused the repository metadata (gated or private)"
+	default:
+		return "the Hugging Face Hub lookup failed (" + err.Error() + ")"
+	}
+}
+
+// placeModel picks the node the model is checked against and writes the
+// verdict into the plan: the explicit node, else the eligible node with the
+// most free budget, cache nodes first; a GPU pool at scale-to-zero answers
+// without a node.
+func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
+	res, p := &plan.Result, plan.Preset
 	loc, err := b.cacheNodes(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	plan.CacheLocal = len(loc.Nodes) > 0
 	nodes, err := b.nodes(ctx, loc)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	reserved := map[string]int64{}
 	if forServe {
@@ -147,11 +222,11 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 			res.BudgetSource = budgetSourcePoolScaleFromZero
 			res.Reason = fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero — the predictor waits for its node; the fit of %s weights + %s overhead = %s against the pool's accelerator is unverified",
 				formatSelector(sel), humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes))
-			return plan, nil
+			return nil
 		}
 		res.Fits = false
 		res.Reason = why
-		return plan, nil
+		return nil
 	}
 	best := candidates[0]
 	bestFree := best.Budget - reserved[best.Name]
@@ -170,7 +245,7 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	}
 	if best.Budget <= 0 {
 		res.Reason = fmt.Sprintf("node %s reports no memory budget (%s)", best.Name, best.BudgetSource)
-		return plan, nil
+		return nil
 	}
 	limit := res.BudgetBytes
 	if forServe {
@@ -187,8 +262,8 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
-	res.Cached = b.isCached(ctx, best.Name, plan.Dir, repo, loc)
-	return plan, nil
+	res.Cached = b.isCached(ctx, best.Name, plan.Dir, plan.Repo, loc)
+	return nil
 }
 
 // anyNodeMatches says whether one of the nodes carries every label of the

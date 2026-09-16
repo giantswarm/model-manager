@@ -112,6 +112,9 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		inv:  newInventory(),
 		log:  log,
 	}
+	// The client's timeout is the ceiling of one exchange; the interactive
+	// lookups (fit check, search) are bounded by opts.HFTimeout on their
+	// context, so a hub that does not answer cannot outlive the caller.
 	b.hub = newHubClient(opts.HFEndpoint, &http.Client{Timeout: 30 * time.Second}, b.hubToken)
 	b.agentHTTP = &http.Client{Timeout: opts.InventoryTimeout}
 	b.scan = b.scanNode
@@ -668,9 +671,11 @@ func (b *Backend) Search(ctx context.Context, query string, limit int) ([]backen
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	hits, err := b.hub.Search(ctx, query, limit)
+	hctx, cancel := b.hubContext(ctx)
+	defer cancel()
+	hits, err := b.hub.Search(hctx, query, limit)
 	if err != nil {
-		return nil, err
+		return nil, hubFailure(err, b.opts.HFTimeout)
 	}
 	if presets, _, err := b.presets(ctx); err == nil {
 		idx := indexPresets(presets)

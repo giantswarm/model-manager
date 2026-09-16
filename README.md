@@ -435,7 +435,12 @@ scheduling by the registered backend document (`docs/backends.md`).
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's InferenceService
   mounts — reporting bytes on disk against the repository size. Gated models
-  need a token Secret (`--kserve-hf-token-secret`).
+  need a token Secret (`--kserve-hf-token-secret`). The hub lookups of one
+  fit check or search are bounded by `--kserve-hf-timeout` (`kserve.hf.timeout`,
+  default 4 s): a hub that does not answer — egress blocked — lets `fit-check`
+  fall back to the preset's requirements in time for the caller
+  (`weightsSource: preset`; `reason` says the hub did not answer within the
+  timeout), and a model no preset serves fails with that message.
 - **Serve / stop** — `load` composes the serving object from the preset
   after a fit check against the node's free budget; `unload` deletes it (the
   cache persists); `delete` removes the cache directory (refused while

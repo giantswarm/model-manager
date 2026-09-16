@@ -37,6 +37,11 @@ const (
 	DefaultPresetSelector      = "agent-platform.giantswarm.io/serving-preset=true"
 	DefaultHFEndpoint          = "https://huggingface.co"
 	DefaultHFTokenSecretKey    = "token"
+	// DefaultHFTimeout bounds the hub lookups of one fit check or search: the
+	// hub answers in well under a second when reachable, and a hub that does
+	// not answer must leave the preset fallback time to answer within a
+	// meta-tool deadline (muster: 10 s).
+	DefaultHFTimeout = 4 * time.Second
 	// DefaultDownloadImage is the KServe storage-initializer: a pre-warm
 	// download then produces exactly the files an InferenceService's own
 	// download would, so a later start finds them and skips the download.
@@ -436,6 +441,9 @@ func applyDefaults(o *backend.KServeOptions) {
 	}
 	if o.InventoryTimeout <= 0 {
 		o.InventoryTimeout = DefaultInventoryTimeout
+	}
+	if o.HFTimeout <= 0 {
+		o.HFTimeout = DefaultHFTimeout
 	}
 	if o.JobTTL <= 0 {
 		o.JobTTL = DefaultJobTTL

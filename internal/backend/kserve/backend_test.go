@@ -156,6 +156,56 @@ func TestFitCheck(t *testing.T) {
 	assert.True(t, res.Fits, res.Reason)
 }
 
+// TestFitCheckHubUnreachable: a hub that never answers (an egress policy
+// dropping the SYNs; here a handler that blocks until the client gives up)
+// must not outlive the caller's meta-tool deadline — the fit check answers
+// from the preset's requirements within the hub lookup timeout and says so,
+// and a model no preset serves fails within the same bound with the same
+// words (giantswarm/model-manager#88).
+func TestFitCheckHubUnreachable(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(silent.Close)
+	f.b.hub.base = silent.URL
+	f.b.opts.HFTimeout = 200 * time.Millisecond
+	const bound = 2 * time.Second // far below the client's 30 s, generous for CI
+
+	start := time.Now()
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), bound, "the fit check answers within the hub timeout")
+	assert.Equal(t, weightsSourcePreset, res.WeightsSource)
+	assert.Equal(t, tinyRepo, res.Model)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "fit within")
+	assert.Contains(t, res.Reason, "; weights from the preset's requirements: the Hugging Face Hub did not answer within 200ms")
+	assert.False(t, res.Gated, "not answering is not a refusal")
+	assert.Zero(t, res.DownloadBytes, "nothing sized the download")
+
+	// The same bound without a preset to fall back to: an error, in time,
+	// that says why.
+	start = time.Now()
+	_, err = f.b.FitCheck(ctx, backend.FitRequest{Model: presetlessRepo})
+	assert.Less(t, time.Since(start), bound)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "the Hugging Face Hub did not answer within 200ms")
+
+	// Search is bounded the same way.
+	start = time.Now()
+	_, err = f.b.Search(ctx, "tiny", 5)
+	assert.Less(t, time.Since(start), bound)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "did not answer within 200ms")
+
+	// A hub that answers keeps sizing from the hub: the bound changes nothing.
+	f.b.hub.base = f.hub.srv.URL
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.Equal(t, weightsSourceTree, res.WeightsSource)
+	assert.NotContains(t, res.Reason, "preset's requirements")
+}
+
 func TestListModelsMergesCacheAndServed(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

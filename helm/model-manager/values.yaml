@@ -330,6 +330,13 @@ kserve:
   hf:
     # -- Hugging Face Hub base URL (search, repository metadata, sizes).
     endpoint: https://huggingface.co
+    # -- Time budget of the Hugging Face Hub lookups of one fit check
+    # (repository metadata, file tree, safetensors index) or search. The hub
+    # answers in well under a second when reachable; when it does not answer
+    # (egress blocked), `check_fit` falls back to the preset's requirements
+    # within this budget, so keep it below the caller's meta-tool deadline
+    # (muster: 10s). Download Jobs are not affected.
+    timeout: 4s
     tokenSecret:
       # -- Secret in the serving namespace holding a Hugging Face token for
       # gated repositories (read by model-manager, mounted into download
