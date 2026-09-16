@@ -15,6 +15,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/service"
@@ -47,7 +48,7 @@ func newRegistrationFixture(t *testing.T, static ...backend.Backend) *registrati
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
 	store := registry.NewStore(func(context.Context) kubernetes.Interface { return client }, testNamespace)
-	srv := NewMCPServer(svc, "test", WithBackendStore(store))
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithBackendStore(store))
 	t.Cleanup(cancel)
 	return &registrationFixture{client: client, svc: svc, wirer: fw, srv: srv, cancel: cancel}
 }
@@ -228,7 +229,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 
 func TestNoStoreRefusesRegistration(t *testing.T) {
 	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
-	srv := NewMCPServer(svc, "test")
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 	text, isErr := callTool(t, srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://x"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "backend registration needs Kubernetes access")

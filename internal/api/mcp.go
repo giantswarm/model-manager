@@ -9,6 +9,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -16,6 +17,7 @@ import (
 // MCP tool names. Through muster they appear as x_<server>_<tool>, e.g.
 // x_model-manager_list_models.
 const (
+	ToolGetInfo          = "get_info"
 	ToolGetBackend       = "get_backend"
 	ToolListBackends     = "list_backends"
 	ToolListModels       = "list_models"
@@ -40,7 +42,7 @@ const (
 // ToolNames lists every tool the MCP server registers.
 func ToolNames() []string {
 	return []string{
-		ToolGetBackend, ToolListBackends, ToolListModels, ToolGetModel, ToolListLoadedModels,
+		ToolGetInfo, ToolGetBackend, ToolListBackends, ToolListModels, ToolGetModel, ToolListLoadedModels,
 		ToolPullModel, ToolLoadModel, ToolUnloadModel, ToolDeleteModel,
 		ToolWireModel, ToolUnwireModel, ToolListJobs, ToolGetJob, ToolCancelJob,
 		ToolListPresets, ToolSearchModels, ToolCheckFit, ToolListNodes,
@@ -66,18 +68,41 @@ func backendArg(what string) mcp.ToolOption {
 	return mcp.WithString(argBackend, mcp.Description("Backend (ollama|kserve|lemonade|lmstudio) "+what+"; one model-manager may run several — list_backends names them. Optional when one backend is configured."))
 }
 
+// Info is get_info's answer: the build this server runs, the tools it
+// registers, the backends it holds and where it wires models into kagent.
+type Info struct {
+	// Version is the release (the image tag), dev for an untagged local
+	// build; Commit and Built identify the source and the build time.
+	Version string   `json:"version"`
+	Commit  string   `json:"commit"`
+	Built   string   `json:"built"`
+	Tools   []string `json:"tools"`
+	// Backends names every configured backend in order, the first being the
+	// default; empty on an installation that has registered none yet.
+	Backends []backend.Name `json:"backends"`
+	// Wiring describes where ModelConfigs are created; absent when agent
+	// wiring is disabled.
+	Wiring *service.WiringInfo `json:"wiring,omitempty"`
+}
+
 // NewMCPServer builds an MCP server exposing the same operations as the REST
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
-func NewMCPServer(svc *service.Service, version string, opts ...Option) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer("model-manager", version,
+// build is what get_info and the MCP server identity report as the version.
+func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *mcpserver.MCPServer {
+	s := mcpserver.NewMCPServer("model-manager", build.Version,
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet, and list_backends is then empty. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)
-	t := &tools{svc: svc}
+	t := &tools{svc: svc, build: build}
 	for _, o := range opts {
 		o(t)
 	}
 	t.registerBackendTools(s)
+
+	s.AddTool(mcp.NewTool(ToolGetInfo,
+		mcp.WithDescription("Report this server's build (version — the release, or dev for a local build —, commit and build time), the names of its tools, the configured backends in order (the first is the default) and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to."),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), t.getInfo)
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
 		mcp.WithDescription("Report one serving backend (ollama|kserve|lemonade|lmstudio) — the named one, else the default (first configured) — with its health/version, its load semantics, the capability flags clients must honor, and the names of every configured backend."),
@@ -208,7 +233,16 @@ func NewMCPServer(svc *service.Service, version string, opts ...Option) *mcpserv
 
 type tools struct {
 	svc   *service.Service
+	build buildinfo.Info
 	store *registry.Store // nil: no Kubernetes access, registration tools refuse
+}
+
+func (t *tools) getInfo(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	names := t.svc.Names()
+	if names == nil {
+		names = []backend.Name{}
+	}
+	return jsonResult(Info{Version: t.build.Version, Commit: t.build.Commit, Built: t.build.Date, Tools: ToolNames(), Backends: names, Wiring: t.svc.Wiring()})
 }
 
 // withErrorsResult adds the per-backend failures of an aggregate read.

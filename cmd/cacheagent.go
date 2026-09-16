@@ -60,7 +60,7 @@ func runCacheAgent(ctx context.Context, o *cacheAgentOptions) error {
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("cache agent listening", "version", version, "listen", o.listen, "root", o.root, "node", o.node)
+		log.Info("cache agent listening", "version", build.Version, "listen", o.listen, "root", o.root, "node", o.node)
 		errCh <- srv.ListenAndServe()
 	}()
 	select {

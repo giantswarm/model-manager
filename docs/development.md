@@ -10,7 +10,7 @@ make helm-docs      # regenerate helm/model-manager/README.md
 
 ## Layout
 
-- `cmd/` — cobra CLI (`serve`, `version`).
+- `cmd/` — cobra CLI (`serve`, `cache-agent`, `version`). The version is the tag at HEAD when the binary is built from a tagged checkout (`internal/buildinfo`, from the Go build info; no `-ldflags -X` needed), `dev` for a build without version control information.
 - `internal/backend` — the `Backend` interface, capability flags, shared types
   and the driver registry, plus the optional interfaces a driver may implement
   (`PresetLister`, `Searcher`, `FitChecker`, `NodeLister`, `ServeLifecycle`,

@@ -1,16 +1,21 @@
 package main
 
-import "github.com/giantswarm/model-manager/cmd"
+import (
+	"github.com/giantswarm/model-manager/cmd"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
+)
 
-// Set by the build via ldflags (-X main.version=...).
+// Set by the build via ldflags (-X main.version=...); what a build leaves at
+// these defaults is resolved from the Go toolchain's build info (the tag at
+// HEAD, the commit, its time), so a tagged build reports its release without
+// a build flag.
 var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+	version = buildinfo.DevVersion
+	commit  = buildinfo.UnknownCommit
+	date    = buildinfo.UnknownDate
 )
 
 func main() {
-	cmd.SetVersion(version)
-	cmd.SetBuildInfo(commit, date)
+	cmd.SetBuild(buildinfo.Read(version, commit, date))
 	cmd.Execute()
 }

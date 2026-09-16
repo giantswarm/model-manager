@@ -318,11 +318,11 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			DownstreamOAuth:               o.downstreamOAuth,
 		}
 	}
-	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, version, mcpOpts...), log)
+	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, build, mcpOpts...), log)
 	if err != nil {
 		return err
 	}
-	log.Info("model-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth)
+	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
