@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 	"github.com/giantswarm/model-manager/internal/wiring"
@@ -407,7 +408,7 @@ func TestServingMCPTools(t *testing.T) {
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny"}
 	fw := newFakeWirer()
 	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
-	srv := NewMCPServer(svc, "test")
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	out, isErr := callTool(t, srv, ToolListPresets, nil)
 	require.False(t, isErr, out)
@@ -445,7 +446,7 @@ func TestServingMCPTools(t *testing.T) {
 	assert.Contains(t, out, "wired when loaded")
 
 	// The ollama-shaped fake answers unsupported for the kserve tools.
-	plain := NewMCPServer(service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), nil, nil, service.Config{}, nil), "test")
+	plain := NewMCPServer(service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), nil, nil, service.Config{}, nil), buildinfo.Info{Version: "test"})
 	for _, tool := range []string{ToolListPresets, ToolListNodes} {
 		out, isErr = callTool(t, plain, tool, nil)
 		assert.True(t, isErr, tool)

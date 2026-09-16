@@ -252,6 +252,10 @@ func (s *Service) Source(name backend.Name) string {
 	return s.sources[name]
 }
 
+// Wiring describes where ModelConfigs are created, nil when agent wiring is
+// disabled.
+func (s *Service) Wiring() *WiringInfo { return s.wiring }
+
 // Names lists the configured backends in order.
 func (s *Service) Names() []backend.Name {
 	all := s.all()

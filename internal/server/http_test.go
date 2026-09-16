@@ -11,6 +11,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -40,7 +41,7 @@ func (downBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 
 func TestReadinessDoesNotTrackBackend(t *testing.T) {
 	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
-	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, "test"), nil)
+	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

@@ -7,22 +7,17 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 )
 
-var (
-	version     = "dev"
-	buildCommit = "unknown"
-	buildDate   = "unknown"
-)
+// build is the running binary's identity: the release version, the commit
+// and the build time, resolved by main from the ldflags values and the Go
+// build info.
+var build = buildinfo.Info{Version: buildinfo.DevVersion, Commit: buildinfo.UnknownCommit, Date: buildinfo.UnknownDate}
 
-// SetVersion records the build version (set from main via ldflags).
-func SetVersion(v string) { version = v }
-
-// SetBuildInfo records the commit and build date.
-func SetBuildInfo(commit, date string) {
-	buildCommit = commit
-	buildDate = date
-}
+// SetBuild records the build identity the commands report.
+func SetBuild(b buildinfo.Info) { build = b }
 
 func newRootCmd() *cobra.Command {
 	var verbose bool
@@ -46,7 +41,7 @@ REST/JSON (portal) and as MCP tools (muster) from one process.`,
 		},
 	}
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
-	root.Version = version
+	root.Version = build.Version
 	root.SetVersionTemplate("model-manager version {{.Version}}\n")
 	root.AddCommand(newServeCmd(), newCacheAgentCmd(), newVersionCmd())
 	return root
@@ -57,7 +52,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, _ []string) {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "model-manager version %s\n  commit: %s\n  built:  %s\n", version, buildCommit, buildDate)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "model-manager version %s\n  commit: %s\n  built:  %s\n", build.Version, build.Commit, build.Date)
 		},
 	}
 }
