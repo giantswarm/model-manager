@@ -54,3 +54,72 @@ spec:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec.kserve.gpuPool.taint.key: required")
 }
+
+// The pool's instance shapes: the field cluster-manager writes so the fit
+// check can judge a model against a pool that has no node yet.
+func TestKServeDocumentGPUPoolInstances(t *testing.T) {
+	raw := `apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: ModelBackend
+spec:
+  kind: kserve
+  source: cluster-manager
+  kserve:
+    target: {cluster: local, servingNamespace: model-serving}
+    gpuPool:
+      taint: {key: nvidia.com/gpu, effect: NoSchedule}
+      nodeSelector: {giantswarm.io/machine-pool: c1-gpu01}
+      instances:
+        - {instanceType: g6.xlarge, size: xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}
+        - {instanceType: g6.2xlarge, vcpu: 8, memoryGiB: 32, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 7, usableMemoryGiB: 27.1}
+`
+	d, err := ParseDocument([]byte(raw))
+	require.NoError(t, err)
+	want := []InstanceShape{
+		{InstanceType: "g6.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 16, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 3, UsableMemoryGiB: 11.9},
+		{InstanceType: "g6.2xlarge", VCPU: 8, MemoryGiB: 32, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 7, UsableMemoryGiB: 27.1},
+	}
+	assert.Equal(t, want, d.Spec.KServe.GPUPool.Instances)
+	assert.Equal(t, want, d.Options(Options{}).KServe.GPUPool.Instances, "the shapes reach the option")
+	assert.Equal(t, "xlarge", want[0].SizeName())
+	assert.Equal(t, "2xlarge", want[1].SizeName(), "size defaults to the part after the family")
+	assert.Equal(t, "custom", InstanceShape{InstanceType: "custom"}.SizeName())
+	assert.Equal(t, 96, InstanceShape{GPUs: 4, GPUMemoryGiB: 24}.GPUMemoryTotalGiB())
+
+	rendered, err := d.Render()
+	require.NoError(t, err)
+	again, err := ParseDocument(rendered)
+	require.NoError(t, err)
+	assert.Equal(t, d, again, "the shapes survive a render round trip")
+
+	for _, tc := range []struct{ shape, field string }{
+		{`{size: xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}`, "instances[0].instanceType: required"},
+		{`{instanceType: g6.xlarge, vcpu: 0, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}`, "instances[0].vcpu: must be positive"},
+		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: -1}`, "instances[0].usableMemoryGiB: must be positive"},
+		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, family: g6}`, "unknown field"},
+	} {
+		_, err := ParseDocument([]byte(`apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: ModelBackend
+spec:
+  kind: kserve
+  kserve:
+    target: {servingNamespace: model-serving}
+    gpuPool:
+      instances:
+        - ` + tc.shape + "\n"))
+		require.Error(t, err, tc.shape)
+		assert.Contains(t, err.Error(), tc.field)
+	}
+	_, err = ParseDocument([]byte(`apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: ModelBackend
+spec:
+  kind: kserve
+  kserve:
+    target: {servingNamespace: model-serving}
+    gpuPool:
+      instances:
+        - {instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}
+        - {instanceType: g6.2xlarge, vcpu: 8, memoryGiB: 32, gpus: 0, gpuMemoryGiB: 24, usableVcpu: 7, usableMemoryGiB: 27.1}
+`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.kserve.gpuPool.instances[1].gpus: must be positive", "the failing entry is named")
+}

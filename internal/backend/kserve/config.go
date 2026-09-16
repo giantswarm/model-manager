@@ -294,6 +294,16 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	if len(o.GPUPool.NodeSelector) > 0 {
 		s.GPUPool.NodeSelector = o.GPUPool.NodeSelector
 	}
+	if len(o.GPUPool.Instances) > 0 {
+		s.GPUPool.Instances = o.GPUPool.Instances
+	}
+	// The document's shapes were validated when it was read; discovery's
+	// come from chart values nothing has checked. A list with a bad shape
+	// is dropped rather than judged on: the answer falls back to unverified.
+	if err := backend.ValidateInstances(s.GPUPool.Instances); err != nil {
+		c.log.Warn("ignoring the GPU pool's instance shapes", "error", "gpuPool."+err.Error())
+		s.GPUPool.Instances = nil
+	}
 	if s.PresetNamespace == "" {
 		s.PresetNamespace = s.Namespace
 	}

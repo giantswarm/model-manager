@@ -122,6 +122,93 @@ type KServeSpec struct {
 type GPUPool struct {
 	Taint        *Taint            `json:"taint,omitempty"`
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Instances are the sizes the pool launches — the node as the provider
+	// lists it and what it leaves a predictor — in the shape cluster-manager's
+	// create_node_pool answer lists under `sizes`. Known, the fit check
+	// judges a model against them while the pool has no node (a Karpenter
+	// pool at scale-to-zero) instead of answering unverified, and a load no
+	// size of the pool could host is refused before a predictor is created
+	// (giantswarm/model-manager#97). Unknown, nothing changes.
+	Instances []InstanceShape `json:"instances,omitempty"`
+}
+
+// InstanceShape is one size of a GPU pool: the node as the provider lists
+// it, and what a predictor may request on it.
+type InstanceShape struct {
+	// InstanceType is the provider's name of the size (g6.xlarge); Size the
+	// size within its family (xlarge), what the pool's `sizes` names.
+	// Defaults to the part of InstanceType after its first dot.
+	InstanceType string `json:"instanceType"`
+	Size         string `json:"size,omitempty"`
+	// VCPU and MemoryGiB are the node's nominal shape; GPUs its accelerators
+	// and GPUMemoryGiB the memory of one of them.
+	VCPU         int `json:"vcpu"`
+	MemoryGiB    int `json:"memoryGiB"`
+	GPUs         int `json:"gpus"`
+	GPUMemoryGiB int `json:"gpuMemoryGiB"`
+	// UsableVCPU and UsableMemoryGiB are what a predictor may request on a
+	// node of this size once the kubelet's reservations and the fleet's
+	// daemonsets have theirs (a g6.xlarge: 3 vCPU / 11.9 GiB of 4 / 16).
+	UsableVCPU      float64 `json:"usableVcpu"`
+	UsableMemoryGiB float64 `json:"usableMemoryGiB"`
+}
+
+// SizeName is the size a person knows the shape by: Size, else the part of
+// InstanceType after its first dot (g6.xlarge → xlarge), else InstanceType.
+func (s InstanceShape) SizeName() string {
+	if s.Size != "" {
+		return s.Size
+	}
+	if _, size, ok := strings.Cut(s.InstanceType, "."); ok && size != "" {
+		return size
+	}
+	return s.InstanceType
+}
+
+// GPUMemoryTotalGiB is the GPU memory across the shape's GPUs.
+func (s InstanceShape) GPUMemoryTotalGiB() int { return s.GPUs * s.GPUMemoryGiB }
+
+// Validate checks the shape: an instance type and positive numbers.
+func (s InstanceShape) Validate() error {
+	if strings.TrimSpace(s.InstanceType) == "" {
+		return errors.New("instanceType: required")
+	}
+	for _, f := range []struct {
+		name  string
+		value float64
+	}{
+		{"vcpu", float64(s.VCPU)}, {"memoryGiB", float64(s.MemoryGiB)},
+		{"gpus", float64(s.GPUs)}, {"gpuMemoryGiB", float64(s.GPUMemoryGiB)},
+		{"usableVcpu", s.UsableVCPU}, {"usableMemoryGiB", s.UsableMemoryGiB},
+	} {
+		if f.value <= 0 {
+			return fmt.Errorf("%s: must be positive, got %v", f.name, f.value)
+		}
+	}
+	return nil
+}
+
+// Validate checks the pool block: the taint and every instance shape.
+// Errors name the field relative to the block (taint.key: required,
+// instances[1].vcpu: must be positive).
+func (p *GPUPool) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if err := p.Taint.Validate(); err != nil {
+		return fmt.Errorf("taint.%w", err)
+	}
+	return ValidateInstances(p.Instances)
+}
+
+// ValidateInstances checks a list of shapes, naming the failing entry.
+func ValidateInstances(shapes []InstanceShape) error {
+	for i, s := range shapes {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("instances[%d].%w", i, err)
+		}
+	}
+	return nil
 }
 
 // Taint is a node taint as a toleration input: an empty Value tolerates
@@ -308,10 +395,8 @@ func (s *DocumentSpec) validateKServe() error {
 	if t.ServingNamespace == "" {
 		return errors.New("spec.kserve.target.servingNamespace: required")
 	}
-	if p := s.KServe.GPUPool; p != nil {
-		if err := p.Taint.Validate(); err != nil {
-			return fmt.Errorf("spec.kserve.gpuPool.taint.%w", err)
-		}
+	if err := s.KServe.GPUPool.Validate(); err != nil {
+		return fmt.Errorf("spec.kserve.gpuPool.%w", err)
 	}
 	if t.Local() {
 		if t.APIServer != "" || t.CABundle != "" {
