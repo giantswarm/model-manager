@@ -13,6 +13,11 @@ const (
 	weightsSourceIndex  = "safetensors-index"
 	weightsSourceTree   = "tree"
 	weightsSourcePreset = "preset"
+	// budgetSourcePoolScaleFromZero marks a fit answered without a node: the
+	// GPU pool (spec.gpuPool.nodeSelector) has no node yet and scales from
+	// zero once a predictor is pending, so the fit is against the pool, not
+	// a node's budget (giantswarm/model-manager#90).
+	budgetSourcePoolScaleFromZero = "pool-scale-from-zero"
 )
 
 // fitPlan is a fit check plus everything the caller needs afterwards.
@@ -130,6 +135,20 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	}
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 {
+		// A GPU pool at scale-to-zero (giantswarm/model-manager#90): the pool
+		// selector names a pool no node belongs to yet. Serving is what
+		// brings the node — the predictor carries the pool's toleration and
+		// selector, goes Pending, and the autoscaler launches it — so the
+		// answer is yes, without a node, and says the fit is unverified. An
+		// explicit node, a pool with nodes that do not fit, or no pool at
+		// all keep the refusal.
+		if sel := b.cfg.settings(ctx).GPUPool.NodeSelector; req.Node == "" && len(sel) > 0 && !anyNodeMatches(nodes, sel) {
+			res.Fits = true
+			res.BudgetSource = budgetSourcePoolScaleFromZero
+			res.Reason = fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero — the predictor waits for its node; the fit of %s weights + %s overhead = %s against the pool's accelerator is unverified",
+				formatSelector(sel), humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes))
+			return plan, nil
+		}
 		res.Fits = false
 		res.Reason = why
 		return plan, nil
@@ -170,6 +189,17 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	}
 	res.Cached = b.isCached(ctx, best.Name, plan.Dir, repo, loc)
 	return plan, nil
+}
+
+// anyNodeMatches says whether one of the nodes carries every label of the
+// selector.
+func anyNodeMatches(nodes []nodeBudget, selector map[string]string) bool {
+	for _, n := range nodes {
+		if matchesSelector(n.Labels, selector) {
+			return true
+		}
+	}
+	return false
 }
 
 func reservedNote(reserved int64) string {

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- kserve: a GPU pool at scale-to-zero can be served (giantswarm/model-manager#90). When the pool selector (`spec.gpuPool.nodeSelector`) names a pool no node belongs to yet, `check_fit` answers `fits: true` without a node (`budgetSource: pool-scale-from-zero`, the reason says the fit is unverified) and `load_model` / `pull_model` proceed: the predictor carries the pool's toleration and selector, goes Pending, and the autoscaler launches the node. Before, `no eligible node` refused every load on an empty pool, so the first model could never be served on it. An explicit node, a pool whose nodes do not fit, or no pool selector keep the refusal.
+
 ### Added
 
 - kserve: the GPU node pool's scheduling as one input, `gpuPool` — the pool's taint (`nvidia.com/gpu` `NoSchedule`, the taint a platform-created pool carries) tolerated and the pool's label (`giantswarm.io/machine-pool=<cluster>-<pool>`) selected on everything the driver schedules onto the pool: the composed `LLMInferenceService` / `InferenceService` predictors (the pool toleration first, the preset's `scheduling.tolerations` after it), the download Jobs and the inventory scan pods (the toleration always, the selector unless the pod is pinned to a cache node). Read from the discovery ConfigMap's `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the platform chart's `modelServing.gpuPool.*`); a registered backend document's `spec.kserve.gpuPool` (and `add_backend`'s `gpuPoolTaint` / `gpuPoolNodeSelector`) replaces it. `GET /api/v1/nodes` reports a tainted GPU node as capacity once its taint is tolerated and names an untolerated `NoSchedule`/`NoExecute` taint or a node outside the pool's selector in `eligibilityReason`; `GET /api/v1/backend` reports the input as `gpuPool`. Unset, nothing changes.

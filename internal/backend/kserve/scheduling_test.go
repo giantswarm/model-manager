@@ -183,3 +183,43 @@ func TestGPUPoolOptionOverridesDiscovery(t *testing.T) {
 	assert.Equal(t, &backend.Taint{Key: "dedicated", Value: "llm", Effect: "NoExecute"}, s.GPUPool.Taint, "the document's taint")
 	assert.Equal(t, map[string]string{poolLabel: poolName}, s.GPUPool.NodeSelector, "discovery's selector stays")
 }
+
+// TestFitCheckPoolScalesFromZero: the pool selector names a pool no node
+// belongs to yet (a Karpenter pool at scale-to-zero). The fit check answers
+// yes without a node and says so; Load creates the serving object, whose
+// pending predictor is what brings the node. An explicit node keeps the
+// refusal, and once a pool node exists the fit is against that node.
+func TestFitCheckPoolScalesFromZero(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput(), redirectPolicy: false})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Equal(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+	assert.Contains(t, res.Reason, "no node in the GPU pool yet ("+poolLabel+"="+poolName+"): the pool scales from zero")
+	assert.Contains(t, res.Reason, "unverified")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo, Node: testGPUNode})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "an explicit node outside the pool is refused as before")
+	assert.Contains(t, res.Reason, "outside the GPU pool node selector")
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	isvcs, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, isvcs.Items, 1, "the serving object exists; its pending predictor brings the pool's node")
+	_, pinned, _ := unstructured.NestedString(isvcs.Items[0].Object, "spec", "predictor", "nodeName")
+	assert.False(t, pinned, "no node pin: the pool decides")
+
+	// With a node in the pool the fit is against that node again.
+	_, err = f.cs.CoreV1().Nodes().Create(ctx, taintedPoolNode(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	f.b.inv.invalidate()
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.Equal(t, poolNode, res.Node)
+	assert.NotEqual(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+}
