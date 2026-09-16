@@ -33,7 +33,6 @@ const (
 	// downloadEntrypoint is the KServe storage-initializer's entrypoint
 	// (src_uri dest_path pairs).
 	downloadEntrypoint = "/storage-initializer/scripts/initializer-entrypoint"
-	downloadUID        = int64(1000)
 )
 
 // downloadScript wraps the storage-initializer so progress (apparent bytes in
@@ -75,10 +74,29 @@ func (p downloadPlan) storageURI() string {
 	return "hf://" + p.Repo
 }
 
-// buildJob composes the download Job: an init container (root) creates the
-// cache directory world-writable — the same step the modelServing Kyverno
-// policy's hf-cache-init container performs for InferenceServices — and the
-// storage-initializer downloads into it as its own uid.
+// cacheInitScript creates the download's cache directory and the markers
+// directory world-writable — the same step the modelServing Kyverno policy's
+// hf-cache-init container performs for a predictor — as the cache uid: the
+// claim's fsGroup makes the claim root writable for it, and `mkdir -m` leaves
+// a directory that already exists (a predictor's init container created it)
+// untouched instead of failing a chmod on someone else's directory. A root
+// the fsGroup did not reach fails with the reason, not with the download's
+// first write.
+func cacheInitScript(dirs ...string) string {
+	quoted := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		quoted = append(quoted, fmt.Sprintf("%q", d))
+	}
+	return `set -eu
+for d in ` + strings.Join(quoted, " ") + `; do
+  mkdir -m 0777 -p "$d" && [ -w "$d" ] || { echo "cache directory $d is not writable by uid $(id -u): the cache claim's volume did not apply the pod's fsGroup"; exit 1; }
+done`
+}
+
+// buildJob composes the download Job: an init container creates the cache
+// directory (cacheInitScript) and the storage-initializer downloads into it,
+// both as the cache uid within the restricted Pod Security Standard
+// (security.go).
 func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 	dst := cacheMount + "/" + plan.Dir
 	markers := cacheMount + "/" + markersDir
@@ -129,20 +147,12 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 					RestartPolicy:                corev1.RestartPolicyNever,
 					AutomountServiceAccountToken: ptr.To(false),
 					NodeName:                     plan.Node,
+					SecurityContext:              cachePodSecurityContext(),
 					InitContainers: []corev1.Container{{
-						Name:    "hf-cache-init",
-						Image:   b.opts.InitImage,
-						Command: []string{scriptShell, "-ec", fmt.Sprintf("mkdir -p %q %q && chmod 0777 %q %q", dst, markers, dst, markers)},
-						SecurityContext: &corev1.SecurityContext{
-							RunAsUser:                ptr.To[int64](0),
-							RunAsNonRoot:             ptr.To(false),
-							AllowPrivilegeEscalation: ptr.To(false),
-							ReadOnlyRootFilesystem:   ptr.To(true),
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
-								Add:  []corev1.Capability{"CHOWN", "DAC_OVERRIDE", "FOWNER"},
-							},
-						},
+						Name:            "hf-cache-init",
+						Image:           b.opts.InitImage,
+						Command:         []string{scriptShell, "-c", cacheInitScript(dst, markers)},
+						SecurityContext: cacheToolSecurityContext(),
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
 							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
@@ -155,7 +165,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 						Command: []string{scriptShell, "-c", downloadScript},
 						Env:     env,
 						SecurityContext: &corev1.SecurityContext{
-							RunAsUser:                ptr.To(downloadUID),
+							RunAsUser:                ptr.To(cacheUID),
 							RunAsNonRoot:             ptr.To(true),
 							AllowPrivilegeEscalation: ptr.To(false),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},

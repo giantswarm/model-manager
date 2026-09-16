@@ -277,25 +277,80 @@ func TestBudgetOfAnnotationWinsOverEverySource(t *testing.T) {
 }
 
 // pssBaselineCapabilities is the Pod Security "baseline" allow-list of added
-// capabilities; the serving namespace commonly enforces that profile.
-var pssBaselineCapabilities = map[corev1.Capability]bool{
-	"AUDIT_WRITE": true, "CHOWN": true, "DAC_OVERRIDE": true, "FOWNER": true, "FSETID": true,
-	"KILL": true, "MKNOD": true, "NET_BIND_SERVICE": true, "SETFCAP": true, "SETGID": true,
-	"SETPCAP": true, "SETUID": true, "SYS_CHROOT": true,
+// Every pod the kserve driver runs against the cache claim — the scan and
+// removal pods, the download Job — satisfies the restricted Pod Security
+// Standard a Giant Swarm cluster enforces through Kyverno: runAsNonRoot,
+// runAsUser > 0, no capability added and ALL dropped, no privilege
+// escalation, seccomp RuntimeDefault (the four rules that denied the scan pod:
+// require-run-as-nonroot, require-run-as-non-root-user,
+// disallow-capabilities-strict, restrict-seccomp-strict). They run as the
+// cache uid with the same fsGroup, so the claim's contents are theirs to read
+// and write without a capability.
+func TestCachePodsSatisfyRestrictedPodSecurity(t *testing.T) {
+	b := &Backend{opts: backend.KServeOptions{InitImage: "alpine:3", DownloadImage: "storage-initializer:test"}}
+	s := settings{Namespace: "serving", CacheClaim: "hf-cache"}
+	specs := map[string]corev1.PodSpec{
+		"scan":     b.cachePod("scan", s, "node-a", "true", true).Spec,
+		"remove":   b.cachePod("rm", s, "node-a", "true", false).Spec,
+		"download": b.buildJob(downloadPlan{Dir: "tiny", Repo: tinyRepo, Node: "node-a"}, s).Spec.Template.Spec,
+	}
+	for name, spec := range specs {
+		t.Run(name, func(t *testing.T) {
+			assertRestrictedPodSecurity(t, spec)
+			require.NotNil(t, spec.SecurityContext.FSGroup, "the claim's fsGroup is set")
+			assert.EqualValues(t, cacheUID, *spec.SecurityContext.FSGroup, "fsGroup is the cache uid")
+			for _, c := range append(spec.InitContainers, spec.Containers...) {
+				assert.EqualValues(t, cacheUID, *c.SecurityContext.RunAsUser, "%s runs as the cache uid", c.Name)
+			}
+		})
+	}
 }
 
-func TestCachePodStaysWithinPodSecurityBaseline(t *testing.T) {
-	b := &Backend{opts: backend.KServeOptions{InitImage: "alpine:3"}}
-	pod := b.cachePod("scan", settings{Namespace: "serving"}, "node-a", "true", true)
-	for _, c := range pod.Spec.Containers {
-		require.NotNil(t, c.SecurityContext)
-		require.NotNil(t, c.SecurityContext.Capabilities)
-		assert.Equal(t, []corev1.Capability{"ALL"}, c.SecurityContext.Capabilities.Drop)
-		for _, cap := range c.SecurityContext.Capabilities.Add {
-			assert.True(t, pssBaselineCapabilities[cap], "capability %s is not allowed by the baseline profile", cap)
-		}
-		assert.False(t, *c.SecurityContext.AllowPrivilegeEscalation)
+// assertRestrictedPodSecurity checks a pod spec against the restricted Pod
+// Security Standard's rules on the security context, the way the Kyverno
+// policies read them: a pod-level field covers every container that does not
+// set its own.
+func assertRestrictedPodSecurity(t *testing.T, spec corev1.PodSpec) {
+	t.Helper()
+	require.NotNil(t, spec.SecurityContext, "pod-level securityContext")
+	podNonRoot := spec.SecurityContext.RunAsNonRoot != nil && *spec.SecurityContext.RunAsNonRoot
+	podSeccomp := spec.SecurityContext.SeccompProfile != nil && spec.SecurityContext.SeccompProfile.Type == corev1.SeccompProfileTypeRuntimeDefault
+	if spec.SecurityContext.RunAsUser != nil {
+		assert.Greater(t, *spec.SecurityContext.RunAsUser, int64(0), "pod runAsUser must be > 0")
 	}
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		sc := c.SecurityContext
+		require.NotNil(t, sc, "%s: securityContext", c.Name)
+		if sc.RunAsNonRoot != nil {
+			assert.True(t, *sc.RunAsNonRoot, "%s: runAsNonRoot must be true when set", c.Name)
+		} else {
+			assert.True(t, podNonRoot, "%s: runAsNonRoot neither on the container nor on the pod", c.Name)
+		}
+		if sc.RunAsUser != nil {
+			assert.Greater(t, *sc.RunAsUser, int64(0), "%s: runAsUser must be > 0", c.Name)
+		}
+		require.NotNil(t, sc.AllowPrivilegeEscalation, "%s: allowPrivilegeEscalation", c.Name)
+		assert.False(t, *sc.AllowPrivilegeEscalation, "%s: allowPrivilegeEscalation must be false", c.Name)
+		require.NotNil(t, sc.Capabilities, "%s: capabilities", c.Name)
+		assert.Contains(t, sc.Capabilities.Drop, corev1.Capability("ALL"), "%s: capabilities must drop ALL", c.Name)
+		assert.Empty(t, sc.Capabilities.Add, "%s: no capability may be added", c.Name)
+		if sc.SeccompProfile != nil {
+			assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, sc.SeccompProfile.Type, "%s: seccompProfile.type", c.Name)
+		} else {
+			assert.True(t, podSeccomp, "%s: seccompProfile neither on the container nor on the pod", c.Name)
+		}
+	}
+}
+
+// The init container leaves a directory that exists alone (mkdir -m, no chmod
+// of someone else's directory) and names the fsGroup when the root is not
+// writable.
+func TestCacheInitScript(t *testing.T) {
+	script := cacheInitScript("/cache/tiny", "/cache/.model-manager")
+	assert.Contains(t, script, `for d in "/cache/tiny" "/cache/.model-manager"; do`)
+	assert.Contains(t, script, `mkdir -m 0777 -p "$d" && [ -w "$d" ] ||`)
+	assert.NotContains(t, script, "chmod")
+	assert.Contains(t, script, "did not apply the pod's fsGroup")
 }
 
 func TestIsAcceleratorAndEligibility(t *testing.T) {

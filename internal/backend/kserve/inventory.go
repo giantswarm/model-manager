@@ -353,13 +353,11 @@ func (b *Backend) removeDir(ctx context.Context, node, dir string) error {
 	return nil
 }
 
-// cachePod builds a one-shot pod mounting the cache claim. It runs as root:
-// the claim root is root-owned and directories are created by the
-// storage-initializer's uid, so a fixed non-root uid could not read or remove
-// everything. The capabilities stay within the Pod Security "baseline"
-// profile (a serving namespace commonly enforces it): DAC_OVERRIDE already
-// bypasses read, write and search checks, so DAC_READ_SEARCH would add
-// nothing but a baseline violation.
+// cachePod builds a one-shot pod mounting the cache claim, within the
+// restricted Pod Security Standard (security.go): the cache uid with the
+// claim's fsGroup, no capability. A removal mounts the claim read-write, so
+// the kubelet makes every directory group-writable for it first, whoever
+// created it; a scan mounts it read-only and reads what is there.
 func (b *Backend) cachePod(name string, s settings, node, script string, readOnly bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -372,20 +370,12 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 			AutomountServiceAccountToken:  ptr.To(false),
 			NodeName:                      node,
 			TerminationGracePeriodSeconds: ptr.To[int64](5),
+			SecurityContext:               cachePodSecurityContext(),
 			Containers: []corev1.Container{{
-				Name:    "tool",
-				Image:   b.opts.InitImage,
-				Command: []string{scriptShell, "-c", script},
-				SecurityContext: &corev1.SecurityContext{
-					RunAsUser:                ptr.To[int64](0),
-					RunAsNonRoot:             ptr.To(false),
-					AllowPrivilegeEscalation: ptr.To(false),
-					ReadOnlyRootFilesystem:   ptr.To(true),
-					Capabilities: &corev1.Capabilities{
-						Drop: []corev1.Capability{"ALL"},
-						Add:  []corev1.Capability{"DAC_OVERRIDE", "FOWNER"},
-					},
-				},
+				Name:            "tool",
+				Image:           b.opts.InitImage,
+				Command:         []string{scriptShell, "-c", script},
+				SecurityContext: cacheToolSecurityContext(),
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
 					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("128Mi")},

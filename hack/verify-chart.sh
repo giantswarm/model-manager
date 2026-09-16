@@ -198,4 +198,17 @@ if echo "$got" | grep -q -- '"create"'; then
   fail "backend documents Role: no write verbs under downstream OAuth"
 fi
 
+# The cache-agent DaemonSet (kserve.inventory.mode: daemonset) stays within the
+# restricted Pod Security Standard: the chart's own security contexts, no root,
+# no capability added, the pod's seccomp profile.
+got=$(helm template mm "$CHART" --show-only templates/cache-agent-daemonset.yaml \
+  --set backend=kserve --set kserve.inventory.mode=daemonset --set kserve.cache.claimName=hf-cache)
+echo "$got" | grep -q -- '^        runAsNonRoot: true$' || fail "cache-agent: the pod does not set runAsNonRoot: true"
+echo "$got" | grep -q -- '^        fsGroup: 1000$' || fail "cache-agent: the pod does not set the cache fsGroup"
+echo "$got" | grep -q -- '^          type: RuntimeDefault$' || fail "cache-agent: the pod does not set seccomp RuntimeDefault"
+echo "$got" | grep -q -- '^            runAsUser: 1000$' || fail "cache-agent: the container does not run as uid 1000"
+if echo "$got" | grep -q -- 'runAsUser: 0\|runAsNonRoot: false\|^ *add:'; then
+  fail "cache-agent: root or an added capability rendered: '$got'"
+fi
+
 echo "verify-chart: ok"
