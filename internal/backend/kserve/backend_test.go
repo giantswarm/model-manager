@@ -490,11 +490,11 @@ func TestPullRunsAJobWithProgress(t *testing.T) {
 	pod := job.Spec.Template.Spec
 	assert.Equal(t, testCacheNode, pod.NodeName)
 	require.Len(t, pod.InitContainers, 1)
-	assert.Contains(t, pod.InitContainers[0].Command[2], `mkdir -p "/cache/tiny"`)
-	assert.EqualValues(t, 0, *pod.InitContainers[0].SecurityContext.RunAsUser)
+	assert.Contains(t, pod.InitContainers[0].Command[2], `"/cache/tiny"`)
+	assert.EqualValues(t, cacheUID, *pod.InitContainers[0].SecurityContext.RunAsUser, "the cache directory is created as the cache uid, not root")
 	require.Len(t, pod.Containers, 1)
 	assert.Equal(t, DefaultDownloadImage, pod.Containers[0].Image)
-	assert.EqualValues(t, downloadUID, *pod.Containers[0].SecurityContext.RunAsUser)
+	assert.EqualValues(t, cacheUID, *pod.Containers[0].SecurityContext.RunAsUser)
 	env := map[string]corev1.EnvVar{}
 	for _, e := range pod.Containers[0].Env {
 		env[e.Name] = e

@@ -5,8 +5,9 @@
 # per selected node mounts the cache claim read-only and serves its contents
 # at GET /inventory; model-manager reads it instead of running a scan pod per
 # node. Same image, `cache-agent` subcommand, no ServiceAccount token. It runs
-# as root with DAC_READ_SEARCH like the scan pod: the claim root is root-owned
-# and the storage-initializer writes as its own uid.
+# under the chart's pod and container security contexts (the restricted Pod
+# Security Standard: uid 1000 with the same fsGroup, no capability), like the
+# scan pod and the download Job the driver composes.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -42,8 +43,7 @@ spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 10
       securityContext:
-        seccompProfile:
-          type: RuntimeDefault
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: cache-agent
           image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -79,18 +79,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
           securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-            runAsNonRoot: false
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-              add:
-                - DAC_READ_SEARCH
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml $agent.resources | nindent 12 }}
           volumeMounts:
