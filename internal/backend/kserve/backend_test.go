@@ -57,7 +57,7 @@ func TestOptionsOverrideDiscovery(t *testing.T) {
 	f := newFixture(t)
 	f.b.opts.Namespace = "elsewhere"
 	f.b.opts.CacheClaim = "other-claim"
-	f.b.cfg = newConfig(f.b.opts)
+	f.b.cfg = newConfig(f.b.opts, f.b.log)
 	s := f.b.cfg.settings(context.Background())
 	assert.Equal(t, "elsewhere", s.Namespace)
 	assert.Equal(t, "other-claim", s.CacheClaim)

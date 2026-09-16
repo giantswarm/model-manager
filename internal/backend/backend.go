@@ -199,10 +199,16 @@ type LoadedModel struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
 	// Status is a backend-specific state: "loaded" (ollama); "Ready",
-	// "NotReady" or "Pending" (kserve InferenceService readiness).
+	// "NotReady", "Pending" or "Terminating" (kserve: the serving object's
+	// readiness — Pending while its predictor pod waits for a node or an
+	// image, whatever the object's conditions say).
 	Status string `json:"status,omitempty"`
-	// Message explains a non-ready Status (kserve: the Ready condition
-	// message or modelStatus failure).
+	// Reason names why Status is not Ready (kserve: the Ready condition's
+	// reason such as HTTPRoutesNotReady, a failed load's, or the predictor
+	// pod's — Unschedulable, ImagePullBackOff).
+	Reason string `json:"reason,omitempty"`
+	// Message explains a non-ready Status in words (kserve: the reason and
+	// the condition's or the pod's message).
 	Message string `json:"message,omitempty"`
 	// Resource is the serving object behind this entry (kserve: the
 	// InferenceService or LLMInferenceService name, which is also the served

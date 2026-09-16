@@ -320,10 +320,12 @@ func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
 	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Equal(t, true, body["loaded"])
-	assert.Equal(t, "Pending", body["running"].(map[string]any)["status"])
+	running := body["running"].(map[string]any)
+	assert.Equal(t, "Pending", running["status"])
+	assert.Equal(t, "org-tiny", running["resource"], "the answer names the serving object the load created")
 	assert.Nil(t, body["modelConfig"], "not wired before ready")
 
-	// A load job follows readiness.
+	// A load job follows readiness, naming the object it follows.
 	status, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
 	require.Equal(t, http.StatusOK, status)
 	var loadJob map[string]any
@@ -336,6 +338,7 @@ func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
 	require.NotNil(t, loadJob, list)
 	assert.Equal(t, "running", loadJob["phase"])
 	assert.Equal(t, true, loadJob["wire"])
+	assert.Equal(t, "org-tiny", loadJob["resource"])
 
 	f.backend.setReady("org/tiny")
 	done := f.waitJob(t, loadJob["id"].(string))
