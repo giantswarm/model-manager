@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -51,7 +52,7 @@ func TestMCPToolsMirrorREST(t *testing.T) {
 	fb := newFakeBackend()
 	fw := newFakeWirer()
 	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
-	srv := NewMCPServer(svc, "test")
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	// tools/list exposes every tool.
 	listReq, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -124,4 +125,34 @@ func TestMCPToolsMirrorREST(t *testing.T) {
 
 	text, isErr = callTool(t, srv, ToolPullModel, map[string]any{})
 	assert.True(t, isErr, text)
+}
+
+func TestGetInfo(t *testing.T) {
+	build := buildinfo.Info{Version: "0.24.0", Commit: "6e3caf2", Date: "2026-09-16T08:00:00Z"}
+
+	t.Run("a backend and wiring", func(t *testing.T) {
+		svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), newFakeWirer(), &service.WiringInfo{Namespace: "kagent", APIVersion: "kagent.dev/v1alpha3"}, service.Config{AutoWire: true}, nil)
+		text, isErr := callTool(t, NewMCPServer(svc, build), ToolGetInfo, nil)
+		require.False(t, isErr, text)
+		var info Info
+		require.NoError(t, json.Unmarshal([]byte(text), &info))
+		assert.Equal(t, Info{
+			Version: "0.24.0", Commit: "6e3caf2", Built: "2026-09-16T08:00:00Z",
+			Tools:    ToolNames(),
+			Backends: []backend.Name{"ollama"},
+			Wiring:   &service.WiringInfo{Namespace: "kagent", APIVersion: "kagent.dev/v1alpha3", AutoWire: true},
+		}, info)
+	})
+
+	t.Run("no backend, no wiring", func(t *testing.T) {
+		svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+		text, isErr := callTool(t, NewMCPServer(svc, buildinfo.Info{Version: "dev", Commit: "abcdef1-dirty", Date: "unknown"}), ToolGetInfo, nil)
+		require.False(t, isErr, text)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal([]byte(text), &raw))
+		assert.Equal(t, "dev", raw["version"])
+		assert.Equal(t, "abcdef1-dirty", raw["commit"])
+		assert.Equal(t, []any{}, raw["backends"], "an installation without backends answers an empty list, not null")
+		assert.NotContains(t, raw, "wiring")
+	})
 }

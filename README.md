@@ -34,7 +34,7 @@ The same operations are exposed twice from one process:
 
 - **REST/JSON** under `/api/v1` for the portal backend — contract in
   [`api/openapi.yaml`](api/openapi.yaml), also served at `/api/v1/openapi.yaml`.
-- **MCP** (streamable HTTP, `/mcp`) for muster — tools `get_backend`,
+- **MCP** (streamable HTTP, `/mcp`) for muster — tools `get_info`, `get_backend`,
   `list_backends`, `list_models`, `get_model`, `list_loaded_models`, `pull_model`,
   `load_model`, `unload_model`, `delete_model`, `wire_model`, `unwire_model`,
   `list_jobs`, `get_job`, `cancel_job`, plus the kserve capabilities
@@ -49,6 +49,7 @@ Lemonade-backend ADR in the team's decision log.
 
 | Operation | REST | MCP tool |
 |---|---|---|
+| This server's build (release version, commit, build time), its tools, the configured backends and the wiring target | — | `get_info` |
 | Every backend's identity, capabilities + load semantics (the first is the default) | `GET /api/v1/backends` | `list_backends` |
 | Register / remove a backend at runtime (a backend document, [docs/backends.md](docs/backends.md); `dryRun`, `mode: apply`) | — | `add_backend`, `remove_backend` |
 | One backend (the named one, else the default) plus the names of all | `GET /api/v1/backend[?backend=]` | `get_backend` |

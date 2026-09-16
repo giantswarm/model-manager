@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 	"github.com/giantswarm/model-manager/internal/wiring"
@@ -353,7 +354,7 @@ func TestMultiBackendServingReadsAggregateAcrossCapableBackends(t *testing.T) {
 
 func TestMultiBackendMCPTools(t *testing.T) {
 	f := newMultiFixture(t)
-	srv := NewMCPServer(f.svc, "test")
+	srv := NewMCPServer(f.svc, buildinfo.Info{Version: "test"})
 
 	out, isErr := callTool(t, srv, ToolListBackends, nil)
 	require.False(t, isErr, out)
