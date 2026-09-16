@@ -452,9 +452,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   - **`LLMInferenceService`, by spec shape**: `spec.model.uri` from the
     preset's `storageUri` (`hf://`, or `pvc://` into the cache),
     `spec.model.name` from `model.id`, `replicas: 1`,
-    `router: {route: {}, scheduler: {}}` (KServe renders the `HTTPRoute` on
-    the configured ingress gateway and the scheduler creates the
-    `InferencePool`), `template.containers[main]` with the preset's `args`,
+    `router: {route: {}}` (KServe renders the `HTTPRoute` on the configured
+    ingress gateway with the workload Service as its backend; the llm-d
+    endpoint picker, `router.scheduler`, is opt-in through the backend
+    document's `spec.kserve.router.scheduler` or a preset's
+    `spec.router.scheduler`, and its `InferencePool` needs the Gateway API
+    Inference Extension on the gateway — `docs/backends.md`),
+    `template.containers[main]` with the preset's `args`,
     `env` and `resources` (GPU count under the discovery's resource name),
     `scheduling` as the template's `nodeSelector`/`tolerations` (merged with
     the discovery selector, the GPU pool's label and toleration, and the

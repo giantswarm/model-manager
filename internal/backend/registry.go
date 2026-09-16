@@ -76,6 +76,11 @@ type KServeOptions struct {
 	// composed predictors. A registered document's spec.kserve.gpuPool
 	// lands here.
 	GPUPool GPUPool
+	// Router is the router shape of the composed LLMInferenceServices: the
+	// route alone by default, the llm-d endpoint picker beside it when
+	// Scheduler is set. A registered document's spec.kserve.router lands
+	// here; a preset's spec.router.scheduler overrides it for that preset.
+	Router Router
 
 	// HFEndpoint is the Hugging Face Hub base URL.
 	HFEndpoint string

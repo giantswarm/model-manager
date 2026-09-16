@@ -79,6 +79,7 @@ data:
 | `spec.kserve.gpuPool` | no | The GPU node pool's scheduling; replaces the discovery ConfigMap's `spec.gpuPool` (see below) |
 | `spec.kserve.gpuPool.taint.{key,value,effect}` | no | The pool's taint (`key` required; `effect` `NoSchedule` \| `PreferNoSchedule` \| `NoExecute`, empty for every effect). Tolerated by the inventory scan pods, the download Jobs and the predictors model-manager composes: `value` empty tolerates every value (`Exists`), set compares it (`Equal`) |
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
+| `spec.kserve.router.scheduler` | no | `true` composes the llm-d endpoint picker (`router.scheduler`) beside the route on every `LLMInferenceService` the backend composes; default `false`, the route alone — KServe routes the models Gateway to the workload Service (see below). A preset's `spec.router.scheduler` overrides it for that preset |
 | `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
@@ -143,6 +144,28 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
 A list with an invalid entry is refused on the document (the document is reported and not loaded)
 and ignored from discovery (the answer is the unverified one). Once a node of the pool exists the
 fit is against that node again, as before.
+
+### The route and the endpoint picker
+
+Every `LLMInferenceService` the backend composes asks KServe for a route, `spec.router.route`, and
+KServe renders the model's `HTTPRoute` on the models Gateway with the **workload Service**
+(`<name>-kserve-workload-svc:8000`) as the backend of every `/v1/*` rule: `ResolvedRefs=True` as
+soon as the Service exists, `Ready=True` once the predictor is up, nothing else in the path. This
+is the default shape and the one a single-replica predictor needs; the Gateway's JWT policy stays
+the one boundary in front of the model.
+
+`router.scheduler` asks KServe for the **llm-d endpoint picker** beside the route: a
+`<name>-kserve-router-scheduler` Deployment and an `InferencePool`, and the `HTTPRoute`'s `/v1/*`
+rules then target the `InferencePool` (`inference.networking.k8s.io`) instead of the Service. A
+gateway resolves an `InferencePool` backendRef only with the **Gateway API Inference Extension**;
+without it the route stays `ResolvedRefs=False BackendNotFound`, the object never becomes Ready
+(`reason: HTTPRoutesNotReady` on the loaded model) and the model has no route. The picker buys
+something only with several replicas — prefix-cache-aware routing, prefill/decode disaggregation —
+so it is **opt-in**: `spec.kserve.router.scheduler: true` on the document switches it on for every
+preset, `spec.router.scheduler: true|false` on a preset for that preset alone (the preset's value
+wins). A shape that switches it on needs the Inference Extension enabled on the models Gateway
+(giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
+keeps its shape until it is unloaded and loaded again.
 
 ## Tools
 

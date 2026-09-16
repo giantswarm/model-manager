@@ -40,10 +40,13 @@ func gvrFor(kind string) schema.GroupVersionResource {
 }
 
 // composeLLM builds the LLMInferenceService for a preset by spec shape:
-// spec.model.uri and .name from the preset, one replica, router.route and
-// router.scheduler so KServe renders the HTTPRoute on the configured ingress
-// gateway and the scheduler creates the InferencePool, the preset's args, env
-// and resources on the template's main container, scheduling as
+// spec.model.uri and .name from the preset, one replica, router.route so
+// KServe renders the HTTPRoute on the configured ingress gateway with the
+// workload Service as its backend — router.scheduler beside it only when the
+// preset or the backend asks for the llm-d endpoint picker, whose
+// InferencePool the gateway resolves only with the Inference Extension —, the
+// preset's args, env and resources on the template's main container,
+// scheduling as
 // nodeSelector/tolerations, the chat template mounted, and
 // template.runtimeClassName from discovery when set. No baseRefs — KServe's
 // controller chooses its well-known LLMInferenceServiceConfigs from the
@@ -79,10 +82,14 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	}
 	mergeTemplate(template, p.Spec.Template)
 
+	router := map[string]any{"route": map[string]any{}}
+	if p.routerScheduler(s) {
+		router["scheduler"] = map[string]any{}
+	}
 	spec := map[string]any{
 		"model":    map[string]any{"uri": p.Spec.Model.StorageURI, "name": p.Spec.Model.ID},
 		"replicas": int64(1),
-		"router":   map[string]any{"route": map[string]any{}, "scheduler": map[string]any{}},
+		"router":   router,
 		"template": template,
 	}
 	if len(p.Spec.BaseRefs) > 0 {
