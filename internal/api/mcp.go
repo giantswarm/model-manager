@@ -144,7 +144,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve). On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
+		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve); a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),
@@ -168,7 +168,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.search)
 
 	s.AddTool(mcp.NewTool(ToolCheckFit,
-		mcp.WithDescription("Check whether a model fits a node (kserve): resolves the weight size from the hub (safetensors index, else file tree, else the preset), adds the serving overhead and compares with the node's memory budget. Says which node, whether the model is cached there and whether a hub token is needed. When the hub does not answer within its lookup timeout, the preset's requirements size the model (weightsSource preset) and reason says so."),
+		mcp.WithDescription("Check whether a model fits a node (kserve): resolves the weight size from the hub (safetensors index, else file tree, else the preset), adds the serving overhead and compares with the node's memory budget. Says which node, whether the model is cached there and whether a hub token is needed. When the hub does not answer within its lookup timeout, the preset's requirements size the model (weightsSource preset) and reason says so. A GPU pool with no node yet (budgetSource pool-scale-from-zero) is judged on its instance shapes when the backend document lists them: the preset's CPU/memory requests, GPUs and GPU memory against the pool's sizes, instanceType naming the size the node will come as, or fits false naming what no size of the pool leaves; without shapes the answer is yes and unverified."),
 		mcp.WithString(argModel, mcp.Description("Hugging Face repository owner/name (required unless preset is given)")),
 		backendArg("to check on (required when several backends offer fit checks)"),
 		mcp.WithString(argPreset, mcp.Description("Serving preset (overhead, model id)")),

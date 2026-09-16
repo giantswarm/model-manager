@@ -214,15 +214,12 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// selector names a pool no node belongs to yet. Serving is what
 		// brings the node — the predictor carries the pool's toleration and
 		// selector, goes Pending, and the autoscaler launches it — so the
-		// answer is yes, without a node, and says the fit is unverified. An
-		// explicit node, a pool with nodes that do not fit, or no pool at
-		// all keep the refusal.
-		if sel := b.cfg.settings(ctx).GPUPool.NodeSelector; req.Node == "" && len(sel) > 0 && !anyNodeMatches(nodes, sel) {
-			res.Fits = true
-			res.BudgetSource = budgetSourcePoolScaleFromZero
-			res.Reason = fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero — the predictor waits for its node; the fit of %s weights + %s overhead = %s against the pool's accelerator is unverified",
-				formatSelector(sel), humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes))
-			return nil
+		// answer is given without a node: judged against the pool's instance
+		// shapes when they are known (giantswarm/model-manager#97), else yes
+		// and unverified. An explicit node, a pool with nodes that do not
+		// fit, or no pool at all keep the refusal.
+		if pool := b.cfg.settings(ctx).GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
+			return b.placeOnPool(plan, pool)
 		}
 		res.Fits = false
 		res.Reason = why

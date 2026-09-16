@@ -217,6 +217,13 @@ func discoveryDocYAML(o discoveryOpts) string {
 				selector += fmt.Sprintf("      %s: %s\n", k, v)
 			}
 		}
+		if len(p.Instances) > 0 {
+			selector += "    instances:\n"
+			for _, s := range p.Instances {
+				selector += fmt.Sprintf("      - {instanceType: %q, size: %q, vcpu: %d, memoryGiB: %d, gpus: %d, gpuMemoryGiB: %d, usableVcpu: %v, usableMemoryGiB: %v}\n",
+					s.InstanceType, s.Size, s.VCPU, s.MemoryGiB, s.GPUs, s.GPUMemoryGiB, s.UsableVCPU, s.UsableMemoryGiB)
+			}
+		}
 	}
 	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ModelServingConfig

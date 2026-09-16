@@ -339,8 +339,12 @@ type FitResult struct {
 	// DownloadBytes is what a pull would fetch (all repository files).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
-	// budget was derived (gpu-labels, allocatable, annotation).
+	// budget was derived (gpu-labels, allocatable, annotation, or
+	// pool-scale-from-zero when the GPU pool has no node yet). InstanceType
+	// is then the size of the pool the node will come as (g6.xlarge), when
+	// the pool's instance shapes are known and one of them hosts the model.
 	Node          string `json:"node,omitempty"`
+	InstanceType  string `json:"instanceType,omitempty"`
 	BudgetBytes   int64  `json:"budgetBytes"`
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`

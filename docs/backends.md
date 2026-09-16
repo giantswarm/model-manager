@@ -79,6 +79,7 @@ data:
 | `spec.kserve.gpuPool` | no | The GPU node pool's scheduling; replaces the discovery ConfigMap's `spec.gpuPool` (see below) |
 | `spec.kserve.gpuPool.taint.{key,value,effect}` | no | The pool's taint (`key` required; `effect` `NoSchedule` \| `PreferNoSchedule` \| `NoExecute`, empty for every effect). Tolerated by the inventory scan pods, the download Jobs and the predictors model-manager composes: `value` empty tolerates every value (`Exists`), set compares it (`Equal`) |
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
+| `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
@@ -117,6 +118,31 @@ model-manager schedules itself:
 before, its `eligibilityReason` names the taint (`taint nvidia.com/gpu:NoSchedule not tolerated
 (set the GPU pool taint)`), and a node outside the pool's selector says so. `GET /api/v1/backend`
 reports the input as `gpuPool`. Unset on both sides, nothing changes.
+
+#### The pool's instance shapes and the fit check
+
+A pool the autoscaler runs at scale-to-zero has no node until a predictor is Pending — so
+`check_fit` has no node to judge against. Without more, it answers `fits: true`,
+`budgetSource: pool-scale-from-zero` and a reason that says the fit is unverified; Karpenter is
+then the first to know whether any size of the pool can host the predictor, in its own log. With
+the pool's **instance shapes** — `gpuPool.instances`, the same list on the document and on the
+discovery ConfigMap, the document's replacing discovery's — the check judges the model first:
+
+- the preset's `resources.requests` `cpu` and `memory` against a size's `usableVcpu` /
+  `usableMemoryGiB` (a request the preset does not name is zero), the preset's `gpus` (default 1)
+  against the size's, and the weights plus overhead the check sized against `gpus × gpuMemoryGiB`;
+- the **smallest size that hosts it** is the node it will come as: `fits: true`, `instanceType`
+  names the size (`g6.xlarge`), `budgetBytes` is its GPU memory, and the reason says the size's
+  leftovers;
+- when **no size hosts it**: `fits: false`, the reason names the pool's sizes, what the predictor
+  asks and what the largest size leaves it — and `load_model` / `pull_model` refuse with that
+  reason before any object is created, instead of a predictor that can only sit Pending;
+- a model **without a preset** is judged on its weights and the default overhead against the GPU
+  memory alone.
+
+A list with an invalid entry is refused on the document (the document is reported and not loaded)
+and ignored from discovery (the answer is the unverified one). Once a node of the pool exists the
+fit is against that node again, as before.
 
 ## Tools
 
