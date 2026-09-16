@@ -365,8 +365,8 @@ func (b *Backend) composeClassic(p *servingPreset, s settings, node string) *uns
 	if ns := p.nodeSelector(s, node); len(ns) > 0 {
 		predictor["nodeSelector"] = ns
 	}
-	if len(p.Spec.Scheduling.Tolerations) > 0 {
-		predictor["tolerations"] = mapsToAny(p.Spec.Scheduling.Tolerations)
+	if tols := p.tolerations(s); len(tols) > 0 {
+		predictor["tolerations"] = tols
 	}
 	if s.RuntimeClassName != "" {
 		predictor["runtimeClassName"] = s.RuntimeClassName
@@ -432,11 +432,15 @@ func (p *servingPreset) resources(s settings) map[string]any {
 	return resources
 }
 
-// nodeSelector merges the discovery's selector, the preset's and the node
-// pin; empty when there is nothing.
+// nodeSelector merges the discovery's serving selector, the GPU pool's
+// label, the preset's selector and the node pin, each overriding the one
+// before; empty when there is nothing.
 func (p *servingPreset) nodeSelector(s settings, node string) map[string]any {
 	out := map[string]any{}
 	for k, v := range s.NodeSelector {
+		out[k] = v
+	}
+	for k, v := range s.GPUPool.NodeSelector {
 		out[k] = v
 	}
 	for k, v := range p.Spec.Scheduling.NodeSelector {

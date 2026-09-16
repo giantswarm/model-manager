@@ -107,6 +107,44 @@ type KServeSpec struct {
 	// names it. Name defaults to agent-platform-model-serving; Namespace
 	// defaults to the serving namespace.
 	Discovery DiscoveryRef `json:"discovery"`
+	// GPUPool, when set, replaces the discovery ConfigMap's spec.gpuPool:
+	// the pool taint model-manager tolerates and the pool label it selects
+	// on everything it schedules onto the pool.
+	GPUPool *GPUPool `json:"gpuPool,omitempty"`
+}
+
+// GPUPool is the scheduling of the GPU node pool the kserve backend puts
+// work on: the pool's taint, tolerated by the inventory scan pods, the
+// download Jobs and the predictors model-manager composes, and the pool's
+// label as their node selector. It has the shape of the discovery
+// ConfigMap's spec.gpuPool, which the platform chart renders from its
+// modelServing.gpuPool values; a registered document's block replaces it.
+type GPUPool struct {
+	Taint        *Taint            `json:"taint,omitempty"`
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+}
+
+// Taint is a node taint as a toleration input: an empty Value tolerates
+// every value of Key (operator Exists), an empty Effect every effect.
+type Taint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect,omitempty"`
+}
+
+// Validate checks the taint: a key, and a Kubernetes taint effect when set.
+func (t *Taint) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if t.Key == "" {
+		return errors.New("key: required")
+	}
+	switch t.Effect {
+	case "", "NoSchedule", "PreferNoSchedule", "NoExecute":
+		return nil
+	}
+	return fmt.Errorf("effect: must be NoSchedule, PreferNoSchedule or NoExecute, got %q", t.Effect)
 }
 
 // DiscoveryRef locates a ConfigMap.
@@ -270,6 +308,11 @@ func (s *DocumentSpec) validateKServe() error {
 	if t.ServingNamespace == "" {
 		return errors.New("spec.kserve.target.servingNamespace: required")
 	}
+	if p := s.KServe.GPUPool; p != nil {
+		if err := p.Taint.Validate(); err != nil {
+			return fmt.Errorf("spec.kserve.gpuPool.taint.%w", err)
+		}
+	}
 	if t.Local() {
 		if t.APIServer != "" || t.CABundle != "" {
 			return errors.New("spec.kserve.target.apiServer: not accepted for the local cluster")
@@ -341,6 +384,9 @@ func (d *Document) Options(base Options) Options {
 		base.KServe.DiscoveryConfigMap = k.Discovery.Name
 		if base.KServe.PresetNamespace == "" {
 			base.KServe.PresetNamespace = k.Discovery.Namespace
+		}
+		if k.GPUPool != nil {
+			base.KServe.GPUPool = *k.GPUPool
 		}
 		if s.Credentials != nil {
 			base.KServe.HFTokenSecret = s.Credentials.SecretRef.Name

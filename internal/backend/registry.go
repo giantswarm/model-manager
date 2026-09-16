@@ -70,6 +70,12 @@ type KServeOptions struct {
 	// PresetNamespace / PresetSelector locate the ServingPreset ConfigMaps.
 	PresetNamespace string
 	PresetSelector  string
+	// GPUPool overrides the discovery ConfigMap's spec.gpuPool — the pool
+	// taint to tolerate (when Taint is set) and the pool label to select
+	// (when NodeSelector is non-empty) on scan pods, download Jobs and
+	// composed predictors. A registered document's spec.kserve.gpuPool
+	// lands here.
+	GPUPool GPUPool
 
 	// HFEndpoint is the Hugging Face Hub base URL.
 	HFEndpoint string

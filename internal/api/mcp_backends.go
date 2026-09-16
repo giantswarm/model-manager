@@ -34,6 +34,8 @@ const (
 	argServingNamespace   = "servingNamespace"
 	argDiscoveryNamespace = "discoveryNamespace"
 	argDiscoveryName      = "discoveryName"
+	argGPUPoolTaint       = "gpuPoolTaint"
+	argGPUPoolSelector    = "gpuPoolNodeSelector"
 	argDryRun             = "dryRun"
 	argMode               = "mode"
 
@@ -71,6 +73,8 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 		mcp.WithString(argServingNamespace, mcp.Description("kserve: the serving namespace on the target (required)")),
 		mcp.WithString(argDiscoveryNamespace, mcp.Description("kserve: namespace of the model-serving discovery ConfigMap (default: the serving namespace)")),
 		mcp.WithString(argDiscoveryName, mcp.Description("kserve: name of the discovery ConfigMap (default agent-platform-model-serving)")),
+		mcp.WithString(argGPUPoolTaint, mcp.Description("kserve: the GPU node pool's taint as key[=value][:effect] (nvidia.com/gpu:NoSchedule), tolerated by the inventory scan pods, download Jobs and predictors; replaces the discovery ConfigMap's gpuPool.taint")),
+		mcp.WithString(argGPUPoolSelector, mcp.Description("kserve: the GPU node pool's label as key=value[,key=value] (giantswarm.io/machine-pool=<cluster>-<pool>), the node selector of everything scheduled onto the pool; replaces the discovery ConfigMap's gpuPool.nodeSelector")),
 		mcp.WithBoolean(argDryRun, mcp.Description("Render the document and the ConfigMap without writing (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): write the ConfigMap as you. commit is not available yet")),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -119,12 +123,46 @@ func (t *tools) documentFrom(req mcp.CallToolRequest) (*backend.Document, error)
 			},
 			Discovery: backend.DiscoveryRef{Namespace: get(argDiscoveryNamespace), Name: get(argDiscoveryName)},
 		}
+		pool, err := gpuPoolFrom(get(argGPUPoolTaint), get(argGPUPoolSelector))
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", backend.ErrInvalid, err)
+		}
+		spec.KServe.GPUPool = pool
 	}
 	doc := backend.NewDocument(spec)
 	if err := doc.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", backend.ErrInvalid, err)
 	}
 	return doc, nil
+}
+
+// gpuPoolFrom parses the GPU pool arguments: the taint as key[=value][:effect]
+// (kubectl taint's notation), the selector as key=value[,key=value]. Nil when
+// both are empty.
+func gpuPoolFrom(taint, selector string) (*backend.GPUPool, error) {
+	if taint == "" && selector == "" {
+		return nil, nil
+	}
+	pool := &backend.GPUPool{}
+	if taint != "" {
+		kv, effect, _ := strings.Cut(taint, ":")
+		key, value, _ := strings.Cut(kv, "=")
+		if key == "" {
+			return nil, fmt.Errorf("%s: must be key[=value][:effect], got %q", argGPUPoolTaint, taint)
+		}
+		pool.Taint = &backend.Taint{Key: key, Value: value, Effect: effect}
+	}
+	if selector != "" {
+		pool.NodeSelector = map[string]string{}
+		for _, pair := range strings.Split(selector, ",") {
+			key, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+			if !ok || key == "" {
+				return nil, fmt.Errorf("%s: must be key=value[,key=value], got %q", argGPUPoolSelector, selector)
+			}
+			pool.NodeSelector[key] = value
+		}
+	}
+	return pool, nil
 }
 
 func (t *tools) noStore() *mcp.CallToolResult {

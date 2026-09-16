@@ -347,10 +347,23 @@ The driver consumes the `modelServing` contract of the
 meta chart, rendered by its `agent-platform-connectivity` chart:
 the discovery ConfigMap `agent-platform-model-serving` (kind
 `ModelServingConfig`) for the serving namespace, runtime, GPU resource name,
-cache claim and preset selector; the `ServingPreset` ConfigMaps
+cache claim and preset selector, and the GPU node pool's scheduling
+(`spec.gpuPool`: the pool's taint and label); the `ServingPreset` ConfigMaps
 (`agent-platform.giantswarm.io/serving-preset=true`); the cache
 PersistentVolumeClaim in the serving namespace. Every discovered value can be
-overridden by a flag (`model-manager serve --help`, `--kserve-*`).
+overridden by a flag (`model-manager serve --help`, `--kserve-*`); the pool
+scheduling by the registered backend document (`docs/backends.md`).
+
+- **GPU node pool** — a pool created through the platform is tainted
+  `nvidia.com/gpu` `NoSchedule` and labelled
+  `giantswarm.io/machine-pool=<cluster>-<pool>`. The discovery ConfigMap's
+  `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the chart's
+  `modelServing.gpuPool.*`), or the backend document's `spec.kserve.gpuPool`,
+  make the driver tolerate the taint on everything it schedules onto the pool
+  — the composed predictors, the download Jobs and the inventory scan pods —
+  and select the pool wherever the pod is not pinned to a node already. The
+  descriptor (`GET /api/v1/backend`) reports it as `gpuPool`. Unset, nothing
+  changes; the chart's DaemonSet takes its own `kserve.inventory.agent.*`.
 
 - **Inventory** — the cache contents per node plus the InferenceServices of
   the serving namespace (readiness from conditions/`modelStatus`, node from the
@@ -392,14 +405,18 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
   (`nvidia.com/gpu.present`, `.count`, `.product`). CPU-only nodes are not
   serving capacity for this backend. Each node says whether a model can be
   served there right now: `eligible` is true when the node is ready, matches
-  the discovery `nodeSelector`, and can mount the cache claim whenever
+  the discovery `nodeSelector` and the GPU pool's, carries no `NoSchedule` or
+  `NoExecute` taint the pool toleration does not cover (a tainted pool node
+  is capacity once its taint is the configured one), and can mount the cache
+  claim whenever
   predictors mount it (cache enabled and `cache.redirectPolicy` on — the
   Kyverno rule that mounts the claim into every predictor) and the claim is
   pinned to nodes (a static local PersistentVolume or a `local-path` volume);
   a shared (RWX), unbound, missing or disabled cache never disqualifies a
   node. `eligibilityReason` names every failing rule (`not ready`, `outside
-  the serving node selector (kubernetes.io/hostname=spark-8723)`, `cache claim
-  hf-cache is pinned to spark-8723`). `pull`, `load` and `fit-check` refuse
+  the serving node selector (kubernetes.io/hostname=spark-8723)`, `taint
+  nvidia.com/gpu:NoSchedule not tolerated (set the GPU pool taint)`, `cache
+  claim hf-cache is pinned to spark-8723`). `pull`, `load` and `fit-check` refuse
   an explicit `node` that is not eligible with that reason (`412
   does_not_fit`; `fits=false` on the fit check) before any Job or
   InferenceService exists, and never pick an ineligible node themselves. A
@@ -434,7 +451,8 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
     `InferencePool`), `template.containers[main]` with the preset's `args`,
     `env` and `resources` (GPU count under the discovery's resource name),
     `scheduling` as the template's `nodeSelector`/`tolerations` (merged with
-    the discovery selector and the node pin), the chat template mounted, and
+    the discovery selector, the GPU pool's label and toleration, and the
+    node pin), the chat template mounted, and
     **`template.runtimeClassName` from the discovery ConfigMap's
     `runtimeClassName`** when non-empty — absent when empty (the same rule
     as the classic predictor). **No `baseRefs`**: KServe chooses its
@@ -449,8 +467,9 @@ overridden by a flag (`model-manager serve --help`, `--kserve-*`).
     `LLMInferenceServiceConfig`; `list_presets` lists one kind.
   - **`InferenceService`** (classic): `predictor.model` from the preset
     (runtime, format, storageUri, args, env, chat-template mount, GPU
-    count); nodeSelector, runtimeClassName, deployment strategy and timeout
-    from discovery; `spec.predictor` extras verbatim.
+    count); nodeSelector, the GPU pool's label and toleration,
+    runtimeClassName, deployment strategy and timeout from discovery;
+    `spec.predictor` extras verbatim.
 - **Wiring** — on ready, a kagent `ModelConfig` **named after the
   InferenceService** (`provider: OpenAI`, `baseUrl` = predictor URL + `/v1`,
   `model` = the served model name: the InferenceService name, which the
