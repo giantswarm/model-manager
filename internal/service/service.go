@@ -640,19 +640,40 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	if s.cfg.AutoWire && s.wirer != nil {
 		if sl, ok := serveLifecycle(b); ok {
-			s.startLoadJob(ctx, b, sl, m.Name)
-		} else if _, err := s.wireModel(ctx, b, m.Name); err != nil {
+			// The answer names the serving object the load created
+			// (running.resource and running.kind, with its state) so the
+			// caller can refer to it; the load job that follows the object
+			// carries the name too.
+			view, err := s.GetModel(ctx, string(b.Name()), m.Name)
+			var running *backend.LoadedModel
+			if view != nil {
+				running = view.Running
+			}
+			s.startLoadJob(ctx, b, sl, m.Name, running)
+			return view, err
+		}
+		if _, err := s.wireModel(ctx, b, m.Name); err != nil {
 			s.log.Warn("auto-wire after load failed", "backend", b.Name(), "model", m.Name, "error", err)
 		}
 	}
 	return s.GetModel(ctx, string(b.Name()), m.Name)
 }
 
-// startLoadJob follows a served model to readiness and wires it.
-func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model string) {
-	job, created := s.jobs.Start(jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx},
+// startLoadJob follows a served model to readiness and wires it; running is
+// the serving object as the backend lists it right after the load, nil when
+// it lists none.
+func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model string, running *backend.LoadedModel) {
+	start := jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx}
+	object := model
+	if running != nil {
+		start.Resource, start.Preset = running.Resource, running.Preset
+		if running.Kind != "" && running.Resource != "" {
+			object = running.Kind + " " + running.Resource
+		}
+	}
+	job, created := s.jobs.Start(start,
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
-			report(backend.Progress{Status: "waiting for the served model to become ready"})
+			report(backend.Progress{Status: "waiting for " + object + " to become ready"})
 			if err := sl.WaitReady(jobCtx, model); err != nil {
 				return nil, err
 			}

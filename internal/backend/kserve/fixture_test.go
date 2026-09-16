@@ -274,6 +274,14 @@ func (f *fixture) resetSettings() {
 	f.b.cfg.mu.Unlock()
 }
 
+// expireSettings ends the cached settings' TTL so the next call refreshes
+// them — and keeps them when the refresh fails.
+func (f *fixture) expireSettings() {
+	f.b.cfg.mu.Lock()
+	f.b.cfg.fetchedAt = time.Time{}
+	f.b.cfg.mu.Unlock()
+}
+
 func node(name string, memory string, labels map[string]string) *corev1.Node {
 	n := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{labelHostname: name}},
@@ -351,6 +359,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	})
 	require.NoError(t, err)
 	b.log = slog.New(slog.DiscardHandler)
+	b.cfg.log = b.log
 	f := &fixture{t: t, b: b, cs: cs, dyn: dyn, hub: hub, entries: map[string][]cacheEntry{}, logs: map[string]string{}}
 	b.scan = func(_ context.Context, node string) ([]cacheEntry, string, error) {
 		f.mu.Lock()

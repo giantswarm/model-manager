@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -52,11 +53,14 @@ type served struct {
 	GPUs           int64
 	Ready          bool
 	Status         string
-	Message        string
-	URL            string
-	Node           string
-	Created        time.Time
-	Deleting       bool
+	// Reason names why Status is not Ready: the Ready condition's reason, a
+	// failed load's, or the predictor pod's (Unschedulable, ImagePullBackOff).
+	Reason   string
+	Message  string
+	URL      string
+	Node     string
+	Created  time.Time
+	Deleting bool
 }
 
 // manageable reports whether model-manager may operate on the
@@ -127,11 +131,11 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 		b.log.Warn("listing presets failed; serving objects are shown without preset details", "error", err)
 	}
 	idx := indexPresets(presets)
-	nodes := b.predictorNodes(ctx, s.Namespace)
+	pods := b.predictorPods(ctx, s.Namespace)
 	out := make([]served, 0, len(items))
 	for i := range items {
 		sv := parseServed(&items[i], idx, s.GPUResourceName)
-		sv.Node = nodes[sv.Name]
+		sv.applyPod(pods[sv.Name])
 		out = append(out, sv)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -142,34 +146,100 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	return out, nil
 }
 
-// predictorNodes maps the name of an InferenceService or LLMInferenceService
-// to the node its predictor (workload) pod runs on.
-func (b *Backend) predictorNodes(ctx context.Context, namespace string) map[string]string {
-	out := map[string]string{}
-	b.podNodes(ctx, namespace, isvcPodLabel, isvcPodLabel, out)
-	b.podNodes(ctx, namespace, llmisvcPodSelector, llmisvcPodLabel, out)
+// predictorPod is what the driver reads off the predictor (workload) pod of
+// an InferenceService or LLMInferenceService.
+type predictorPod struct {
+	Node        string
+	Terminating bool
+	// Pending is true while the pod waits for a node or for its containers'
+	// images; Reason and Message are then the scheduler's or the kubelet's.
+	Pending bool
+	Reason  string
+	Message string
+}
+
+// outranks reports whether p describes its object better than other: a pod
+// that stays over one that terminates, a scheduled one over a pending one.
+func (p predictorPod) outranks(other predictorPod) bool {
+	if p.Terminating != other.Terminating {
+		return !p.Terminating
+	}
+	return p.Node != "" && other.Node == ""
+}
+
+// predictorPods maps the name of an InferenceService or LLMInferenceService
+// to its predictor (workload) pod.
+func (b *Backend) predictorPods(ctx context.Context, namespace string) map[string]predictorPod {
+	out := map[string]predictorPod{}
+	b.podsByName(ctx, namespace, isvcPodLabel, isvcPodLabel, out)
+	b.podsByName(ctx, namespace, llmisvcPodSelector, llmisvcPodLabel, out)
 	return out
 }
 
-// podNodes adds the node of every pod matching selector to out, keyed by the
-// pod's nameLabel value.
-func (b *Backend) podNodes(ctx context.Context, namespace, selector, nameLabel string, out map[string]string) {
+// podsByName adds every pod matching selector to out, keyed by the pod's
+// nameLabel value; of several pods for one name (a rollout, a replacement)
+// the one that outranks the others stays.
+func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel string, out map[string]predictorPod) {
 	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		b.log.Warn("listing predictor pods failed", "namespace", namespace, "selector", selector, "error", err)
 		return
 	}
 	for i := range pods.Items {
-		p := &pods.Items[i]
-		name := p.Labels[nameLabel]
-		if name == "" || p.Spec.NodeName == "" {
+		name := pods.Items[i].Labels[nameLabel]
+		if name == "" {
 			continue
 		}
-		// Prefer a running pod over a terminating one.
-		if prev, ok := out[name]; ok && prev != "" && p.DeletionTimestamp != nil {
+		cur := predictorPodOf(&pods.Items[i])
+		if prev, ok := out[name]; ok && prev.outranks(cur) {
 			continue
 		}
-		out[name] = p.Spec.NodeName
+		out[name] = cur
+	}
+}
+
+func predictorPodOf(p *corev1.Pod) predictorPod {
+	pp := predictorPod{Node: p.Spec.NodeName, Terminating: p.DeletionTimestamp != nil}
+	if p.Status.Phase == corev1.PodPending {
+		pp.Pending = true
+		pp.Reason, pp.Message = podPendingReason(p)
+	}
+	return pp
+}
+
+// podPendingReason is why a pod is Pending: the first container waiting with
+// a reason (ImagePullBackOff, CreateContainerConfigError, ContainerCreating),
+// else the scheduler's (Unschedulable, with the nodes it looked at), else the
+// pod's own status reason.
+func podPendingReason(p *corev1.Pod) (reason, message string) {
+	for _, list := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
+		for _, cs := range list {
+			if w := cs.State.Waiting; w != nil && w.Reason != "" {
+				return w.Reason, w.Message
+			}
+		}
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
+			return c.Reason, c.Message
+		}
+	}
+	return p.Status.Reason, p.Status.Message
+}
+
+// applyPod adds what the predictor pod tells: the node it runs on and, while
+// the object is not Ready, a Pending pod's own state — the scheduler's reason
+// (Unschedulable: no node with a free GPU, a pool still scaling from zero) or
+// the kubelet's (ImagePullBackOff) — which says more than the object's Ready
+// condition does. A serving object whose pod waits is Pending, not NotReady.
+func (sv *served) applyPod(p predictorPod) {
+	sv.Node = p.Node
+	if sv.Ready || sv.Deleting || !p.Pending {
+		return
+	}
+	sv.Status = statusPending
+	if p.Reason != "" || p.Message != "" {
+		sv.Reason, sv.Message = p.Reason, strings.TrimSpace(p.Reason+" "+p.Message)
 	}
 }
 
@@ -221,7 +291,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource st
 		sv.Model = sv.Name
 	}
 
-	sv.Status, sv.Message, sv.Ready = servedStatus(obj)
+	sv.Status, sv.Reason, sv.Message, sv.Ready = servedStatus(obj)
 	sv.URL = normalizePredictorURL(servedURL(obj, sv))
 	return sv
 }
@@ -270,9 +340,10 @@ func gpusOf(resources any, gpuResource string) int64 {
 	return 0
 }
 
-// servedStatus maps the KServe conditions / modelStatus to Ready, NotReady
-// (with a message) or Pending.
-func servedStatus(obj *unstructured.Unstructured) (status, message string, ready bool) {
+// servedStatus maps the KServe conditions / modelStatus to Ready, NotReady or
+// Pending, with the reason and the message (the reason and the condition's
+// text together) behind a state that is not Ready.
+func servedStatus(obj *unstructured.Unstructured) (status, reason, message string, ready bool) {
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	var readyCond map[string]any
 	for _, c := range conds {
@@ -282,25 +353,31 @@ func servedStatus(obj *unstructured.Unstructured) (status, message string, ready
 		}
 	}
 	if readyCond != nil && readyCond["status"] == "True" {
-		return statusReady, "", true
+		return statusReady, "", "", true
 	}
 	if failure, ok, _ := unstructured.NestedMap(obj.Object, "status", "modelStatus", "lastFailureInfo"); ok && len(failure) > 0 {
-		msg, _ := failure["message"].(string)
-		reason, _ := failure["reason"].(string)
-		return statusNotReady, strings.TrimSpace(reason + " " + msg), false
+		reason, message = conditionText(failure)
+		return statusNotReady, reason, message, false
 	}
 	if readyCond != nil {
-		msg, _ := readyCond["message"].(string)
-		reason, _ := readyCond["reason"].(string)
+		reason, message = conditionText(readyCond)
 		if readyCond["status"] == "False" {
-			return statusNotReady, strings.TrimSpace(reason + " " + msg), false
+			return statusNotReady, reason, message, false
 		}
-		return statusPending, strings.TrimSpace(reason + " " + msg), false
+		return statusPending, reason, message, false
 	}
 	if ts, _, _ := unstructured.NestedString(obj.Object, "status", "modelStatus", "transitionStatus"); ts != "" && ts != "UpToDate" && ts != "InProgress" {
-		return statusNotReady, ts, false
+		return statusNotReady, ts, ts, false
 	}
-	return statusPending, "", false
+	return statusPending, "", "", false
+}
+
+// conditionText reads a condition's (or a failure's) reason, and reason and
+// message as one line.
+func conditionText(c map[string]any) (reason, text string) {
+	reason, _ = c["reason"].(string)
+	msg, _ := c["message"].(string)
+	return reason, strings.TrimSpace(reason + " " + msg)
 }
 
 func quantityValue(v any) int64 {

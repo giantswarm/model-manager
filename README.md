@@ -485,6 +485,15 @@ scheduling by the registered backend document (`docs/backends.md`).
   model-manager created or that carry the `agent-platform.giantswarm.io/preset`
   label (the portal's serve flow) can be unloaded here; hand-written ones are
   inventory only (`409 conflict` on unload; `managedBy` says who owns them).
+- **State** — the loaded models (`GET /api/v1/loaded`, `list_loaded_models`)
+  are every InferenceService and LLMInferenceService of the serving namespace
+  whatever their readiness: `status` `Ready`, `Pending` (the predictor pod
+  waits for a node or an image — `reason` `Unschedulable` with the
+  scheduler's message, `ImagePullBackOff`), `NotReady` (the Ready
+  condition's `reason`, a failed load) or `Terminating`, with `message` in
+  words. `unload` takes the preset name, the object name or the repository
+  id and deletes the object in any state; a `load`'s answer names the object
+  it created (`running.resource`, `running.kind`).
 
 ## Jobs, restarts and replicas
 

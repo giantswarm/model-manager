@@ -2,12 +2,15 @@ package kserve
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
@@ -154,28 +157,65 @@ type settings struct {
 // for DiscoveryTTL so a changed ConfigMap is picked up without a restart.
 type config struct {
 	opts backend.KServeOptions
+	log  *slog.Logger
 
 	mu        sync.Mutex
 	cached    *settings
 	fetchedAt time.Time
 	now       func() time.Time
+	// refreshErr is the failure the last refresh ended in ("" when it
+	// succeeded); a change is logged once, not every attempt.
+	refreshErr string
 }
 
-func newConfig(opts backend.KServeOptions) *config {
-	return &config{opts: opts, now: time.Now}
+func newConfig(opts backend.KServeOptions, log *slog.Logger) *config {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &config{opts: opts, log: log, now: time.Now}
 }
 
-// settings returns the effective configuration.
+// settings returns the effective configuration. The cache is shared by every
+// caller, so a refresh only replaces it when it succeeds: a refresh that
+// fails with the credentials at hand — a job whose caller token expired, a
+// caller without the permission — keeps the last good settings and is tried
+// again on the next call. Before this rule a load job polling with a dead
+// token cached "LLMInferenceService API not served" for everyone, and the
+// namespace's LLMInferenceServices vanished from every list and unload
+// (giantswarm/model-manager#92).
 func (c *config) settings(ctx context.Context) settings {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cached != nil && c.now().Sub(c.fetchedAt) < c.opts.DiscoveryTTL {
 		return *c.cached
 	}
-	s := c.resolve(ctx)
-	c.cached = &s
-	c.fetchedAt = c.now()
+	s, err := c.resolve(ctx)
+	c.noteRefresh(err)
+	switch {
+	case err == nil:
+		c.cached = &s
+		c.fetchedAt = c.now()
+	case c.cached != nil:
+		return *c.cached
+	}
 	return s
+}
+
+// noteRefresh logs a refresh failure when it starts and the recovery when it
+// ends; the attempts in between stay quiet.
+func (c *config) noteRefresh(err error) {
+	switch {
+	case err == nil && c.refreshErr != "":
+		c.refreshErr = ""
+		c.log.Info("serving settings refreshed again")
+	case err != nil && err.Error() != c.refreshErr:
+		c.refreshErr = err.Error()
+		if c.cached != nil {
+			c.log.Warn("refreshing the serving settings failed; keeping the last good ones", "error", err, "age", c.now().Sub(c.fetchedAt).Round(time.Second))
+		} else {
+			c.log.Warn("resolving the serving settings failed; using the defaults until a refresh succeeds", "error", err)
+		}
+	}
 }
 
 // last returns the most recently resolved settings without refreshing
@@ -194,7 +234,11 @@ func (c *config) last() settings {
 	return s
 }
 
-func (c *config) resolve(ctx context.Context) settings {
+// resolve reads the settings once. The error says the answer is incomplete —
+// the discovery ConfigMap or the API discovery could not be read with any
+// client at hand — and must not be cached; the settings returned beside it
+// are the defaults plus whatever was read.
+func (c *config) resolve(ctx context.Context) (settings, error) {
 	o := c.opts
 	s := settings{
 		Namespace:       DefaultNamespace,
@@ -206,8 +250,10 @@ func (c *config) resolve(ctx context.Context) settings {
 		PresetNamespace: o.DiscoveryNamespace,
 		PresetSelector:  DefaultPresetSelector,
 	}
+	var errs []error
 	if doc, err := c.discover(ctx); err != nil {
 		s.DiscoveryError = err.Error()
+		errs = append(errs, err)
 	} else if doc != nil {
 		s.DiscoveryFound = true
 		sp := doc.Spec
@@ -246,7 +292,11 @@ func (c *config) resolve(ctx context.Context) settings {
 	if s.PresetNamespace == "" {
 		s.PresetNamespace = s.Namespace
 	}
-	s.LLMServed = c.apiServed(ctx, llmisvcGVR)
+	served, err := c.apiServed(ctx, llmisvcGVR)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	s.LLMServed = served
 	s.ServingKind = o.ServingKind
 	if s.ServingKind == ServingKindAuto || s.ServingKind == "" {
 		s.ServingKind = ServingKindClassic
@@ -254,53 +304,84 @@ func (c *config) resolve(ctx context.Context) settings {
 			s.ServingKind = ServingKindLLM
 		}
 	}
-	return s
+	return s, errors.Join(errs...)
 }
 
-// clientset returns the clientset a resolve should use: the caller's when the
-// request carries a caller token (downstream OAuth: the ServiceAccount cannot
-// read the ConfigMap), else the configured one; nil without either.
-func (c *config) clientset(ctx context.Context) kubernetes.Interface {
-	cs := c.opts.Clientset
+// clientsets returns the clientsets a resolve tries, in order: the caller's
+// when the request carries a caller token (downstream OAuth: only the caller
+// may read the ConfigMap; a remote target knows no other credential), then
+// the configured one, which still answers when the caller's token has
+// expired. Empty without either.
+func (c *config) clientsets(ctx context.Context) []kubernetes.Interface {
+	var out []kubernetes.Interface
 	if c.opts.ClientsFor != nil {
-		if caller, _ := c.opts.ClientsFor(ctx); caller != nil {
-			cs = caller
+		if caller, _ := c.opts.ClientsFor(ctx); caller != nil && caller != c.opts.Clientset {
+			out = append(out, caller)
 		}
 	}
-	return cs
+	if c.opts.Clientset != nil {
+		out = append(out, c.opts.Clientset)
+	}
+	return out
 }
 
-// apiServed reports whether the API server serves gvr (a false answer when
-// the discovery request fails: the kind is then not usable either way).
-func (c *config) apiServed(ctx context.Context, gvr schema.GroupVersionResource) bool {
-	cs := c.clientset(ctx)
-	if cs == nil {
-		return false
-	}
-	list, err := cs.Discovery().ServerResourcesForGroupVersion(gvr.GroupVersion().String())
-	if err != nil {
-		return false
-	}
-	for _, r := range list.APIResources {
-		if r.Name == gvr.Resource {
-			return true
+// apiServed reports whether the API server serves gvr. The first client whose
+// discovery request is answered decides — the group version listed, or not
+// found. An error from every client means the answer is unknown, never that
+// the kind is absent.
+func (c *config) apiServed(ctx context.Context, gvr schema.GroupVersionResource) (bool, error) {
+	var errs []error
+	for _, cs := range c.clientsets(ctx) {
+		list, err := cs.Discovery().ServerResourcesForGroupVersion(gvr.GroupVersion().String())
+		if apierrors.IsNotFound(err) {
+			return false, nil
 		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, r := range list.APIResources {
+			if r.Name == gvr.Resource {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
-	return false
+	if len(errs) == 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("discover %s: %w", gvr.GroupVersion(), errors.Join(errs...))
 }
 
 // discover reads the ModelServingConfig ConfigMap; nil when it does not exist.
+// The first client that reads it, or finds it absent, decides; an error from
+// every client is returned.
 func (c *config) discover(ctx context.Context) (*discoveryDoc, error) {
 	o := c.opts
-	if o.DiscoveryConfigMap == "" || o.DiscoveryNamespace == "" || o.Clientset == nil {
+	if o.DiscoveryConfigMap == "" || o.DiscoveryNamespace == "" {
 		return nil, nil
 	}
-	cm, err := c.clientset(ctx).CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		return nil, nil
+	var (
+		cm   *corev1.ConfigMap
+		errs []error
+	)
+	for _, cs := range c.clientsets(ctx) {
+		got, err := cs.CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		cm = got
+		break
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read discovery ConfigMap %s/%s: %w", o.DiscoveryNamespace, o.DiscoveryConfigMap, err)
+	if cm == nil {
+		if len(errs) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read discovery ConfigMap %s/%s: %w", o.DiscoveryNamespace, o.DiscoveryConfigMap, errors.Join(errs...))
 	}
 	raw, ok := cm.Data[discoveryConfigKey]
 	if !ok {

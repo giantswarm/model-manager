@@ -66,9 +66,14 @@ type Job struct {
 	// request named, else the one the backend picked after its fit check.
 	// Empty on backends without placement (ollama) and on a shared cache.
 	Node string `json:"node,omitempty"`
-	// Preset is the serving preset a pull is for (kserve): the one the request
-	// named, else the single preset the backend resolved for the model.
+	// Preset is the serving preset a pull or a load is for (kserve): the one
+	// the request named, else the single preset the backend resolved for the
+	// model.
 	Preset string `json:"preset,omitempty"`
+	// Resource is the serving object a load follows (kserve: the
+	// InferenceService or LLMInferenceService name), so a reader can refer
+	// to it; empty when the backend listed none.
+	Resource string `json:"resource,omitempty"`
 	// RequestedBy is the caller who started the job (email, else the IdP
 	// subject) when the request was authenticated; empty for jobs the service
 	// starts on its own (adopted downloads).
@@ -145,6 +150,8 @@ type StartRequest struct {
 	// download Job carries); the backend refines them through Progress.
 	Node   string
 	Preset string
+	// Resource is the serving object a load job follows.
+	Resource string
 }
 
 // Start begins a job in the background and returns its initial snapshot. If a
@@ -175,6 +182,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 			Wire:        req.Wire,
 			Node:        req.Node,
 			Preset:      req.Preset,
+			Resource:    req.Resource,
 			RequestedBy: identity.Caller(parent),
 		},
 		cancel: cancel,

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -102,13 +103,14 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	default:
 		return nil, fmt.Errorf("kserve inventory mode %q: want %s or %s", opts.InventoryMode, InventoryModePod, InventoryModeDaemonSet)
 	}
+	log := slog.Default().With("backend", "kserve")
 	b := &Backend{
 		opts: opts,
-		cfg:  newConfig(opts),
+		cfg:  newConfig(opts, log),
 		cs:   opts.Clientset,
 		dyn:  opts.Dynamic,
 		inv:  newInventory(),
-		log:  slog.Default().With("backend", "kserve"),
+		log:  log,
 	}
 	b.hub = newHubClient(opts.HFEndpoint, &http.Client{Timeout: 30 * time.Second}, b.hubToken)
 	b.agentHTTP = &http.Client{Timeout: opts.InventoryTimeout}
@@ -400,6 +402,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Endpoint:  sv.URL,
 			Node:      sv.Node,
 			Status:    sv.Status,
+			Reason:    sv.Reason,
 			Message:   sv.Message,
 			Resource:  sv.Name,
 			Kind:      sv.Kind,
@@ -583,11 +586,17 @@ func (b *Backend) WaitReady(ctx context.Context, model string) error {
 	defer ticker.Stop()
 	for {
 		matches, err := b.servedFor(ctx, model)
-		if err != nil {
+		switch {
+		case apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err):
+			// The credential this wait runs with — a caller token that expired
+			// while the predictor waited for a node — reads nothing anymore;
+			// polling on would report the same every few seconds for hours.
+			return fmt.Errorf("waiting for %s to become ready: %w; the serving object keeps starting — the loaded models list shows its state and wire_model wires it once Ready", model, err)
+		case err != nil:
 			b.log.Warn("readiness poll failed", "model", model, "error", err)
-		} else if len(matches) == 0 {
+		case len(matches) == 0:
 			return fmt.Errorf("%w: InferenceService for %s is gone", backend.ErrNotFound, model)
-		} else {
+		default:
 			for _, sv := range matches {
 				if sv.Ready {
 					return nil

@@ -196,24 +196,28 @@ func TestServedStatus(t *testing.T) {
 	obj := func(status map[string]any) *unstructured.Unstructured {
 		return &unstructured.Unstructured{Object: map[string]any{"status": status}}
 	}
-	s, msg, ready := servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}))
+	s, reason, msg, ready := servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}))
 	assert.Equal(t, statusReady, s)
 	assert.True(t, ready)
+	assert.Empty(t, reason)
 	assert.Empty(t, msg)
 
-	s, msg, ready = servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False", "reason": "PredictorNotReady", "message": "waiting"}}}))
+	s, reason, msg, ready = servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False", "reason": "PredictorNotReady", "message": "waiting"}}}))
 	assert.Equal(t, statusNotReady, s)
 	assert.False(t, ready)
+	assert.Equal(t, "PredictorNotReady", reason)
 	assert.Equal(t, "PredictorNotReady waiting", msg)
 
-	s, msg, _ = servedStatus(obj(map[string]any{"modelStatus": map[string]any{"transitionStatus": "BlockedByFailedLoad", "lastFailureInfo": map[string]any{"reason": "ModelLoadFailed", "message": "OOM"}}}))
+	s, reason, msg, _ = servedStatus(obj(map[string]any{"modelStatus": map[string]any{"transitionStatus": "BlockedByFailedLoad", "lastFailureInfo": map[string]any{"reason": "ModelLoadFailed", "message": "OOM"}}}))
 	assert.Equal(t, statusNotReady, s)
+	assert.Equal(t, "ModelLoadFailed", reason)
 	assert.Equal(t, "ModelLoadFailed OOM", msg)
 
-	s, _, _ = servedStatus(obj(map[string]any{}))
+	s, _, _, _ = servedStatus(obj(map[string]any{}))
 	assert.Equal(t, statusPending, s)
-	s, _, _ = servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "Unknown", "reason": "Scheduling"}}}))
+	s, reason, _, _ = servedStatus(obj(map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "Unknown", "reason": "Scheduling"}}}))
 	assert.Equal(t, statusPending, s)
+	assert.Equal(t, "Scheduling", reason)
 }
 
 func TestHubHelpers(t *testing.T) {
