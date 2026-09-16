@@ -127,7 +127,7 @@ func TestComposeLLMInferenceServiceForEveryShippedPreset(t *testing.T) {
 			assert.Equal(t, map[string]any{"uri": p.Spec.Model.StorageURI, "name": p.Spec.Model.ID}, spec["model"])
 			assert.True(t, strings.HasPrefix(p.Spec.Model.StorageURI, "hf://"), "shipped presets serve from the Hub")
 			assert.EqualValues(t, 1, spec["replicas"])
-			assert.Equal(t, map[string]any{"route": map[string]any{}, "scheduler": map[string]any{}}, spec["router"], "KServe's router renders the route and the scheduler the InferencePool")
+			assert.Equal(t, map[string]any{"route": map[string]any{}}, spec["router"], "the route alone: KServe routes the Gateway to the workload Service; no scheduler, no InferencePool")
 			_, hasBaseRefs := spec["baseRefs"]
 			assert.False(t, hasBaseRefs, "no baseRefs: KServe picks its well-known configs from the shape")
 
@@ -227,6 +227,46 @@ func TestComposeLLMInferenceServicePresetOverrides(t *testing.T) {
 	assert.Equal(t, []any{map[string]any{"name": "custom-config"}}, baseRefs, "a preset naming a custom config is the only baseRefs case")
 	runtimeClass, _, _ := unstructured.NestedString(obj.Object, "spec", "template", "runtimeClassName")
 	assert.Equal(t, "nvidia", runtimeClass)
+}
+
+// The llm-d endpoint picker is opt-in: the backend's router option composes
+// router.scheduler for every preset, a preset's spec.router.scheduler decides
+// for itself either way. Its InferencePool needs the Inference Extension on
+// the gateway, which the default shape does not.
+func TestComposeLLMInferenceServiceRouterScheduler(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.serveLLMAPI()
+	for name, extra := range map[string]string{
+		"picker":  "  router:\n    scheduler: true\n",
+		"route":   "  router:\n    scheduler: false\n",
+		"default": "",
+	} {
+		_, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap(name, presetDoc(name, "org/"+name, 1, extra)), metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	schema := loadLLMISVCSchema(t)
+	router := func(t *testing.T, preset string) map[string]any {
+		t.Helper()
+		obj := f.b.compose(mustPreset(t, f, preset), f.b.cfg.settings(ctx), "")
+		schema.assertValid(t, obj)
+		r, _, _ := unstructured.NestedMap(obj.Object, "spec", "router")
+		return r
+	}
+	withPicker := map[string]any{"route": map[string]any{}, "scheduler": map[string]any{}}
+	routeOnly := map[string]any{"route": map[string]any{}}
+
+	assert.Equal(t, withPicker, router(t, "picker"), "a preset switches the scheduler on")
+	assert.Equal(t, routeOnly, router(t, "route"))
+	assert.Equal(t, routeOnly, router(t, "default"), "off unless asked")
+
+	// The backend option (a document's spec.kserve.router.scheduler) is the
+	// default for every preset that does not decide for itself.
+	f.b.cfg.opts.Router.Scheduler = true
+	f.resetSettings()
+	assert.Equal(t, withPicker, router(t, "default"), "the backend's default")
+	assert.Equal(t, routeOnly, router(t, "route"), "a preset switches the scheduler off")
+	assert.Equal(t, withPicker, router(t, "picker"))
 }
 
 func TestLoadUnloadLLMInferenceService(t *testing.T) {

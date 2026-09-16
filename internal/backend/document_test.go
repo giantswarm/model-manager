@@ -47,6 +47,8 @@ spec:
         MIIB
         -----END CERTIFICATE-----
       servingNamespace: model-serving
+    router:
+      scheduler: true
 `))
 	require.NoError(t, err)
 	assert.Equal(t, "agent-platform-model-serving", doc.Spec.KServe.Discovery.Name, "discovery name default")
@@ -59,12 +61,14 @@ spec:
 	assert.Equal(t, "model-serving", opts.KServe.DiscoveryNamespace)
 	assert.Equal(t, "gpu01", opts.KServe.Target.Cluster)
 	assert.Equal(t, "img", opts.KServe.DownloadImage)
+	assert.True(t, opts.KServe.Router.Scheduler, "the document's router shape lands in the options")
 
 	local := NewDocument(DocumentSpec{Kind: NameKServe, KServe: &KServeSpec{Target: Target{ServingNamespace: "ns"}}})
 	require.NoError(t, local.Validate())
 	assert.Equal(t, TargetLocal, local.Spec.KServe.Target.Cluster)
 	assert.Nil(t, local.Spec.KServe.Target.Identity(), "local has no target identity")
 	assert.Equal(t, SourcePerson, local.Spec.Source)
+	assert.False(t, local.Options(Options{}).KServe.Router.Scheduler, "no router block: the route alone")
 }
 
 func TestParseDocumentNamesTheFailingField(t *testing.T) {

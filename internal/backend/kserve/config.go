@@ -140,7 +140,11 @@ type settings struct {
 	// GPUPool is the pool scheduling every scan pod, download Job and
 	// composed predictor gets (scheduling.go): discovery's spec.gpuPool,
 	// the option's taint and selector replacing each when set.
-	GPUPool             backend.GPUPool
+	GPUPool backend.GPUPool
+	// RouterScheduler composes the llm-d endpoint picker (router.scheduler)
+	// beside the route on every LLMInferenceService whose preset does not
+	// decide for itself (llmisvc.go): the option's; discovery has no say.
+	RouterScheduler     bool
 	CacheEnabled        bool
 	CacheClaim          string
 	CacheMountPath      string
@@ -297,6 +301,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	if len(o.GPUPool.Instances) > 0 {
 		s.GPUPool.Instances = o.GPUPool.Instances
 	}
+	s.RouterScheduler = o.Router.Scheduler
 	// The document's shapes were validated when it was read; discovery's
 	// come from chart values nothing has checked. A list with a bad shape
 	// is dropped rather than judged on: the answer falls back to unverified.

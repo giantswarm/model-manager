@@ -75,6 +75,15 @@ type presetSpec struct {
 	Predictor map[string]any   `json:"predictor"`
 	Template  map[string]any   `json:"template"`
 	BaseRefs  []map[string]any `json:"baseRefs"`
+	// Router decides the LLMInferenceService's router shape for this preset
+	// alone: Scheduler set composes (true) or leaves out (false) the llm-d
+	// endpoint picker whatever the backend's default; nil follows it.
+	Router *presetRouter `json:"router"`
+}
+
+// presetRouter is a preset's spec.router.
+type presetRouter struct {
+	Scheduler *bool `json:"scheduler"`
 }
 
 func (p *servingPreset) name() string { return p.Metadata.Name }
@@ -84,6 +93,16 @@ func (p *servingPreset) gpus() int64 {
 		return 1
 	}
 	return *p.Spec.Resources.GPUs
+}
+
+// routerScheduler reports whether the preset's LLMInferenceService gets the
+// llm-d endpoint picker: the preset's spec.router.scheduler when set, else
+// the backend's default.
+func (p *servingPreset) routerScheduler(s settings) bool {
+	if p.Spec.Router != nil && p.Spec.Router.Scheduler != nil {
+		return *p.Spec.Router.Scheduler
+	}
+	return s.RouterScheduler
 }
 
 func (p *servingPreset) weightsBytes() int64 {

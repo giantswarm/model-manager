@@ -111,6 +111,20 @@ type KServeSpec struct {
 	// the pool taint model-manager tolerates and the pool label it selects
 	// on everything it schedules onto the pool.
 	GPUPool *GPUPool `json:"gpuPool,omitempty"`
+	// Router, when set, is the router shape of every LLMInferenceService
+	// the backend composes; see Router.
+	Router *Router `json:"router,omitempty"`
+}
+
+// Router is the router shape of the LLMInferenceServices the kserve backend
+// composes. Scheduler asks KServe for the llm-d endpoint picker beside the
+// route: the model's HTTPRoute then targets an InferencePool, which the
+// models Gateway resolves only with the Gateway API Inference Extension
+// (giantswarm/agent-platform#504). Off — the default — KServe routes the
+// Gateway to the workload Service, the shape a single-replica predictor
+// needs. A preset's spec.router.scheduler overrides it for that preset.
+type Router struct {
+	Scheduler bool `json:"scheduler"`
 }
 
 // GPUPool is the scheduling of the GPU node pool the kserve backend puts
@@ -472,6 +486,9 @@ func (d *Document) Options(base Options) Options {
 		}
 		if k.GPUPool != nil {
 			base.KServe.GPUPool = *k.GPUPool
+		}
+		if k.Router != nil {
+			base.KServe.Router = *k.Router
 		}
 		if s.Credentials != nil {
 			base.KServe.HFTokenSecret = s.Credentials.SecretRef.Name
