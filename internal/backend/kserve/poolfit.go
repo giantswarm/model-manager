@@ -65,8 +65,20 @@ func requestOf(p *servingPreset, name string, as func(resource.Quantity) float64
 // hosts reports whether a node of shape s can run a predictor with needs n.
 func hosts(s backend.InstanceShape, n predictorNeeds) bool {
 	return n.VCPU <= s.UsableVCPU && n.MemoryGiB <= s.UsableMemoryGiB &&
-		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= float64(s.GPUMemoryTotalGiB())
+		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= gpuBudgetGiB(s, n)
 }
+
+// gpuBudgetGiB is the GPU memory a predictor with needs n has on a node of
+// shape s: the memory of the GPUs it requests, not the node's — a one-GPU
+// predictor on a four-GPU size gets one card, whatever the other three add
+// up to (giantswarm/model-manager#113). The same arithmetic sized the pool
+// on the form (cluster-manager's compose.hosts).
+func gpuBudgetGiB(s backend.InstanceShape, n predictorNeeds) float64 {
+	return float64(s.GPUMemoryGiB * requestedGPUs(n))
+}
+
+// requestedGPUs is the GPUs the predictor is scheduled with: at least one.
+func requestedGPUs(n predictorNeeds) int { return max(n.GPUs, 1) }
 
 // sortedShapes is the pool's shapes smallest first: by vCPU, then memory.
 func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
@@ -85,7 +97,9 @@ func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
 // Without instance shapes the answer is yes and says the fit is unverified;
 // with them, the smallest size hosting the predictor is the node it will
 // come as, and when none does the answer is no, naming what the predictor
-// asks and what the pool's largest size leaves it.
+// asks and what the pool's largest size leaves it. The GPU memory budget on
+// either verdict is that of the GPUs the predictor requests on the size; a
+// preset whose declared weights the Hub contradicts hears so on both.
 func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 	res := &plan.Result
 	res.BudgetSource = budgetSourcePoolScaleFromZero
@@ -107,20 +121,39 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 		}
 		res.Fits = true
 		res.InstanceType = s.InstanceType
-		res.BudgetBytes = gibToBytes(float64(s.GPUMemoryTotalGiB()))
+		res.BudgetBytes = gibToBytes(gpuBudgetGiB(s, needs))
 		res.FreeBytes = res.BudgetBytes
-		res.Reason = fmt.Sprintf("%s — the node comes as %s (%s: %s vCPU / %s GiB for the predictor, %d × %d GiB GPU); %s fit within %s, and %s hosts %s",
+		res.Reason = fmt.Sprintf("%s — the node comes as %s (%s: %s vCPU / %s GiB for the predictor, %d × %d GiB GPU); %s fit within %s on the %d GPU the predictor requests, and %s hosts %s%s",
 			where, s.SizeName(), s.InstanceType, trimFloat(s.UsableVCPU), trimFloat(s.UsableMemoryGiB), s.GPUs, s.GPUMemoryGiB,
-			need, humanBytes(res.BudgetBytes), s.SizeName(), describeNeeds(needs, plan.Preset))
+			need, humanBytes(res.BudgetBytes), requestedGPUs(needs), s.SizeName(), describeNeeds(needs, plan.Preset), declarationNote(plan))
 		return nil
 	}
 	largest := shapes[len(shapes)-1]
 	res.Fits = false
-	res.BudgetBytes = gibToBytes(float64(largest.GPUMemoryTotalGiB()))
-	res.Reason = fmt.Sprintf("%s — no size of the pool (%s) hosts %s: %s; %s, the largest, leaves a predictor %s vCPU / %s GiB after the node's kubelet reservations and daemonsets and carries %d × %d GiB GPU (%s needed); widen the pool's sizes or pick a smaller preset",
+	res.BudgetBytes = gibToBytes(gpuBudgetGiB(largest, needs))
+	res.Reason = fmt.Sprintf("%s — no size of the pool (%s) hosts %s: %s; %s, the largest, leaves a predictor %s vCPU / %s GiB after the node's kubelet reservations and daemonsets and carries %d × %d GiB GPU, %s on the %d GPU the predictor requests (%s needed); widen the pool's sizes or pick a smaller preset%s",
 		where, sizeNames(shapes), presetOrModel(plan), describeNeeds(needs, plan.Preset),
-		largest.SizeName(), trimFloat(largest.UsableVCPU), trimFloat(largest.UsableMemoryGiB), largest.GPUs, largest.GPUMemoryGiB, need)
+		largest.SizeName(), trimFloat(largest.UsableVCPU), trimFloat(largest.UsableMemoryGiB), largest.GPUs, largest.GPUMemoryGiB,
+		humanBytes(res.BudgetBytes), requestedGPUs(needs), need, declarationNote(plan))
 	return nil
+}
+
+// declarationNote is the clause the verdict carries when the weights the Hub
+// holds exceed what the preset declares (requirements.weightsGiB): the pool
+// was sized on the form from the declaration, so a person who chose the
+// preset there needs to hear that the Hub's size is what was judged. Empty
+// without a preset, when the preset sized the weights itself, and when the
+// declaration covers the Hub.
+func declarationNote(plan *fitPlan) string {
+	res := &plan.Result
+	if plan.Preset == nil || res.WeightsBytes <= res.DeclaredWeightsBytes {
+		return ""
+	}
+	declared, hub := humanBytes(res.DeclaredWeightsBytes), humanBytes(res.WeightsBytes)
+	if res.Fits {
+		return fmt.Sprintf("; the preset declares %s of weights, the Hub holds %s", declared, hub)
+	}
+	return fmt.Sprintf("; the preset declares %s of weights; the Hub holds %s, which is what does not fit — correct the preset", declared, hub)
 }
 
 // describeNeeds words the predictor's needs: the requests when a preset

@@ -22,6 +22,10 @@ var (
 	// shapeL40S is a g6e.xlarge: the same nominal shape as the g6.xlarge
 	// but 32 GiB of memory and a 48 GiB GPU.
 	shapeL40S = backend.InstanceShape{InstanceType: "g6e.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 32, GPUs: 1, GPUMemoryGiB: 48, UsableVCPU: 3, UsableMemoryGiB: 27.1}
+	// shapeL40S2XLarge and shape12XLarge are the families' larger sizes: one
+	// 48 GiB L40S on a g6e.2xlarge, four 24 GiB L4s on a g6.12xlarge.
+	shapeL40S2XLarge = backend.InstanceShape{InstanceType: "g6e.2xlarge", Size: "2xlarge", VCPU: 8, MemoryGiB: 64, GPUs: 1, GPUMemoryGiB: 48, UsableVCPU: 7, UsableMemoryGiB: 57.5}
+	shape12XLarge    = backend.InstanceShape{InstanceType: "g6.12xlarge", Size: "12xlarge", VCPU: 48, MemoryGiB: 192, GPUs: 4, GPUMemoryGiB: 24, UsableVCPU: 47, UsableMemoryGiB: 179.1}
 )
 
 const fatRepo = "org/fat"
@@ -135,7 +139,7 @@ func TestFitCheckPoolShapesJudgeGPUMemory(t *testing.T) {
 	assert.False(t, res.Fits)
 	assert.Equal(t, int64(100)*gib, res.WeightsBytes, "the hub's safetensors index sizes the weights")
 	assert.Contains(t, res.Reason, "no size of the pool (xlarge, 2xlarge) hosts preset big: 2 vCPU / 8 GiB requested, 1 GPU, 101 GiB of GPU memory")
-	assert.Contains(t, res.Reason, "carries 1 × 24 GiB GPU (100.0 GiB weights + 1.0 GiB overhead = 101.0 GiB needed)")
+	assert.Contains(t, res.Reason, "carries 1 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (100.0 GiB weights + 1.0 GiB overhead = 101.0 GiB needed)")
 
 	// No preset: 10 GiB of weights and the 30 GiB default overhead need 40
 	// GiB of GPU memory; an L4 has 24, an L40S 48.
@@ -143,6 +147,7 @@ func TestFitCheckPoolShapesJudgeGPUMemory(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Fits)
 	assert.Empty(t, res.Preset)
+	assert.Zero(t, res.DeclaredWeightsBytes, "no preset, no declaration")
 	assert.Contains(t, res.Reason, "hosts "+presetlessRepo+": 40 GiB of GPU memory on 1 GPU (no preset: weights and default overhead only)")
 
 	f.setPool(ctx, shapeL40S)
@@ -193,6 +198,94 @@ func TestFitCheckPoolShapesFromDiscovery(t *testing.T) {
 	assert.True(t, res.Fits)
 	assert.Empty(t, res.InstanceType)
 	assert.Contains(t, res.Reason, "unverified", "without usable shapes the answer is the one before the shapes existed")
+}
+
+// TestFitCheckPoolShapesBudgetTheRequestedGPUs: the GPU memory a predictor
+// has is that of the GPUs it requests, not the node's. A one-GPU preset
+// needing 30 GiB is refused on a pool whose only size carries 4 × 24 GiB —
+// scheduled with one GPU, vLLM would have one card — while a two-GPU preset
+// needing 40 GiB fits that size with a 48 GiB budget; the refusal and the
+// fit both name the budget of the requested GPUs. With a single-GPU 48 GiB
+// size beside it, the one-GPU preset comes as that size.
+func TestFitCheckPoolShapesBudgetTheRequestedGPUs(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t,
+		presetConfigMap("one", presetDoc("one", fatRepo, 29, "")),
+		presetConfigMap("two", strings.Replace(presetDoc("two", fatRepo, 39, ""), "gpus: 1", "gpus: 2", 1)),
+	)
+	f.setPool(ctx, shape12XLarge)
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "one"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "30 GiB on one 24 GiB GPU, whatever the node's four add up to")
+	assert.Equal(t, int64(24)*gib, res.BudgetBytes, "the budget is one GPU's memory")
+	assert.Contains(t, res.Reason, "no size of the pool (12xlarge) hosts preset one: 2 vCPU / 8 GiB requested, 1 GPU, 30 GiB of GPU memory")
+	assert.Contains(t, res.Reason, "carries 4 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (29.0 GiB weights + 1.0 GiB overhead = 30.0 GiB needed)")
+	assert.NotContains(t, res.Reason, "declares", "the preset sized the weights itself: nothing to reconcile")
+	err = f.b.Load(ctx, backend.LoadRequest{Preset: "one"})
+	require.ErrorIs(t, err, backend.ErrUnfit)
+	assert.Equal(t, 0, servingObjects(t, f, ctx))
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "two"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "g6.12xlarge", res.InstanceType)
+	assert.Equal(t, int64(48)*gib, res.BudgetBytes, "two of the four GPUs")
+	assert.Equal(t, res.BudgetBytes, res.FreeBytes)
+	assert.Contains(t, res.Reason, "39.0 GiB weights + 1.0 GiB overhead = 40.0 GiB fit within 48.0 GiB on the 2 GPU the predictor requests")
+	assert.Contains(t, res.Reason, "12xlarge hosts 2 vCPU / 8 GiB requested, 2 GPU, 40 GiB of GPU memory")
+
+	f.setPool(ctx, shape12XLarge, shapeL40S2XLarge)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "one"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "g6e.2xlarge", res.InstanceType, "the one-GPU preset comes as the size with the 48 GiB card")
+	assert.Equal(t, int64(48)*gib, res.BudgetBytes)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "two"})
+	require.NoError(t, err)
+	assert.Equal(t, "g6.12xlarge", res.InstanceType, "two GPUs: the 2xlarge carries one")
+}
+
+// TestFitCheckPoolShapesNameTheDeclaration: the pool was sized on the form
+// from the preset's declared weights; the fit sizes them from the hub. When
+// the hub holds more than the preset declares, both verdicts say so beside
+// declaredWeightsBytes and load_model's refusal carries the same words; a
+// declaration that covers the hub adds nothing.
+func TestFitCheckPoolShapesNameTheDeclaration(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t,
+		// The hub's tree holds 10 GiB of the repository; the preset declares 4.
+		presetConfigMap("lean", presetDoc("lean", presetlessRepo, 4, "")),
+		// The hub's safetensors index holds 100 GiB; the preset declares 15.
+		presetConfigMap("wishful", presetDoc("wishful", bigRepo, 15, "")),
+	)
+	f.setPool(ctx, shapeXLarge)
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "lean"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, weightsSourceTree, res.WeightsSource)
+	assert.Equal(t, int64(10)*gib, res.WeightsBytes)
+	assert.Equal(t, int64(4)*gib, res.DeclaredWeightsBytes)
+	assert.Contains(t, res.Reason, "xlarge hosts 2 vCPU / 8 GiB requested, 1 GPU, 11 GiB of GPU memory; the preset declares 4.0 GiB of weights, the Hub holds 10.0 GiB")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "wishful"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits)
+	assert.Equal(t, weightsSourceIndex, res.WeightsSource)
+	assert.Equal(t, int64(15)*gib, res.DeclaredWeightsBytes)
+	assert.Contains(t, res.Reason, "no size of the pool (xlarge) hosts preset wishful: 2 vCPU / 8 GiB requested, 1 GPU, 101 GiB of GPU memory")
+	assert.Contains(t, res.Reason, "widen the pool's sizes or pick a smaller preset; the preset declares 15.0 GiB of weights; the Hub holds 100.0 GiB, which is what does not fit — correct the preset")
+	err = f.b.Load(ctx, backend.LoadRequest{Preset: "wishful"})
+	require.ErrorIs(t, err, backend.ErrUnfit)
+	assert.Contains(t, err.Error(), "the Hub holds 100.0 GiB, which is what does not fit — correct the preset", "load_model echoes the fit")
+	assert.Equal(t, 0, servingObjects(t, f, ctx))
+
+	// The shipped preset for the repository declares what the hub holds.
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "big"})
+	require.NoError(t, err)
+	assert.Equal(t, res.WeightsBytes, res.DeclaredWeightsBytes)
+	assert.NotContains(t, res.Reason, "declares")
 }
 
 // An unparsable request is the preset's fault and is named as such.

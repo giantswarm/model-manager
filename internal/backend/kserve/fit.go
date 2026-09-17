@@ -152,6 +152,7 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
 	}
 	if p != nil {
+		res.DeclaredWeightsBytes = p.weightsBytes()
 		res.OverheadBytes = p.overheadBytes(b.opts.DefaultOverheadGiB)
 	} else {
 		res.OverheadBytes = gibToBytes(b.opts.DefaultOverheadGiB)

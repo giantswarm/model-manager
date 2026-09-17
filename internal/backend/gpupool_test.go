@@ -83,7 +83,6 @@ spec:
 	assert.Equal(t, "xlarge", want[0].SizeName())
 	assert.Equal(t, "2xlarge", want[1].SizeName(), "size defaults to the part after the family")
 	assert.Equal(t, "custom", InstanceShape{InstanceType: "custom"}.SizeName())
-	assert.Equal(t, 96, InstanceShape{GPUs: 4, GPUMemoryGiB: 24}.GPUMemoryTotalGiB())
 
 	rendered, err := d.Render()
 	require.NoError(t, err)

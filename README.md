@@ -453,7 +453,18 @@ scheduling by the registered backend document (`docs/backends.md`).
   default 4 s): a hub that does not answer — egress blocked — lets `fit-check`
   fall back to the preset's requirements in time for the caller
   (`weightsSource: preset`; `reason` says the hub did not answer within the
-  timeout), and a model no preset serves fails with that message.
+  timeout), and a model no preset serves fails with that message. On a GPU
+  pool with no node yet whose instance shapes the backend document lists
+  ([docs/backends.md](docs/backends.md)) the check is against the pool's
+  sizes, and the GPU memory budget is that of the GPUs the preset requests
+  (`resources.gpus`, default 1) on a size — not the node's: a one-GPU preset
+  on a four-GPU size has one card. A preset's declared weights
+  (`requirements.weightsGiB`, what the pool was sized from) are answered as
+  `declaredWeightsBytes` beside the hub-sized `weightsBytes`; when the hub
+  holds more than the preset declares, `reason` says so on both verdicts
+  (`…; the preset declares 15.0 GiB of weights, the Hub holds 24.6 GiB` on a
+  fit; `…; the preset declares 15.0 GiB of weights; the Hub holds 24.6 GiB,
+  which is what does not fit — correct the preset` on a refusal).
 - **Serve / stop** — `load` composes the serving object from the preset
   after a fit check against the node's free budget; `unload` deletes it (the
   cache persists); `delete` removes the cache directory (refused while
@@ -525,7 +536,9 @@ scheduling by the registered backend document (`docs/backends.md`).
   its answer says `status: Terminating` and that the list shows the object
   until it is gone. A `load`'s answer names the object it created
   (`running.resource`, `running.kind`), carries the fit verdict it was
-  judged by (`fit`, the `check_fit` shape) and the initial `running.steps`.
+  judged by (`fit`, the `check_fit` shape) and the initial `running.steps`;
+  a refusal (`412 does_not_fit`) carries the fit's `reason`, the
+  declared-weights clause included.
 - **Phases** — `phase` refines `status` with where a serve is, and `steps`
   is the whole timeline: one entry per phase in order, each
   `{name, state: pending|inProgress|done|failed, since, finishedAt, reason,
