@@ -75,7 +75,48 @@ type ModelView struct {
 	// Fit is the verdict a load judged the model by (backend.Server); only
 	// a load's answer carries it.
 	Fit *backend.FitResult `json:"fit,omitempty"`
+	// Wiring is what a load did about the ModelConfig on a serve-lifecycle
+	// backend — created in the same call, before the model is ready; only a
+	// load's answer carries it.
+	Wiring *WiringResult `json:"wiring,omitempty"`
 }
+
+// LoadedView is a loaded / served model as the loaded list answers it: the
+// backend's entry plus, on a serve-lifecycle backend, its kagent ModelConfig
+// when one exists and — when this read wired a model that had none — what
+// the read did.
+type LoadedView struct {
+	backend.LoadedModel
+	ModelConfig *wiring.ModelConfigRef `json:"modelConfig,omitempty"`
+	Wiring      *WiringResult          `json:"wiring,omitempty"`
+}
+
+// WiringResult says what a call did about a served model's ModelConfig, so a
+// wiring the caller did not ask for by name is never silent: Wired with the
+// ModelConfig and the occasion as Reason, or not wired and why.
+type WiringResult struct {
+	Wired  bool   `json:"wired"`
+	Reason string `json:"reason"`
+	// ModelConfig is the ModelConfig the model is wired to — model-manager's
+	// own, or the one someone else already pointed at the model.
+	ModelConfig *wiring.ModelConfigRef `json:"modelConfig,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+}
+
+// The occasions a WiringResult names.
+const (
+	// WiredOnLoad: load created (or refreshed) the ModelConfig in the same
+	// call, before the model is ready.
+	WiredOnLoad = "wired on load"
+	// WiredOnRead: a read found a served model model-manager manages without
+	// a ModelConfig and wired it as the caller.
+	WiredOnRead = "wired on read"
+	// AlreadyWired: a ModelConfig someone else created already points at the
+	// served model; it is reported, never duplicated.
+	AlreadyWired = "already wired"
+	// WiringFailed: the ModelConfig could not be written; Error says why.
+	WiringFailed = "wiring failed"
+)
 
 // PullOptions describe an import request.
 type PullOptions struct {
@@ -557,22 +598,59 @@ func (s *Service) GetModel(ctx context.Context, name, ref string) (*ModelView, e
 }
 
 // ListLoaded returns the loaded/running models of the named backend, or of
-// every backend that lists them.
-func (s *Service) ListLoaded(ctx context.Context, name string) ([]backend.LoadedModel, Errors, error) {
+// every backend that lists them. On a serve-lifecycle backend each entry
+// carries its ModelConfig, and a served model model-manager manages that has
+// none is wired by this read, as the caller (loadedViews).
+func (s *Service) ListLoaded(ctx context.Context, name string) ([]LoadedView, Errors, error) {
 	targets, err := s.targetsWith(name, func(c backend.Capabilities) bool { return c.LoadedModels }, "listing loaded models")
 	if err != nil {
 		return nil, nil, err
 	}
-	return aggregate(targets, func(b backend.Backend) ([]backend.LoadedModel, error) {
+	return aggregate(targets, func(b backend.Backend) ([]LoadedView, error) {
 		loaded, err := b.ListLoaded(ctx)
 		if err != nil {
 			return nil, err
 		}
-		for i := range loaded {
-			loaded[i].Backend = b.Name()
-		}
-		return loaded, nil
+		return s.loadedViews(ctx, b, loaded), nil
 	})
+}
+
+// loadedViews joins b's loaded models with their ModelConfigs and, on a
+// serve-lifecycle backend with auto-wiring, wires — as the caller — every
+// served model model-manager manages (its managed-by label) that has none.
+// In caller-only mode no reconciler runs, and the load job that wired at
+// readiness died with every model-manager restart during a cold start,
+// leaving a served model no agent could use (giantswarm/model-manager#115);
+// the caller's reads are what runs with a caller, so they mend it and say
+// so. Objects someone else manages are theirs to wire; an object on its way
+// out is not re-wired behind the unload that removed its ModelConfig.
+func (s *Service) loadedViews(ctx context.Context, b backend.Backend, loaded []backend.LoadedModel) []LoadedView {
+	out := make([]LoadedView, 0, len(loaded))
+	_, serves := serveLifecycle(b)
+	joins := serves && s.wirer != nil
+	var wired wiredView
+	if joins {
+		wired = s.wiredIndex(ctx, b)
+	}
+	for _, l := range loaded {
+		l.Backend = b.Name()
+		v := LoadedView{LoadedModel: l}
+		if joins {
+			if mc, ok := wired.lookup(l.Name, &l); ok {
+				v.ModelConfig = &mc
+			} else if s.cfg.AutoWire && l.ManagedBy == wiring.ManagedByValue && !terminating(l) {
+				v.Wiring = s.wire(ctx, b, l.Name, WiredOnRead)
+				v.ModelConfig = v.Wiring.ModelConfig
+			}
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// terminating reports whether a served model's object is being deleted.
+func terminating(l backend.LoadedModel) bool {
+	return l.Phase == backend.PhaseTerminating || l.Status == "Terminating"
 }
 
 // Pull starts (or joins) an import job on the named backend, else the default
@@ -625,9 +703,11 @@ func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.
 		})
 }
 
-// Load loads/serves a model. With AutoWire the ModelConfig is ensured right
-// away, or — on ServeLifecycle backends — by a `load` job once the served
-// model is ready.
+// Load loads/serves a model. With AutoWire the ModelConfig is ensured in the
+// same call — on ServeLifecycle backends too, at the address the served
+// model will answer on, before it is ready; there a `load` job then follows
+// the model to readiness and refreshes the ModelConfig from the address the
+// backend published.
 func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error) {
 	if strings.TrimSpace(opts.Backend) != "" {
 		b, err := s.named(opts.Backend)
@@ -676,9 +756,19 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			// (running.resource and running.kind, with its state and the
 			// initial steps) so the caller can refer to it and render the
 			// timeline; the load job that follows the object carries the
-			// name too.
+			// name too. Reading the state first also lets the backend
+			// compose the endpoint from the object it just created.
 			view := s.loadedView(ctx, b, m)
 			view.Fit = fit
+			// Wired now, with the caller's token, at the address the
+			// backend knows the model will answer on: the only wiring
+			// that survives a restart of this process during the cold
+			// start (giantswarm/model-manager#115). The job refreshes it
+			// at readiness.
+			view.Wiring = s.wire(ctx, b, m.Name, WiredOnLoad)
+			if view.Wiring.ModelConfig != nil {
+				view.ModelConfig = view.Wiring.ModelConfig
+			}
 			s.startLoadJob(ctx, b, sl, m.Name, view.Running)
 			return view, nil
 		}
@@ -689,6 +779,24 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	view := s.loadedView(ctx, b, m)
 	view.Fit = fit
 	return view, nil
+}
+
+// wire wires model on b as the caller and says what it did: Wired with the
+// ModelConfig and reason as the occasion (WiredOnLoad, WiredOnRead) — or
+// AlreadyWired when a ModelConfig someone else created already points at
+// the served model, which is reported and left alone — else WiringFailed
+// with the error. Never silent: the answer carries the result, the log the
+// failure.
+func (s *Service) wire(ctx context.Context, b backend.Backend, model, reason string) *WiringResult {
+	ref, err := s.wireModel(ctx, b, model, backend.WireOptions{})
+	if err != nil {
+		s.log.Warn("wiring failed", "backend", b.Name(), "model", model, "occasion", reason, "error", err, identity.LogAttr(ctx))
+		return &WiringResult{Reason: WiringFailed, Error: err.Error()}
+	}
+	if !ref.Managed {
+		reason = AlreadyWired
+	}
+	return &WiringResult{Wired: true, Reason: reason, ModelConfig: ref}
 }
 
 // loadedView is what a load answers: the model as the backend lists it right
@@ -705,9 +813,12 @@ func (s *Service) loadedView(ctx context.Context, b backend.Backend, m *backend.
 	return view
 }
 
-// startLoadJob follows a served model to readiness and wires it; running is
-// the serving object as the backend lists it right after the load, nil when
-// it lists none.
+// startLoadJob follows a served model to readiness and then refreshes its
+// ModelConfig from the address the backend published — the same ModelConfig
+// the load wired, updated in place (Ensure is idempotent), never a second
+// one. running is the serving object as the backend lists it right after
+// the load, nil when it lists none. The job lives in this process: a
+// restart drops it, and loses nothing but its progress entry.
 func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model string, running *backend.LoadedModel) {
 	start := jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx}
 	object := model
@@ -723,10 +834,10 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 			if err := sl.WaitReady(jobCtx, model); err != nil {
 				return nil, err
 			}
-			report(backend.Progress{Status: "ready; wiring into kagent"})
+			report(backend.Progress{Status: "ready; refreshing the ModelConfig from the published address"})
 			ref, err := s.wireModel(jobCtx, b, model, backend.WireOptions{})
 			if err != nil {
-				return nil, fmt.Errorf("%s is ready but wiring failed: %w", model, err)
+				return nil, fmt.Errorf("%s is ready but refreshing its ModelConfig failed: %w", model, err)
 			}
 			report(backend.Progress{Status: "wired"})
 			return ref, nil
@@ -1013,7 +1124,7 @@ func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(
 // else with the preset label).
 func (s *Service) Run(ctx context.Context) {
 	if s.cfg.CallerOnly {
-		s.log.Info("caller-only mode: no download adoption and no wiring reconciler (every Kubernetes call carries the caller's token; the ServiceAccount holds no permissions)")
+		s.log.Info("caller-only mode: no download adoption and no wiring reconciler (every Kubernetes call carries the caller's token; the ServiceAccount holds no permissions); a restart loses the in-memory jobs and nothing else — a served model's ModelConfig is written by the load itself and, when missing, by the caller's next read, a running download Job is joined by the next pull")
 		return
 	}
 	for _, b := range s.all() {
@@ -1073,11 +1184,8 @@ func (s *Service) reconcileWiring(ctx context.Context, b backend.Backend) {
 		if l.Status != "Ready" {
 			continue
 		}
-		if wired.has(l.Name) {
-			continue
-		}
-		if _, ok := wired.byEndpoint[endpointKey(l.Endpoint, l.Resource)]; ok {
-			continue // wired by someone else (the portal)
+		if _, ok := wired.lookup(l.Name, &l); ok {
+			continue // model-manager's own, or someone else's (the portal)
 		}
 		if s.hasActiveJob(jobs.TypeLoad, b.Name(), l.Name) {
 			continue
@@ -1204,9 +1312,23 @@ type wiredView struct {
 	byEndpoint map[string]wiring.ModelConfigRef
 }
 
-func (w wiredView) has(model string) bool {
-	_, ok := w.byModel[model]
-	return ok
+// lookup finds a model's ModelConfig: model-manager's own by model reference,
+// else — for a served model l — anyone's by served endpoint and the name the
+// provider serves the model under (the object's name for a classic
+// InferenceService, the model id for an LLMInferenceService: both are tried).
+func (w wiredView) lookup(model string, l *backend.LoadedModel) (wiring.ModelConfigRef, bool) {
+	if mc, ok := w.byModel[model]; ok {
+		return mc, true
+	}
+	if l == nil || w.byEndpoint == nil {
+		return wiring.ModelConfigRef{}, false
+	}
+	for _, servedAs := range []string{l.Resource, l.Name} {
+		if mc, ok := w.byEndpoint[endpointKey(l.Endpoint, servedAs)]; ok {
+			return mc, true
+		}
+	}
+	return wiring.ModelConfigRef{}, false
 }
 
 func (s *Service) wiredIndex(ctx context.Context, b backend.Backend) wiredView {
@@ -1259,14 +1381,8 @@ func (s *Service) view(b backend.Backend, m backend.Model, loaded map[string]bac
 		lc.Backend = b.Name()
 		v.Running = &lc
 	}
-	if mc, ok := wired.byModel[m.Name]; ok {
-		mcc := mc
-		v.ModelConfig = &mcc
-	} else if v.Running != nil && wired.byEndpoint != nil {
-		if mc, ok := wired.byEndpoint[endpointKey(v.Running.Endpoint, v.Running.Resource)]; ok {
-			mcc := mc
-			v.ModelConfig = &mcc
-		}
+	if mc, ok := wired.lookup(m.Name, v.Running); ok {
+		v.ModelConfig = &mc
 	}
 	return v
 }

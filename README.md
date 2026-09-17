@@ -25,8 +25,9 @@ into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
 for the ollama backend; `OpenAI` provider with the caller's token forwarded
 (`apiKeyPassthrough`) for a kserve model routed on the models Gateway;
 `OpenAI` provider plus a placeholder API-key Secret —
-against the predictor URL for kserve, created once the InferenceService is
-ready, and against Lemonade's `/api/v1` for lemonade), so agents can use them
+against the predictor URL for a kserve model on its in-cluster Service, and
+against Lemonade's `/api/v1` for lemonade; a kserve model's ModelConfig is
+created by the load call, before the model is ready), so agents can use them
 without manual steps. They are written in the kagent.dev API version the
 cluster serves (`v1alpha3` on kagent API v2, discovered at start-up), and a
 ModelConfig is `ready` once kagent has accepted it and resolved its Secret
@@ -56,10 +57,10 @@ Lemonade-backend ADR in the team's decision log.
 | Register / remove a backend at runtime (a backend document, [docs/backends.md](docs/backends.md); `dryRun`, `mode: apply`) | — | `add_backend`, `remove_backend` |
 | One backend (the named one, else the default) plus the names of all | `GET /api/v1/backend[?backend=]` | `get_backend` |
 | Downloaded models (with loaded state + ModelConfig), of one or every backend | `GET /api/v1/models[?backend=]`, `GET /api/v1/models/{name}[?backend=]` | `list_models`, `get_model` |
-| Loaded / running models | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
+| Loaded / running models (kserve: each with its `modelConfig`; a served model model-manager manages that has none is wired by the read, `wiring: {wired, reason: "wired on read", modelConfig}`) | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
 | Pull / import (returns a job; on `backend`, else the default backend) | `POST /api/v1/models/pull {"model","backend?","wire?","preset?","node?"}` | `pull_model` |
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
-| Load / unload | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
+| Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; unload unwires) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
 | Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
@@ -87,8 +88,14 @@ the model annotation identify them, and the same reference on two backends is
 two ModelConfigs (the second named `<derived>-<backend>`).
 
 On kserve, `pull` and `load` accept `preset` and `node`; a model is wired into
-kagent when its InferenceService becomes ready (a `load` job tracks that) and
-unwired on unload — never after a pull, since a cached model has no endpoint.
+kagent by the `load` call itself — before it is ready, at the address it will
+answer on; the answer's `wiring` names the ModelConfig — and unwired on unload,
+never after a pull, since a cached model has no endpoint. A `load` job follows
+the model to readiness and refreshes the ModelConfig from the address KServe
+published; the job lives in the process, so a restart loses only its progress
+entry. A served model model-manager manages that has no ModelConfig is wired
+by the caller's next `list_loaded_models` / `GET /api/v1/loaded`, whose entry
+says so (`wiring.reason: "wired on read"`).
 
 Capability flags: `pull`, `pullProgress`, `delete`, `load`, `unload`,
 `loadedModels`, `wire` (Kubernetes access present), `presets`, `fitCheck`,
@@ -350,8 +357,11 @@ The driver consumes the `modelServing` contract of the
 meta chart, rendered by its `agent-platform-connectivity` chart:
 the discovery ConfigMap `agent-platform-model-serving` (kind
 `ModelServingConfig`) for the serving namespace, runtime, GPU resource name,
-cache claim and preset selector, and the GPU node pool's scheduling
-(`spec.gpuPool`: the pool's taint and label); the `ServingPreset` ConfigMaps
+cache claim and preset selector, the GPU node pool's scheduling
+(`spec.gpuPool`: the pool's taint and label) and the models Gateway
+(`spec.gateway.endpoint`, `https://models.<domain>`: the origin every
+`LLMInferenceService` is routed on at `/<namespace>/<name>`, which is how a
+served model's address is known before KServe publishes it); the `ServingPreset` ConfigMaps
 (`agent-platform.giantswarm.io/serving-preset=true`); the cache
 PersistentVolumeClaim in the serving namespace. Every discovered value can be
 overridden by a flag (`model-manager serve --help`, `--kserve-*`); the pool
@@ -504,17 +514,24 @@ scheduling by the registered backend document (`docs/backends.md`).
     count); nodeSelector, the GPU pool's label and toleration,
     runtimeClassName, deployment strategy and timeout from discovery;
     `spec.predictor` extras verbatim.
-- **Wiring** — on ready, a kagent `ModelConfig` **named after the
-  InferenceService** (`provider: OpenAI`, `baseUrl` = the address KServe
-  published + `/v1`, `model` = the served model name: the InferenceService
-  name, which the ClusterServingRuntime serves under `--served-model-name
-  {{.Name}}`, or an LLMInferenceService's `spec.model.name`) — the same rule
-  the portal's serve flow applies. The API key follows the address: a model
-  **routed on the models Gateway** (`status.addresses`, an external host)
-  gets `apiKeyPassthrough: true` and no Secret — the agent forwards the
-  person's own token, the only thing the Gateway's JWT policy admits, so a
-  placeholder key would fail every turn with 401; a model reached on its
-  **in-cluster Service** (no route published) gets the placeholder
+- **Wiring** — in the load call, before the model is ready, a kagent
+  `ModelConfig` **named after the InferenceService** (`provider: OpenAI`,
+  `baseUrl` = the model's address + `/v1`, `model` = the served model name:
+  the InferenceService name, which the ClusterServingRuntime serves under
+  `--served-model-name {{.Name}}`, or an LLMInferenceService's
+  `spec.model.name`) — the same rule the portal's serve flow applies; the
+  `load` answer's `wiring` names it, the `load` job refreshes it from the
+  address KServe publishes once the model is ready, and a served model
+  model-manager manages that has none is wired by the caller's next
+  `list_loaded_models` (`wiring.reason: "wired on read"`). The address is the
+  one KServe published or, until then, the one the object is expected on: the
+  discovery document's models Gateway (`spec.gateway.endpoint` +
+  `/<namespace>/<name>`) for an `LLMInferenceService`, the in-cluster Service
+  otherwise. The API key follows the address: a model **routed on the models
+  Gateway** (an external host) gets `apiKeyPassthrough: true` and no Secret —
+  the agent forwards the person's own token, the only thing the Gateway's JWT
+  policy admits, so a placeholder key would fail every turn with 401; a model
+  reached on its **in-cluster Service** gets the placeholder
   `OPENAI_API_KEY` Secret the go ADK runtime insists on, which keyless vLLM
   never checks. A re-wire that moves a ModelConfig onto the Gateway removes
   its placeholder Secret. A ModelConfig that already points at the predictor (same
@@ -668,8 +685,11 @@ ServiceAccount. Nothing runs without a caller: the
 wiring reconciler and the re-adoption of running downloads after a restart
 are off, and a job that outlives its caller's token (a download longer than
 the token lives) fails on the apiserver's 401 — attributed to the caller,
-retried by the caller. Health endpoints (`/healthz`, `/readyz`, `/backendz`)
-and the OAuth metadata stay public.
+retried by the caller. A restart of the process loses the in-memory jobs and
+nothing else: a served model's ModelConfig is written by the load call itself
+and, when missing, by the caller's next `list_loaded_models`, and a running
+download Job is joined by the next `pull_model`. Health endpoints (`/healthz`,
+`/readyz`, `/backendz`) and the OAuth metadata stay public.
 
 ## Helm chart
 

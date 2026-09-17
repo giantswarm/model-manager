@@ -343,6 +343,62 @@ func TestLoadUnloadLLMInferenceService(t *testing.T) {
 	assert.ErrorIs(t, err, backend.ErrConflict, "a hand-written InferenceService is not model-manager's to delete")
 }
 
+// With the models Gateway named in discovery, an LLMInferenceService's address
+// is known the moment it is composed — its route on the Gateway — so the
+// ModelConfig a load wires points where the model will answer and forwards
+// the caller's token, before KServe has published anything
+// (giantswarm/model-manager#115).
+func TestLLMInferenceServiceIsRoutedOnTheDiscoveryGatewayBeforeKServePublishes(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.serveLLMAPI()
+	f.setDiscoveryOpts(ctx, discoveryOpts{gateway: "https://models.example.com/"})
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, statusPending, loaded[0].Status, "nothing published yet")
+	assert.Equal(t, "https://models.example.com/model-serving/tiny", loaded[0].Endpoint, "the route KServe will render, from the discovery Gateway (trailing slash dropped)")
+
+	ep := f.b.AgentEndpoint(tinyRepo)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny/v1", ep.BaseURL)
+	assert.Equal(t, tinyRepo, ep.Model)
+	assert.Equal(t, "tiny", ep.Name)
+	assert.True(t, ep.APIKeyPassthrough, "routed on the Gateway: the caller's token, before the model is ready")
+	assert.False(t, ep.PlaceholderAPIKey)
+
+	// A model not served yet composes the same way.
+	ep = f.b.AgentEndpoint(bigRepo)
+	assert.Equal(t, "https://models.example.com/model-serving/big/v1", ep.BaseURL)
+	assert.True(t, ep.APIKeyPassthrough)
+
+	// Once KServe publishes an address, that one wins.
+	obj, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, "tiny", metav1.GetOptions{})
+	require.NoError(t, err)
+	obj.Object["status"] = map[string]any{"addresses": []any{map[string]any{"url": "https://models.example.com/model-serving/tiny-renamed"}}}
+	_, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny-renamed", loaded[0].Endpoint)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny-renamed/v1", f.b.AgentEndpoint(tinyRepo).BaseURL)
+
+	// A classic InferenceService is not routed on the Gateway: its predictor
+	// Service and the placeholder key, as before.
+	classic := newFixture(t)
+	classic.setDiscoveryOpts(ctx, discoveryOpts{gateway: "https://models.example.com"})
+	require.NoError(t, classic.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	loaded, err = classic.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, predictorURL("tiny", testServingNS), loaded[0].Endpoint)
+	ep = classic.b.AgentEndpoint(tinyRepo)
+	assert.Equal(t, predictorURL("tiny", testServingNS)+"/v1", ep.BaseURL)
+	assert.True(t, ep.PlaceholderAPIKey)
+	assert.False(t, ep.APIKeyPassthrough)
+}
+
 func TestServingKindOption(t *testing.T) {
 	ctx := context.Background()
 	_, err := New(backend.KServeOptions{Clientset: kubefake.NewSimpleClientset(), Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), ServingKind: "Predictor"})

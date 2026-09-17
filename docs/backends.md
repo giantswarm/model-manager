@@ -176,16 +176,21 @@ keeps its shape until it is unloaded and loaded again.
 
 ### The ModelConfig's API key
 
-A served model is wired into kagent as a `ModelConfig` on the OpenAI provider, and the provider
-insists on an API key. Which key follows the address KServe published for the model:
+A served model is wired into kagent as a `ModelConfig` on the OpenAI provider — by `load_model`
+itself, before the model is ready — and the provider insists on an API key. Which key follows the
+model's address: the one KServe published, or, until it does, the one the object is expected on —
+its route on the models Gateway when the discovery document names the Gateway
+(`ModelServingConfig` `spec.gateway.endpoint`, `https://models.<installation>`; every
+`LLMInferenceService` is routed at `<endpoint>/<namespace>/<name>`), else its in-cluster Service:
 
-- **Routed on the models Gateway** (`status.addresses[0].url`, an external host such as
-  `https://models.<installation>/model-serving/<name>`): `apiKeyPassthrough: true`, no
-  `apiKeySecret`, no Secret. The Gateway's JWT policy admits a person's Dex token and nothing
+- **Routed on the models Gateway** (`status.addresses[0].url`, or the expected route — an external
+  host such as `https://models.<installation>/model-serving/<name>`): `apiKeyPassthrough: true`,
+  no `apiKeySecret`, no Secret. The Gateway's JWT policy admits a person's Dex token and nothing
   else, so the agent forwards the Bearer token of its incoming request as the API key — the
   person reaches the model as themselves. A static or placeholder key answers `401` on every
   turn (`the token header is malformed`).
-- **Reached on its in-cluster Service** (no route published, or the model not served yet):
+- **Reached on its in-cluster Service** (no Gateway in discovery and no route published, or a
+  classic `InferenceService`):
   `apiKeySecret: <name>-api-key` / `apiKeySecretKey: OPENAI_API_KEY`, a placeholder Secret
   model-manager creates and removes with the ModelConfig. vLLM checks no key; the placeholder
   satisfies the runtime.

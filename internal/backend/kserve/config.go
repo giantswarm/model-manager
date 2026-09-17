@@ -128,6 +128,17 @@ type discoveryDoc struct {
 			LabelSelector string   `json:"labelSelector"`
 			Names         []string `json:"names"`
 		} `json:"presets"`
+		// Gateway is the models Gateway every LLMInferenceService route
+		// attaches to: Endpoint its public origin (https://models.<domain>),
+		// PathConvention the path a served model answers on
+		// (/<namespace>/<model>/v1).
+		Gateway struct {
+			Enabled        bool   `json:"enabled"`
+			Name           string `json:"name"`
+			Namespace      string `json:"namespace"`
+			Endpoint       string `json:"endpoint"`
+			PathConvention string `json:"pathConvention"`
+		} `json:"gateway"`
 	} `json:"spec"`
 }
 
@@ -148,7 +159,14 @@ type settings struct {
 	// RouterScheduler composes the llm-d endpoint picker (router.scheduler)
 	// beside the route on every LLMInferenceService whose preset does not
 	// decide for itself (llmisvc.go): the option's; discovery has no say.
-	RouterScheduler     bool
+	RouterScheduler bool
+	// GatewayEndpoint is the models Gateway's origin (https://models.<domain>,
+	// no trailing slash) from discovery's spec.gateway when the Gateway is
+	// enabled, empty otherwise. KServe routes every LLMInferenceService on it
+	// at <origin>/<namespace>/<name>, so the address a served model gets is
+	// known the moment the object is composed — before KServe publishes it in
+	// status.addresses (giantswarm/model-manager#115).
+	GatewayEndpoint     string
 	CacheEnabled        bool
 	CacheClaim          string
 	CacheMountPath      string
@@ -284,6 +302,9 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		s.CacheRedirectPolicy = sp.Cache.RedirectPolicy
 		setIf(&s.PresetNamespace, sp.Presets.Namespace)
 		setIf(&s.PresetSelector, sp.Presets.LabelSelector)
+		if sp.Gateway.Enabled {
+			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
+		}
 	}
 	// Explicit options win over discovery.
 	setIf(&s.Namespace, o.Namespace)

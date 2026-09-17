@@ -28,6 +28,13 @@ type fakeServing struct {
 	ready   map[string]bool
 	presets []backend.Preset
 	pulls   []backend.PullRequest
+	// gateway, when set, is the models Gateway's origin: served models are
+	// routed on it (https://<gateway>/model-serving/<name>) and reached with
+	// the caller's token, as the kserve driver composes from discovery.
+	gateway string
+	// managedBy overrides the managed-by label of a served object (default
+	// model-manager's own value).
+	managedBy map[string]string
 }
 
 func newFakeServing() *fakeServing {
@@ -37,7 +44,17 @@ func newFakeServing() *fakeServing {
 		fakeBackend: fb,
 		ready:       map[string]bool{},
 		presets:     []backend.Preset{{Name: "tiny", DisplayName: "Tiny", Model: "org/tiny", GPUs: 1, WeightsBytes: 10, OverheadBytes: 20, RequiredBytes: 30}},
+		managedBy:   map[string]string{},
 	}
+}
+
+// endpoint is where a served model answers: its route on the models Gateway
+// when one is configured, else its in-cluster predictor Service.
+func (f *fakeServing) endpoint(resource string) string {
+	if f.gateway != "" {
+		return f.gateway + "/model-serving/" + resource
+	}
+	return "http://" + resource + "-predictor.model-serving.svc.cluster.local"
 }
 
 // Name is kserve unless the embedded fake was given another name (a second
@@ -72,7 +89,11 @@ func (f *fakeServing) ListLoaded(ctx context.Context) ([]backend.LoadedModel, er
 			loaded[i].Status = "Ready"
 		}
 		loaded[i].Resource = strings.ReplaceAll(loaded[i].Name, "/", "-")
-		loaded[i].Endpoint = "http://" + loaded[i].Resource + "-predictor.model-serving.svc.cluster.local"
+		loaded[i].Endpoint = f.endpoint(loaded[i].Resource)
+		loaded[i].ManagedBy = wiring.ManagedByValue
+		if by, ok := f.managedBy[loaded[i].Name]; ok {
+			loaded[i].ManagedBy = by
+		}
 	}
 	return loaded, err
 }
@@ -100,7 +121,10 @@ func (f *fakeServing) Load(ctx context.Context, req backend.LoadRequest) error {
 }
 func (f *fakeServing) AgentEndpoint(model string) backend.AgentEndpoint {
 	name := strings.ReplaceAll(model, "/", "-")
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://" + name + "-predictor.model-serving.svc.cluster.local/v1", Model: name, PlaceholderAPIKey: true, Name: name}
+	f.mu.Lock()
+	routed := f.gateway != ""
+	f.mu.Unlock()
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: f.endpoint(name) + "/v1", Model: name, APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: name}
 }
 func (f *fakeServing) WaitReady(ctx context.Context, model string) error {
 	for {
@@ -313,7 +337,7 @@ func TestServingPullJobCarriesTheNodeTheBackendPicked(t *testing.T) {
 	assert.Equal(t, "n1", listed["node"])
 }
 
-func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
+func TestServingLoadWiresInTheCallAndUnloadUnwires(t *testing.T) {
 	f := newServingFixture(t)
 
 	// The backend needs a preset; the service passes the model's own.
@@ -323,7 +347,16 @@ func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
 	running := body["running"].(map[string]any)
 	assert.Equal(t, "Pending", running["status"])
 	assert.Equal(t, "org-tiny", running["resource"], "the answer names the serving object the load created")
-	assert.Nil(t, body["modelConfig"], "not wired before ready")
+	// The ModelConfig is created in the same call, before the model is
+	// ready: the answer's wiring says so and modelConfig carries it.
+	wiringOut := body["wiring"].(map[string]any)
+	assert.Equal(t, true, wiringOut["wired"])
+	assert.Equal(t, service.WiredOnLoad, wiringOut["reason"])
+	assert.Equal(t, "org-tiny", wiringOut["modelConfig"].(map[string]any)["name"], "named after the serving object")
+	assert.Equal(t, "org-tiny", body["modelConfig"].(map[string]any)["name"])
+	ref, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok, "the ModelConfig exists while the model is still Pending")
+	assert.True(t, ref.Managed)
 
 	// A load job follows readiness, naming the object it follows.
 	status, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
@@ -346,11 +379,20 @@ func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
 	result := done["result"].(map[string]any)
 	assert.Equal(t, "org-tiny", result["name"])
 	assert.Equal(t, "OpenAI", result["provider"])
+	assert.Len(t, f.wirer.refs, 1, "the job refreshed the ModelConfig the load wired; it did not create a second one")
 
 	status, body = f.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "Ready", body["running"].(map[string]any)["status"])
 	assert.Equal(t, "org-tiny", body["modelConfig"].(map[string]any)["name"])
+
+	// The loaded list carries the ModelConfig too, and — wired already —
+	// reports no wiring of its own.
+	status, list = f.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status)
+	entry := list["loaded"].([]any)[0].(map[string]any)
+	assert.Equal(t, "org-tiny", entry["modelConfig"].(map[string]any)["name"])
+	assert.Nil(t, entry["wiring"])
 
 	// Loading a preset by name alone works too.
 	status, body = f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"preset": "tiny"})
@@ -364,6 +406,134 @@ func TestServingLoadWiresOnReadyAndUnloadUnwires(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, false, body["loaded"])
 	assert.Nil(t, body["modelConfig"])
+}
+
+// A model routed on the models Gateway is wired with the caller's token
+// forwarded from the load call on: the backend knows the routed address at
+// compose time, so nothing waits for KServe to publish it.
+func TestServingLoadWiresARoutedModelWithPassthroughBeforeReady(t *testing.T) {
+	f := newServingFixture(t)
+	f.backend.mu.Lock()
+	f.backend.gateway = "https://models.example.com"
+	f.backend.mu.Unlock()
+
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "Pending", body["running"].(map[string]any)["status"], "not ready yet")
+	wiringOut := body["wiring"].(map[string]any)
+	assert.Equal(t, true, wiringOut["wired"])
+	assert.Equal(t, service.WiredOnLoad, wiringOut["reason"])
+	mc := wiringOut["modelConfig"].(map[string]any)
+	assert.Equal(t, true, mc["apiKeyPassthrough"], "the Gateway admits the person's token and nothing else")
+	assert.Nil(t, mc["apiKeySecret"])
+	assert.Equal(t, "https://models.example.com/model-serving/org-tiny/v1", mc["endpoint"])
+}
+
+// A served model model-manager manages that has no ModelConfig — a load that
+// ran before this rule, or a wiring that failed — is wired by the next read
+// of the loaded list, as the caller, and the entry says so. Objects someone
+// else manages are theirs to wire.
+func TestServingReadWiresAManagedServedModelWithoutModelConfig(t *testing.T) {
+	f := newServingFixture(t)
+	f.backend.models["org/theirs"] = backend.Model{Name: "org/theirs", SizeBytes: 10, Preset: "tiny"}
+	f.backend.fakeBackend.mu.Lock()
+	f.backend.loaded["org/tiny"] = true
+	f.backend.loaded["org/theirs"] = true
+	f.backend.fakeBackend.mu.Unlock()
+	f.backend.mu.Lock()
+	f.backend.managedBy["org/theirs"] = "backstage"
+	f.backend.mu.Unlock()
+	assert.Empty(t, f.wirer.refs, "nothing wired yet")
+
+	status, body := f.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	byName := map[string]map[string]any{}
+	for _, e := range body["loaded"].([]any) {
+		em := e.(map[string]any)
+		byName[em["name"].(string)] = em
+	}
+	ours := byName["org/tiny"]
+	require.NotNil(t, ours, body)
+	wiringOut := ours["wiring"].(map[string]any)
+	assert.Equal(t, true, wiringOut["wired"])
+	assert.Equal(t, service.WiredOnRead, wiringOut["reason"])
+	assert.Equal(t, "org-tiny", wiringOut["modelConfig"].(map[string]any)["name"])
+	assert.Equal(t, "org-tiny", ours["modelConfig"].(map[string]any)["name"])
+	ref, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok)
+	assert.True(t, ref.Managed)
+
+	theirs := byName["org/theirs"]
+	require.NotNil(t, theirs, body)
+	assert.Nil(t, theirs["wiring"], "an object someone else manages is not wired by a read")
+	assert.Nil(t, theirs["modelConfig"])
+	_, ok = f.wirer.get(backend.NameKServe, "org/theirs")
+	assert.False(t, ok)
+
+	// The next read finds the ModelConfig and reports no wiring of its own.
+	status, body = f.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status)
+	for _, e := range body["loaded"].([]any) {
+		em := e.(map[string]any)
+		if em["name"] == "org/tiny" {
+			assert.Equal(t, "org-tiny", em["modelConfig"].(map[string]any)["name"])
+			assert.Nil(t, em["wiring"])
+		}
+	}
+	assert.Len(t, f.wirer.refs, 1)
+}
+
+// A model-manager restart between load and Ready drops the in-memory load
+// job. The model stays wired — the load wrote the ModelConfig — and a model
+// whose ModelConfig is missing all the same is wired by the caller's next
+// read, so an agent created on it answers once the model serves.
+func TestServingRestartDuringColdStartLeavesAWiredModel(t *testing.T) {
+	f := newServingFixture(t)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	_, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok, "wired by the load")
+
+	// The process restarts: a new service over the same cluster state (the
+	// backend's objects, the ModelConfigs) with an empty job table.
+	restarted := service.New([]backend.Backend{f.backend}, jobs.NewManager(), f.wirer, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, CallerOnly: true}, nil)
+	mux := http.NewServeMux()
+	NewREST(restarted, nil).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	after := &fixture{srv: srv}
+	_, list := after.do(t, http.MethodGet, Prefix+"/jobs", nil)
+	assert.Empty(t, list["jobs"], "the load job did not survive the restart")
+
+	status, body = after.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	entry := body["loaded"].([]any)[0].(map[string]any)
+	assert.Equal(t, "Pending", entry["status"], "still starting")
+	assert.Equal(t, "org-tiny", entry["modelConfig"].(map[string]any)["name"], "wired although no job watches the model")
+	assert.Nil(t, entry["wiring"], "nothing to mend")
+
+	// A served model whose ModelConfig is missing all the same (wired by a
+	// job that died before this rule) is mended by the read.
+	require.NoError(t, f.wirer.Remove(context.Background(), backend.NameKServe, "org/tiny"))
+	status, body = after.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	entry = body["loaded"].([]any)[0].(map[string]any)
+	wiringOut := entry["wiring"].(map[string]any)
+	assert.Equal(t, true, wiringOut["wired"])
+	assert.Equal(t, service.WiredOnRead, wiringOut["reason"])
+	_, ok = f.wirer.get(backend.NameKServe, "org/tiny")
+	assert.True(t, ok)
+
+	// Ready, and still one ModelConfig; unload removes it.
+	f.backend.setReady("org/tiny")
+	status, body = after.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "Ready", body["running"].(map[string]any)["status"])
+	assert.Equal(t, "org-tiny", body["modelConfig"].(map[string]any)["name"])
+	assert.Len(t, f.wirer.refs, 1)
+	status, _ = after.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Empty(t, f.wirer.refs, "unload still unwires")
 }
 
 func TestServingRunAdoptsPullsAndReconcilesWiring(t *testing.T) {
@@ -438,6 +608,8 @@ func TestServingMCPTools(t *testing.T) {
 	out, isErr = callTool(t, srv, ToolLoadModel, map[string]any{argPreset: "tiny"})
 	require.False(t, isErr, out)
 	assert.Contains(t, out, `"loaded": true`)
+	assert.Contains(t, out, `"wired": true`, "the ModelConfig is created in the load call")
+	assert.Contains(t, out, `"reason": "wired on load"`)
 	out, isErr = callTool(t, srv, ToolLoadModel, map[string]any{})
 	assert.True(t, isErr, out)
 	assert.Contains(t, out, "invalid_request")
