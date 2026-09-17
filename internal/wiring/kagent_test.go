@@ -45,6 +45,18 @@ func lemonadeEndpoint(model string) backend.AgentEndpoint {
 	return backend.AgentEndpoint{Backend: backend.NameLemonade, Provider: "OpenAI", BaseURL: "http://172.21.0.1:13305/api/v1", Model: model, PlaceholderAPIKey: true}
 }
 
+// gatewayEndpoint is what the kserve backend answers for a model routed on
+// the models Gateway: the caller's token forwarded, no placeholder.
+func gatewayEndpoint(name string) backend.AgentEndpoint {
+	return backend.AgentEndpoint{Backend: backend.NameKServe, Provider: "OpenAI", BaseURL: "https://models.example.com/model-serving/" + name + "/v1", Model: name, Name: name, APIKeyPassthrough: true}
+}
+
+// kservePredictorEndpoint is the same model reached on its in-cluster
+// Service: keyless vLLM behind kagent's OpenAI provider, placeholder key.
+func kservePredictorEndpoint(name string) backend.AgentEndpoint {
+	return backend.AgentEndpoint{Backend: backend.NameKServe, Provider: "OpenAI", BaseURL: "http://" + name + "-predictor.model-serving.svc.cluster.local/v1", Model: name, Name: name, PlaceholderAPIKey: true}
+}
+
 func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	k, client := newFakeKagent(t)
 	ctx := context.Background()
@@ -142,6 +154,93 @@ func TestEnsureOpenAIPlaceholderSecret(t *testing.T) {
 	require.NoError(t, k.Remove(ctx, "", "org/qwen3-8b"))
 	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "org-qwen3-8b-api-key", metav1.GetOptions{})
 	require.Error(t, err, "placeholder secret goes with the ModelConfig")
+}
+
+func TestEnsurePassthroughReferencesNoSecret(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	ref, err := k.Ensure(ctx, "Qwen/Qwen3-4B-Instruct-2507", gatewayEndpoint("qwen3-4b-instruct"))
+	require.NoError(t, err)
+	assert.Equal(t, "qwen3-4b-instruct", ref.Name)
+	assert.True(t, ref.APIKeyPassthrough, "the ref reports the shape")
+	assert.Empty(t, ref.APIKeySecret)
+
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-4b-instruct", metav1.GetOptions{})
+	require.NoError(t, err)
+	passthrough, _, _ := unstructured.NestedBool(obj.Object, "spec", "apiKeyPassthrough")
+	assert.True(t, passthrough, "the agent forwards the caller's token to the Gateway")
+	_, hasSecret, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
+	assert.False(t, hasSecret, "no placeholder key: the Gateway would answer 401 to it")
+	_, hasKey, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecretKey")
+	assert.False(t, hasKey)
+	secrets, err := client.Resource(secretGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, secrets.Items, "no placeholder Secret is created for the passthrough shape")
+
+	require.NoError(t, k.Remove(ctx, backend.NameKServe, "Qwen/Qwen3-4B-Instruct-2507"))
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+}
+
+func TestEnsureRefusesPassthroughWithSecret(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	ep := gatewayEndpoint("qwen3-4b-instruct")
+	ep.APIKeySecret = "my-key"
+	_, err := k.Ensure(ctx, "Qwen/Qwen3-4B-Instruct-2507", ep)
+	require.ErrorIs(t, err, backend.ErrInvalid)
+	assert.ErrorContains(t, err, "mutually exclusive")
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items, "nothing is written for a shape the CRD refuses")
+}
+
+func TestEnsureCallerSecretIsReferencedNotCreated(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	ep := lemonadeEndpoint("qwen3-4b-FLM")
+	ep.APIKeySecret = "lemonade-key"
+	ref, err := k.Ensure(ctx, "qwen3-4b-FLM", ep)
+	require.NoError(t, err)
+	assert.Equal(t, "lemonade-key", ref.APIKeySecret)
+	assert.False(t, ref.APIKeyPassthrough)
+
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-4b-flm", metav1.GetOptions{})
+	require.NoError(t, err)
+	secretName, _, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
+	assert.Equal(t, "lemonade-key", secretName, "the caller's Secret replaces the placeholder")
+	key, _, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecretKey")
+	assert.Equal(t, "OPENAI_API_KEY", key, "the key defaults when the caller names none")
+	secrets, err := client.Resource(secretGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, secrets.Items, "a Secret of the caller's is never created")
+	require.NoError(t, k.Remove(ctx, backend.NameLemonade, "qwen3-4b-FLM"), "and never deleted")
+}
+
+func TestEnsureRewireToPassthroughRemovesPlaceholderSecret(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	const model = "Qwen/Qwen3-4B-Instruct-2507"
+	_, err := k.Ensure(ctx, model, kservePredictorEndpoint("qwen3-4b-instruct"))
+	require.NoError(t, err)
+	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-4b-instruct-api-key", metav1.GetOptions{})
+	require.NoError(t, err, "the in-cluster shape has its placeholder Secret")
+
+	// KServe publishes the route; the next wire moves the ModelConfig onto
+	// the Gateway's contract and the placeholder goes with the old shape.
+	ref, err := k.Ensure(ctx, model, gatewayEndpoint("qwen3-4b-instruct"))
+	require.NoError(t, err)
+	assert.True(t, ref.APIKeyPassthrough)
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-4b-instruct", metav1.GetOptions{})
+	require.NoError(t, err)
+	_, hasSecret, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
+	assert.False(t, hasSecret, "the refreshed spec carries no apiKeySecret")
+	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-4b-instruct-api-key", metav1.GetOptions{})
+	require.Error(t, err, "the stale placeholder Secret is removed with the shape")
+	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1, "one ModelConfig, refreshed in place")
 }
 
 func TestLookupListRemove(t *testing.T) {
@@ -472,14 +571,15 @@ func TestReadyNeedsAcceptedAndResolvedRefs(t *testing.T) {
 // Ollama model and an OpenAI-compatible one with testdata/*.yaml — the files
 // `kubectl -n kagent create --dry-run=server -f` validates against a kagent
 // API v2 cluster (v1alpha3: the provider-specific block only with its
-// provider, apiKeySecret and apiKeySecretKey together). UPDATE_GOLDEN=1
-// rewrites them.
+// provider, apiKeySecret and apiKeySecretKey together, apiKeyPassthrough
+// without either). UPDATE_GOLDEN=1 rewrites them.
 func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
 	k, _ := newFakeKagent(t)
 	goldens := map[string]*unstructured.Unstructured{
-		"modelconfig-v1alpha3-ollama.yaml":        k.build("qwen2-5-0-5b", "qwen2.5:0.5b", ollamaEndpoint("qwen2.5:0.5b")),
-		"modelconfig-v1alpha3-openai.yaml":        k.build("qwen3-4b-flm", "qwen3-4b-FLM", lemonadeEndpoint("qwen3-4b-FLM")),
-		"modelconfig-v1alpha3-openai-secret.yaml": k.placeholderSecret("qwen3-4b-flm"),
+		"modelconfig-v1alpha3-ollama.yaml":             k.build("qwen2-5-0-5b", "qwen2.5:0.5b", ollamaEndpoint("qwen2.5:0.5b")),
+		"modelconfig-v1alpha3-openai.yaml":             k.build("qwen3-4b-flm", "qwen3-4b-FLM", lemonadeEndpoint("qwen3-4b-FLM")),
+		"modelconfig-v1alpha3-openai-secret.yaml":      k.placeholderSecret("qwen3-4b-flm"),
+		"modelconfig-v1alpha3-openai-passthrough.yaml": k.build("qwen3-4b-instruct", "Qwen/Qwen3-4B-Instruct-2507", gatewayEndpoint("qwen3-4b-instruct")),
 	}
 	for file, obj := range goldens {
 		t.Run(file, func(t *testing.T) {

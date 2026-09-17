@@ -180,7 +180,7 @@ func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndp
 	if endpoint == "" {
 		endpoint = ep.Host
 	}
-	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend}
+	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend, APIKeyPassthrough: ep.APIKeyPassthrough, APIKeySecret: ep.APIKeySecret}
 	w.refs[refKey(ep.Backend, model)] = ref
 	return &ref, nil
 }
@@ -471,6 +471,16 @@ func TestWireUnwireAndDisabled(t *testing.T) {
 	status, body := f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b"})
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Equal(t, "qwen3-0-6b", body["modelConfig"].(map[string]any)["name"])
+	assert.Nil(t, body["modelConfig"].(map[string]any)["apiKeyPassthrough"], "the backend decides by default")
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b", "apiKeyPassthrough": true})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, true, body["modelConfig"].(map[string]any)["apiKeyPassthrough"], "the caller's shape reaches the ModelConfig on any backend")
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b", "apiKeyPassthrough": true, "apiKeySecret": "my-key"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Contains(t, body["error"].(map[string]any)["message"], "mutually exclusive")
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b", "apiKeySecret": "my-key"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "my-key", body["modelConfig"].(map[string]any)["apiKeySecret"], "a static key of the caller's")
 	status, _ = f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "missing:1b"})
 	assert.Equal(t, http.StatusNotFound, status)
 	status, body = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3:0.6b"})

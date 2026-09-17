@@ -167,6 +167,30 @@ wins). A shape that switches it on needs the Inference Extension enabled on the 
 (giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
 keeps its shape until it is unloaded and loaded again.
 
+### The ModelConfig's API key
+
+A served model is wired into kagent as a `ModelConfig` on the OpenAI provider, and the provider
+insists on an API key. Which key follows the address KServe published for the model:
+
+- **Routed on the models Gateway** (`status.addresses[0].url`, an external host such as
+  `https://models.<installation>/model-serving/<name>`): `apiKeyPassthrough: true`, no
+  `apiKeySecret`, no Secret. The Gateway's JWT policy admits a person's Dex token and nothing
+  else, so the agent forwards the Bearer token of its incoming request as the API key — the
+  person reaches the model as themselves. A static or placeholder key answers `401` on every
+  turn (`the token header is malformed`).
+- **Reached on its in-cluster Service** (no route published, or the model not served yet):
+  `apiKeySecret: <name>-api-key` / `apiKeySecretKey: OPENAI_API_KEY`, a placeholder Secret
+  model-manager creates and removes with the ModelConfig. vLLM checks no key; the placeholder
+  satisfies the runtime.
+
+`wire_model` (`POST /api/v1/models/wire`) takes the shape explicitly for any backend:
+`apiKeyPassthrough: true` composes the passthrough shape; `apiKeySecret` (with `apiKeySecretKey`,
+default `OPENAI_API_KEY`) references a Secret of the caller's holding a static key for an endpoint
+that checks one — never created, never deleted by model-manager. The two together are refused
+(`400 invalid`), as the `ModelConfig` CRD refuses them. A re-wire that changes the shape refreshes
+the ModelConfig in place and removes a placeholder Secret the new shape no longer reads.
+`unwire_model` and `unload_model` remove what was wired, whichever shape.
+
 ## Tools
 
 Both tools act as the caller (the request's forwarded token under `--downstream-oauth`, the

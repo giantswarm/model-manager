@@ -1,16 +1,22 @@
 // Package wiring creates kagent ModelConfigs for models a backend serves, so
 // agents can use them without manual steps. The Ollama backend maps to
-// kagent's native keyless Ollama provider; OpenAI-compatible endpoints get a
-// placeholder API-key secret (kagent's OpenAI runtime refuses to start without
-// one even when the endpoint never checks it).
+// kagent's native keyless Ollama provider. An OpenAI-compatible endpoint
+// presents one of three API-key shapes (backend.AgentEndpoint): the caller's
+// Bearer token forwarded (apiKeyPassthrough — an endpoint that admits a
+// person's token, such as a route on the kserve backend's models Gateway), a
+// static key in a Secret of the caller's (apiKeySecret), or the placeholder
+// Secret model-manager creates (kagent's OpenAI runtime refuses to start
+// without a key even when the endpoint never checks it). apiKeyPassthrough
+// and apiKeySecret are mutually exclusive on the ModelConfig.
 //
 // The ModelConfig is written in the kagent.dev API version the apiserver
 // serves — kagent API v2 serves v1alpha3 only (no v1alpha2, no conversion
-// webhook). The spec fields model-manager writes (provider, model,
-// ollama.host, openAI.baseUrl, apiKeySecret/apiKeySecretKey) are the same in
-// v1alpha2 and v1alpha3; the status is not: v1alpha3 reports Accepted (the
-// spec is valid) and ResolvedRefs (the referenced Secret exists and holds the
-// key) as separate conditions, so a ModelConfig is ready only when both hold.
+// webhook). apiKeyPassthrough exists in v1alpha3 only; the other spec fields
+// model-manager writes (provider, model, ollama.host, openAI.baseUrl,
+// apiKeySecret/apiKeySecretKey) are the same in v1alpha2 and v1alpha3. The
+// status is not: v1alpha3 reports Accepted (the spec is valid) and
+// ResolvedRefs (the referenced Secret exists and holds the key) as separate
+// conditions, so a ModelConfig is ready only when both hold.
 package wiring
 
 import (
@@ -81,6 +87,12 @@ type ModelConfigRef struct {
 	ProviderModel string `json:"providerModel,omitempty"`
 	// Endpoint is the provider endpoint: openAI.baseUrl or ollama.host.
 	Endpoint string `json:"endpoint,omitempty"`
+	// APIKeyPassthrough is spec.apiKeyPassthrough: the agent forwards the
+	// caller's Bearer token to the endpoint as the API key. APIKeySecret is
+	// spec.apiKeySecret: the Secret a static key is read from — the
+	// placeholder Secret or the caller's own. At most one is set.
+	APIKeyPassthrough bool   `json:"apiKeyPassthrough,omitempty"`
+	APIKeySecret      string `json:"apiKeySecret,omitempty"`
 	// Backend is the driver that produced the ModelConfig (the
 	// model-manager.giantswarm.io/backend label); together with Model it
 	// identifies the ModelConfig when one model-manager runs several
@@ -199,6 +211,9 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
+	if err := ep.Validate(); err != nil {
+		return nil, err
+	}
 	target := ModelConfigName(k.prefix, model)
 	if ep.Name != "" {
 		target = k.prefixed(ep.Name)
@@ -234,7 +249,7 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	existing, err := res.Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
-		if ep.PlaceholderAPIKey {
+		if placeholderNeeded(ep) {
 			if err := k.ensurePlaceholderSecret(ctx, name); err != nil {
 				return nil, err
 			}
@@ -250,10 +265,15 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	if existing.GetLabels()[ManagedByLabel] != ManagedByValue {
 		return nil, fmt.Errorf("%w: ModelConfig %s/%s exists but is not managed by %s", backend.ErrConflict, k.namespace, name, ManagedByValue)
 	}
-	if ep.PlaceholderAPIKey {
+	// The placeholder Secret follows the shape: created for it, removed when a
+	// re-wire moves the ModelConfig off it (a stale placeholder would otherwise
+	// outlive the ModelConfig's need for it).
+	if placeholderNeeded(ep) {
 		if err := k.ensurePlaceholderSecret(ctx, name); err != nil {
 			return nil, err
 		}
+	} else if err := k.removePlaceholderSecret(ctx, name); err != nil {
+		return nil, err
 	}
 	// Preserve server-side metadata, replace what we own.
 	desired.SetResourceVersion(existing.GetResourceVersion())
@@ -301,15 +321,30 @@ func (k *Kagent) removeObj(ctx context.Context, name string) error {
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelConfig %s/%s: %w", k.namespace, name, err)
 	}
+	return k.removePlaceholderSecret(ctx, name)
+}
+
+// removePlaceholderSecret deletes the placeholder Secret of the ModelConfig
+// named mcName when model-manager created it; a Secret of anyone else's or
+// none at all is left alone.
+func (k *Kagent) removePlaceholderSecret(ctx context.Context, mcName string) error {
 	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
-	secretName := placeholderSecretName(name)
+	secretName := placeholderSecretName(mcName)
 	sec, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
-	if err == nil && sec.GetLabels()[ManagedByLabel] == ManagedByValue {
-		if err := secrets.Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("delete Secret %s/%s: %w", k.namespace, secretName, err)
-		}
+	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue {
+		return nil
+	}
+	if err := secrets.Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete Secret %s/%s: %w", k.namespace, secretName, err)
 	}
 	return nil
+}
+
+// placeholderNeeded reports whether the ModelConfig reads its key from the
+// placeholder Secret: the provider insists on a key and neither the caller's
+// token nor a Secret of the caller's supplies one.
+func placeholderNeeded(ep backend.AgentEndpoint) bool {
+	return ep.PlaceholderAPIKey && !ep.APIKeyPassthrough && ep.APIKeySecret == ""
 }
 
 // Lookup implements Wirer.
@@ -423,7 +458,16 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 	case "OpenAI":
 		spec["openAI"] = map[string]any{"baseUrl": ep.BaseURL}
 	}
-	if ep.PlaceholderAPIKey {
+	switch {
+	case ep.APIKeyPassthrough:
+		spec["apiKeyPassthrough"] = true
+	case ep.APIKeySecret != "":
+		spec["apiKeySecret"] = ep.APIKeySecret
+		spec["apiKeySecretKey"] = ep.APIKeySecretKey
+		if ep.APIKeySecretKey == "" {
+			spec["apiKeySecretKey"] = placeholderSecretKey
+		}
+	case ep.PlaceholderAPIKey:
 		spec["apiKeySecret"] = placeholderSecretName(name)
 		spec["apiKeySecretKey"] = placeholderSecretKey
 	}
@@ -508,6 +552,8 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	} else if h, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "host"); h != "" {
 		ref.Endpoint = h
 	}
+	ref.APIKeyPassthrough, _, _ = unstructured.NestedBool(obj.Object, "spec", "apiKeyPassthrough")
+	ref.APIKeySecret, _, _ = unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	ref.Ready, ref.Message = readiness(conds)
 	return ref

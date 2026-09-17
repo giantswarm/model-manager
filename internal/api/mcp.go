@@ -56,11 +56,15 @@ const (
 	argWire      = "wire"
 	argKeepAlive = "keepAlive"
 	argUnwire    = "unwire"
-	argJobID     = "id"
-	argPreset    = "preset"
-	argNode      = "node"
-	argQuery     = "query"
-	argLimit     = "limit"
+	// The API-key shape of a wired ModelConfig (wire_model).
+	argAPIKeyPassthrough = "apiKeyPassthrough" // #nosec G101 -- argument name, not a credential
+	argAPIKeySecret      = "apiKeySecret"      // #nosec G101 -- argument name, not a credential
+	argAPIKeySecretKey   = "apiKeySecretKey"   // #nosec G101 -- argument name, not a credential
+	argJobID             = "id"
+	argPreset            = "preset"
+	argNode              = "node"
+	argQuery             = "query"
+	argLimit             = "limit"
 )
 
 // backendArg is the optional backend argument every tool takes.
@@ -198,9 +202,12 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.deleteModel)
 
 	s.AddTool(mcp.NewTool(ToolWireModel,
-		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it."),
+		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
+		mcp.WithBoolean(argAPIKeyPassthrough, mcp.Description("Forward the Bearer token of the agent's incoming request to the endpoint as the API key (for an endpoint that admits the person's token, such as the models Gateway); no Secret is referenced or created")),
+		mcp.WithString(argAPIKeySecret, mcp.Description("Name of an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it")),
+		mcp.WithString(argAPIKeySecretKey, mcp.Description("Key within apiKeySecret holding the API key (default OPENAI_API_KEY)")),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.wire)
 
@@ -391,7 +398,12 @@ func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return errResult(err), nil
 	}
-	ref, err := t.svc.Wire(ctx, req.GetString(argBackend, ""), name)
+	opts := backend.WireOptions{
+		APIKeyPassthrough: req.GetBool(argAPIKeyPassthrough, false),
+		APIKeySecret:      req.GetString(argAPIKeySecret, ""),
+		APIKeySecretKey:   req.GetString(argAPIKeySecretKey, ""),
+	}
+	ref, err := t.svc.Wire(ctx, req.GetString(argBackend, ""), name, opts)
 	if err != nil {
 		return errResult(err), nil
 	}

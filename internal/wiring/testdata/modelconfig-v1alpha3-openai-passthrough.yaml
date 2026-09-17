@@ -1,0 +1,16 @@
+apiVersion: kagent.dev/v1alpha3
+kind: ModelConfig
+metadata:
+  annotations:
+    model-manager.giantswarm.io/model: Qwen/Qwen3-4B-Instruct-2507
+  labels:
+    app.kubernetes.io/managed-by: model-manager
+    model-manager.giantswarm.io/backend: kserve
+  name: qwen3-4b-instruct
+  namespace: kagent
+spec:
+  apiKeyPassthrough: true
+  model: qwen3-4b-instruct
+  openAI:
+    baseUrl: https://models.example.com/model-serving/qwen3-4b-instruct/v1
+  provider: OpenAI

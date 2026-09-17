@@ -614,7 +614,7 @@ func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.
 			if !doWire {
 				return nil, nil
 			}
-			mcRef, err := s.wireModel(jobCtx, b, req.Ref)
+			mcRef, err := s.wireModel(jobCtx, b, req.Ref, backend.WireOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("pulled %s but wiring failed: %w", req.Ref, err)
 			}
@@ -668,7 +668,7 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			s.startLoadJob(ctx, b, sl, m.Name, view.Running)
 			return view, nil
 		}
-		if _, err := s.wireModel(ctx, b, m.Name); err != nil {
+		if _, err := s.wireModel(ctx, b, m.Name, backend.WireOptions{}); err != nil {
 			s.log.Warn("auto-wire after load failed", "backend", b.Name(), "model", m.Name, "error", err)
 		}
 	}
@@ -708,7 +708,7 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 				return nil, err
 			}
 			report(backend.Progress{Status: "ready; wiring into kagent"})
-			ref, err := s.wireModel(jobCtx, b, model)
+			ref, err := s.wireModel(jobCtx, b, model, backend.WireOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("%s is ready but wiring failed: %w", model, err)
 			}
@@ -767,7 +767,7 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 }
 
 // Wire creates the ModelConfig for an existing model.
-func (s *Service) Wire(ctx context.Context, name, ref string) (*wiring.ModelConfigRef, error) {
+func (s *Service) Wire(ctx context.Context, name, ref string, opts backend.WireOptions) (*wiring.ModelConfigRef, error) {
 	if s.wirer == nil {
 		return nil, ErrWiringDisabled
 	}
@@ -775,7 +775,7 @@ func (s *Service) Wire(ctx context.Context, name, ref string) (*wiring.ModelConf
 	if err != nil {
 		return nil, err
 	}
-	return s.wireModel(ctx, b, m.Name)
+	return s.wireModel(ctx, b, m.Name, opts)
 }
 
 // Unwire removes the ModelConfig for a model (which need not exist anymore)
@@ -1066,7 +1066,7 @@ func (s *Service) reconcileWiring(ctx context.Context, b backend.Backend) {
 		if s.hasActiveJob(jobs.TypeLoad, b.Name(), l.Name) {
 			continue
 		}
-		if _, err := s.wireModel(rctx, b, l.Name); err != nil {
+		if _, err := s.wireModel(rctx, b, l.Name, backend.WireOptions{}); err != nil {
 			s.log.Warn("reconcile: wiring served model failed", "backend", b.Name(), "model", l.Name, "error", err)
 		}
 	}
@@ -1081,14 +1081,20 @@ func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
 	return false
 }
 
-func (s *Service) wireModel(ctx context.Context, b backend.Backend, model string) (*wiring.ModelConfigRef, error) {
+// wireModel wires model on b: the backend's endpoint with the caller's
+// WireOptions laid over it (the API-key shape), refused before anything is
+// written when the shape is not one the ModelConfig can carry.
+func (s *Service) wireModel(ctx context.Context, b backend.Backend, model string, opts backend.WireOptions) (*wiring.ModelConfigRef, error) {
 	// Resolve the canonical name so "smollm2:135m" and "smollm2:135m" pulled
 	// as "smollm2" end up in one ModelConfig.
 	if m, err := b.GetModel(ctx, model); err == nil {
 		model = m.Name
 	}
-	ep := b.AgentEndpoint(model)
+	ep := opts.Apply(b.AgentEndpoint(model))
 	ep.Backend = b.Name()
+	if err := ep.Validate(); err != nil {
+		return nil, err
+	}
 	// On serve-lifecycle backends the endpoint identifies the served model:
 	// a ModelConfig someone else created for it (the portal's serve flow)
 	// counts as wired — never a duplicate, never touched.

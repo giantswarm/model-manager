@@ -115,6 +115,13 @@ func TestMCPToolsMirrorREST(t *testing.T) {
 	text, isErr = callTool(t, srv, ToolUnloadModel, map[string]any{"model": "smollm2:135m"})
 	require.False(t, isErr, text)
 
+	text, isErr = callTool(t, srv, ToolWireModel, map[string]any{"model": "smollm2:135m", "apiKeyPassthrough": true})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, `"apiKeyPassthrough": true`, "wire_model takes the shape explicitly")
+	text, isErr = callTool(t, srv, ToolWireModel, map[string]any{"model": "smollm2:135m", "apiKeyPassthrough": true, "apiKeySecret": "my-key"})
+	require.True(t, isErr, text)
+	assert.Contains(t, text, "mutually exclusive", "refused with the reason")
+
 	text, isErr = callTool(t, srv, ToolGetModel, map[string]any{"model": "missing:1b"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "not_found")
