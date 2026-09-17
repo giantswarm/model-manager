@@ -74,6 +74,17 @@ type modelRequest struct {
 	// node to pull to / serve on.
 	Preset string `json:"preset,omitempty"`
 	Node   string `json:"node,omitempty"`
+	// The API-key shape of a wired ModelConfig (wire): the caller's token
+	// forwarded, or a static key in a Secret of the caller's. Mutually
+	// exclusive; neither leaves the decision to the backend.
+	APIKeyPassthrough bool   `json:"apiKeyPassthrough,omitempty"`
+	APIKeySecret      string `json:"apiKeySecret,omitempty"`
+	APIKeySecretKey   string `json:"apiKeySecretKey,omitempty"`
+}
+
+// wireOptions is the request's say on the wired ModelConfig's API key.
+func (r modelRequest) wireOptions() backend.WireOptions {
+	return backend.WireOptions{APIKeyPassthrough: r.APIKeyPassthrough, APIKeySecret: r.APIKeySecret, APIKeySecretKey: r.APIKeySecretKey}
 }
 
 type errorBody struct {
@@ -249,7 +260,7 @@ func (h *REST) wire(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ref, err := h.svc.Wire(r.Context(), req.Backend, req.Model)
+	ref, err := h.svc.Wire(r.Context(), req.Backend, req.Model, req.wireOptions())
 	if err != nil {
 		h.writeError(w, err)
 		return

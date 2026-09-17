@@ -301,6 +301,8 @@ func TestLoadUnloadLLMInferenceService(t *testing.T) {
 	assert.Equal(t, workloadURL("tiny", testServingNS)+"/v1", ep.BaseURL)
 	assert.Equal(t, tinyRepo, ep.Model, "the well-known template serves under spec.model.name")
 	assert.Equal(t, "tiny", ep.Name, "the ModelConfig is named after the object")
+	assert.True(t, ep.PlaceholderAPIKey, "the in-cluster workload Service is keyless vLLM: kagent's placeholder key")
+	assert.False(t, ep.APIKeyPassthrough)
 	ep = f.b.AgentEndpoint(bigRepo)
 	assert.Equal(t, workloadURL("big", testServingNS)+"/v1", ep.BaseURL, "unserved models resolve through their preset, in the configured kind")
 	assert.Equal(t, bigRepo, ep.Model)
@@ -318,6 +320,10 @@ func TestLoadUnloadLLMInferenceService(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, statusReady, loaded[0].Status)
 	assert.Equal(t, "https://models.example.com/model-serving/tiny", loaded[0].Endpoint)
+	ep = f.b.AgentEndpoint(tinyRepo)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny/v1", ep.BaseURL, "the wiring follows the route")
+	assert.True(t, ep.APIKeyPassthrough, "a model routed on the models Gateway is reached with the caller's own token")
+	assert.False(t, ep.PlaceholderAPIKey, "no placeholder key: the Gateway admits a person's token only")
 
 	// A classic InferenceService of the same name, whoever made it, blocks a load.
 	foreign := isvcObject("big", "hf://"+bigRepo, nil)

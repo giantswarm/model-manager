@@ -5,8 +5,10 @@
 // InferenceService from a curated serving preset (the modelServing contract of
 // the agent-platform connectivity chart); unload deletes it. Sizes come from the Hugging
 // Face Hub and are fit-checked against node memory budgets before any download
-// or start. Agents reach a served model through kagent's OpenAI provider with
-// a placeholder API key.
+// or start. Agents reach a served model through kagent's OpenAI provider: a
+// model routed on the models Gateway with the caller's own token forwarded
+// (the Gateway admits nothing else), a model reached on its in-cluster
+// Service with a placeholder API key.
 package kserve
 
 import (
@@ -624,11 +626,17 @@ func (b *Backend) RunningPulls(ctx context.Context) ([]backend.PullRequest, erro
 }
 
 // AgentEndpoint implements backend.Backend: kagent's OpenAI provider against
-// the predictor's OpenAI-compatible API. vLLM serves the model under the
+// the model's OpenAI-compatible API at the address KServe published. A model
+// routed on the models Gateway (status.addresses, an external host) is
+// reached with the caller's Bearer token forwarded — the Gateway's JWT policy
+// admits a person's token and nothing else, so a placeholder key fails every
+// turn with 401. A model reached on its in-cluster Service (no route
+// published, or not served yet) needs the placeholder key kagent's OpenAI
+// runtime insists on; vLLM checks none. vLLM serves the model under the
 // InferenceService name (--served-model-name {{.Name}} in the platform
-// runtime) and checks no API key, so the placeholder secret is required. The
-// ModelConfig is named after the InferenceService too — the rule the portal's
-// serve flow applies, so both wire a served model to the same object.
+// runtime) or an LLMInferenceService's spec.model.name. The ModelConfig is
+// named after the object — the rule the portal's serve flow applies, so both
+// wire a served model to the same ModelConfig.
 func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	repo, _ := splitRevision(model)
 	b.mu.Lock()
@@ -637,7 +645,8 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	b.mu.Unlock()
 	for _, sv := range servedList {
 		if strings.EqualFold(sv.Model, repo) || sv.Name == model {
-			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), PlaceholderAPIKey: true, Name: sv.Name}
+			routed := sv.routed()
+			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
 		}
 	}
 	// Not served (yet): the object the preset would create, in the

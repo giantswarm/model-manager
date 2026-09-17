@@ -579,6 +579,14 @@ paths:
     post:
       tags: [wiring]
       summary: Create or refresh the kagent ModelConfig for a downloaded model
+      description: |
+        The backend decides how the ModelConfig authenticates against the endpoint: a kserve
+        model routed on the models Gateway forwards the caller's own Bearer token
+        (`apiKeyPassthrough: true`, no Secret — the Gateway admits a person's token and nothing
+        else), a keyless in-cluster endpoint behind kagent's OpenAI provider gets the placeholder
+        `OPENAI_API_KEY` Secret model-manager creates. `apiKeyPassthrough` or `apiKeySecret` in
+        the request overrides the backend's decision for any backend; the two together are
+        refused (`400`), as the ModelConfig itself refuses them.
       operationId: wireModel
       x-mcp-tool: wire_model
       requestBody:
@@ -759,6 +767,9 @@ components:
       properties:
         backend: { $ref: "#/components/schemas/BackendName" }
         model: { type: string }
+        apiKeyPassthrough: { type: boolean, description: "wire only: the ModelConfig forwards the Bearer token of the agent's incoming request to the endpoint as the API key; no Secret is referenced or created. Mutually exclusive with apiKeySecret." }
+        apiKeySecret: { type: string, description: "wire only: an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it" }
+        apiKeySecretKey: { type: string, description: "wire only: the key within apiKeySecret (default OPENAI_API_KEY)" }
     Capabilities:
       type: object
       description: Explicit data — render per flag, never per backend name.
@@ -957,6 +968,8 @@ components:
         model: { type: string, description: the backend's model reference }
         providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the InferenceService name) }
         endpoint: { type: string, description: openAI.baseUrl or ollama.host }
+        apiKeyPassthrough: { type: boolean, description: "spec.apiKeyPassthrough — the agent forwards the caller's Bearer token to the endpoint as the API key (kserve models routed on the models Gateway); absent when a Secret supplies the key" }
+        apiKeySecret: { type: string, description: "spec.apiKeySecret — the Secret the static key is read from: model-manager's placeholder <name>-api-key, or the caller's own; absent with apiKeyPassthrough" }
         managed: { type: boolean, description: created by model-manager (only these are updated or deleted) }
         ready: { type: boolean, description: "kagent's Accepted condition is True and, whenever the controller reports it, its ResolvedRefs condition (the referenced API-key Secret exists and holds the key) is True too — kagent API v2 reports a missing Secret there while Accepted stays True; a status without ResolvedRefs (kagent 0.x) is judged by Accepted alone" }
         message: { type: string, description: the message of the condition holding ready back, or the Accepted message once ready }

@@ -22,7 +22,9 @@ and names the others — the one-backend form clients of a single backend keep
 using. Clients render only what a backend supports instead of switching on
 its name. Pulled or loaded models are wired
 into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
-for the ollama backend; `OpenAI` provider plus a placeholder API-key Secret —
+for the ollama backend; `OpenAI` provider with the caller's token forwarded
+(`apiKeyPassthrough`) for a kserve model routed on the models Gateway;
+`OpenAI` provider plus a placeholder API-key Secret —
 against the predictor URL for kserve, created once the InferenceService is
 ready, and against Lemonade's `/api/v1` for lemonade), so agents can use them
 without manual steps. They are written in the kagent.dev API version the
@@ -59,7 +61,7 @@ Lemonade-backend ADR in the team's decision log.
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
-| Wire / unwire to kagent | `POST /api/v1/models/wire {"model","backend?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
+| Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
 | Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","backend?","node?"}` | `check_fit` |
@@ -492,12 +494,19 @@ scheduling by the registered backend document (`docs/backends.md`).
     runtimeClassName, deployment strategy and timeout from discovery;
     `spec.predictor` extras verbatim.
 - **Wiring** — on ready, a kagent `ModelConfig` **named after the
-  InferenceService** (`provider: OpenAI`, `baseUrl` = predictor URL + `/v1`,
-  `model` = the served model name: the InferenceService name, which the
-  ClusterServingRuntime serves under `--served-model-name {{.Name}}`, or an
-  LLMInferenceService's `spec.model.name`) plus the placeholder `OPENAI_API_KEY`
-  Secret the go ADK runtime insists on — the same rule the portal's serve
-  flow applies. A ModelConfig that already points at the predictor (same
+  InferenceService** (`provider: OpenAI`, `baseUrl` = the address KServe
+  published + `/v1`, `model` = the served model name: the InferenceService
+  name, which the ClusterServingRuntime serves under `--served-model-name
+  {{.Name}}`, or an LLMInferenceService's `spec.model.name`) — the same rule
+  the portal's serve flow applies. The API key follows the address: a model
+  **routed on the models Gateway** (`status.addresses`, an external host)
+  gets `apiKeyPassthrough: true` and no Secret — the agent forwards the
+  person's own token, the only thing the Gateway's JWT policy admits, so a
+  placeholder key would fail every turn with 401; a model reached on its
+  **in-cluster Service** (no route published) gets the placeholder
+  `OPENAI_API_KEY` Secret the go ADK runtime insists on, which keyless vLLM
+  never checks. A re-wire that moves a ModelConfig onto the Gateway removes
+  its placeholder Secret. A ModelConfig that already points at the predictor (same
   host, same served model name), whoever created it, counts as the model's
   wiring: it is reported with `managed: false`, never duplicated and never
   deleted; `unwire`/`unload` only remove ModelConfigs model-manager created.

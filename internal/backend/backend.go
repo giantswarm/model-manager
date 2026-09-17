@@ -12,6 +12,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -461,8 +462,14 @@ type PullAdopter interface {
 }
 
 // AgentEndpoint describes how kagent agents reach a model on this backend; the
-// wiring layer turns it into a ModelConfig (plus placeholder secret when the
-// provider needs one).
+// wiring layer turns it into a ModelConfig. The API key the ModelConfig
+// presents to the endpoint takes one of three shapes, in this order of
+// precedence: the caller's own Bearer token forwarded (APIKeyPassthrough — an
+// endpoint that admits a person's token, the kserve backend's models
+// Gateway), a static key read from a Secret of the caller's (APIKeySecret),
+// or kagent's placeholder Secret (PlaceholderAPIKey — a keyless endpoint
+// behind a provider that insists on a key). APIKeyPassthrough and
+// APIKeySecret are mutually exclusive, as on the ModelConfig itself.
 type AgentEndpoint struct {
 	// Provider is the kagent ModelConfig provider ("Ollama", "OpenAI").
 	Provider string `json:"provider"`
@@ -479,11 +486,56 @@ type AgentEndpoint struct {
 	Model string `json:"model"`
 	// PlaceholderAPIKey is true when the provider requires an API key the
 	// endpoint does not check (keyless vLLM behind kagent's OpenAI provider).
+	// Ignored when APIKeyPassthrough or APIKeySecret is set.
 	PlaceholderAPIKey bool `json:"placeholderApiKey,omitempty"`
+	// APIKeyPassthrough makes the ModelConfig forward the Bearer token of the
+	// incoming A2A request to the endpoint as the API key (kagent's
+	// apiKeyPassthrough): the endpoint admits the person's token and nothing
+	// else — no placeholder, no static key.
+	APIKeyPassthrough bool `json:"apiKeyPassthrough,omitempty"`
+	// APIKeySecret names a Secret in the ModelConfig namespace holding a
+	// static key for an endpoint that checks one; APIKeySecretKey is the key
+	// within it (default OPENAI_API_KEY). The Secret is the caller's: never
+	// created, never deleted by model-manager.
+	APIKeySecret    string `json:"apiKeySecret,omitempty"`
+	APIKeySecretKey string `json:"apiKeySecretKey,omitempty"`
 	// Name is the ModelConfig name the backend wants (kserve: the
 	// InferenceService name, the same rule the portal applies). Empty derives
 	// the name from the model reference.
 	Name string `json:"name,omitempty"`
+}
+
+// Validate refuses an endpoint whose API-key shape the ModelConfig cannot
+// carry: the forwarded token and a static Secret are mutually exclusive.
+func (ep AgentEndpoint) Validate() error {
+	if ep.APIKeyPassthrough && ep.APIKeySecret != "" {
+		return fmt.Errorf("%w: apiKeyPassthrough and apiKeySecret are mutually exclusive — the ModelConfig forwards the caller's Bearer token or reads a static key from the Secret, not both", ErrInvalid)
+	}
+	if ep.APIKeySecretKey != "" && ep.APIKeySecret == "" {
+		return fmt.Errorf("%w: apiKeySecretKey names a key within apiKeySecret, which is not set", ErrInvalid)
+	}
+	return nil
+}
+
+// WireOptions are the caller's choices for wire_model beyond the backend's
+// own endpoint: the API-key shape of the ModelConfig. Zero means the
+// backend decides.
+type WireOptions struct {
+	APIKeyPassthrough bool
+	APIKeySecret      string
+	APIKeySecretKey   string
+}
+
+// Apply lays the caller's choices over the backend's endpoint: a shape the
+// caller names replaces the backend's placeholder decision.
+func (o WireOptions) Apply(ep AgentEndpoint) AgentEndpoint {
+	if o.APIKeyPassthrough {
+		ep.APIKeyPassthrough = true
+	}
+	if o.APIKeySecret != "" {
+		ep.APIKeySecret, ep.APIKeySecretKey = o.APIKeySecret, o.APIKeySecretKey
+	}
+	return ep
 }
 
 // Backend is the driver contract. The kserve driver implements the same

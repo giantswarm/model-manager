@@ -114,6 +114,17 @@ func isClusterLocalHost(host string) bool {
 	return strings.HasSuffix(host, ".svc") || strings.Contains(host, ".svc.")
 }
 
+// routed reports whether the address KServe published for the model is its
+// route on the models Gateway rather than its in-cluster Service: a host that
+// is no Service DNS name. The Gateway admits a person's token and nothing
+// else, so agents reach a routed model with the caller's own token
+// (apiKeyPassthrough); the keyless in-cluster Service is reached with
+// kagent's placeholder key.
+func (sv served) routed() bool {
+	u, err := url.Parse(sv.URL)
+	return err == nil && u.Host != "" && !isClusterLocalHost(u.Hostname())
+}
+
 // listServed lists the InferenceServices of the serving namespace with the
 // node their predictor runs on.
 func (b *Backend) listServed(ctx context.Context) ([]served, error) {
