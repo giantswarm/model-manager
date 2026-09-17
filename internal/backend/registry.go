@@ -101,6 +101,11 @@ type KServeOptions struct {
 	DownloadImage string
 	// DownloadIgnorePatterns are passed as STORAGE_IGNORE_PATTERNS.
 	DownloadIgnorePatterns []string
+	// DownloadStallTimeout fails a download Job that wrote nothing to its
+	// target directory for this long (the download script's stall clock)
+	// with a reason naming the window and the bytes on disk, instead of
+	// letting it hang.
+	DownloadStallTimeout time.Duration
 	// InitImage creates cache directories and scans the cache (a busybox-like
 	// image with sh, find, stat, awk).
 	InitImage string
