@@ -324,15 +324,19 @@ func (b *Backend) cacheEntries(ctx context.Context) ([]cacheEntry, error) {
 	}
 	nodes := loc.Nodes
 	if len(nodes) == 0 {
-		// Shared storage, or a claim that binds on first use: one scan,
-		// wherever the scheduler puts it.
+		// Shared storage: one scan, wherever the scheduler puts it — once
+		// scanAllowed permits one (not on an unbound claim, not while the
+		// GPU pool has no node).
 		nodes = []string{""}
 	}
 	var out []cacheEntry
 	for _, node := range nodes {
-		snap := b.inv.snapshot(ctx, node, b.opts.InventoryTTL, false, b.scan)
+		snap := b.cacheSnapshotFor(ctx, node, loc)
 		if snap.Err != nil {
 			b.log.Warn("cache scan failed", "node", nodeOrAny(node), "error", snap.Err)
+		}
+		if snap.Pending {
+			b.log.Debug("cache scan deferred", "node", nodeOrAny(node), "reason", snap.PendingReason)
 		}
 		for _, e := range snap.Entries {
 			if e.Node == "" {
@@ -671,11 +675,11 @@ func (b *Backend) Search(ctx context.Context, query string, limit int) ([]backen
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	hctx, cancel := b.hubContext(ctx)
+	hctx, hubBudget, cancel := b.hubContext(ctx)
 	defer cancel()
 	hits, err := b.hub.Search(hctx, query, limit)
 	if err != nil {
-		return nil, hubFailure(err, b.opts.HFTimeout)
+		return nil, hubFailure(err, hubBudget)
 	}
 	if presets, _, err := b.presets(ctx); err == nil {
 		idx := indexPresets(presets)

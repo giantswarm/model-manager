@@ -111,7 +111,7 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 	// Bounded on the caller's context: a hub whose packets an egress policy
 	// drops must leave the fallback time to answer within the caller's
 	// meta-tool deadline (giantswarm/model-manager#88).
-	hctx, cancel := b.hubContext(ctx)
+	hctx, hubBudget, cancel := b.hubContext(ctx)
 	defer cancel()
 	var note string
 	hub, err := b.hub.Model(hctx, repo)
@@ -122,7 +122,7 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		res.Private = hub.Private
 		files, err := b.hub.Tree(hctx, repo, plan.Revision)
 		if err != nil {
-			return "", hubFailure(err, b.opts.HFTimeout)
+			return "", hubFailure(err, hubBudget)
 		}
 		plan.Files = files
 		res.DownloadBytes = downloadTotal(files, b.opts.DownloadIgnorePatterns)
@@ -144,9 +144,9 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		b.log.Warn("hub lookup failed; using the preset's requirements", "model", repo, "error", err)
 		res.WeightsBytes, res.WeightsSource = p.weightsBytes(), weightsSourcePreset
 		res.Gated = errors.Is(err, backend.ErrInvalid)
-		note = "weights from the preset's requirements: " + describeHubFailure(err, b.opts.HFTimeout)
+		note = "weights from the preset's requirements: " + describeHubFailure(err, hubBudget)
 	default:
-		return "", hubFailure(err, b.opts.HFTimeout)
+		return "", hubFailure(err, hubBudget)
 	}
 	if res.WeightsBytes <= 0 {
 		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
@@ -161,9 +161,19 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 }
 
 // hubContext bounds the hub lookups of one call (fit check, search) by
-// opts.HFTimeout.
-func (b *Backend) hubContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, b.opts.HFTimeout)
+// opts.HFTimeout — less when the caller's deadline is nearer: the hub gets what
+// the deadline leaves after deadlineReserve, so the Kubernetes side of the
+// call still answers in time (giantswarm/model-manager#104). The budget is
+// returned for the message a failed lookup carries.
+func (b *Backend) hubContext(ctx context.Context) (context.Context, time.Duration, context.CancelFunc) {
+	budget := b.opts.HFTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl) - deadlineReserve; left < budget {
+			budget = max(left, 0)
+		}
+	}
+	hctx, cancel := context.WithTimeout(ctx, budget)
+	return hctx, budget, cancel
 }
 
 // hubFailure is the error a call answers when a hub lookup fails: a hub that
@@ -368,7 +378,11 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 	return out
 }
 
-// isCached reports whether the model is already in the node's cache.
+// isCached reports whether the model is already in the node's cache: what the
+// scan says, and — while no scan can answer in this call (the pool at zero,
+// the caller's deadline; cacheSnapshotFor) — what the cache index remembers:
+// a directory an InferenceService filled for the repository and model-manager
+// has not removed (index.go).
 func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cacheLocation) bool {
 	if loc.Missing || (!loc.Bound && len(loc.Nodes) == 0) {
 		return false
@@ -377,7 +391,7 @@ func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cach
 	if loc.Shared {
 		scanNode = ""
 	}
-	snap := b.inv.snapshot(ctx, scanNode, b.opts.InventoryTTL, false, b.scan)
+	snap := b.cacheSnapshotFor(ctx, scanNode, loc)
 	for _, e := range snap.Entries {
 		if e.Dir == dir && e.Files > 0 {
 			return true
@@ -385,6 +399,10 @@ func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cach
 		if e.Marker != nil && strings.EqualFold(e.Marker.Model, repo) && e.Files > 0 {
 			return true
 		}
+	}
+	if snap.Pending && len(snap.Entries) == 0 {
+		rec, ok := b.readIndex(ctx)[dir]
+		return ok && strings.EqualFold(rec.Model, repo)
 	}
 	return false
 }

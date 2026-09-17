@@ -361,7 +361,7 @@ scheduling by the registered backend document (`docs/backends.md`).
   `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the chart's
   `modelServing.gpuPool.*`), or the backend document's `spec.kserve.gpuPool`,
   make the driver tolerate the taint on everything it schedules onto the pool
-  — the composed predictors, the download Jobs and the inventory scan pods —
+  — the composed predictors, the download Jobs and the inventory scan Jobs —
   and select the pool wherever the pod is not pinned to a node already. The
   descriptor (`GET /api/v1/backend`) reports it as `gpuPool`. Unset, nothing
   changes; the chart's DaemonSet takes its own `kserve.inventory.agent.*`.
@@ -369,9 +369,11 @@ scheduling by the registered backend document (`docs/backends.md`).
 - **Inventory** — the cache contents per node plus the InferenceServices of
   the serving namespace (readiness from conditions/`modelStatus`, node from the
   predictor pod, GPU request, predictor URL). The cache is read in one of two
-  ways (`kserve.inventory.mode`): a **short-lived scan pod** per cache node
+  ways (`kserve.inventory.mode`): a **short-lived scan Job** per cache node
   mounts the claim read-only and walks `<claim>/<dir>` whenever the inventory
-  is older than the TTL (default), or a **DaemonSet** of `model-manager
+  is older than the TTL (default; never while the cache claim is unbound or
+  the GPU pool has no node, and in the background when the caller's deadline
+  leaves no room for a pod), or a **DaemonSet** of `model-manager
   cache-agent` pods (same image) mounts the claim on each selected node and
   serves the same walk at `GET /inventory`, which model-manager reads from
   the agent on the node — no pod churn, and `nodes[].cache.inventory` says

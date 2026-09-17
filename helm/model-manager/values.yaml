@@ -394,7 +394,7 @@ kserve:
       # -- Extra labels on the agent pods.
       podLabels: {}  # @schema additionalProperties: true
     # -- Image that creates cache directories (download Job init container)
-    # and scans / cleans the cache (short-lived pods); needs sh, find, stat,
+    # and scans / cleans the cache (short-lived Jobs); needs sh, find, stat,
     # awk (busybox).
     image:
       registry: gsoci.azurecr.io
@@ -402,7 +402,7 @@ kserve:
       tag: 3.22.1
     # -- How long one cache scan is reused before a node is scanned again.
     ttl: 2m
-    # -- Time budget of one scan (scan pod, or cache-agent request).
+    # -- Time budget of one scan (scan Job, or cache-agent request); a caller whose deadline leaves less is answered from the last scan while a new one runs in the background.
     timeout: 2m
   budget:
     # -- Node memory budget for fit checks: `auto` (GPU memory from the

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -111,6 +111,11 @@ type cacheSnapshot struct {
 	Entries   []cacheEntry
 	ScannedAt time.Time
 	Err       error
+	// Pending is set when no scan answered in this call — the entries are
+	// the last scan's, whatever its age, or none — and PendingReason says
+	// why (cacheSnapshotFor, scangate.go).
+	Pending       bool
+	PendingReason string
 }
 
 // inventory caches scans per node.
@@ -182,6 +187,45 @@ func (inv *inventory) invalidate() {
 	inv.snaps = map[string]*cacheSnapshot{}
 }
 
+// fresh is the node's scan when younger than ttl; nil otherwise.
+func (inv *inventory) fresh(node string, ttl time.Duration) *cacheSnapshot {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if s, ok := inv.snaps[node]; ok && time.Since(s.ScannedAt) < ttl {
+		return s
+	}
+	return nil
+}
+
+// last is a copy of the node's most recent scan whatever its age — an empty
+// one without any — for a caller to add its verdict to.
+func (inv *inventory) last(node string) *cacheSnapshot {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if s, ok := inv.snaps[node]; ok {
+		c := *s
+		return &c
+	}
+	return &cacheSnapshot{Node: node}
+}
+
+// refresh scans node in the background, detached from the caller (the
+// ServiceAccount's clients, a budget of its own), unless a scan is under way
+// already; snapshot de-duplicates a race between two callers.
+func (inv *inventory) refresh(node string, ttl, timeout time.Duration, scan scanner) {
+	inv.mu.Lock()
+	_, busy := inv.inflight[node]
+	inv.mu.Unlock()
+	if busy {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Minute)
+		defer cancel()
+		inv.snapshot(ctx, node, ttl, false, scan)
+	}()
+}
+
 // parseScan turns the scan output into entries.
 func parseScan(node string, r io.Reader) ([]cacheEntry, error) {
 	byDir := map[string]*cacheEntry{}
@@ -241,15 +285,15 @@ func parseScan(node string, r io.Reader) ([]cacheEntry, error) {
 	return out, nil
 }
 
-// scanNode runs the scan script in a short-lived pod that mounts the cache
-// claim read-only, pinned to node when given. Returns the entries and the node
+// scanNode runs the scan script in a short-lived Job (runCacheJob) whose pod
+// mounts the cache claim read-only, pinned to node when given. Returns the entries and the node
 // the pod actually ran on.
 func (b *Backend) scanNode(ctx context.Context, node string) ([]cacheEntry, string, error) {
 	s := b.cfg.settings(ctx)
 	ctx, cancel := context.WithTimeout(ctx, b.opts.InventoryTimeout)
 	defer cancel()
 	pod := b.cachePod(prefixed(scanPrefix, node+"-"+shortID()), s, node, scanScript, true)
-	logs, ranOn, err := b.runPod(ctx, pod)
+	logs, ranOn, err := b.runCacheJob(ctx, pod)
 	if err != nil {
 		return nil, ranOn, fmt.Errorf("scan cache on %s: %w", nodeOrAny(node), err)
 	}
@@ -347,7 +391,7 @@ func (b *Backend) removeDir(ctx context.Context, node, dir string) error {
 	defer cancel()
 	script := fmt.Sprintf("set -eu\ncd %s\nrm -rf -- %q %q\necho removed", cacheMount, dir, markersDir+"/"+dir+".json")
 	pod := b.cachePod(prefixed(rmPrefix, dir+"-"+shortID()), s, node, script, false)
-	if _, _, err := b.runPod(ctx, pod); err != nil {
+	if _, _, err := b.runCacheJob(ctx, pod); err != nil {
 		return fmt.Errorf("remove %s on %s: %w", dir, nodeOrAny(node), err)
 	}
 	return nil
@@ -395,27 +439,63 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 	return pod
 }
 
-// runPod creates the pod, waits for it to finish, returns its logs and the
-// node it ran on, and deletes it.
-func (b *Backend) runPod(ctx context.Context, pod *corev1.Pod) (logs, node string, err error) {
-	pods := b.k8s(ctx).CoreV1().Pods(pod.Namespace)
-	created, err := pods.Create(ctx, pod, metav1.CreateOptions{FieldManager: ManagedByValue})
+// cacheJobTTL is how long a finished cache Job stays: a safety net for a
+// model-manager that dies mid-scan, else the Job is deleted once read.
+const cacheJobTTL = 10 * time.Minute
+
+// cacheJob wraps a one-shot cache pod in a Job of the same name so the pod
+// has an owner — the fleet's prevent-bare-pods policy audits one without
+// (giantswarm/model-manager#104). No retry: the scan either reads the claim or
+// reports why not.
+func cacheJob(pod *corev1.Pod) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            ptr.To[int32](0),
+			TTLSecondsAfterFinished: ptr.To(int32(cacheJobTTL / time.Second)), // #nosec G115 -- a constant
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: pod.Labels},
+				Spec:       pod.Spec,
+			},
+		},
+	}
+}
+
+// cacheJobPoll is how often a cache Job's pod is looked at: the poll
+// interval, at most every second — a scan pod finishes within seconds.
+func cacheJobPoll(interval time.Duration) time.Duration {
+	if interval <= 0 || interval > time.Second {
+		return time.Second
+	}
+	return interval
+}
+
+// runCacheJob runs a one-shot cache pod as a Job (cacheJob), waits for its
+// pod to finish, returns the pod's logs and the node it ran on, and deletes
+// the Job with its pod.
+func (b *Backend) runCacheJob(ctx context.Context, pod *corev1.Pod) (logs, node string, err error) {
+	cs := b.k8s(ctx)
+	jobs := cs.BatchV1().Jobs(pod.Namespace)
+	pods := cs.CoreV1().Pods(pod.Namespace)
+	job, err := jobs.Create(ctx, cacheJob(pod), metav1.CreateOptions{FieldManager: ManagedByValue})
 	if err != nil {
-		return "", "", fmt.Errorf("create pod %s: %w", pod.Name, err)
+		return "", "", fmt.Errorf("create Job %s: %w", pod.Name, err)
 	}
 	defer func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = pods.Delete(dctx, created.Name, metav1.DeleteOptions{GracePeriodSeconds: ptr.To[int64](0)})
+		propagation := metav1.DeletePropagationBackground
+		_ = jobs.Delete(dctx, job.Name, metav1.DeleteOptions{PropagationPolicy: &propagation})
 	}()
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(cacheJobPoll(b.opts.PollInterval))
 	defer ticker.Stop()
 	for {
-		p, err := pods.Get(ctx, created.Name, metav1.GetOptions{})
-		if err != nil && !errors.IsNotFound(err) {
-			return "", "", fmt.Errorf("get pod %s: %w", created.Name, err)
+		list, err := pods.List(ctx, metav1.ListOptions{LabelSelector: jobPodLabel + "=" + job.Name})
+		if err != nil {
+			return "", "", fmt.Errorf("list pods of Job %s: %w", job.Name, err)
 		}
-		if p != nil {
+		if len(list.Items) > 0 {
+			p := &list.Items[0]
 			node = p.Spec.NodeName
 			switch p.Status.Phase {
 			case corev1.PodSucceeded:
@@ -428,10 +508,12 @@ func (b *Backend) runPod(ctx context.Context, pod *corev1.Pod) (logs, node strin
 			if reason := podStuckReason(p); reason != "" {
 				return "", node, fmt.Errorf("pod cannot start: %s", reason)
 			}
+		} else if j, err := jobs.Get(ctx, job.Name, metav1.GetOptions{}); err == nil && jobFinished(j) {
+			return "", "", fmt.Errorf("job %s finished without a pod: %s", job.Name, jobFailure(j))
 		}
 		select {
 		case <-ctx.Done():
-			return "", node, fmt.Errorf("waiting for pod %s: %w", created.Name, ctx.Err())
+			return "", node, fmt.Errorf("waiting for Job %s: %w", job.Name, ctx.Err())
 		case <-ticker.C:
 		}
 	}

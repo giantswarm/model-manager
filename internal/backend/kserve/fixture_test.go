@@ -362,7 +362,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 		HFTokenSecret:      "hf-token",
 		PollInterval:       10 * time.Millisecond,
 		ReadyTimeout:       2 * time.Second,
-		InventoryTimeout:   5 * time.Second,
+		InventoryTimeout:   time.Second,
 	})
 	require.NoError(t, err)
 	b.log = slog.New(slog.DiscardHandler)
@@ -404,8 +404,9 @@ func (f *fixture) setLogs(pod, logs string) {
 	f.mu.Unlock()
 }
 
-// completePods marks every pod of the namespace Succeeded on the cache node as
-// soon as it appears (the fake API server runs nothing).
+// completePods gives every cache Job of the namespace its pod and marks every
+// pod Succeeded on the cache node as soon as it appears (the fake API server
+// runs no controller).
 func (f *fixture) completePods(ctx context.Context) {
 	go func() {
 		for {
@@ -413,6 +414,19 @@ func (f *fixture) completePods(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(5 * time.Millisecond):
+			}
+			jobs, err := f.cs.BatchV1().Jobs(testServingNS).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				continue
+			}
+			for i := range jobs.Items {
+				j := &jobs.Items[i]
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: j.Name + "-abcde", Namespace: testServingNS, Labels: map[string]string{jobPodLabel: j.Name}},
+					Spec:       corev1.PodSpec{NodeName: testCacheNode},
+					Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+				}
+				_, _ = f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
 			}
 			pods, err := f.cs.CoreV1().Pods(testServingNS).List(ctx, metav1.ListOptions{})
 			if err != nil {

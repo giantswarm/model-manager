@@ -200,9 +200,9 @@ can stay empty.
 | kserve.inventory.agent.resources | object | `{"limits":{"cpu":"500m","memory":"256Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | Resources of the agent container (a scan walks file metadata only). |
 | kserve.inventory.agent.podAnnotations | object | `{}` | Annotations on the agent pods. |
 | kserve.inventory.agent.podLabels | object | `{}` | Extra labels on the agent pods. |
-| kserve.inventory.image | object | `{"name":"giantswarm/alpine","registry":"gsoci.azurecr.io","tag":"3.22.1"}` | Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox). |
+| kserve.inventory.image | object | `{"name":"giantswarm/alpine","registry":"gsoci.azurecr.io","tag":"3.22.1"}` | Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived Jobs); needs sh, find, stat, awk (busybox). |
 | kserve.inventory.ttl | string | `"2m"` | How long one cache scan is reused before a node is scanned again. |
-| kserve.inventory.timeout | string | `"2m"` | Time budget of one scan (scan pod, or cache-agent request). |
+| kserve.inventory.timeout | string | `"2m"` | Time budget of one scan (scan Job, or cache-agent request); a caller whose deadline leaves less is answered from the last scan while a new one runs in the background. |
 | kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`). |
 | kserve.budget.defaultOverheadGiB | int | `30` | Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`. |
 | kserve.readyTimeout | string | `"2h"` | How long a load job waits for an InferenceService to become ready before it gives up on wiring. |
