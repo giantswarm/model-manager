@@ -377,7 +377,14 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if err != nil {
 		return errResult(err), nil
 	}
-	return jsonResult(map[string]any{argBackend: b, argModel: name, "loaded": false})
+	out := map[string]any{argBackend: b, argModel: name, "loaded": false}
+	if b == backend.NameKServe {
+		// The serving object is deleted, not gone: the list shows it as
+		// Terminating until Kubernetes has removed it and its pod.
+		out["status"] = "Terminating"
+		out["next"] = "the serving object is being deleted; list_loaded_models shows it with status Terminating (phase terminating) until it is gone, then no longer"
+	}
+	return jsonResult(out)
 }
 
 func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

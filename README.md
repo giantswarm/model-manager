@@ -517,12 +517,49 @@ scheduling by the registered backend document (`docs/backends.md`).
 - **State** — the loaded models (`GET /api/v1/loaded`, `list_loaded_models`)
   are every InferenceService and LLMInferenceService of the serving namespace
   whatever their readiness: `status` `Ready`, `Pending` (the predictor pod
-  waits for a node or an image — `reason` `Unschedulable` with the
-  scheduler's message, `ImagePullBackOff`), `NotReady` (the Ready
-  condition's `reason`, a failed load) or `Terminating`, with `message` in
-  words. `unload` takes the preset name, the object name or the repository
-  id and deletes the object in any state; a `load`'s answer names the object
-  it created (`running.resource`, `running.kind`).
+  waits for a node, the weights or an image — `reason` `Unschedulable` with
+  the scheduler's message, `DownloadingWeights`, `ImagePullBackOff`),
+  `NotReady` (the Ready condition's `reason`, a failed load) or
+  `Terminating`, with `message` in words. `unload` takes the preset name,
+  the object name or the repository id and deletes the object in any state;
+  its answer says `status: Terminating` and that the list shows the object
+  until it is gone. A `load`'s answer names the object it created
+  (`running.resource`, `running.kind`), carries the fit verdict it was
+  judged by (`fit`, the `check_fit` shape) and the initial `running.steps`.
+- **Phases** — `phase` refines `status` with where a serve is, and `steps`
+  is the whole timeline: one entry per phase in order, each
+  `{name, state: pending|inProgress|done|failed, since, finishedAt, reason,
+  message}` with `since`/`finishedAt` from the pod's conditions, container
+  statuses and Events (Karpenter's nomination, the kubelet's `Pulling`/
+  `Pulled` with the pull's duration, probe failures), so a caller shows
+  elapsed time per step. The phases of a fresh serve on a scale-to-zero pool
+  (proof 1: ≈ 12 min to Ready):
+
+  | `phase` | What is happening | Read from |
+  |---|---|---|
+  | `scheduling` | no node has a free GPU; the autoscaler is asked | `PodScheduled=False` (`Unschedulable`), `FailedScheduling` events; ≈ 3.5 min while a node launches |
+  | `nodeStarting` | a node is nominated or bound, its GPU not allocatable yet | Karpenter's `Nominated` event, `nominatedNodeName`, the node's allocatable `nvidia.com/gpu`; ≈ 1 min |
+  | `downloadingWeights` | the `storage-initializer` fills the cache directory | the init container; `bytesTotal` (the preset's weights), `bytesCompleted` (a bounded cache-agent scan while filling, cache-agent mode only), `cached: true` when it finished within 15 s — the claim held the weights (72 s for 8 GB, else 0.3 s) |
+  | `pullingImage` | the kubelet pulls the runtime image | the container `Waiting` (`ContainerCreating`), `Pulling`/`Pulled` events (the message carries the duration); ≈ 4 min |
+  | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min |
+  | `routing` | the pod is ready, KServe resolves the route | `Ready=False` `HTTPRoutesNotReady` |
+  | `ready` | the endpoint answers | `Ready=True` (`since` = its `lastTransitionTime`) |
+  | `failed` | a step failed — the step says why | `ImagePullBackOff`/`ErrImagePull`, `CrashLoopBackOff`, an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`), `modelStatus.lastFailureInfo` |
+  | `terminating` | the object is being deleted | `deletionTimestamp`; the steps stay as they were |
+
+  Without a pod yet the object is `scheduling` (`WaitingForPod`) since its
+  creation; a Ready object whose pod the driver cannot see has every step
+  done. Backends without a serve lifecycle (ollama, lemonade, lmstudio)
+  answer neither `phase` nor `steps`. Reading the Events and the nodes costs
+  one bounded (3 s) list per pod, concurrently, so three served models stay
+  inside a caller's ~10 s deadline.
+- **Cache verdict** — `check_fit`'s `cached` is a boolean and `cacheSource`
+  says how it was decided: `scan` (a cache scan answered in this call),
+  `index` (no scan could run — a GPU pool at zero, the caller's deadline —
+  and the cache index remembers a directory an InferenceService filled for
+  the repository), `unknown` (neither answered; `cached: false` is then no
+  verdict). On the scale-from-zero pool path the claim is asked as a whole,
+  so weights an earlier serve left in it answer `cached: true`.
 
 ## Jobs, restarts and replicas
 

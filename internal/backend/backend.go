@@ -230,6 +230,59 @@ type LoadedModel struct {
 	// Pinned is true when the model is exempt from the backend's slot
 	// eviction (lemonade: loaded with keepAlive -1).
 	Pinned bool `json:"pinned,omitempty"`
+	// Phase refines Status for a served model (kserve): where a serve is
+	// right now, one of the Phase* values, in the order a fresh serve moves
+	// through them. Steps is the whole timeline, one entry per phase.
+	// Backends without a serve lifecycle (ollama, lemonade, lmstudio) answer
+	// neither.
+	Phase string `json:"phase,omitempty"`
+	Steps []Step `json:"steps,omitempty"`
+}
+
+// The phases of a serve, in order; Phase names the current one. Failed and
+// Terminating are terminal phases outside the sequence: the step that failed
+// says why, Steps stay as they were when the object started to go.
+const (
+	PhaseScheduling         = "scheduling"
+	PhaseNodeStarting       = "nodeStarting"
+	PhaseDownloadingWeights = "downloadingWeights"
+	PhasePullingImage       = "pullingImage"
+	PhaseLoading            = "loading"
+	PhaseRouting            = "routing"
+	PhaseReady              = "ready"
+	PhaseFailed             = "failed"
+	PhaseTerminating        = "terminating"
+)
+
+// ServePhases lists the phases a fresh serve moves through, in order.
+var ServePhases = []string{PhaseScheduling, PhaseNodeStarting, PhaseDownloadingWeights, PhasePullingImage, PhaseLoading, PhaseRouting, PhaseReady}
+
+// The states of a Step; the vocabulary is shared with cluster-manager.
+const (
+	StepPending    = "pending"
+	StepInProgress = "inProgress"
+	StepDone       = "done"
+	StepFailed     = "failed"
+)
+
+// Step is one phase of a serve in the timeline: its State, when it began
+// (Since) and ended (FinishedAt), and what the objects say about it
+// (Reason, Message). The weights step carries what it knows about the
+// download: BytesTotal (the preset's weights), BytesCompleted (the cache
+// directory's size while filling, when the node's cache agent answered) and
+// Cached (the claim already held the weights: the initializer finished
+// within seconds).
+type Step struct {
+	Name       string     `json:"name"`
+	State      string     `json:"state"`
+	Since      *time.Time `json:"since,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	Message    string     `json:"message,omitempty"`
+
+	BytesCompleted int64 `json:"bytesCompleted,omitempty"`
+	BytesTotal     int64 `json:"bytesTotal,omitempty"`
+	Cached         *bool `json:"cached,omitempty"`
 }
 
 // Progress is a pull-progress sample.
@@ -355,8 +408,36 @@ type FitResult struct {
 	Gated           bool `json:"gated"`
 	Private         bool `json:"private"`
 	TokenConfigured bool `json:"tokenConfigured"`
-	// Cached is true when the model is already in the node's cache.
-	Cached bool `json:"cached"`
+	// Cached is true when the model is already in the cache. CacheSource
+	// says how that was decided: "scan" (a cache scan answered in this
+	// call), "index" (no scan could run — a pool at zero, the caller's
+	// deadline — and the cache index remembers a directory an
+	// InferenceService filled for the repository), or "unknown" (neither
+	// answered: Cached false is then no verdict). Empty on backends without
+	// a cache.
+	Cached      bool   `json:"cached"`
+	CacheSource string `json:"cacheSource,omitempty"`
+}
+
+// The CacheSource values of a FitResult.
+const (
+	CacheSourceScan    = "scan"
+	CacheSourceIndex   = "index"
+	CacheSourceUnknown = "unknown"
+)
+
+// LoadResult is what a Server's Serve answers next to the error: the fit
+// verdict it judged the model by before creating the serving object.
+type LoadResult struct {
+	Fit *FitResult `json:"fit,omitempty"`
+}
+
+// Server is implemented by backends whose Load fit-checks the model first
+// (kserve). Serve is Load with the verdict in the answer, so a load's caller
+// sees what the model was judged by; Load stays for callers without use
+// for it.
+type Server interface {
+	Serve(ctx context.Context, req LoadRequest) (*LoadResult, error)
 }
 
 // NodeInfo is one node's serving budget and cache state.

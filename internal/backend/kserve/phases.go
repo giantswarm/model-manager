@@ -1,0 +1,560 @@
+package kserve
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/giantswarm/model-manager/internal/backend"
+)
+
+// Where a serve is, read off the predictor pod, its Events and its node
+// (giantswarm/model-manager#110). A fresh serve on a scale-to-zero pool moves
+// through backend.ServePhases: the scheduler finds no node and the autoscaler
+// nominates one (scheduling), the node registers and its GPU becomes
+// allocatable (nodeStarting), the storage-initializer fills the cache
+// directory (downloadingWeights), the kubelet pulls the runtime image
+// (pullingImage), vLLM loads the weights until the startup probe passes
+// (loading), KServe resolves the route (routing), the endpoint answers
+// (ready). Conditions carry the transitions the pod records; Events carry the
+// rest — Karpenter's nomination, Pulling/Pulled with the pull's duration,
+// probe failures.
+const (
+	initContainerName = "storage-initializer"
+
+	// eventsTimeout bounds the Events read per pod so three served models
+	// stay inside the caller's deadline.
+	eventsTimeout = 3 * time.Second
+	// cachedWithin: an initializer that finished this fast found the weights
+	// in the claim (8 GB took 72 s to download, 0.3 s when cached).
+	cachedWithin = 15 * time.Second
+	// downloadStallAfter: an initializer running this long has stalled.
+	downloadStallAfter = 30 * time.Minute
+
+	eventNominated        = "Nominated"
+	eventFailedScheduling = "FailedScheduling"
+	eventPulling          = "Pulling"
+	eventPulled           = "Pulled"
+	eventUnhealthy        = "Unhealthy"
+
+	reasonNodeStarting       = "NodeStarting"
+	reasonDownloadingWeights = "DownloadingWeights"
+	reasonDownloadStalled    = "DownloadStalled"
+	reasonLoadingModel       = "LoadingModel"
+	reasonWaitingForPod      = "WaitingForPod"
+)
+
+// podFacts is what the phase computation reads besides the pod.
+type podFacts struct {
+	Pod    *corev1.Pod
+	Events []corev1.Event
+	// NodeKnown says the pod's node was read; NodeGPUs is its allocatable
+	// accelerator count.
+	NodeKnown bool
+	NodeGPUs  int64
+	// GPUResource names the accelerator resource (nvidia.com/gpu).
+	GPUResource string
+	Now         time.Time
+}
+
+// timeline is the steps of a serve while they are computed.
+type timeline struct {
+	steps []backend.Step
+}
+
+func newTimeline() *timeline {
+	t := &timeline{steps: make([]backend.Step, 0, len(backend.ServePhases))}
+	for _, name := range backend.ServePhases {
+		t.steps = append(t.steps, backend.Step{Name: name, State: backend.StepPending})
+	}
+	return t
+}
+
+func (t *timeline) begin(i int, at time.Time) {
+	t.steps[i].State = backend.StepInProgress
+	t.steps[i].Since = timePtr(at)
+}
+
+// note records what the objects say about the step under way.
+func (t *timeline) note(i int, reason, message string) {
+	t.steps[i].Reason = reason
+	t.steps[i].Message = strings.TrimSpace(message)
+}
+
+func (t *timeline) done(i int, at time.Time, message string) {
+	s := &t.steps[i]
+	s.State = backend.StepDone
+	if s.Since == nil {
+		s.Since = timePtr(at)
+	}
+	s.FinishedAt = timePtr(at)
+	s.Reason = ""
+	s.Message = strings.TrimSpace(message)
+}
+
+func (t *timeline) fail(i int, reason, message string) {
+	t.steps[i].State = backend.StepFailed
+	t.note(i, reason, message)
+}
+
+// phase is the current phase: terminating while the object goes, failed when
+// a step failed, else the step under way, else ready.
+func (t *timeline) phase(deleting bool) string {
+	if deleting {
+		return backend.PhaseTerminating
+	}
+	current := backend.PhaseReady
+	for _, s := range t.steps {
+		switch s.State {
+		case backend.StepFailed:
+			return backend.PhaseFailed
+		case backend.StepInProgress:
+			if current == backend.PhaseReady {
+				current = s.Name
+			}
+		}
+	}
+	return current
+}
+
+// current is the step under way or failed; nil when every step is done or
+// pending.
+func (t *timeline) current() *backend.Step {
+	for i := range t.steps {
+		if s := &t.steps[i]; s.State == backend.StepInProgress || s.State == backend.StepFailed {
+			return s
+		}
+	}
+	return nil
+}
+
+func timePtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	t = t.UTC()
+	return &t
+}
+
+// The indexes of the steps in backend.ServePhases.
+const (
+	stepScheduling = iota
+	stepNodeStarting
+	stepWeights
+	stepImage
+	stepLoading
+	stepRouting
+	stepReady
+)
+
+// servePhase computes the phase and the timeline of a served object from
+// its pod. Without a pod the object waits for one (or is Ready without the
+// driver seeing the pod). A serve that failed by the object's own account
+// (modelStatus.lastFailureInfo) fails the step under way.
+func servePhase(sv served, pf podFacts) (string, []backend.Step) {
+	t := newTimeline()
+	if pf.Pod == nil {
+		if sv.Ready {
+			for i := range t.steps {
+				t.done(i, sv.ReadyAt, "")
+			}
+			return t.phase(sv.Deleting), t.steps
+		}
+		t.begin(stepScheduling, sv.Created)
+		t.note(stepScheduling, reasonWaitingForPod, "waiting for the predictor pod")
+		return finish(t, sv)
+	}
+	if !schedule(t, pf) || !download(t, pf) || !pull(t, pf) || !load(t, pf) {
+		return finish(t, sv)
+	}
+	readyAt := conditionTime(pf.Pod, corev1.ContainersReady, pf.Now)
+	t.begin(stepRouting, readyAt)
+	if !sv.Ready {
+		t.note(stepRouting, sv.Reason, sv.Message)
+		return finish(t, sv)
+	}
+	t.done(stepRouting, sv.ReadyAt, "")
+	t.done(stepReady, sv.ReadyAt, "")
+	return finish(t, sv)
+}
+
+func finish(t *timeline, sv served) (string, []backend.Step) {
+	if sv.Failed {
+		if s := t.current(); s != nil && s.State != backend.StepFailed {
+			t.fail(indexOf(s.Name), sv.Reason, sv.Message)
+		}
+	}
+	return t.phase(sv.Deleting), t.steps
+}
+
+func indexOf(name string) int {
+	for i, n := range backend.ServePhases {
+		if n == name {
+			return i
+		}
+	}
+	return 0
+}
+
+// schedule covers scheduling and nodeStarting; false while one of them is
+// under way.
+func schedule(t *timeline, pf podFacts) bool {
+	p := pf.Pod
+	t.begin(stepScheduling, p.CreationTimestamp.Time)
+	nominated := lastEvent(pf.Events, eventNominated, "")
+	nominatedAt := eventTime(nominated, true)
+	bound := conditionIs(p, corev1.PodScheduled, corev1.ConditionTrue)
+	if !bound {
+		if nominated == nil && p.Status.NominatedNodeName == "" {
+			reason, message := podPendingReason(p)
+			if reason == "" {
+				if ev := lastEvent(pf.Events, eventFailedScheduling, ""); ev != nil {
+					reason, message = ev.Reason, ev.Message
+				}
+			}
+			t.note(stepScheduling, reason, message)
+			return false
+		}
+		// The autoscaler answered: the node is on its way.
+		if nominatedAt.IsZero() {
+			nominatedAt = pf.Now
+		}
+		t.done(stepScheduling, nominatedAt, "")
+		t.begin(stepNodeStarting, nominatedAt)
+		message := "the node is starting"
+		if nominated != nil {
+			message = nominated.Message
+		} else if p.Status.NominatedNodeName != "" {
+			message = "nominated to " + p.Status.NominatedNodeName
+		}
+		t.note(stepNodeStarting, reasonNodeStarting, message)
+		return false
+	}
+	// Scheduling ended when the autoscaler answered, else when the pod
+	// bound; the node started then.
+	boundAt := conditionTime(p, corev1.PodScheduled, p.CreationTimestamp.Time)
+	scheduledAt := boundAt
+	if !nominatedAt.IsZero() && nominatedAt.Before(boundAt) {
+		scheduledAt = nominatedAt
+	}
+	t.done(stepScheduling, scheduledAt, "")
+	t.begin(stepNodeStarting, scheduledAt)
+	if pf.NodeKnown && pf.NodeGPUs == 0 && requestsGPU(p, pf.GPUResource) {
+		t.note(stepNodeStarting, reasonNodeStarting, fmt.Sprintf("node %s: %s not allocatable yet", p.Spec.NodeName, pf.GPUResource))
+		return false
+	}
+	t.done(stepNodeStarting, boundAt, "")
+	return true
+}
+
+// download covers downloadingWeights: the storage-initializer init container.
+func download(t *timeline, pf podFacts) bool {
+	p := pf.Pod
+	boundAt := conditionTime(p, corev1.PodScheduled, p.CreationTimestamp.Time)
+	init := containerStatus(p.Status.InitContainerStatuses, initContainerName)
+	if init == nil {
+		t.done(stepWeights, boundAt, "")
+		if len(p.Spec.InitContainers) == 0 {
+			t.steps[stepWeights].Message = "no storage-initializer: the runtime fetches the weights itself"
+		}
+		return true
+	}
+	switch {
+	case init.State.Terminated != nil:
+		term := init.State.Terminated
+		t.begin(stepWeights, term.StartedAt.Time)
+		if term.ExitCode != 0 {
+			t.fail(stepWeights, nonEmpty(term.Reason, "Error"), fmt.Sprintf("%s exited %d: %s", initContainerName, term.ExitCode, nonEmpty(term.Message, "no message")))
+			return false
+		}
+		took := term.FinishedAt.Sub(term.StartedAt.Time)
+		cached := took <= cachedWithin
+		t.done(stepWeights, term.FinishedAt.Time, "")
+		t.steps[stepWeights].Cached = &cached
+		if cached {
+			t.steps[stepWeights].Message = fmt.Sprintf("the cache claim already held the weights (%s finished in %s)", initContainerName, took.Round(100*time.Millisecond))
+		}
+		return true
+	case init.State.Running != nil:
+		startedAt := init.State.Running.StartedAt.Time
+		t.begin(stepWeights, startedAt)
+		running := pf.Now.Sub(startedAt)
+		switch {
+		case init.RestartCount > 0:
+			t.fail(stepWeights, reasonDownloadStalled, fmt.Sprintf("%s restarted %d× (%s)", initContainerName, init.RestartCount, lastTermination(init)))
+			return false
+		case running > downloadStallAfter:
+			t.fail(stepWeights, reasonDownloadStalled, fmt.Sprintf("%s running for %s without finishing", initContainerName, running.Round(time.Minute)))
+			return false
+		}
+		t.note(stepWeights, reasonDownloadingWeights, fmt.Sprintf("%s downloading the weights into the cache claim", initContainerName))
+		return false
+	default:
+		t.begin(stepWeights, boundAt)
+		if w := init.State.Waiting; w != nil {
+			if isPullFailure(w.Reason) {
+				t.fail(stepWeights, w.Reason, w.Message)
+				return false
+			}
+			t.note(stepWeights, w.Reason, w.Message)
+		}
+		return false
+	}
+}
+
+// pull covers pullingImage: the runtime container's image.
+func pull(t *timeline, pf podFacts) bool {
+	p := pf.Pod
+	if len(p.Status.ContainerStatuses) == 0 {
+		t.begin(stepImage, stepEnd(t, stepWeights, pf.Now))
+		return false
+	}
+	main := &p.Status.ContainerStatuses[0]
+	field := "spec.containers{" + main.Name + "}"
+	pulling := lastEvent(pf.Events, eventPulling, field)
+	pulled := lastEvent(pf.Events, eventPulled, field)
+	since := stepEnd(t, stepWeights, pf.Now)
+	if at := eventTime(pulling, true); !at.IsZero() {
+		since = at
+	}
+	t.begin(stepImage, since)
+	if w := main.State.Waiting; w != nil {
+		if isPullFailure(w.Reason) {
+			t.fail(stepImage, w.Reason, w.Message)
+			return false
+		}
+		if pulled == nil {
+			message := w.Message
+			if pulling != nil {
+				message = pulling.Message
+			}
+			t.note(stepImage, nonEmpty(w.Reason, eventPulling), message)
+			return false
+		}
+		// Pulled, not yet Running: created, or crash-looping.
+		pulledAt := eventTime(pulled, false)
+		t.done(stepImage, pulledAt, pulled.Message)
+		t.begin(stepLoading, pulledAt)
+		if isCrash(w.Reason) {
+			t.fail(stepLoading, w.Reason, nonEmpty(w.Message, lastTermination(main)))
+		} else {
+			t.note(stepLoading, w.Reason, w.Message)
+		}
+		return false
+	}
+	pulledAt := eventTime(pulled, false)
+	message := ""
+	if pulled != nil {
+		message = pulled.Message
+	}
+	if pulledAt.IsZero() {
+		pulledAt = containerStart(main, since)
+	}
+	t.done(stepImage, pulledAt, message)
+	return true
+}
+
+// load covers loading: the runtime container up to its probes passing.
+func load(t *timeline, pf podFacts) bool {
+	p := pf.Pod
+	main := &p.Status.ContainerStatuses[0]
+	if term := main.State.Terminated; term != nil {
+		t.begin(stepLoading, term.StartedAt.Time)
+		t.fail(stepLoading, nonEmpty(term.Reason, "Error"), fmt.Sprintf("%s exited %d: %s", main.Name, term.ExitCode, nonEmpty(term.Message, "no message")))
+		return false
+	}
+	startedAt := containerStart(main, stepEnd(t, stepImage, pf.Now))
+	t.begin(stepLoading, startedAt)
+	if !main.Ready {
+		message := "the runtime is loading the model; the startup probe has not passed yet"
+		if ev := lastEvent(pf.Events, eventUnhealthy, "spec.containers{"+main.Name+"}"); ev != nil {
+			message = ev.Message
+		}
+		t.note(stepLoading, reasonLoadingModel, message)
+		return false
+	}
+	t.done(stepLoading, conditionTime(p, corev1.ContainersReady, pf.Now), "")
+	return true
+}
+
+// stepEnd is when step i finished, else fallback.
+func stepEnd(t *timeline, i int, fallback time.Time) time.Time {
+	if at := t.steps[i].FinishedAt; at != nil {
+		return *at
+	}
+	return fallback
+}
+
+func containerStart(cs *corev1.ContainerStatus, fallback time.Time) time.Time {
+	if r := cs.State.Running; r != nil && !r.StartedAt.IsZero() {
+		return r.StartedAt.Time
+	}
+	return fallback
+}
+
+func containerStatus(list []corev1.ContainerStatus, name string) *corev1.ContainerStatus {
+	for i := range list {
+		if list[i].Name == name {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
+func lastTermination(cs *corev1.ContainerStatus) string {
+	term := cs.LastTerminationState.Terminated
+	if term == nil {
+		return "no termination recorded"
+	}
+	return fmt.Sprintf("last exit %d %s %s", term.ExitCode, term.Reason, strings.TrimSpace(term.Message))
+}
+
+func isPullFailure(reason string) bool {
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError":
+		return true
+	}
+	return false
+}
+
+func isCrash(reason string) bool {
+	return reason == "CrashLoopBackOff" || reason == "RunContainerError"
+}
+
+func nonEmpty(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
+}
+
+func requestsGPU(p *corev1.Pod, gpuResource string) bool {
+	for _, c := range p.Spec.Containers {
+		if q, ok := c.Resources.Requests[corev1.ResourceName(gpuResource)]; ok && !q.IsZero() {
+			return true
+		}
+		if q, ok := c.Resources.Limits[corev1.ResourceName(gpuResource)]; ok && !q.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+func conditionIs(p *corev1.Pod, kind corev1.PodConditionType, status corev1.ConditionStatus) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == kind {
+			return c.Status == status
+		}
+	}
+	return false
+}
+
+// conditionTime is the condition's lastTransitionTime, else fallback.
+func conditionTime(p *corev1.Pod, kind corev1.PodConditionType, fallback time.Time) time.Time {
+	for _, c := range p.Status.Conditions {
+		if c.Type == kind && !c.LastTransitionTime.IsZero() {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return fallback
+}
+
+// lastEvent is the latest event with the reason, for the object's fieldPath
+// (a container) when given; nil without one.
+func lastEvent(events []corev1.Event, reason, fieldPath string) *corev1.Event {
+	var best *corev1.Event
+	for i := range events {
+		e := &events[i]
+		if e.Reason != reason || (fieldPath != "" && e.InvolvedObject.FieldPath != fieldPath) {
+			continue
+		}
+		if best == nil || eventTime(e, false).After(eventTime(best, false)) {
+			best = e
+		}
+	}
+	return best
+}
+
+// eventTime is when an event (last) happened — or first, for the start of a
+// step; zero for nil.
+func eventTime(e *corev1.Event, first bool) time.Time {
+	if e == nil {
+		return time.Time{}
+	}
+	if first && !e.FirstTimestamp.IsZero() {
+		return e.FirstTimestamp.Time
+	}
+	for _, t := range []time.Time{e.LastTimestamp.Time, e.EventTime.Time, e.FirstTimestamp.Time} {
+		if !t.IsZero() {
+			return t
+		}
+	}
+	return e.CreationTimestamp.Time
+}
+
+// podEvents lists the Events of one pod, bounded by eventsTimeout; none when
+// the read fails (the phase is then computed from the pod alone).
+func (b *Backend) podEvents(ctx context.Context, p *corev1.Pod) []corev1.Event {
+	ctx, cancel := context.WithTimeout(ctx, eventsTimeout)
+	defer cancel()
+	list, err := b.k8s(ctx).CoreV1().Events(p.Namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.uid=" + string(p.UID)})
+	if err != nil {
+		b.log.Warn("listing the predictor pod's events failed; phases are read from the pod alone", "pod", p.Name, "error", err)
+		return nil
+	}
+	out := make([]corev1.Event, 0, len(list.Items))
+	for _, e := range list.Items {
+		if e.InvolvedObject.UID == p.UID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// nodeGPUs maps every node to its allocatable accelerator count; nil when
+// nodes cannot be read.
+func (b *Backend) nodeGPUs(ctx context.Context, gpuResource string) map[string]int64 {
+	nodes, err := b.k8s(ctx).CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		b.log.Warn("listing nodes for the served models' phases failed", "error", err)
+		return nil
+	}
+	out := make(map[string]int64, len(nodes.Items))
+	for _, n := range nodes.Items {
+		q := n.Status.Allocatable[corev1.ResourceName(gpuResource)]
+		out[n.Name] = q.Value()
+	}
+	return out
+}
+
+// weightsBytes fills the weights step with the download's size — the
+// preset's weights as total and, while the initializer runs in cache-agent
+// mode, the cache directory's current size from a bounded scan of the node.
+func (b *Backend) weightsBytes(ctx context.Context, sv *served, total int64) {
+	for i := range sv.Steps {
+		s := &sv.Steps[i]
+		if s.Name != backend.PhaseDownloadingWeights {
+			continue
+		}
+		s.BytesTotal = total
+		if s.State != backend.StepInProgress || !b.liveCache || sv.Node == "" {
+			return
+		}
+		ctx, cancel := context.WithTimeout(ctx, eventsTimeout)
+		defer cancel()
+		snap := b.inv.snapshot(ctx, sv.Node, 0, true, b.scan)
+		for _, e := range snap.Entries {
+			if e.Dir == sv.Name {
+				s.BytesCompleted = e.Bytes
+				if total > 0 {
+					s.Message = fmt.Sprintf("%s downloading the weights into the cache claim: %s of %s", initContainerName, humanBytes(e.Bytes), humanBytes(total))
+				}
+			}
+		}
+		return
+	}
+}
