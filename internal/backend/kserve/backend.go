@@ -46,7 +46,10 @@ type Backend struct {
 
 	// scan and logs are the node-touching primitives; tests replace them.
 	scan scanner
-	logs logReader
+	// liveCache says scans reach the cache without creating a pod (the
+	// cache-agent daemonset), so a list call may read a filling directory.
+	liveCache bool
+	logs      logReader
 	// agentHTTP talks to the cache-agent pods (daemonset inventory mode).
 	agentHTTP *http.Client
 
@@ -122,6 +125,7 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	b.scan = b.scanNode
 	if opts.InventoryMode == InventoryModeDaemonSet {
 		b.scan = b.scanAgent
+		b.liveCache = true
 	}
 	return b, nil
 }
@@ -418,9 +422,11 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Preset:    sv.Preset,
 			GPUs:      sv.GPUs,
 			ManagedBy: sv.ManagedBy,
+			Phase:     sv.Phase,
+			Steps:     sv.Steps,
 		}
 		if sv.Deleting {
-			lm.Status = "Terminating"
+			lm.Status = statusTerminating
 		}
 		if p, ok := idx.byName[sv.Preset]; ok {
 			lm.SizeBytes = p.weightsBytes()
@@ -505,40 +511,50 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 // Load implements backend.Backend: fit-check, then create the InferenceService
 // composed from the preset. Loading the same preset again is a no-op.
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
+	_, err := b.Serve(ctx, req)
+	return err
+}
+
+// Serve implements backend.Server: Load with the fit verdict the model was
+// judged by in the answer (giantswarm/model-manager#110).
+func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.LoadResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" && req.Preset == "" {
-		return fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
 	}
 	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node}, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if plan.Preset == nil {
-		return fmt.Errorf("%w: no serving preset serves %s; presets are curated in the platform chart (components.modelServing.presets)", backend.ErrInvalid, plan.Repo)
+		return nil, fmt.Errorf("%w: no serving preset serves %s; presets are curated in the platform chart (components.modelServing.presets)", backend.ErrInvalid, plan.Repo)
 	}
+	fit := plan.Result
+	fit.Backend = b.Name()
+	res := &backend.LoadResult{Fit: &fit}
 	s := b.cfg.settings(ctx)
 	existing, err := b.findServing(ctx, s, plan.Preset.name())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s.GPUResourceName)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
 			b.log.Info("serving object already exists", "kind", sv.Kind, "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
-			return nil
+			return res, nil
 		}
-		return fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, sv.Kind, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
+		return nil, fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, sv.Kind, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
 	}
 	if !plan.Result.Fits {
-		return fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
+		return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
 	obj := b.compose(plan.Preset, s, req.Node)
 	if err := b.createServing(ctx, obj); err != nil {
-		return err
+		return nil, err
 	}
 	b.log.Info("serving object created", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
 	b.inv.invalidate()
-	return nil
+	return res, nil
 }
 
 // Unload implements backend.Backend: deletes the InferenceServices serving the

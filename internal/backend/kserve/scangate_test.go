@@ -166,7 +166,9 @@ func TestIsCachedFromIndexWhenNoScanCanAnswer(t *testing.T) {
 	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput()}) // pool at zero: no scan
 	loc, err := f.b.cacheNodes(ctx)
 	require.NoError(t, err)
-	assert.False(t, f.b.isCached(ctx, "", "tiny", tinyRepo, loc), "index miss")
+	cached, source := f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
+	assert.False(t, cached, "index miss")
+	assert.Equal(t, backend.CacheSourceUnknown, source, "no scan, no index record: unknown, not no")
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: f.b.opts.CacheIndexConfigMap, Namespace: testServingNS},
 		Data:       map[string]string{"tiny": `{"model":"` + tinyRepo + `","dir":"tiny","inferenceService":"tiny"}`},
@@ -174,8 +176,11 @@ func TestIsCachedFromIndexWhenNoScanCanAnswer(t *testing.T) {
 	_, err = f.cs.CoreV1().ConfigMaps(testServingNS).Create(ctx, cm, metav1.CreateOptions{})
 	require.NoError(t, err)
 	f.b.index.set(nil)
-	assert.True(t, f.b.isCached(ctx, "", "tiny", tinyRepo, loc), "index hit")
-	assert.False(t, f.b.isCached(ctx, "", "big", bigRepo, loc), "another directory: miss")
+	cached, source = f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
+	assert.True(t, cached, "index hit")
+	assert.Equal(t, backend.CacheSourceIndex, source)
+	cached, _ = f.b.isCached(ctx, "", "big", bigRepo, loc)
+	assert.False(t, cached, "another directory: miss")
 	assert.Equal(t, 0, f.scanCount(), "no scan pod")
 }
 

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/giantswarm/model-manager/internal/backend"
 )
 
 // Labels and annotations model-manager puts on the objects it creates, plus
@@ -30,6 +33,9 @@ const (
 	statusReady    = "Ready"
 	statusNotReady = "NotReady"
 	statusPending  = "Pending"
+	// statusTerminating is what a deleting object answers; the phase says
+	// the same and the list shows the object until it is gone.
+	statusTerminating = "Terminating"
 )
 
 var isvcGVR = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1beta1", Resource: "inferenceservices"}
@@ -61,6 +67,13 @@ type served struct {
 	Node     string
 	Created  time.Time
 	Deleting bool
+	// ReadyAt is when the Ready condition last turned True; Failed says the
+	// object recorded a failed load (modelStatus.lastFailureInfo).
+	ReadyAt time.Time
+	Failed  bool
+	// Phase and Steps are where the serve is (phases.go).
+	Phase string
+	Steps []backend.Step
 }
 
 // manageable reports whether model-manager may operate on the
@@ -142,11 +155,16 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 		b.log.Warn("listing presets failed; serving objects are shown without preset details", "error", err)
 	}
 	idx := indexPresets(presets)
-	pods := b.predictorPods(ctx, s.Namespace)
+	pods := b.predictorPods(ctx, s)
 	out := make([]served, 0, len(items))
 	for i := range items {
 		sv := parseServed(&items[i], idx, s.GPUResourceName)
 		sv.applyPod(pods[sv.Name])
+		var total int64
+		if p, ok := idx.byName[sv.Preset]; ok {
+			total = p.weightsBytes()
+		}
+		b.weightsBytes(ctx, &sv, total)
 		out = append(out, sv)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -167,6 +185,13 @@ type predictorPod struct {
 	Pending bool
 	Reason  string
 	Message string
+	// Phase and Steps are where the serve is by the pod's account
+	// (servePhase); Found says a pod was read at all; facts is what the
+	// phase was computed from, for applyPod to finish it with the object.
+	Found bool
+	Phase string
+	Steps []backend.Step
+	facts podFacts
 }
 
 // outranks reports whether p describes its object better than other: a pod
@@ -180,17 +205,40 @@ func (p predictorPod) outranks(other predictorPod) bool {
 
 // predictorPods maps the name of an InferenceService or LLMInferenceService
 // to its predictor (workload) pod.
-func (b *Backend) predictorPods(ctx context.Context, namespace string) map[string]predictorPod {
-	out := map[string]predictorPod{}
-	b.podsByName(ctx, namespace, isvcPodLabel, isvcPodLabel, out)
-	b.podsByName(ctx, namespace, llmisvcPodSelector, llmisvcPodLabel, out)
+func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]predictorPod {
+	pods := map[string]*corev1.Pod{}
+	b.podsByName(ctx, s.Namespace, isvcPodLabel, isvcPodLabel, pods)
+	b.podsByName(ctx, s.Namespace, llmisvcPodSelector, llmisvcPodLabel, pods)
+	out := make(map[string]predictorPod, len(pods))
+	if len(pods) == 0 {
+		return out
+	}
+	// The phases need the pods' Events and nodes: the nodes once, the
+	// Events per pod concurrently, each read bounded (phases.go).
+	gpus := b.nodeGPUs(ctx, s.GPUResourceName)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, p := range pods {
+		wg.Add(1)
+		go func(name string, p *corev1.Pod) {
+			defer wg.Done()
+			facts := podFacts{Pod: p, Events: b.podEvents(ctx, p), GPUResource: s.GPUResourceName, Now: time.Now()}
+			if n, ok := gpus[p.Spec.NodeName]; ok {
+				facts.NodeKnown, facts.NodeGPUs = true, n
+			}
+			mu.Lock()
+			out[name] = predictorPodOf(p, facts)
+			mu.Unlock()
+		}(name, p)
+	}
+	wg.Wait()
 	return out
 }
 
 // podsByName adds every pod matching selector to out, keyed by the pod's
 // nameLabel value; of several pods for one name (a rollout, a replacement)
 // the one that outranks the others stays.
-func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel string, out map[string]predictorPod) {
+func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel string, out map[string]*corev1.Pod) {
 	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		b.log.Warn("listing predictor pods failed", "namespace", namespace, "selector", selector, "error", err)
@@ -201,31 +249,43 @@ func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel
 		if name == "" {
 			continue
 		}
-		cur := predictorPodOf(&pods.Items[i])
-		if prev, ok := out[name]; ok && prev.outranks(cur) {
+		cur := &pods.Items[i]
+		if prev, ok := out[name]; ok && podRank(prev).outranks(podRank(cur)) {
 			continue
 		}
 		out[name] = cur
 	}
 }
 
-func predictorPodOf(p *corev1.Pod) predictorPod {
-	pp := predictorPod{Node: p.Spec.NodeName, Terminating: p.DeletionTimestamp != nil}
+// podRank is the part of a pod that decides which of several stays.
+func podRank(p *corev1.Pod) predictorPod {
+	return predictorPod{Node: p.Spec.NodeName, Terminating: p.DeletionTimestamp != nil}
+}
+
+// predictorPodOf reads a pod for its object: the node, whether it goes,
+// why it is Pending — and, from the facts around it, where the serve is.
+// The phase is completed against the object in applyPod (routing, ready).
+func predictorPodOf(p *corev1.Pod, facts podFacts) predictorPod {
+	pp := podRank(p)
+	pp.Found = true
 	if p.Status.Phase == corev1.PodPending {
 		pp.Pending = true
 		pp.Reason, pp.Message = podPendingReason(p)
 	}
+	pp.Phase, pp.Steps = servePhase(served{}, facts)
+	pp.facts = facts
 	return pp
 }
 
 // podPendingReason is why a pod is Pending: the first container waiting with
-// a reason (ImagePullBackOff, CreateContainerConfigError, ContainerCreating),
-// else the scheduler's (Unschedulable, with the nodes it looked at), else the
-// pod's own status reason.
+// a reason (ImagePullBackOff, CreateContainerConfigError, ContainerCreating —
+// not PodInitializing, which only says an init container runs), else the
+// scheduler's (Unschedulable, with the nodes it looked at), else the pod's
+// own status reason.
 func podPendingReason(p *corev1.Pod) (reason, message string) {
 	for _, list := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
 		for _, cs := range list {
-			if w := cs.State.Waiting; w != nil && w.Reason != "" {
+			if w := cs.State.Waiting; w != nil && w.Reason != "" && w.Reason != "PodInitializing" {
 				return w.Reason, w.Message
 			}
 		}
@@ -245,12 +305,26 @@ func podPendingReason(p *corev1.Pod) (reason, message string) {
 // condition does. A serving object whose pod waits is Pending, not NotReady.
 func (sv *served) applyPod(p predictorPod) {
 	sv.Node = p.Node
+	facts := p.facts
+	if !p.Found {
+		facts = podFacts{Now: time.Now()}
+	}
+	sv.Phase, sv.Steps = servePhase(*sv, facts)
 	if sv.Ready || sv.Deleting || !p.Pending {
 		return
 	}
 	sv.Status = statusPending
 	if p.Reason != "" || p.Message != "" {
 		sv.Reason, sv.Message = p.Reason, strings.TrimSpace(p.Reason+" "+p.Message)
+		return
+	}
+	// The pod says nothing (an init container running, a container being
+	// created): the step under way does.
+	for _, s := range sv.Steps {
+		if s.State == backend.StepInProgress || s.State == backend.StepFailed {
+			sv.Reason, sv.Message = s.Reason, strings.TrimSpace(s.Reason+" "+s.Message)
+			return
+		}
 	}
 }
 
@@ -303,8 +377,29 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource st
 	}
 
 	sv.Status, sv.Reason, sv.Message, sv.Ready = servedStatus(obj)
+	sv.ReadyAt = readyTransition(obj)
+	failure, ok, _ := unstructured.NestedMap(obj.Object, "status", "modelStatus", "lastFailureInfo")
+	sv.Failed = ok && len(failure) > 0
 	sv.URL = normalizePredictorURL(servedURL(obj, sv))
 	return sv
+}
+
+// readyTransition is the Ready condition's lastTransitionTime; zero without
+// one.
+func readyTransition(obj *unstructured.Unstructured) time.Time {
+	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	for _, c := range conds {
+		cm, ok := c.(map[string]any)
+		if !ok || cm["type"] != "Ready" {
+			continue
+		}
+		if raw, _ := cm["lastTransitionTime"].(string); raw != "" {
+			if t, err := time.Parse(time.RFC3339, raw); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // servedURL is the address KServe published for the object — status.address

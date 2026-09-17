@@ -72,6 +72,9 @@ type ModelView struct {
 	Loaded      bool                   `json:"loaded"`
 	Running     *backend.LoadedModel   `json:"running,omitempty"`
 	ModelConfig *wiring.ModelConfigRef `json:"modelConfig,omitempty"`
+	// Fit is the verdict a load judged the model by (backend.Server); only
+	// a load's answer carries it.
+	Fit *backend.FitResult `json:"fit,omitempty"`
 }
 
 // PullOptions describe an import request.
@@ -654,17 +657,28 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if req.Preset == "" && m.Preset != "" {
 		req.Preset = m.Preset
 	}
-	if err := b.Load(ctx, req); err != nil {
+	var fit *backend.FitResult
+	if srv, ok := b.(backend.Server); ok {
+		res, err := srv.Serve(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if res != nil {
+			fit = res.Fit
+		}
+	} else if err := b.Load(ctx, req); err != nil {
 		return nil, err
 	}
 	s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	if s.cfg.AutoWire && s.wirer != nil {
 		if sl, ok := serveLifecycle(b); ok {
 			// The answer names the serving object the load created
-			// (running.resource and running.kind, with its state) so the
-			// caller can refer to it; the load job that follows the object
-			// carries the name too.
+			// (running.resource and running.kind, with its state and the
+			// initial steps) so the caller can refer to it and render the
+			// timeline; the load job that follows the object carries the
+			// name too.
 			view := s.loadedView(ctx, b, m)
+			view.Fit = fit
 			s.startLoadJob(ctx, b, sl, m.Name, view.Running)
 			return view, nil
 		}
@@ -672,7 +686,9 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			s.log.Warn("auto-wire after load failed", "backend", b.Name(), "model", m.Name, "error", err)
 		}
 	}
-	return s.loadedView(ctx, b, m), nil
+	view := s.loadedView(ctx, b, m)
+	view.Fit = fit
+	return view, nil
 }
 
 // loadedView is what a load answers: the model as the backend lists it right

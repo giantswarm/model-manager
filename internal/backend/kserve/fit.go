@@ -229,6 +229,10 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// and unverified. An explicit node, a pool with nodes that do not
 		// fit, or no pool at all keep the refusal.
 		if pool := b.cfg.settings(ctx).GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
+			// The claim may hold the weights from an earlier serve
+			// (giantswarm/model-manager#110): a shared claim is asked
+			// without a node, a pinned one on its node.
+			res.Cached, res.CacheSource = b.isCached(ctx, "", plan.Dir, plan.Repo, loc)
 			return b.placeOnPool(plan, pool)
 		}
 		res.Fits = false
@@ -269,7 +273,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
-	res.Cached = b.isCached(ctx, best.Name, plan.Dir, plan.Repo, loc)
+	res.Cached, res.CacheSource = b.isCached(ctx, best.Name, plan.Dir, plan.Repo, loc)
 	return nil
 }
 
@@ -378,33 +382,40 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 	return out
 }
 
-// isCached reports whether the model is already in the node's cache: what the
-// scan says, and — while no scan can answer in this call (the pool at zero,
-// the caller's deadline; cacheSnapshotFor) — what the cache index remembers:
-// a directory an InferenceService filled for the repository and model-manager
-// has not removed (index.go).
-func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cacheLocation) bool {
+// isCached reports whether the model is already in the cache and how that
+// was decided (backend.CacheSource*): what the scan says, and — while no scan
+// can answer in this call (the pool at zero, the caller's deadline;
+// cacheSnapshotFor) — what the cache index remembers: a directory an
+// InferenceService filled for the repository and model-manager has not
+// removed (index.go). Neither answering is "unknown", not "no". Without a
+// node the cache is asked as a whole (a pinned claim: its node; a shared
+// one: any).
+func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cacheLocation) (bool, string) {
 	if loc.Missing || (!loc.Bound && len(loc.Nodes) == 0) {
-		return false
+		return false, backend.CacheSourceUnknown
 	}
 	scanNode := node
 	if loc.Shared {
 		scanNode = ""
+	} else if scanNode == "" && len(loc.Nodes) > 0 {
+		scanNode = loc.Nodes[0]
 	}
 	snap := b.cacheSnapshotFor(ctx, scanNode, loc)
 	for _, e := range snap.Entries {
 		if e.Dir == dir && e.Files > 0 {
-			return true
+			return true, backend.CacheSourceScan
 		}
 		if e.Marker != nil && strings.EqualFold(e.Marker.Model, repo) && e.Files > 0 {
-			return true
+			return true, backend.CacheSourceScan
 		}
 	}
 	if snap.Pending && len(snap.Entries) == 0 {
-		rec, ok := b.readIndex(ctx)[dir]
-		return ok && strings.EqualFold(rec.Model, repo)
+		if rec, ok := b.readIndex(ctx)[dir]; ok && strings.EqualFold(rec.Model, repo) {
+			return true, backend.CacheSourceIndex
+		}
+		return false, backend.CacheSourceUnknown
 	}
-	return false
+	return false, backend.CacheSourceScan
 }
 
 func humanBytes(n int64) string {
