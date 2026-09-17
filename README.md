@@ -436,7 +436,16 @@ scheduling by the registered backend document (`docs/backends.md`).
   memory overstates what a model may use); `pull` refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's InferenceService
-  mounts — reporting bytes on disk against the repository size. Gated models
+  mounts — reporting bytes on disk against the repository size. The Job
+  downloads with `HF_HUB_DISABLE_XET=1` and `HF_HUB_ENABLE_HF_TRANSFER=1`:
+  the Xet client connects to CDN addresses a Cilium `toFQDNs` DNS proxy never
+  resolved for an allowed name and hangs on the dropped SYNs, hf_transfer
+  resolves per connection through the system resolver, so every address is
+  admitted. A download that writes nothing to its directory for
+  `--kserve-download-stall-timeout` (`kserve.download.stallTimeout`, default
+  10 min) fails with a reason the pull job shows — `DOWNLOAD STALLED: no bytes
+  written to <dir> for <N>s (<bytes> bytes on disk, …)` — instead of hanging;
+  partial files stay and a new `pull` resumes. Gated models
   need a token Secret (`--kserve-hf-token-secret`). The hub lookups of one
   fit check or search are bounded by `--kserve-hf-timeout` (`kserve.hf.timeout`,
   default 4 s): a hub that does not answer — egress blocked — lets `fit-check`

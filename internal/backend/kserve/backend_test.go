@@ -518,6 +518,29 @@ func TestPullRunsAJobWithProgress(t *testing.T) {
 	assert.Empty(t, jobs.Items)
 }
 
+// A download that stalls ends as a failed pull whose error is the script's
+// stall line — what pullProgress and list_models show — not an endless
+// "downloading" (giantswarm/model-manager#106).
+func TestPullFailsAStalledDownloadWithTheReason(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	plan := downloadPlan{Dir: "tiny"}
+	stall := "DOWNLOAD STALLED: no bytes written to /cache/tiny for 600s (1000 bytes on disk, HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=1); partial files stay for a retry"
+	f.failJob(ctx, plan.jobName(), "INFO start\nPROGRESS 1000\nPROGRESS 1000\n"+stall+"\n",
+		"PodFailurePolicy", "Container download for pod "+testServingNS+"/"+plan.jobName()+"-abcde failed with exit code 3 matching FailJob rule at index 0")
+	var samples []backend.Progress
+	err := f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, func(p backend.Progress) { samples = append(samples, p) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download failed: PodFailurePolicy Container download for pod")
+	assert.Contains(t, err.Error(), stall, "the stall line is the reason")
+	assert.NotContains(t, err.Error(), "PROGRESS", "not the log tail")
+	require.NotEmpty(t, samples)
+	assert.Equal(t, "downloading", samples[len(samples)-1].Status)
+	assert.EqualValues(t, 1000, samples[len(samples)-1].BytesCompleted, "the last bytes read before the stall")
+}
+
 func TestPullCancelDeletesJobAndAdoption(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

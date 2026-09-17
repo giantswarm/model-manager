@@ -450,6 +450,18 @@ func (f *fixture) completePods(ctx context.Context) {
 // completeJob waits for the download Job, gives it a running pod with progress
 // logs, then marks it complete.
 func (f *fixture) completeJob(ctx context.Context, name string, progressLogs string) {
+	f.finishJob(ctx, name, progressLogs, batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+}
+
+// failJob runs the Job's pod with the given logs, then fails the Job the way
+// a podFailurePolicy rule does (reason and message on the Failed condition).
+func (f *fixture) failJob(ctx context.Context, name string, logs, reason, message string) {
+	f.finishJob(ctx, name, logs, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: reason, Message: message})
+}
+
+// finishJob waits for the Job to exist, runs a pod for it whose logs read as
+// given, lets a couple of progress polls happen and ends the Job with cond.
+func (f *fixture) finishJob(ctx context.Context, name string, logs string, cond batchv1.JobCondition) {
 	go func() {
 		var job *batchv1.Job
 		for job == nil {
@@ -469,11 +481,15 @@ func (f *fixture) completeJob(ctx context.Context, name string, progressLogs str
 			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 		}
 		_, _ = f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
-		f.setLogs(pod.Name, progressLogs)
-		// Let a couple of progress polls happen before completion.
+		f.setLogs(pod.Name, logs)
+		// Let a couple of progress polls happen before the end.
 		time.Sleep(40 * time.Millisecond)
-		job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
-		job.Status.Succeeded = 1
+		job.Status.Conditions = append(job.Status.Conditions, cond)
+		if cond.Type == batchv1.JobComplete {
+			job.Status.Succeeded = 1
+		} else {
+			job.Status.Failed = 1
+		}
 		_, _ = f.cs.BatchV1().Jobs(testServingNS).UpdateStatus(ctx, job, metav1.UpdateOptions{})
 	}()
 }

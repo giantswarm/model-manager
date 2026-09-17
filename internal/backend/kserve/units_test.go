@@ -4,12 +4,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -304,6 +306,52 @@ func TestCachePodsSatisfyRestrictedPodSecurity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The download Job downloads without Xet and gives up on a stalled download
+// with a reason (giantswarm/model-manager#106): hf_xet connects to CDN
+// addresses a Cilium toFQDNs DNS proxy never resolved and hangs on the dropped
+// SYNs, hf_transfer resolves per connection through the system resolver. A
+// download that writes nothing for the configured window exits
+// stalledExitCode, which the Job's podFailurePolicy turns into a failed Job at
+// once (a pod its node's disruption took is no attempt), and the stall line
+// is the failure's reason rather than the log tail.
+func TestDownloadJobDisablesXetAndFailsAStall(t *testing.T) {
+	b := &Backend{opts: backend.KServeOptions{InitImage: "alpine:3", DownloadImage: "storage-initializer:test", DownloadStallTimeout: 7 * time.Minute}}
+	job := b.buildJob(downloadPlan{Dir: "tiny", Repo: tinyRepo, Node: "node-a"}, settings{Namespace: "serving", CacheClaim: "hf-cache"})
+	require.Len(t, job.Spec.Template.Spec.Containers, 1)
+	c := job.Spec.Template.Spec.Containers[0]
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	assert.Equal(t, "1", env["HF_HUB_DISABLE_XET"], "the Xet path is off")
+	assert.Equal(t, "1", env["HF_HUB_ENABLE_HF_TRANSFER"], "hf_transfer stays on")
+	assert.Equal(t, "420", env["MM_STALL_SECONDS"], "the stall window in seconds")
+
+	script := c.Command[2]
+	assert.Contains(t, script, `"$idle" -ge "${MM_STALL_SECONDS:-600}"`, "the script's stall clock reads the window")
+	assert.Contains(t, script, "allocated() { du -s -B1", "the clock reads bytes allocated on disk")
+	assert.Contains(t, script, stalledMarker)
+	assert.Contains(t, script, "exit "+strconv.Itoa(stalledExitCode))
+
+	require.NotNil(t, job.Spec.PodFailurePolicy)
+	require.Len(t, job.Spec.PodFailurePolicy.Rules, 2)
+	stalled := job.Spec.PodFailurePolicy.Rules[0]
+	assert.Equal(t, batchv1.PodFailurePolicyActionFailJob, stalled.Action, "a stall fails the Job, no retry")
+	require.NotNil(t, stalled.OnExitCodes)
+	assert.Equal(t, c.Name, *stalled.OnExitCodes.ContainerName)
+	assert.Equal(t, batchv1.PodFailurePolicyOnExitCodesOpIn, stalled.OnExitCodes.Operator)
+	assert.Equal(t, []int32{stalledExitCode}, stalled.OnExitCodes.Values)
+	disrupted := job.Spec.PodFailurePolicy.Rules[1]
+	assert.Equal(t, batchv1.PodFailurePolicyActionIgnore, disrupted.Action, "a disrupted pod is not a failed attempt")
+	require.Len(t, disrupted.OnPodConditions, 1)
+	assert.Equal(t, corev1.DisruptionTarget, disrupted.OnPodConditions[0].Type)
+	assert.EqualValues(t, 2, *job.Spec.BackoffLimit, "other failures keep their retries")
+
+	stall := "DOWNLOAD STALLED: no bytes written to /cache/tiny for 420s (100 bytes on disk, HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=1); partial files stay for a retry"
+	assert.Equal(t, stall, failureDetail("PROGRESS 100\nPROGRESS 100\n"+stall+"\n"), "the stall line is the reason")
+	assert.Equal(t, "a | b", failureDetail("a\nb\n"), "else the tail")
 }
 
 // assertRestrictedPodSecurity checks a pod spec against the restricted Pod

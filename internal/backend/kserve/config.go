@@ -64,16 +64,20 @@ const (
 	DefaultInventoryAgentPort     = cacheagent.DefaultPort
 	componentCacheAgent           = "cache-agent"
 	DefaultJobTTL                 = time.Hour
-	DefaultReadyTimeout           = 2 * time.Hour
-	DefaultPollInterval           = 5 * time.Second
-	discoveryConfigKey            = "config.yaml"
-	discoveryKind                 = "ModelServingConfig"
-	presetConfigKey               = "preset.yaml"
-	presetKind                    = "ServingPreset"
-	agentPlatformAPIVersion       = "agent-platform.giantswarm.io/v1alpha1"
-	budgetSourceAuto              = "auto"
-	budgetSourceGPULabels         = "gpu-labels"
-	budgetSourceAllocatable       = "allocatable"
+	// DefaultDownloadStallTimeout covers the hub's metadata phase and a slow
+	// shard comfortably; a download the network silently drops shows nothing
+	// for far longer.
+	DefaultDownloadStallTimeout = 10 * time.Minute
+	DefaultReadyTimeout         = 2 * time.Hour
+	DefaultPollInterval         = 5 * time.Second
+	discoveryConfigKey          = "config.yaml"
+	discoveryKind               = "ModelServingConfig"
+	presetConfigKey             = "preset.yaml"
+	presetKind                  = "ServingPreset"
+	agentPlatformAPIVersion     = "agent-platform.giantswarm.io/v1alpha1"
+	budgetSourceAuto            = "auto"
+	budgetSourceGPULabels       = "gpu-labels"
+	budgetSourceAllocatable     = "allocatable"
 	// budgetSourceAnnotation is reported when the node's BudgetAnnotation
 	// overrode the configured source.
 	budgetSourceAnnotation       = "annotation"
@@ -462,6 +466,9 @@ func applyDefaults(o *backend.KServeOptions) {
 	}
 	if o.JobTTL <= 0 {
 		o.JobTTL = DefaultJobTTL
+	}
+	if o.DownloadStallTimeout <= 0 {
+		o.DownloadStallTimeout = DefaultDownloadStallTimeout
 	}
 	if o.ReadyTimeout <= 0 {
 		o.ReadyTimeout = DefaultReadyTimeout

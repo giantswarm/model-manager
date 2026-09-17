@@ -278,6 +278,10 @@
                         "jobTTL": {
                             "type": "string",
                             "description": "ttlSecondsAfterFinished of download Jobs."
+                        },
+                        "stallTimeout": {
+                            "type": "string",
+                            "description": "A download Job that writes nothing to its target directory for this long fails with a reason the pull job shows (`DOWNLOAD STALLED: no bytes written to <dir> for <N>s`) instead of hanging; partial files stay for a retry. The Job downloads with `HF_HUB_DISABLE_XET=1` and `HF_HUB_ENABLE_HF_TRANSFER=1`: the Xet client connects to CDN addresses a Cilium `toFQDNs` DNS proxy never resolved and hangs on the dropped SYNs, hf_transfer resolves per connection through the system resolver."
                         }
                     }
                 },

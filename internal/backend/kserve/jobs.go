@@ -35,23 +35,51 @@ const (
 	downloadEntrypoint = "/storage-initializer/scripts/initializer-entrypoint"
 )
 
+// stalledExitCode is what the download script exits with when the download
+// wrote nothing for MM_STALL_SECONDS; the Job's podFailurePolicy fails the Job
+// on it at once instead of retrying a download that would hang the same way.
+const stalledExitCode = 3
+
+// stalledMarker opens the line the download script prints when it gives up
+// on a stalled download; watchJob surfaces that line as the failure's reason.
+const stalledMarker = "DOWNLOAD STALLED:"
+
+// downloadContainer is the download Job's main container.
+const downloadContainer = "download"
+
 // downloadScript wraps the storage-initializer so progress (apparent bytes in
-// the target directory) is printed every 10 s and, on success, a marker file
-// records which repository landed in which directory.
-const downloadScript = `set -u
+// the target directory) is printed every 10 s, a download that writes nothing
+// to the target directory for MM_STALL_SECONDS is killed and fails with a
+// reason (stalledExitCode), and, on success, a marker file records which
+// repository landed in which directory. Progress is the apparent size, what
+// the repository size is compared against; the stall clock reads the bytes
+// allocated on disk, which grow with every write wherever in a file it lands
+// (hf_transfer writes a file's chunks in parallel at their offsets).
+var downloadScript = strings.ReplaceAll(`set -u
 export HF_HOME="${HF_HOME:-/tmp/hf}"
 mkdir -p "$HF_HOME" 2>/dev/null || true
 report() { printf 'PROGRESS %s\n' "$(du -sb "$MM_DST" 2>/dev/null | cut -f1)"; }
+allocated() { du -s -B1 "$MM_DST" 2>/dev/null | cut -f1; }
 report
-` + downloadEntrypoint + ` "$MM_SRC" "$MM_DST" &
+`+downloadEntrypoint+` "$MM_SRC" "$MM_DST" &
 pid=$!
-while kill -0 "$pid" 2>/dev/null; do sleep 10; report; done
+last=$(allocated); idle=0
+while kill -0 "$pid" 2>/dev/null; do
+  sleep 10; report
+  now=$(allocated)
+  if [ "${now:-0}" != "${last:-0}" ]; then last=$now; idle=0; else idle=$((idle+10)); fi
+  if [ "$idle" -ge "${MM_STALL_SECONDS:-600}" ]; then
+    kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    echo "DOWNLOAD STALLED: no bytes written to $MM_DST for ${idle}s (${last:-0} bytes on disk, HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-unset} HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER:-unset}); partial files stay for a retry"
+    exit @STALLED@
+  fi
+done
 wait "$pid"; rc=$?
 report
 if [ "$rc" -ne 0 ]; then echo "DOWNLOAD FAILED rc=$rc"; exit "$rc"; fi
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 printf '{"model":"%s","revision":"%s","dir":"%s","bytesExpected":%s,"completedAt":"%s","job":"%s"}\n' "$MM_MODEL" "$MM_REVISION" "$MM_DIRNAME" "${MM_BYTES:-0}" "$now" "$MM_JOB" > "$MM_MARKER"
-echo DONE`
+echo DONE`, "@STALLED@", strconv.Itoa(stalledExitCode))
 
 var progressLine = regexp.MustCompile(`(?m)^PROGRESS (\d+)\s*$`)
 
@@ -110,6 +138,14 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 		{Name: "MM_BYTES", Value: strconv.FormatInt(plan.BytesTotal, 10)},
 		{Name: "MM_JOB", Value: plan.jobName()},
 		{Name: "HF_HOME", Value: "/tmp/hf"},
+		// Xet off, hf_transfer on (giantswarm/model-manager#106): hf_xet
+		// connects to CDN addresses a Cilium toFQDNs DNS proxy never resolved
+		// for an allowed name and hangs on the dropped SYNs; hf_transfer
+		// resolves through the system resolver per connection, so every
+		// address is admitted. The storage-initializer image ships both.
+		{Name: "HF_HUB_DISABLE_XET", Value: "1"},
+		{Name: "HF_HUB_ENABLE_HF_TRANSFER", Value: "1"},
+		{Name: "MM_STALL_SECONDS", Value: strconv.FormatInt(int64(b.opts.DownloadStallTimeout/time.Second), 10)},
 	}
 	if len(b.opts.DownloadIgnorePatterns) > 0 {
 		raw, _ := json.Marshal(b.opts.DownloadIgnorePatterns)
@@ -141,6 +177,24 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptr.To[int32](2),
 			TTLSecondsAfterFinished: ptr.To(int32(b.opts.JobTTL / time.Second)), // #nosec G115 -- bounded by the option
+			// A stalled download fails the Job at once — a retry would hang
+			// the same way and hold the node; a pod the node's disruption
+			// took (spot reclaim) is not a failed attempt. Every other
+			// failure keeps the retries, resuming from the partial files.
+			PodFailurePolicy: &batchv1.PodFailurePolicy{Rules: []batchv1.PodFailurePolicyRule{
+				{
+					Action: batchv1.PodFailurePolicyActionFailJob,
+					OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+						ContainerName: ptr.To(downloadContainer),
+						Operator:      batchv1.PodFailurePolicyOnExitCodesOpIn,
+						Values:        []int32{stalledExitCode},
+					},
+				},
+				{
+					Action:          batchv1.PodFailurePolicyActionIgnore,
+					OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue}},
+				},
+			}},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{ModelAnnotation: plan.Repo}},
 				Spec: corev1.PodSpec{
@@ -160,7 +214,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 						VolumeMounts: []corev1.VolumeMount{{Name: cacheVolume, MountPath: cacheMount}},
 					}},
 					Containers: []corev1.Container{{
-						Name:    "download",
+						Name:    downloadContainer,
 						Image:   b.opts.DownloadImage,
 						Command: []string{scriptShell, "-c", downloadScript},
 						Env:     env,
@@ -318,7 +372,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 				if pod != nil {
 					tail, _ = b.podLogs(ctx, pod.Namespace, pod.Name, 15)
 				}
-				return fmt.Errorf("download failed: %s: %s", jobFailure(job), lastLines(tail, 5))
+				return fmt.Errorf("download failed: %s: %s", jobFailure(job), failureDetail(tail))
 			case pod == nil:
 				report("waiting for the download pod", lastBytes)
 			case pod.Status.Phase == corev1.PodPending:
@@ -387,6 +441,17 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, " | ")
+}
+
+// failureDetail is what a failed download's log tail says: the stall line
+// when the script gave up on a stalled download, else the last lines.
+func failureDetail(tail string) string {
+	for _, line := range strings.Split(tail, "\n") {
+		if strings.HasPrefix(line, stalledMarker) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return lastLines(tail, 5)
 }
 
 // runningDownloads lists the active download Jobs as pull requests (adoption
