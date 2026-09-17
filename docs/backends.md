@@ -113,7 +113,7 @@ model-manager schedules itself:
 |---|---|---|
 | Composed `LLMInferenceService` / `InferenceService` predictor | first, the preset's `scheduling.tolerations` after it (a repeated entry once) | merged under the preset's `scheduling.nodeSelector` and the node pin |
 | Download Job | always | only when the Job is not pinned to a cache node (a shared cache); a pinned Job keeps its node |
-| Inventory scan pod (`kserve.inventory.mode: pod`) | always | likewise; the chart's DaemonSet (`daemonset` mode) takes `kserve.inventory.agent.tolerations` / `.nodeSelector` |
+| Inventory scan Job (`kserve.inventory.mode: pod`) | only while a pool node exists (a scan never launches one) | likewise; the chart's DaemonSet (`daemonset` mode) takes `kserve.inventory.agent.tolerations` / `.nodeSelector` |
 
 `GET /api/v1/nodes` reports a tainted GPU node as serving capacity once the taint is tolerated;
 before, its `eligibilityReason` names the taint (`taint nvidia.com/gpu:NoSchedule not tolerated

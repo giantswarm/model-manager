@@ -664,19 +664,29 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			// (running.resource and running.kind, with its state) so the
 			// caller can refer to it; the load job that follows the object
 			// carries the name too.
-			view, err := s.GetModel(ctx, string(b.Name()), m.Name)
-			var running *backend.LoadedModel
-			if view != nil {
-				running = view.Running
-			}
-			s.startLoadJob(ctx, b, sl, m.Name, running)
-			return view, err
+			view := s.loadedView(ctx, b, m)
+			s.startLoadJob(ctx, b, sl, m.Name, view.Running)
+			return view, nil
 		}
 		if _, err := s.wireModel(ctx, b, m.Name); err != nil {
 			s.log.Warn("auto-wire after load failed", "backend", b.Name(), "model", m.Name, "error", err)
 		}
 	}
-	return s.GetModel(ctx, string(b.Name()), m.Name)
+	return s.loadedView(ctx, b, m), nil
+}
+
+// loadedView is what a load answers: the model as the backend lists it right
+// after the load (running.status / running.reason of the serving object), or
+// — when that read fails, the caller's deadline having run out after the
+// object was created — the model as resolved. A load that succeeded never
+// answers as a cancelled call (giantswarm/model-manager#104).
+func (s *Service) loadedView(ctx context.Context, b backend.Backend, m *backend.Model) *ModelView {
+	view, err := s.GetModel(ctx, string(b.Name()), m.Name)
+	if err != nil {
+		s.log.Warn("reading the model's state after the load failed; answering with the resolved model", "backend", b.Name(), "model", m.Name, "error", err, identity.LogAttr(ctx))
+		return &ModelView{Model: *m}
+	}
+	return view
 }
 
 // startLoadJob follows a served model to readiness and wires it; running is

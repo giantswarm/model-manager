@@ -21,8 +21,9 @@ make helm-docs      # regenerate helm/model-manager/README.md
   (`client.go` — the /api/v1 API, `backend.go`; no `nodes.go`, LM Studio
   exposes no host hardware, and no delete). `internal/backend/kserve` is the KServe driver: `config.go` (discovery
   ConfigMap + flag overrides), `presets.go`, `hub.go` (Hugging Face Hub),
-  `nodes.go` (budgets, cache location), `inventory.go` (cache scan pods and
-  the cache-agent client), `internal/cacheagent` (the DaemonSet's HTTP
+  `nodes.go` (budgets, cache location), `inventory.go` (cache scan Jobs and
+  the cache-agent client), `scangate.go` (when a scan may run: never on an
+  unbound claim or a pool at zero, never inline under a short deadline), `internal/cacheagent` (the DaemonSet's HTTP
   inventory, `model-manager cache-agent`),
   `jobs.go` (download Jobs), `isvc.go` (InferenceService composition/status),
   `fit.go`, `backend.go`.
