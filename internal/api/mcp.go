@@ -57,9 +57,9 @@ const (
 	argKeepAlive = "keepAlive"
 	argUnwire    = "unwire"
 	// The API-key shape of a wired ModelConfig (wire_model).
-	argAPIKeyPassthrough = "apiKeyPassthrough"
-	argAPIKeySecret      = "apiKeySecret"
-	argAPIKeySecretKey   = "apiKeySecretKey"
+	argAPIKeyPassthrough = "apiKeyPassthrough" // #nosec G101 -- argument name, not a credential
+	argAPIKeySecret      = "apiKeySecret"      // #nosec G101 -- argument name, not a credential
+	argAPIKeySecretKey   = "apiKeySecretKey"   // #nosec G101 -- argument name, not a credential
 	argJobID             = "id"
 	argPreset            = "preset"
 	argNode              = "node"
