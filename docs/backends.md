@@ -131,13 +131,20 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
 
 - the preset's `resources.requests` `cpu` and `memory` against a size's `usableVcpu` /
   `usableMemoryGiB` (a request the preset does not name is zero), the preset's `gpus` (default 1)
-  against the size's, and the weights plus overhead the check sized against `gpus × gpuMemoryGiB`;
+  against the size's, and the weights plus overhead the check sized against the memory of the GPUs
+  the preset requests on the size — `gpuMemoryGiB × the preset's gpus`, not the node's: a one-GPU
+  preset on a four-GPU size has one card (the arithmetic cluster-manager sized the pool with);
 - the **smallest size that hosts it** is the node it will come as: `fits: true`, `instanceType`
-  names the size (`g6.xlarge`), `budgetBytes` is its GPU memory, and the reason says the size's
-  leftovers;
+  names the size (`g6.xlarge`), `budgetBytes` is the memory of the requested GPUs on it, and the
+  reason says the size's leftovers;
 - when **no size hosts it**: `fits: false`, the reason names the pool's sizes, what the predictor
   asks and what the largest size leaves it — and `load_model` / `pull_model` refuse with that
   reason before any object is created, instead of a predictor that can only sit Pending;
+- a preset's **declared weights** (`requirements.weightsGiB`, what the pool was sized from) are
+  answered as `declaredWeightsBytes` beside the Hub-sized `weightsBytes`; when the Hub holds more
+  than the preset declares, the reason says so on both verdicts — `the preset declares 15.0 GiB of
+  weights, the Hub holds 24.6 GiB` on a fit, `…; the Hub holds 24.6 GiB, which is what does not
+  fit — correct the preset` on a refusal — and a declaration that covers the Hub adds nothing;
 - a model **without a preset** is judged on its weights and the default overhead against the GPU
   memory alone.
 

@@ -386,17 +386,23 @@ type FitResult struct {
 	Presets []string `json:"presets,omitempty"`
 	// WeightsBytes is the size of the weights as served; WeightsSource says
 	// where the number came from (safetensors-index, tree, preset).
-	WeightsBytes  int64  `json:"weightsBytes"`
-	WeightsSource string `json:"weightsSource,omitempty"`
-	OverheadBytes int64  `json:"overheadBytes"`
-	RequiredBytes int64  `json:"requiredBytes"`
+	// DeclaredWeightsBytes is what the preset declares
+	// (requirements.weightsGiB) when a preset serves the model — the number
+	// a GPU pool was sized from; the two differ when the hub holds more than
+	// the preset says, and Reason then names the discrepancy.
+	WeightsBytes         int64  `json:"weightsBytes"`
+	WeightsSource        string `json:"weightsSource,omitempty"`
+	DeclaredWeightsBytes int64  `json:"declaredWeightsBytes,omitempty"`
+	OverheadBytes        int64  `json:"overheadBytes"`
+	RequiredBytes        int64  `json:"requiredBytes"`
 	// DownloadBytes is what a pull would fetch (all repository files).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
 	// budget was derived (gpu-labels, allocatable, annotation, or
 	// pool-scale-from-zero when the GPU pool has no node yet). InstanceType
 	// is then the size of the pool the node will come as (g6.xlarge), when
-	// the pool's instance shapes are known and one of them hosts the model.
+	// the pool's instance shapes are known and one of them hosts the model,
+	// and BudgetBytes the memory of the GPUs the predictor requests on it.
 	Node          string `json:"node,omitempty"`
 	InstanceType  string `json:"instanceType,omitempty"`
 	BudgetBytes   int64  `json:"budgetBytes"`

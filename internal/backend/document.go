@@ -179,9 +179,6 @@ func (s InstanceShape) SizeName() string {
 	return s.InstanceType
 }
 
-// GPUMemoryTotalGiB is the GPU memory across the shape's GPUs.
-func (s InstanceShape) GPUMemoryTotalGiB() int { return s.GPUs * s.GPUMemoryGiB }
-
 // Validate checks the shape: an instance type and positive numbers.
 func (s InstanceShape) Validate() error {
 	if strings.TrimSpace(s.InstanceType) == "" {
