@@ -404,7 +404,7 @@
                         },
                         "image": {
                             "type": "object",
-                            "description": "Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived pods); needs sh, find, stat, awk (busybox).",
+                            "description": "Image that creates cache directories (download Job init container) and scans / cleans the cache (short-lived Jobs); needs sh, find, stat, awk (busybox).",
                             "additionalProperties": false,
                             "properties": {
                                 "name": {
@@ -424,7 +424,7 @@
                         },
                         "timeout": {
                             "type": "string",
-                            "description": "Time budget of one scan (scan pod, or cache-agent request)."
+                            "description": "Time budget of one scan (scan Job, or cache-agent request); a caller whose deadline leaves less is answered from the last scan while a new one runs in the background."
                         },
                         "ttl": {
                             "type": "string",

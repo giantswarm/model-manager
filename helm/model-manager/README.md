@@ -23,7 +23,7 @@ names the others.
   delete: that call answers `501 unsupported`, and a model is removed with
   `lms rm` on the host.
 - `kserve` — InferenceServices composed from the platform's serving presets,
-  the per-node Hugging Face cache (scanned by short-lived Jobs), pre-warm
+  the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
   download Jobs with progress, Hugging Face Hub search and node fit checks.
   Agent wiring uses kagent's `OpenAI` provider against the predictor URL with
   a placeholder API-key Secret, created when the InferenceService is ready.
@@ -69,7 +69,7 @@ can stay empty.
   labels). Gated repositories need `kserve.hf.tokenSecret` (a Secret in the
   serving namespace).
 - The cache inventory (`kserve.inventory.*`) reads each cache node either with
-  a short-lived scan Job (`mode: pod`, the default; results are reused for
+  a short-lived scan pod (`mode: pod`, the default; results are reused for
   `kserve.inventory.ttl`) or, with `mode: daemonset`, through a DaemonSet in
   the serving namespace that runs `model-manager cache-agent` — the same
   image, mounting the claim read-only and serving its contents over HTTP — so
@@ -193,7 +193,7 @@ can stay empty.
 | kserve.download.image | object | `{"name":"kserve/storage-initializer","registry":"docker.io","tag":"v0.20.0"}` | Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an InferenceService would, so a later start finds the files and skips the download. |
 | kserve.download.ignorePatterns | list | `[]` | File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an InferenceService does. |
 | kserve.download.jobTTL | string | `"1h"` | ttlSecondsAfterFinished of download Jobs. |
-| kserve.inventory.mode | string | `"pod"` | How the per-node cache contents are read. `pod`: a short-lived scan Job per cache node whenever the inventory is older than `ttl` (no long-running pods, but pod churn in the serving namespace). `daemonset`: the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the serving namespace running `model-manager cache-agent`, which mounts the cache claim read-only and serves its contents over HTTP; model-manager asks the agent on the node instead of creating pods. Requires `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart cannot read the discovery ConfigMap). Deletes still use a one-shot pod. |
+| kserve.inventory.mode | string | `"pod"` | How the per-node cache contents are read. `pod`: a short-lived scan pod per cache node whenever the inventory is older than `ttl` (no long-running pods, but pod churn in the serving namespace). `daemonset`: the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the serving namespace running `model-manager cache-agent`, which mounts the cache claim read-only and serves its contents over HTTP; model-manager asks the agent on the node instead of creating pods. Requires `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart cannot read the discovery ConfigMap). Deletes still use a one-shot pod. |
 | kserve.inventory.agent.port | int | `8081` | Port the cache agent listens on. |
 | kserve.inventory.agent.nodeSelector | object | `{}` | Node selector of the DaemonSet. A node-local cache claim (static local PV, local-path) can only be mounted on its node: select it. |
 | kserve.inventory.agent.tolerations | list | `[]` | Tolerations of the agent pods (GPU node taints). |
