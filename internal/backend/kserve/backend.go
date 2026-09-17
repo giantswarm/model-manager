@@ -538,7 +538,7 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		return nil, err
 	}
 	if existing != nil {
-		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s.GPUResourceName)
+		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
 			b.log.Info("serving object already exists", "kind", sv.Kind, "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
 			return res, nil
@@ -642,13 +642,17 @@ func (b *Backend) RunningPulls(ctx context.Context) ([]backend.PullRequest, erro
 }
 
 // AgentEndpoint implements backend.Backend: kagent's OpenAI provider against
-// the model's OpenAI-compatible API at the address KServe published. A model
-// routed on the models Gateway (status.addresses, an external host) is
-// reached with the caller's Bearer token forwarded — the Gateway's JWT policy
-// admits a person's token and nothing else, so a placeholder key fails every
-// turn with 401. A model reached on its in-cluster Service (no route
-// published, or not served yet) needs the placeholder key kagent's OpenAI
-// runtime insists on; vLLM checks none. vLLM serves the model under the
+// the model's OpenAI-compatible API at the address KServe published — or,
+// until it does, the address the object is expected on: its route on the
+// models Gateway when discovery names one, the in-cluster Service otherwise
+// (served.expectedURL). A model routed on the Gateway is reached with the
+// caller's Bearer token forwarded — the Gateway's JWT policy admits a
+// person's token and nothing else, so a placeholder key fails every turn
+// with 401; a model reached on its in-cluster Service needs the placeholder
+// key kagent's OpenAI runtime insists on, which keyless vLLM never checks.
+// Knowing the routed address at compose time is what lets a load wire the
+// ModelConfig in the same call, before the model is ready
+// (giantswarm/model-manager#115). vLLM serves the model under the
 // InferenceService name (--served-model-name {{.Name}} in the platform
 // runtime) or an LLMInferenceService's spec.model.name. The ModelConfig is
 // named after the object — the rule the portal's serve flow applies, so both
@@ -661,18 +665,18 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	b.mu.Unlock()
 	for _, sv := range servedList {
 		if strings.EqualFold(sv.Model, repo) || sv.Name == model {
-			routed := sv.routed()
-			return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
+			return sv.agentEndpoint()
 		}
 	}
 	// Not served (yet): the object the preset would create, in the
-	// configured kind.
+	// configured kind, at the address it will get.
 	s := b.cfg.last()
 	sv := served{Kind: s.ServingKind, Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo}
 	if p, err := indexPresets(presets).resolve(repo, ""); err == nil && p != nil {
 		sv.Name, sv.Model = p.name(), p.Spec.Model.ID
 	}
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.defaultURL() + "/v1", Model: sv.servedName(), PlaceholderAPIKey: true, Name: sv.Name}
+	sv.URL = sv.expectedURL(s.GatewayEndpoint)
+	return sv.agentEndpoint()
 }
 
 // ListPresets implements backend.PresetLister.

@@ -138,6 +138,30 @@ func (sv served) routed() bool {
 	return err == nil && u.Host != "" && !isClusterLocalHost(u.Hostname())
 }
 
+// expectedURL is the address the object gets before KServe has published
+// one: its route on the models Gateway — <gateway>/<namespace>/<name>, the
+// path KServe renders for every LLMInferenceService attached to it — when
+// discovery names the Gateway, else the kind's in-cluster Service. Known at
+// compose time, so the ModelConfig a load wires points where the model will
+// answer and carries the token shape the Gateway demands
+// (giantswarm/model-manager#115).
+func (sv served) expectedURL(gateway string) string {
+	if gateway != "" && sv.Kind == ServingKindLLM {
+		return gateway + "/" + sv.Namespace + "/" + sv.Name
+	}
+	return sv.defaultURL()
+}
+
+// agentEndpoint is how kagent reaches the served model: its OpenAI-compatible
+// API at sv.URL, the caller's token forwarded when that is the route on the
+// models Gateway (the Gateway's JWT policy admits nothing else), kagent's
+// placeholder key when it is the keyless in-cluster Service. The ModelConfig
+// is named after the object — the rule the portal's serve flow applies.
+func (sv served) agentEndpoint() backend.AgentEndpoint {
+	routed := sv.routed()
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
+}
+
 // listServed lists the InferenceServices of the serving namespace with the
 // node their predictor runs on.
 func (b *Backend) listServed(ctx context.Context) ([]served, error) {
@@ -158,7 +182,7 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	pods := b.predictorPods(ctx, s)
 	out := make([]served, 0, len(items))
 	for i := range items {
-		sv := parseServed(&items[i], idx, s.GPUResourceName)
+		sv := parseServed(&items[i], idx, s)
 		sv.applyPod(pods[sv.Name])
 		var total int64
 		if p, ok := idx.byName[sv.Preset]; ok {
@@ -329,8 +353,10 @@ func (sv *served) applyPod(p predictorPod) {
 }
 
 // parseServed reads the fields the driver needs from an InferenceService or
-// an LLMInferenceService.
-func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource string) served {
+// an LLMInferenceService; s names the GPU resource the accelerator count is
+// read under and the models Gateway an unpublished address is expected on.
+func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) served {
+	gpuResource := s.GPUResourceName
 	sv := served{
 		Kind:           ServingKindClassic,
 		Name:           obj.GetName(),
@@ -380,7 +406,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, gpuResource st
 	sv.ReadyAt = readyTransition(obj)
 	failure, ok, _ := unstructured.NestedMap(obj.Object, "status", "modelStatus", "lastFailureInfo")
 	sv.Failed = ok && len(failure) > 0
-	sv.URL = normalizePredictorURL(servedURL(obj, sv))
+	sv.URL = normalizePredictorURL(servedURL(obj, sv, s.GatewayEndpoint))
 	return sv
 }
 
@@ -404,8 +430,8 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 
 // servedURL is the address KServe published for the object — status.address
 // (classic), status.url, the first of status.addresses (llmisvc) — else the
-// kind's default.
-func servedURL(obj *unstructured.Unstructured, sv served) string {
+// address it is expected on (expectedURL).
+func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "address", "url"); u != "" {
 		return u
 	}
@@ -419,7 +445,7 @@ func servedURL(obj *unstructured.Unstructured, sv served) string {
 			}
 		}
 	}
-	return sv.defaultURL()
+	return sv.expectedURL(gateway)
 }
 
 // defaultURL is the in-cluster Service the kind gets: the workload Service

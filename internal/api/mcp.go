@@ -133,9 +133,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.getModel)
 
 	s.AddTool(mcp.NewTool(ToolListLoadedModels,
-		mcp.WithDescription("List models currently loaded in memory / serving, with their backend, memory use and expiry."),
+		mcp.WithDescription("List models currently loaded in memory / serving, with their backend, memory use and expiry. On kserve every entry carries its phase and steps[] and, when one exists, its kagent ModelConfig (modelConfig); a served model model-manager manages (managedBy model-manager) that has no ModelConfig is wired by this read as the caller, and the entry says so (wiring: {wired: true, reason: \"wired on read\", modelConfig}) — the mend for a model-manager restart during a cold start, since no reconciler runs without a caller."),
 		backendArg("to list"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
@@ -148,7 +148,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve); a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve a `load` job follows the model to readiness and then wires it into kagent. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
+		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve); a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve the answer carries fit (the verdict), running (the serving object, its phase and steps[]) and wiring: the kagent ModelConfig created in the same call, before the model is ready, at the address the model will answer on — apiKeyPassthrough for a model routed on the models Gateway — so an agent created on it answers as soon as the model serves; a `load` job follows the model to readiness and refreshes that ModelConfig from the published address. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),

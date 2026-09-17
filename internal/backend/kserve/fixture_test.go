@@ -195,6 +195,9 @@ type discoveryOpts struct {
 	runtimeClassName string
 	// gpuPool is the pool taint and label block (spec.gpuPool); absent when nil.
 	gpuPool *backend.GPUPool
+	// gateway is the models Gateway's origin (spec.gateway.endpoint, enabled
+	// when set); the block says enabled: false when empty.
+	gateway string
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -225,6 +228,10 @@ func discoveryDocYAML(o discoveryOpts) string {
 			}
 		}
 	}
+	gateway := "  gateway:\n    enabled: false\n"
+	if o.gateway != "" {
+		gateway = fmt.Sprintf("  gateway:\n    enabled: true\n    name: models\n    namespace: agent-platform\n    endpoint: %s\n    pathConvention: /<namespace>/<model>/v1\n", o.gateway)
+	}
 	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ModelServingConfig
 spec:
@@ -239,11 +246,11 @@ spec:
     claimName: hf-cache
     mountPath: /mnt/models
     redirectPolicy: %t
-  presets:
+%s  presets:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, o.redirectPolicy)
+`, o.runtimeClassName, selector, o.redirectPolicy, gateway)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings
