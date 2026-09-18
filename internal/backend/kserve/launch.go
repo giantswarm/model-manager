@@ -38,6 +38,17 @@ import (
 // cloud names come from every refusal text, the zones with capacity where
 // the text is whole; and whether the zone is the model cache claim's — the
 // pool's pin, cluster-manager's `pool.zones` — from the claim's volume.
+//
+// The zones are the pool's constraint only when the pool pins them
+// (giantswarm/model-manager#132). A pool that pins none lets a claim launch
+// in every zone of its node class's subnets, and CreateFleet asks for every
+// size in every one of them: a fleet that launched nothing was refused them
+// all, whatever the one (size, zone) the cut event names. The zones a claim
+// allowed are read from the claim's own zone requirement while it stands
+// (Karpenter resolves it from the node class), else from the node class
+// (`ec2nodeclasses.karpenter.k8s.aws`, `status.subnets[].zone`); the step
+// then names every zone the pool allows, offers no zone as the way out, and
+// says the pool follows no cache claim.
 const (
 	// karpenterEventsNamespace is where the events of Karpenter's
 	// cluster-scoped NodeClaims land.
@@ -69,6 +80,10 @@ const (
 var (
 	nodeClaimGVR = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}
 	nodePoolGVR  = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}
+	// nodeClassGVR is the AWS node class a NodePool's template references
+	// (nodeClassRef); its status names the subnets, and with them the zones,
+	// a claim may launch in.
+	nodeClassGVR = schema.GroupVersionResource{Group: "karpenter.k8s.aws", Version: "v1", Resource: "ec2nodeclasses"}
 )
 
 // launchRefusalEvents are Karpenter's event reasons for a claim it gave up
@@ -114,6 +129,12 @@ type launchFacts struct {
 	// stands; PoolErr says why it could not be read.
 	Pool    constraints
 	PoolErr error
+	// Allowed are the zones a claim of the pool may launch in when the pool
+	// pins none — the zones of its node class's subnets — read when a
+	// refusal stands and neither the claim nor the pool names a zone;
+	// AllowedErr says why they could not be read.
+	Allowed    []string
+	AllowedErr error
 	// Cache is where the serving namespace's cache claim lives — its zones
 	// decide whether the pool's zone is the claim's — read when a refusal
 	// stands; CacheErr says why it could not be read.
@@ -221,6 +242,15 @@ func (lf launchFacts) asked() constraints {
 	return lf.Pool
 }
 
+// allowedZones are the zones a claim of a pool that pins none may launch in:
+// the claim's own zone requirement while it stands, else the node class's.
+func (lf launchFacts) allowedZones() []string {
+	if s := lf.State; s != nil && len(s.Asked.Zones) > 0 {
+		return s.Asked.Zones
+	}
+	return lf.Allowed
+}
+
 // unread names the reads that failed, for the step's message.
 func (lf launchFacts) unread() string {
 	var parts []string
@@ -232,6 +262,9 @@ func (lf launchFacts) unread() string {
 	}
 	if lf.PoolErr != nil {
 		parts = append(parts, fmt.Sprintf("what NodePool %s asks for could not be read (%v)", nodeClaimPool(lf.Claim), lf.PoolErr))
+	}
+	if lf.AllowedErr != nil {
+		parts = append(parts, fmt.Sprintf("the zones the pool allows could not be read (%v)", lf.AllowedErr))
 	}
 	if lf.CacheErr != nil {
 		parts = append(parts, fmt.Sprintf("where the cache claim lives could not be read (%v)", lf.CacheErr))
@@ -257,18 +290,33 @@ type capacityRefusal struct {
 	CacheClaim string
 	// PoolZones says the requested zones are the pool's own constraint.
 	PoolZones bool
+	// Unpinned says the claim was constrained to no zone: RequestedZones are
+	// then every zone the pool allows (EveryZone), or — when those could not
+	// be read — the zones the cloud named, at least.
+	Unpinned, EveryZone bool
 }
 
 // capacity reads the refusals for what the cloud refused and what would
 // launch: every size the claim asked for (a fleet that launched nothing was
-// refused every size) and every size the cloud names, the zones asked for
-// and the zone the cloud names, and the zones it names as having capacity
-// where its answer is whole.
+// refused every size) and every size the cloud names; the zones — the
+// pool's when it pins them, every zone the claim allowed when it pins none
+// (refused all of them the same way), the claim's own when the pool could
+// not be read — and the zone the cloud names; and the zones it names as
+// having capacity where its answer is whole, never one the same answer
+// refused.
 func (lf launchFacts) capacity(refusals []launchRefusal) capacityRefusal {
 	asked := lf.asked()
-	cr := capacityRefusal{
-		RefusedInstanceTypes: append([]string(nil), asked.InstanceTypes...),
-		RequestedZones:       append([]string(nil), asked.Zones...),
+	cr := capacityRefusal{RefusedInstanceTypes: append([]string(nil), asked.InstanceTypes...)}
+	switch {
+	case len(lf.Pool.Zones) > 0:
+		cr.RequestedZones, cr.PoolZones = append([]string(nil), lf.Pool.Zones...), true
+	case lf.PoolErr == nil && !lf.Pool.empty():
+		cr.Unpinned = true
+		if allowed := lf.allowedZones(); len(allowed) > 0 {
+			cr.RequestedZones, cr.EveryZone = append([]string(nil), allowed...), true
+		}
+	default:
+		cr.RequestedZones = append([]string(nil), asked.Zones...)
 	}
 	named := false
 	for _, r := range refusals {
@@ -287,8 +335,15 @@ func (lf launchFacts) capacity(refusals []launchRefusal) capacityRefusal {
 	if !named {
 		return capacityRefusal{}
 	}
-	cr.PoolZones = len(lf.Pool.Zones) > 0 && subset(cr.RequestedZones, lf.Pool.Zones)
+	// The cloud's "choosing <zones>" is the complement of the zone that
+	// fleet error refused: a zone another fleet error of the same answer
+	// refused has no capacity either.
+	cr.AvailableZones = without(cr.AvailableZones, cr.RequestedZones)
 	cr.PinnedByCache, cr.CacheClaim = lf.pinnedByCache(cr.RequestedZones)
+	if cr.Unpinned && cr.PinnedByCache != nil {
+		// A pool that pins no zone follows no claim, wherever its volume lies.
+		cr.PinnedByCache = ptr.To(false)
+	}
 	return cr
 }
 
@@ -336,7 +391,12 @@ func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 	}
 	fmt.Fprintf(&b, "the cloud has no %s capacity", joinList(cr.RefusedInstanceTypes, "or"))
 	pinned := cr.PinnedByCache != nil && *cr.PinnedByCache
-	if len(cr.RequestedZones) > 0 {
+	switch {
+	case cr.Unpinned && cr.EveryZone:
+		fmt.Fprintf(&b, " in any zone the pool allows (%s)", joinList(cr.RequestedZones, "and"))
+	case cr.Unpinned && len(cr.RequestedZones) > 0:
+		fmt.Fprintf(&b, " in %s at least — the claim was constrained to no zone", joinList(cr.RequestedZones, "and"))
+	case len(cr.RequestedZones) > 0:
 		zone := "zone"
 		if len(cr.RequestedZones) > 1 {
 			zone = "zones"
@@ -353,6 +413,14 @@ func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 	}
 	if len(cr.AvailableZones) > 0 {
 		fmt.Fprintf(&b, "; it has capacity in %s", joinList(cr.AvailableZones, "and"))
+	}
+	if cr.Unpinned {
+		if cr.EveryZone {
+			b.WriteString(". No zone is left to move to; wider sizes or another accelerator (a re-run of create_node_pool) give Karpenter more to choose from, and it retries while the pod waits")
+		} else {
+			b.WriteString("; Karpenter retries while the pod waits")
+		}
+		return b.String()
 	}
 	b.WriteString(". The way out is a pool in ")
 	if len(cr.AvailableZones) > 0 {
@@ -402,14 +470,15 @@ func appendMissing(list []string, s string) []string {
 	return append(list, s)
 }
 
-// subset reports whether every item of of is in in.
-func subset(of, in []string) bool {
-	for _, s := range of {
-		if !containsString(in, s) {
-			return false
+// without is list less the items in drop, in order; nil when nothing is left.
+func without(list, drop []string) []string {
+	var out []string
+	for _, s := range list {
+		if !containsString(drop, s) {
+			out = append(out, s)
 		}
 	}
-	return true
+	return out
 }
 
 // nodeClaimPool is the NodePool a claim is named after (`<nodepool>-<five
@@ -455,7 +524,11 @@ func (b *Backend) launchFacts(ctx context.Context, events []corev1.Event) launch
 	if len(lf.refusals()) == 0 {
 		return lf
 	}
-	lf.Pool, lf.PoolErr = b.poolConstraints(ctx, pool)
+	var class string
+	lf.Pool, class, lf.PoolErr = b.poolConstraints(ctx, pool)
+	if lf.PoolErr == nil && len(lf.Pool.Zones) == 0 && len(lf.allowedZones()) == 0 {
+		lf.Allowed, lf.AllowedErr = b.nodeClassZones(ctx, class)
+	}
 	lf.Cache, lf.CacheErr = b.cacheNodes(ctx)
 	return lf
 }
@@ -486,17 +559,53 @@ func parseClaim(obj *unstructured.Unstructured) *claimState {
 	return s
 }
 
-// poolConstraints reads what a NodePool's template asks the cloud for.
-func (b *Backend) poolConstraints(ctx context.Context, pool string) (constraints, error) {
+// poolConstraints reads what a NodePool's template asks the cloud for, and
+// the AWS node class it references (empty for another kind).
+func (b *Backend) poolConstraints(ctx context.Context, pool string) (constraints, string, error) {
 	if pool == "" {
-		return constraints{}, nil
+		return constraints{}, "", nil
 	}
 	obj, err := b.dynamic(ctx).Resource(nodePoolGVR).Get(ctx, pool, metav1.GetOptions{})
 	if err != nil {
-		return constraints{}, err
+		return constraints{}, "", err
 	}
 	reqs, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "requirements")
-	return parseRequirements(reqs), nil
+	var class string
+	if group, _, _ := unstructured.NestedString(obj.Object, "spec", "template", "spec", "nodeClassRef", "group"); group == nodeClassGVR.Group {
+		class, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "spec", "nodeClassRef", "name")
+	}
+	return parseRequirements(reqs), class, nil
+}
+
+// nodeClassZones reads the zones a node class's subnets span — every zone a
+// claim of a pool that pins none may launch in. No class, no zones.
+func (b *Backend) nodeClassZones(ctx context.Context, class string) ([]string, error) {
+	if class == "" {
+		return nil, nil
+	}
+	obj, err := b.dynamic(ctx).Resource(nodeClassGVR).Get(ctx, class, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return parseNodeClassZones(obj), nil
+}
+
+// parseNodeClassZones reads the zones of a node class's status.subnets,
+// each once, sorted.
+func parseNodeClassZones(obj *unstructured.Unstructured) []string {
+	subnets, _, _ := unstructured.NestedSlice(obj.Object, "status", "subnets")
+	var zones []string
+	for _, s := range subnets {
+		subnet, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		if zone, _ := subnet["zone"].(string); zone != "" {
+			zones = appendMissing(zones, zone)
+		}
+	}
+	sort.Strings(zones)
+	return zones
 }
 
 // launchRefusals lists Karpenter's refusal events on the pool's claims,
