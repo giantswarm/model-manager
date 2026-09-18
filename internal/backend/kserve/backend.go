@@ -440,14 +440,24 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 }
 
 // Pull implements backend.Backend: fit-check, then a download Job into the
-// cache directory the model's InferenceService will mount.
+// cache directory the model's InferenceService will mount. A preset served
+// from an OCI model image has nothing to pull into the cache — the nodes pull
+// the image themselves — and is refused as invalid before the hub is asked
+// (giantswarm/model-manager#123).
 func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress func(backend.Progress)) error {
 	ref := strings.TrimSpace(req.Ref)
 	if ref == "" {
 		return fmt.Errorf("%w: empty model reference", backend.ErrInvalid)
 	}
-	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: ref, Preset: req.Preset, Node: req.Node}, false)
+	fitReq := backend.FitRequest{Model: ref, Preset: req.Preset, Node: req.Node}
+	plan, idx, err := b.resolveFit(ctx, fitReq)
 	if err != nil {
+		return err
+	}
+	if p := plan.Preset; !p.storesInCache() {
+		return fmt.Errorf("%w: %s is served from an OCI model image the platform pre-pulls on its GPU nodes (preset %s, %s); nothing to download", backend.ErrInvalid, plan.Repo, p.name(), p.Spec.Model.StorageURI)
+	}
+	if err := b.judgeFit(ctx, plan, idx, fitReq, false); err != nil {
 		return err
 	}
 	res := plan.Result

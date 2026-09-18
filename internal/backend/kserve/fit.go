@@ -45,17 +45,27 @@ func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe
 	if err != nil {
 		return nil, err
 	}
-	note, err := b.sizeModel(ctx, plan)
-	if err != nil {
+	if err := b.judgeFit(ctx, plan, idx, req, forServe); err != nil {
 		return nil, err
 	}
+	return plan, nil
+}
+
+// judgeFit completes a resolved plan: sizes the model, places it, and notes
+// in the answer when the preset stood in for the hub. Split from fitCheck so
+// a caller can look at the resolved preset before the hub is asked (Pull).
+func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
+	note, err := b.sizeModel(ctx, plan)
+	if err != nil {
+		return err
+	}
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
-		return nil, err
+		return err
 	}
 	if note != "" {
 		plan.Result.Reason += "; " + note
 	}
-	return plan, nil
+	return nil
 }
 
 // resolveFit turns the request into the plan's skeleton: the repository (the
@@ -203,12 +213,18 @@ func describeHubFailure(err error, timeout time.Duration) string {
 // placeModel picks the node the model is checked against and writes the
 // verdict into the plan: the explicit node, else the eligible node with the
 // most free budget, cache nodes first; a GPU pool at scale-to-zero answers
-// without a node.
+// without a node. The cache claim has a say for a preset that stores in it
+// (storesInCache) only: an oci:// preset is judged without the claim's
+// location — no node pin, no cache-node preference, no scan — and its cache
+// verdict is the oci-image one (giantswarm/model-manager#123).
 func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
 	res, p := &plan.Result, plan.Preset
-	loc, err := b.cacheNodes(ctx)
-	if err != nil {
-		return err
+	var loc cacheLocation
+	if p.storesInCache() {
+		var err error
+		if loc, err = b.cacheNodes(ctx); err != nil {
+			return err
+		}
 	}
 	plan.CacheLocal = len(loc.Nodes) > 0
 	nodes, err := b.nodes(ctx, loc)
@@ -233,7 +249,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 			// The claim may hold the weights from an earlier serve
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
-			res.Cached, res.CacheSource = b.isCached(ctx, "", plan.Dir, plan.Repo, loc)
+			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 			return b.placeOnPool(plan, pool)
 		}
 		res.Fits = false
@@ -274,8 +290,19 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
-	res.Cached, res.CacheSource = b.isCached(ctx, best.Name, plan.Dir, plan.Repo, loc)
+	res.Cached, res.CacheSource = b.cacheVerdict(ctx, best.Name, plan, loc)
 	return nil
+}
+
+// cacheVerdict is the fit answer's Cached / CacheSource pair: what the cache
+// says for a model that stores in it (isCached); for one served from an OCI
+// model image, not cached — nothing of it is in the claim — from the
+// oci-image source.
+func (b *Backend) cacheVerdict(ctx context.Context, node string, plan *fitPlan, loc cacheLocation) (bool, string) {
+	if !plan.Preset.storesInCache() {
+		return false, backend.CacheSourceOCIImage
+	}
+	return b.isCached(ctx, node, plan.Dir, plan.Repo, loc)
 }
 
 // anyNodeMatches says whether one of the nodes carries every label of the
