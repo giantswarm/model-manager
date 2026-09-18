@@ -60,7 +60,7 @@ Lemonade-backend ADR in the team's decision log.
 | Loaded / running models (kserve: each with its `modelConfig`; a served model model-manager manages that has none is wired by the read, `wiring: {wired, reason: "wired on read", modelConfig}`) | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
 | Pull / import (returns a job; on `backend`, else the default backend) | `POST /api/v1/models/pull {"model","backend?","wire?","preset?","node?"}` | `pull_model` |
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
-| Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; unload unwires) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
+| Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call, never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
 | Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
@@ -476,9 +476,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   fit; `…; the preset declares 15.0 GiB of weights; the Hub holds 24.6 GiB,
   which is what does not fit — correct the preset` on a refusal).
 - **Serve / stop** — `load` composes the serving object from the preset
-  after a fit check against the node's free budget; `unload` deletes it (the
-  cache persists); `delete` removes the cache directory (refused while
-  served). The kind is `--kserve-serving-kind` (`kserve.servingKind`):
+  after a fit check against the node's free budget; `unload` deletes it and
+  unwires within the caller's deadline — the object is found by repository,
+  object or preset name, never through the cache inventory, so a scan pod
+  that cannot start never delays the deletion — and rescans the cache in the
+  background where a scan pod may run, the answer's `inventory` saying
+  whether one runs or why none can (the cache persists); `delete` removes
+  the cache directory (refused while served). The kind is `--kserve-serving-kind` (`kserve.servingKind`):
   `auto` (default) composes an **`LLMInferenceService`**
   (`serving.kserve.io/v1alpha2`, the llm-d control plane) wherever that API
   is served and a classic `InferenceService` elsewhere; both kinds are

@@ -247,12 +247,12 @@ func (h *REST) unload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	b, err := h.svc.Unload(r.Context(), req.Backend, req.Model)
+	view, err := h.svc.Unload(r.Context(), req.Backend, req.Model)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{argBackend: b, argModel: req.Model, "loaded": false})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *REST) wire(w http.ResponseWriter, r *http.Request) {

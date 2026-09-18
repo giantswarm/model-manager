@@ -446,6 +446,36 @@ type Server interface {
 	Serve(ctx context.Context, req LoadRequest) (*LoadResult, error)
 }
 
+// UnloadResult is what a Stopper's Stop answers next to the error: the model
+// the deleted serving object served and what follows the deletion in the
+// backend's inventory.
+type UnloadResult struct {
+	// Model is the repository the serving object served — the name the
+	// model's ModelConfig is unwired by.
+	Model string `json:"model"`
+	// Inventory says what happens to the cache inventory after the unload.
+	Inventory InventoryRefresh `json:"inventory"`
+}
+
+// InventoryRefresh says whether the cache inventory is being rescanned in
+// the background after a call changed what the cache holds or serves, and
+// why not when it is not. A call never waits for the scan: the scan is the
+// inventory after the change, not the change.
+type InventoryRefresh struct {
+	Refreshing bool   `json:"refreshing"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// Stopper is implemented by backends whose unload needs no inventory
+// (kserve): Stop deletes the serving object by the reference the caller gave
+// — repository id, object name or preset name — within the caller's
+// deadline and answers what follows; the cache inventory is refreshed in
+// the background, never awaited. Unload stays for callers without use for
+// the answer.
+type Stopper interface {
+	Stop(ctx context.Context, name string) (*UnloadResult, error)
+}
+
 // NodeInfo is one node's serving budget and cache state.
 type NodeInfo struct {
 	Name string `json:"name"`

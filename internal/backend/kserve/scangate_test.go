@@ -274,3 +274,70 @@ func TestScanRunsAsOwnedJob(t *testing.T) {
 	_, err = f.cs.BatchV1().Jobs(testServingNS).Get(ctx, job.Name, metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err), "the Job is deleted once read")
 }
+
+// unload_model with a cache scan that would outlast the caller's deadline (a
+// scan pod that cannot schedule): the serving object is deleted and the call
+// answers within the deadline, no scan runs inside it, and the inventory is
+// rescanned in the background — the answer says so
+// (giantswarm/model-manager#119).
+func TestStopAnswersWithinDeadlineWithASlowScan(t *testing.T) {
+	f := newFixture(t)
+	bg := context.Background()
+	require.NoError(t, f.b.Load(bg, backend.LoadRequest{Preset: "tiny"}))
+	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Files: 3, HasModel: true})
+	before := f.scanCount()
+	const deadline = 300 * time.Millisecond
+	scan := f.b.scan
+	f.b.scan = func(ctx context.Context, node string) ([]cacheEntry, string, error) {
+		select {
+		case <-time.After(3 * deadline):
+		case <-ctx.Done():
+			return nil, node, ctx.Err()
+		}
+		return scan(ctx, node)
+	}
+
+	ctx, cancel := context.WithTimeout(bg, deadline)
+	defer cancel()
+	start := time.Now()
+	res, err := f.b.Stop(ctx, tinyRepo)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), deadline, "answered within the deadline")
+	assert.Equal(t, tinyRepo, res.Model)
+	assert.True(t, res.Inventory.Refreshing, "the answer says the inventory is rescanned in the background")
+	assert.Empty(t, res.Inventory.Reason)
+	obj, err := f.b.findServing(bg, f.b.cfg.settings(bg), "tiny")
+	require.NoError(t, err)
+	assert.Nil(t, obj, "the serving object is deleted")
+	assert.Equal(t, before, f.scanCount(), "no scan inside the call")
+	require.Eventually(t, func() bool { return f.scanCount() == before+1 }, 5*deadline, 5*time.Millisecond, "the scan ran in the background")
+	require.Eventually(t, func() bool { return f.b.inv.fresh(testCacheNode, f.b.opts.InventoryTTL) != nil }, time.Second, 5*time.Millisecond, "the next read answers from the new scan")
+
+	// Nothing serves the model any more: not found, still without a scan.
+	_, err = f.b.Stop(ctx, tinyRepo)
+	assert.ErrorIs(t, err, backend.ErrNotFound)
+	assert.Equal(t, before+1, f.scanCount())
+}
+
+// The same unload on a GPU pool at zero: nothing may launch a scan pod, so
+// the answer says the inventory is not rescanned and why; the deletion is
+// done all the same, and the preset name addresses the object too.
+func TestStopSaysWhyNoScanCanRun(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.shareVolume(ctx)
+	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput()})
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
+	before := f.scanCount()
+
+	res, err := f.b.Stop(ctx, "tiny")
+	require.NoError(t, err)
+	assert.Equal(t, tinyRepo, res.Model, "the answer names the repository the object served")
+	assert.False(t, res.Inventory.Refreshing)
+	assert.Contains(t, res.Inventory.Reason, "no node of the GPU pool")
+	obj, err := f.b.findServing(ctx, f.b.cfg.settings(ctx), "tiny")
+	require.NoError(t, err)
+	assert.Nil(t, obj, "the serving object is deleted")
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, before, f.scanCount(), "no scan pod")
+}
