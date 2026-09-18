@@ -391,6 +391,11 @@ type FitResult struct {
 	// Fits is true when RequiredBytes <= BudgetBytes on Node.
 	Fits   bool   `json:"fits"`
 	Reason string `json:"reason,omitempty"`
+	// Retryable is true when the refusal is about the moment, not the
+	// model: the serving layer's discovery document is not published yet
+	// (the slice is still installing), so the same call answers
+	// differently in a moment.
+	Retryable bool `json:"retryable,omitempty"`
 	// Preset is the preset the check used for overhead (and weights when the
 	// hub could not tell); Presets lists every preset serving the model.
 	Preset  string   `json:"preset,omitempty"`

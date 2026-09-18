@@ -180,9 +180,16 @@ func presetConfigMap(name, doc string) *corev1.ConfigMap {
 }
 
 func discoveryConfigMap() *corev1.ConfigMap {
+	return discoveryConfigMapWith(discoveryOpts{})
+}
+
+// discoveryConfigMapWith is the discovery ConfigMap rendering o — for a test
+// that creates the document after the fixture, the way the serving slice
+// publishes it while installing.
+func discoveryConfigMapWith(o discoveryOpts) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: DefaultDiscoveryConfigMap, Namespace: testPlatformNS},
-		Data:       map[string]string{discoveryConfigKey: discoveryDocYAML(discoveryOpts{})},
+		Data:       map[string]string{discoveryConfigKey: discoveryDocYAML(o)},
 	}
 }
 

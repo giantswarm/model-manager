@@ -236,6 +236,15 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		reserved = b.reservedByNode(ctx, idx, p)
 	}
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
+	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
+		// The discovery document appeared since the settings were cached
+		// (giantswarm/model-manager#127): the nodes and their eligibility
+		// are judged again on what it says — the GPU pool above all.
+		if nodes, err = b.nodes(ctx, loc); err != nil {
+			return err
+		}
+		candidates, why = b.candidateNodes(ctx, nodes, req.Node, loc, p)
+	}
 	if len(candidates) == 0 {
 		// A GPU pool at scale-to-zero (giantswarm/model-manager#90): the pool
 		// selector names a pool no node belongs to yet. Serving is what
@@ -245,7 +254,8 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// shapes when they are known (giantswarm/model-manager#97), else yes
 		// and unverified. An explicit node, a pool with nodes that do not
 		// fit, or no pool at all keep the refusal.
-		if pool := b.cfg.settings(ctx).GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
+		s := b.cfg.settings(ctx)
+		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
 			// The claim may hold the weights from an earlier serve
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
@@ -254,6 +264,17 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		}
 		res.Fits = false
 		res.Reason = why
+		// Without the discovery document the driver knows no pool: the
+		// answer names the document that is missing and says to retry —
+		// "no accelerator node" is the verdict for a document that names
+		// no pool. The nodes' own reasons stay when there are nodes.
+		if missing := b.cfg.discoveryMissing(s); req.Node == "" && missing != "" {
+			res.Reason = missing
+			if len(nodes) > 0 {
+				res.Reason += "; " + why
+			}
+			res.Retryable = true
+		}
 		return nil
 	}
 	best := candidates[0]
