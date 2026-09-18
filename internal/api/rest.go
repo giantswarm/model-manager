@@ -361,6 +361,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, backend.ErrUnfit):
 		return http.StatusPreconditionFailed, "does_not_fit"
+	case errors.Is(err, backend.ErrUnavailable):
+		return http.StatusServiceUnavailable, "unavailable"
 	default:
 		return http.StatusBadGateway, "backend_error"
 	}

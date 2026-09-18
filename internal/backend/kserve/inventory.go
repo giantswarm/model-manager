@@ -24,7 +24,7 @@ import (
 )
 
 // The cache layout the modelServing contract defines: one subdirectory per
-// InferenceService under the claim root, mounted at cache.mountPath in the
+// LLMInferenceService under the claim root, mounted at cache.mountPath in the
 // predictor. model-manager adds a hidden markers directory that records which
 // repository a pre-warm download put into which directory.
 const (

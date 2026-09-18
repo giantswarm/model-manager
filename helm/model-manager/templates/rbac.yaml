@@ -45,14 +45,16 @@ subjects:
 {{- end }}
 {{- if and $rbac (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) }}
 {{- /*
-KServe backend, in the serving namespace: InferenceServices; download Jobs and
+KServe backend, in the serving namespace: LLMInferenceServices; download Jobs and
 their pods (progress from pod logs); the predictor pods' Events (where a serve
 is: the autoscaler's nomination, image pulls, probe failures); the short-lived
 cache-tool pods that scan and clean the cache claim; the claim itself; the
 cache index ConfigMap model-manager writes (create cannot be limited to a
 name, update and patch are); the optional hub-token Secret. In the discovery / preset namespace: the
 ModelServingConfig and ServingPreset ConfigMaps. Cluster-wide: nodes (memory
-budgets, GPU labels), PersistentVolumes (which node holds the cache) and
+budgets, GPU labels), PersistentVolumes (which node holds the cache), the
+LLMInferenceServiceConfigs the llm-d controller composes from (whether a
+controller is there to reconcile what a load creates) and
 Karpenter's NodeClaims (whether the node a predictor waits for launched). In
 the default namespace: Karpenter's Warning events on the NodeClaims it could
 not launch (the events of a cluster-scoped object land there).
@@ -67,11 +69,8 @@ metadata:
     {{- include "model-manager.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["serving.kserve.io"]
-    resources: ["inferenceservices"]
+    resources: ["llminferenceservices"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["serving.kserve.io"]
-    resources: ["servingruntimes"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "delete"]
@@ -162,6 +161,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceserviceconfigs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]

@@ -2,14 +2,19 @@ package kserve
 
 import (
 	"fmt"
+	"strconv"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// The LLMInferenceService API (KServe's llm-d control plane) and what its
-// controller puts on the objects it derives from one.
-var llmisvcGVR = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha2", Resource: "llminferenceservices"}
+// The LLMInferenceService API (KServe's llm-d control plane, the only kind
+// the driver composes), the LLMInferenceServiceConfigs its controller
+// composes from, and what the controller puts on the objects it derives.
+var (
+	llmisvcGVR       = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha2", Resource: "llminferenceservices"}
+	llmisvcConfigGVR = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha2", Resource: "llminferenceserviceconfigs"}
+)
 
 const (
 	// Labels the controller puts on the workload pods of an
@@ -25,18 +30,11 @@ const (
 )
 
 // workloadURL is the in-cluster URL of an LLMInferenceService's workload
-// Service (<name>-kserve-workload-svc), the fallback until KServe publishes
-// the routed address in status.
+// Service (<name>-kserve-workload-svc): where the model answers until KServe
+// publishes the routed address in status, and for good where discovery names
+// no models Gateway.
 func workloadURL(name, namespace string) string {
 	return fmt.Sprintf("http://%s-kserve-workload-svc.%s.svc.cluster.local:%d", name, namespace, llmisvcWorkloadPort)
-}
-
-// gvrFor maps a serving kind to its API resource.
-func gvrFor(kind string) schema.GroupVersionResource {
-	if kind == ServingKindLLM {
-		return llmisvcGVR
-	}
-	return isvcGVR
 }
 
 // composeLLM builds the LLMInferenceService for a preset by spec shape:
@@ -95,9 +93,128 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	if len(p.Spec.BaseRefs) > 0 {
 		spec["baseRefs"] = mapsToAny(p.Spec.BaseRefs)
 	}
-	obj := newServingObject(ServingKindLLM, p, s.Namespace)
+	obj := newServingObject(p, s.Namespace)
 	obj.Object["spec"] = spec
 	return obj
+}
+
+// newServingObject is the LLMInferenceService's metadata: the preset's name,
+// the labels that make the object model-manager's and link it to its preset,
+// the model annotation.
+func newServingObject(p *servingPreset, namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": llmisvcGVR.GroupVersion().String(),
+		"kind":       kindLLMInferenceService,
+		"metadata": map[string]any{
+			"name":      p.name(),
+			"namespace": namespace,
+			"labels": map[string]any{
+				ManagedByLabel:                          ManagedByValue,
+				BackendLabel:                            "kserve",
+				PresetLabel:                             p.name(),
+				"app.kubernetes.io/name":                p.name(),
+				"app.kubernetes.io/component":           "inference",
+				"app.kubernetes.io/part-of":             "agent-platform",
+				"model-manager.giantswarm.io/model-dir": p.name(),
+			},
+			"annotations": map[string]any{
+				ModelAnnotation: p.Spec.Model.ID,
+			},
+		},
+	}}
+}
+
+// resources is the preset's requests/limits with the accelerator count
+// added under the discovery's resource name; empty when there is nothing.
+func (p *servingPreset) resources(s settings) map[string]any {
+	requests := copyResourceMap(p.Spec.Resources.Requests)
+	limits := copyResourceMap(p.Spec.Resources.Limits)
+	if gpus := p.gpus(); gpus > 0 && s.GPUResourceName != "" {
+		requests[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
+		limits[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
+	}
+	resources := map[string]any{}
+	if len(requests) > 0 {
+		resources["requests"] = requests
+	}
+	if len(limits) > 0 {
+		resources["limits"] = limits
+	}
+	return resources
+}
+
+// nodeSelector merges the discovery's serving selector, the GPU pool's
+// label, the preset's selector and the node pin, each overriding the one
+// before; empty when there is nothing.
+func (p *servingPreset) nodeSelector(s settings, node string) map[string]any {
+	out := map[string]any{}
+	for k, v := range s.NodeSelector {
+		out[k] = v
+	}
+	for k, v := range s.GPUPool.NodeSelector {
+		out[k] = v
+	}
+	for k, v := range p.Spec.Scheduling.NodeSelector {
+		out[k] = v
+	}
+	if node != "" {
+		out[labelHostname] = node
+	}
+	return out
+}
+
+// chatTemplateMount is the volume mount and volume for the preset's chat
+// template ConfigMap; nil, nil without one.
+func (p *servingPreset) chatTemplateMount() (mount, volume map[string]any) {
+	ct := p.Spec.ChatTemplate
+	if ct == nil || ct.ConfigMap == "" {
+		return nil, nil
+	}
+	mountPath := ct.MountPath
+	if mountPath == "" {
+		mountPath = "/mnt/chat-template"
+	}
+	return map[string]any{"name": "chat-template", "mountPath": mountPath, "readOnly": true},
+		map[string]any{"name": "chat-template", "configMap": map[string]any{"name": ct.ConfigMap}}
+}
+
+func toAnySlice(in []string) []any {
+	out := make([]any, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	return out
+}
+
+func mapsToAny(in []map[string]any) []any {
+	out := make([]any, 0, len(in))
+	for _, m := range in {
+		out = append(out, m)
+	}
+	return out
+}
+
+// copyResourceMap copies a requests/limits map, stringifying numbers so the
+// API server's quantity parser accepts them.
+func copyResourceMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+1)
+	for k, v := range in {
+		switch n := v.(type) {
+		case float64:
+			if n == float64(int64(n)) {
+				out[k] = strconv.FormatInt(int64(n), 10)
+			} else {
+				out[k] = strconv.FormatFloat(n, 'f', -1, 64)
+			}
+		case int64:
+			out[k] = strconv.FormatInt(n, 10)
+		case int:
+			out[k] = strconv.Itoa(n)
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // mergeTemplate copies the preset's spec.template extras on top of the

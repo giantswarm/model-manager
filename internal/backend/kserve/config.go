@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
@@ -25,7 +26,6 @@ import (
 const (
 	DefaultDiscoveryConfigMap = "agent-platform-model-serving"
 	DefaultNamespace          = "model-serving"
-	DefaultRuntime            = "kserve-vllm"
 	DefaultGPUResourceName    = "nvidia.com/gpu"
 	DefaultCacheClaim         = "hf-cache"
 	DefaultCacheMountPath     = "/mnt/models"
@@ -43,7 +43,7 @@ const (
 	// meta-tool deadline (muster: 10 s).
 	DefaultHFTimeout = 4 * time.Second
 	// DefaultDownloadImage is the KServe storage-initializer: a pre-warm
-	// download then produces exactly the files an InferenceService's own
+	// download then produces exactly the files an LLMInferenceService's own
 	// download would, so a later start finds them and skips the download.
 	DefaultDownloadImage = "docker.io/kserve/storage-initializer:v0.20.0"
 	// DefaultInitImage creates cache directories and scans the cache.
@@ -94,23 +94,18 @@ const (
 	budgetSourceAnnotation       = "annotation"
 	gib                    int64 = 1 << 30
 
-	// ServingKindLLM composes presets into LLMInferenceServices
-	// (serving.kserve.io/v1alpha2, the llm-d control plane); ServingKindClassic
-	// into InferenceServices on the vLLM ClusterServingRuntime; ServingKindAuto
-	// picks the first wherever its API is served.
-	ServingKindAuto    = "auto"
-	ServingKindLLM     = "LLMInferenceService"
-	ServingKindClassic = "InferenceService"
+	// kindLLMInferenceService is the one kind the driver composes, lists and
+	// deletes: KServe's llm-d control plane (serving.kserve.io/v1alpha2).
+	kindLLMInferenceService = "LLMInferenceService"
+	// wellKnownTemplateConfig is the LLMInferenceServiceConfig the controller
+	// composes every LLMInferenceService's workload from — the template that
+	// names the runtime image and the main container the preset's args, env
+	// and resources go into. It ships with the llm-d control plane (the
+	// platform's kserve-runtime-configs component), not with the CRDs, so
+	// its presence says a controller is there to reconcile what the driver
+	// creates (giantswarm/model-manager#129).
+	wellKnownTemplateConfig = "kserve-config-llm-template"
 )
-
-// validServingKind reports whether k is one of the three ServingKind values.
-func validServingKind(k string) bool {
-	switch k {
-	case ServingKindAuto, ServingKindLLM, ServingKindClassic:
-		return true
-	}
-	return false
-}
 
 // discoveryDoc is the ModelServingConfig document the platform's connectivity
 // chart publishes (agent-platform-connectivity, templates/model-serving/config.yaml).
@@ -118,13 +113,10 @@ type discoveryDoc struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Spec       struct {
-		Namespace              string            `json:"namespace"`
-		Runtime                string            `json:"runtime"`
-		GPUResourceName        string            `json:"gpuResourceName"`
-		RuntimeClassName       string            `json:"runtimeClassName"`
-		NodeSelector           map[string]string `json:"nodeSelector"`
-		DeploymentStrategyType string            `json:"deploymentStrategyType"`
-		TimeoutSeconds         int64             `json:"timeoutSeconds"`
+		Namespace        string            `json:"namespace"`
+		GPUResourceName  string            `json:"gpuResourceName"`
+		RuntimeClassName string            `json:"runtimeClassName"`
+		NodeSelector     map[string]string `json:"nodeSelector"`
 		// GPUPool is the pool taint and label (the chart's
 		// modelServing.gpuPool); see backend.GPUPool.
 		GPUPool backend.GPUPool `json:"gpuPool"`
@@ -156,15 +148,12 @@ type discoveryDoc struct {
 // settings is the effective serving-layer configuration: discovery merged
 // with explicit options (options win).
 type settings struct {
-	Namespace              string
-	Runtime                string
-	GPUResourceName        string
-	RuntimeClassName       string
-	NodeSelector           map[string]string
-	DeploymentStrategyType string
-	TimeoutSeconds         int64
+	Namespace        string
+	GPUResourceName  string
+	RuntimeClassName string
+	NodeSelector     map[string]string
 	// GPUPool is the pool scheduling every scan pod, download Job and
-	// composed predictor gets (scheduling.go): discovery's spec.gpuPool,
+	// composed workload gets (scheduling.go): discovery's spec.gpuPool,
 	// the option's taint and selector replacing each when set.
 	GPUPool backend.GPUPool
 	// RouterScheduler composes the llm-d endpoint picker (router.scheduler)
@@ -184,12 +173,15 @@ type settings struct {
 	CacheRedirectPolicy bool
 	PresetNamespace     string
 	PresetSelector      string
-	// ServingKind is the kind presets are composed into, ServingKindLLM or
-	// ServingKindClassic (never auto); LLMServed whether the
-	// LLMInferenceService API is served on the cluster, in which case the
-	// serving namespace's LLMInferenceServices are listed too.
-	ServingKind string
-	LLMServed   bool
+	// LLMServed reports whether the LLMInferenceService API is served on the
+	// cluster; ControlPlane is the namespace holding the well-known
+	// LLMInferenceServiceConfig the llm-d controller composes from, empty
+	// when the CRDs stand alone and nothing would reconcile a created object.
+	// ServingError is why neither could be established ("" when they were):
+	// a load is refused on it rather than judged on a guess.
+	LLMServed    bool
+	ControlPlane string
+	ServingError string
 	// DiscoveryFound reports whether the discovery ConfigMap was read.
 	DiscoveryFound bool
 	DiscoveryError string
@@ -208,6 +200,26 @@ func (s settings) forPreset(p *servingPreset) settings {
 	s.GPUPool = backend.GPUPool{}
 	s.RuntimeClassName = ""
 	return s
+}
+
+// servingUnavailable is why a load cannot be served on this cluster as the
+// settings stand — the LLMInferenceService API is not served, the llm-d
+// controller is not installed, or neither could be read — and what to do
+// about it; "" when a load can go ahead. The check runs before anything is
+// composed or created, so a cluster carrying the CRDs without the controller
+// gets a refusal instead of an object nothing reconciles and a load job that
+// waits forever (giantswarm/model-manager#129).
+func (s settings) servingUnavailable() string {
+	gv := llmisvcGVR.GroupVersion().String()
+	switch {
+	case s.ServingError != "":
+		return fmt.Sprintf("cannot tell whether the llm-d control plane serves this cluster: %s; the driver needs to read the %s API and list %s cluster-wide", s.ServingError, gv, llmisvcConfigGVR.Resource)
+	case !s.LLMServed:
+		return fmt.Sprintf("the %s API (%s) is not served on this cluster; install the llm-d control plane — the platform's kserve-llmisvc-crd, kserve-llmisvc-resources and kserve-runtime-configs components", kindLLMInferenceService, gv)
+	case s.ControlPlane == "":
+		return fmt.Sprintf("the %s API is served but the llm-d controller is not installed: no LLMInferenceServiceConfig %s in any namespace, so nothing would reconcile a created object; turn on the platform's kserve-llmisvc-resources and kserve-runtime-configs components", kindLLMInferenceService, wellKnownTemplateConfig)
+	}
+	return ""
 }
 
 // config resolves settings from options plus the discovery ConfigMap, cached
@@ -348,11 +360,8 @@ func (c *config) last() settings {
 	if c.cached != nil {
 		return *c.cached
 	}
-	s := settings{Namespace: DefaultNamespace, ServingKind: ServingKindClassic}
+	s := settings{Namespace: DefaultNamespace}
 	setIf(&s.Namespace, c.opts.Namespace)
-	if c.opts.ServingKind == ServingKindLLM {
-		s.ServingKind = ServingKindLLM
-	}
 	return s
 }
 
@@ -364,7 +373,6 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	o := c.opts
 	s := settings{
 		Namespace:       DefaultNamespace,
-		Runtime:         DefaultRuntime,
 		GPUResourceName: DefaultGPUResourceName,
 		CacheEnabled:    true,
 		CacheClaim:      DefaultCacheClaim,
@@ -380,12 +388,9 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		s.DiscoveryFound = true
 		sp := doc.Spec
 		setIf(&s.Namespace, sp.Namespace)
-		setIf(&s.Runtime, sp.Runtime)
 		setIf(&s.GPUResourceName, sp.GPUResourceName)
 		s.RuntimeClassName = sp.RuntimeClassName
 		s.NodeSelector = sp.NodeSelector
-		s.DeploymentStrategyType = sp.DeploymentStrategyType
-		s.TimeoutSeconds = sp.TimeoutSeconds
 		s.GPUPool = sp.GPUPool
 		s.CacheEnabled = sp.Cache.Enabled
 		setIf(&s.CacheClaim, sp.Cache.ClaimName)
@@ -399,7 +404,6 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	}
 	// Explicit options win over discovery.
 	setIf(&s.Namespace, o.Namespace)
-	setIf(&s.Runtime, o.Runtime)
 	setIf(&s.GPUResourceName, o.GPUResourceName)
 	if o.CacheClaim != "" {
 		s.CacheClaim = o.CacheClaim
@@ -430,14 +434,15 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	}
 	served, err := c.apiServed(ctx, llmisvcGVR)
 	if err != nil {
+		s.ServingError = err.Error()
 		errs = append(errs, err)
 	}
 	s.LLMServed = served
-	s.ServingKind = o.ServingKind
-	if s.ServingKind == ServingKindAuto || s.ServingKind == "" {
-		s.ServingKind = ServingKindClassic
-		if s.LLMServed {
-			s.ServingKind = ServingKindLLM
+	if served {
+		s.ControlPlane, err = c.controlPlane(ctx)
+		if err != nil {
+			s.ServingError = err.Error()
+			errs = append(errs, err)
 		}
 	}
 	return s, errors.Join(errs...)
@@ -459,6 +464,49 @@ func (c *config) clientsets(ctx context.Context) []kubernetes.Interface {
 		out = append(out, c.opts.Clientset)
 	}
 	return out
+}
+
+// dynamics returns the dynamic clients a resolve tries, in the order of
+// clientsets: the caller's, then the configured one.
+func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
+	var out []dynamic.Interface
+	if c.opts.ClientsFor != nil {
+		if _, caller := c.opts.ClientsFor(ctx); caller != nil && caller != c.opts.Dynamic {
+			out = append(out, caller)
+		}
+	}
+	if c.opts.Dynamic != nil {
+		out = append(out, c.opts.Dynamic)
+	}
+	return out
+}
+
+// controlPlane looks for the llm-d controller by the well-known
+// LLMInferenceServiceConfig it composes from (wellKnownTemplateConfig) and
+// returns the namespace holding it, "" when no namespace does. The controller
+// reads its configs from the object's namespace, then from its own, so the
+// lookup is cluster-wide and takes the first client that answers; an error
+// from every client means the answer is unknown, never that the controller
+// is absent.
+func (c *config) controlPlane(ctx context.Context) (string, error) {
+	var errs []error
+	for _, dyn := range c.dynamics(ctx) {
+		list, err := dyn.Resource(llmisvcConfigGVR).List(ctx, metav1.ListOptions{FieldSelector: "metadata.name=" + wellKnownTemplateConfig})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for i := range list.Items {
+			if list.Items[i].GetName() == wellKnownTemplateConfig {
+				return list.Items[i].GetNamespace(), nil
+			}
+		}
+		return "", nil
+	}
+	if len(errs) == 0 {
+		return "", nil
+	}
+	return "", fmt.Errorf("list %s: %w", llmisvcConfigGVR.Resource, errors.Join(errs...))
 }
 
 // apiServed reports whether the API server serves gvr. The first client whose
@@ -555,7 +603,6 @@ func applyDefaults(o *backend.KServeOptions) {
 	defaultIf(&o.DownloadImage, DefaultDownloadImage)
 	defaultIf(&o.InitImage, DefaultInitImage)
 	defaultIf(&o.BudgetSource, DefaultBudgetSource)
-	defaultIf(&o.ServingKind, ServingKindAuto)
 	defaultIf(&o.InventoryMode, InventoryModePod)
 	defaultIf(&o.InventoryAgentSelector, DefaultInventoryAgentSelector)
 	if o.InventoryAgentPort <= 0 {

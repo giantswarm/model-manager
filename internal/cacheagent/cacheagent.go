@@ -1,5 +1,5 @@
 // Package cacheagent reads a mounted model cache — one subdirectory per
-// InferenceService under the claim root, plus the hidden markers directory a
+// LLMInferenceService under the claim root, plus the hidden markers directory a
 // pre-warm download writes — and serves the result as JSON. The
 // `model-manager cache-agent` subcommand runs it in the DaemonSet the chart
 // renders for kserve.inventory.mode=daemonset; the kserve driver reads

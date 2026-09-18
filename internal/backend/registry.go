@@ -41,17 +41,8 @@ type KServeOptions struct {
 	// DiscoveryTTL bounds how long the discovery document is cached.
 	DiscoveryTTL time.Duration
 
-	// Namespace is the serving namespace (InferenceServices, Jobs, cache).
+	// Namespace is the serving namespace (LLMInferenceServices, Jobs, cache).
 	Namespace string
-	// Runtime is the ClusterServingRuntime name a preset without one uses
-	// (classic InferenceService path only).
-	Runtime string
-	// ServingKind is what a preset is composed into: LLMInferenceService
-	// (serving.kserve.io/v1alpha2, the llm-d control plane), InferenceService
-	// (the classic predictor on the vLLM ClusterServingRuntime), or auto
-	// (default): LLMInferenceService wherever its API is served, else the
-	// classic kind.
-	ServingKind string
 	// GPUResourceName is the accelerator resource (nvidia.com/gpu).
 	GPUResourceName string
 	// CacheClaim / CacheMountPath describe the HF cache claim in Namespace.
@@ -97,7 +88,7 @@ type KServeOptions struct {
 
 	// DownloadImage runs pre-warm downloads (default: the KServe
 	// storage-initializer, so the cache holds exactly what an
-	// InferenceService would download).
+	// LLMInferenceService would download).
 	DownloadImage string
 	// DownloadIgnorePatterns are passed as STORAGE_IGNORE_PATTERNS.
 	DownloadIgnorePatterns []string

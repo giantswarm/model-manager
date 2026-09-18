@@ -1,7 +1,7 @@
 // Package backend defines the serving-backend abstraction behind model-manager's
 // API. One API — inventory of downloaded and loaded models, import with
 // progress, load/unload, delete, wire-to-agents — implemented by drivers:
-// `ollama` (host Ollama, the agentlab dev loop), `kserve` (InferenceServices,
+// `ollama` (host Ollama, the agentlab dev loop), `kserve` (LLMInferenceServices,
 // HF cache inventory per node, download Jobs, presets) and `lemonade` (a host
 // Lemonade Server). One process runs one or several of them at once; the
 // service stamps every object with the driver's Name. Drivers report what
@@ -47,6 +47,10 @@ var (
 	// ErrUnfit means the model does not fit the memory budget of any eligible
 	// node (fit check refused a pull or a load); the message says why.
 	ErrUnfit = errors.New("model does not fit")
+	// ErrUnavailable means the backend cannot serve the operation on this
+	// cluster as it stands — its serving control plane is not installed —
+	// and nothing was created; the message says what is missing.
+	ErrUnavailable = errors.New("backend unavailable")
 )
 
 // Capabilities are explicit data, not conditionals in clients. A flag is true
@@ -165,8 +169,8 @@ type Model struct {
 	ContextLength int64   `json:"contextLength,omitempty"`
 	// Runtime is what the backend runs the model with, on backends that have
 	// several (lemonade: the recipe — flm for FastFlowLM on the NPU, llamacpp,
-	// ryzenai-llm, ...). Empty on a backend with one runtime (ollama) or where
-	// the preset says (kserve).
+	// ryzenai-llm, ...). Empty on a backend with one runtime (ollama, kserve:
+	// the llm-d template's).
 	Runtime string `json:"runtime,omitempty"`
 	// Capabilities are model features as reported by the backend
 	// (e.g. completion, tools, vision, embedding, thinking).
@@ -175,11 +179,11 @@ type Model struct {
 	Node string `json:"node,omitempty"`
 	// Downloaded is set by backends that also list models which are not (yet)
 	// in their cache: false for a model known only from a serving preset or a
-	// running InferenceService whose weights are not cached. Absent means the
+	// running LLMInferenceService whose weights are not cached. Absent means the
 	// backend lists downloads only (ollama).
 	Downloaded *bool `json:"downloaded,omitempty"`
 	// Path is the cache directory holding the files, relative to the cache
-	// mount (kserve: the InferenceService name the storage-initializer uses).
+	// mount (kserve: the LLMInferenceService name the storage-initializer uses).
 	Path string `json:"path,omitempty"`
 	// Preset is the serving preset whose model this is, when one matches
 	// (kserve).
@@ -196,7 +200,7 @@ type LoadedModel struct {
 	VRAMBytes     int64      `json:"vramBytes,omitempty"`
 	ContextLength int64      `json:"contextLength,omitempty"`
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	// Endpoint is where inference is served (kserve: InferenceService URL).
+	// Endpoint is where inference is served (kserve: the LLMInferenceService's address).
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
 	// Status is a backend-specific state: "loaded" (ollama); "Ready",
@@ -212,8 +216,7 @@ type LoadedModel struct {
 	// the condition's or the pod's message).
 	Message string `json:"message,omitempty"`
 	// Resource is the serving object behind this entry (kserve: the
-	// InferenceService or LLMInferenceService name, which is also the served
-	// model name); Kind says which of the two it is.
+	// LLMInferenceService name, also the cache directory); Kind is its kind.
 	Resource string `json:"resource,omitempty"`
 	Kind     string `json:"kind,omitempty"`
 	// Preset is the serving preset the entry was created from (kserve).
@@ -314,7 +317,7 @@ type PullRequest struct {
 	// Ref is the model reference in the backend's namespace.
 	Ref string `json:"ref"`
 	// Preset names the serving preset the download is for (kserve): the
-	// weights land in the cache directory that preset's InferenceService
+	// weights land in the cache directory that preset's LLMInferenceService
 	// mounts. Empty picks the preset serving Ref when exactly one does.
 	Preset string `json:"preset,omitempty"`
 	// Node pins the download to one node's cache (kserve). Empty lets the
@@ -347,7 +350,6 @@ type Preset struct {
 	Model         string            `json:"model"`
 	StorageURI    string            `json:"storageUri,omitempty"`
 	Format        string            `json:"format,omitempty"`
-	Runtime       string            `json:"runtime,omitempty"`
 	ContextLength int64             `json:"contextLength,omitempty"`
 	Capabilities  []string          `json:"capabilities,omitempty"`
 	License       string            `json:"license,omitempty"`
@@ -434,7 +436,7 @@ type FitResult struct {
 	// says how that was decided: "scan" (a cache scan answered in this
 	// call), "index" (no scan could run — a pool at zero, the caller's
 	// deadline — and the cache index remembers a directory an
-	// InferenceService filled for the repository), "unknown" (neither
+	// LLMInferenceService filled for the repository), "unknown" (neither
 	// answered: Cached false is then no verdict), or "oci-image" (the
 	// preset serves an OCI model image the nodes pull themselves; nothing of
 	// it is in the cache, and Cached false is the verdict). Empty on
@@ -581,7 +583,7 @@ type NodeLister interface {
 }
 
 // ServeLifecycle marks backends whose inference endpoint exists only while a
-// model is loaded (kserve: the InferenceService). The service then wires the
+// model is loaded (kserve: the LLMInferenceService). The service then wires the
 // model into kagent when it becomes ready rather than right after Load,
 // unwires it on Unload, and never wires after a pull (a cached model has no
 // endpoint).
@@ -636,7 +638,7 @@ type AgentEndpoint struct {
 	APIKeySecret    string `json:"apiKeySecret,omitempty"`
 	APIKeySecretKey string `json:"apiKeySecretKey,omitempty"`
 	// Name is the ModelConfig name the backend wants (kserve: the
-	// InferenceService name, the same rule the portal applies). Empty derives
+	// LLMInferenceService name, the same rule the portal applies). Empty derives
 	// the name from the model reference.
 	Name string `json:"name,omitempty"`
 }
@@ -676,7 +678,7 @@ func (o WireOptions) Apply(ep AgentEndpoint) AgentEndpoint {
 
 // Backend is the driver contract. The kserve driver implements the same
 // interface: ListModels is the per-node HF cache inventory, Pull is a download
-// Job, Load/Unload create and delete InferenceServices, LoadRequest.Preset
+// Job, Load/Unload create and delete LLMInferenceServices, LoadRequest.Preset
 // selects a serving preset.
 type Backend interface {
 	Name() Name

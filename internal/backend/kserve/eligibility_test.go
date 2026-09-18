@@ -24,7 +24,7 @@ import (
 // redirect policy mounting the cache claim into every predictor. Only the
 // accelerator nodes are reported, each says whether it can serve, and a
 // request naming a node that cannot is refused with the reason before any
-// Job or InferenceService exists — through the driver and through the REST API.
+// Job or LLMInferenceService exists — through the driver and through the REST API.
 func TestNodesAreAcceleratorsWithEligibility(t *testing.T) {
 	ctx := context.Background()
 	const downNode = "gpu-down"
@@ -87,9 +87,9 @@ func TestNodesAreAcceleratorsWithEligibility(t *testing.T) {
 	err = f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo, Node: testGPUNode})
 	assert.ErrorIs(t, err, backend.ErrUnfit)
 	assert.ErrorContains(t, err, "node gpu1 is not a serving target")
-	isvcs, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	isvcs, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, isvcs.Items, "no InferenceService for an ineligible node")
+	assert.Empty(t, isvcs.Items, "no LLMInferenceService for an ineligible node")
 	err = f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo, Node: testGPUNode}, nil)
 	assert.ErrorIs(t, err, backend.ErrUnfit)
 	assert.ErrorContains(t, err, "cache claim hf-cache is pinned to n1")
@@ -176,7 +176,7 @@ func TestNodesAreAcceleratorsWithEligibility(t *testing.T) {
 	assert.Contains(t, res.Reason, testCacheNode+": outside the serving node selector (kubernetes.io/hostname="+downNode+")")
 	err = f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo})
 	assert.ErrorIs(t, err, backend.ErrUnfit)
-	isvcs, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	isvcs, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, isvcs.Items)
 }

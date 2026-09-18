@@ -157,7 +157,7 @@ func TestCacheEntriesUnderDeadlineScansInBackground(t *testing.T) {
 }
 
 // While no scan can answer, the cache index stands in for it: a directory an
-// InferenceService filled for the repository — in this claim and volume —
+// LLMInferenceService filled for the repository — in this claim and volume —
 // counts as cached, anything else does not. A record bound to another
 // volume, or to none (an older release's), is no verdict
 // (giantswarm/model-manager#130).
@@ -216,7 +216,7 @@ func TestLoadAnswersWithinDeadlineAtScaleFromZero(t *testing.T) {
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
 	assert.Less(t, time.Since(start), 3*time.Second, "answered within the deadline")
 	assert.Equal(t, 0, f.scanCount(), "no scan pod inside load_model")
-	obj, err := f.b.findServing(bg, f.b.cfg.settings(bg), "tiny")
+	obj, err := f.b.getServing(bg, f.b.cfg.settings(bg).Namespace, "tiny")
 	require.NoError(t, err)
 	require.NotNil(t, obj, "the serving object exists")
 	loaded, err := f.b.ListLoaded(ctx)
@@ -323,7 +323,7 @@ func TestStopAnswersWithinDeadlineWithASlowScan(t *testing.T) {
 	assert.Equal(t, tinyRepo, res.Model)
 	assert.True(t, res.Inventory.Refreshing, "the answer says the inventory is rescanned in the background")
 	assert.Empty(t, res.Inventory.Reason)
-	obj, err := f.b.findServing(bg, f.b.cfg.settings(bg), "tiny")
+	obj, err := f.b.getServing(bg, f.b.cfg.settings(bg).Namespace, "tiny")
 	require.NoError(t, err)
 	assert.Nil(t, obj, "the serving object is deleted")
 	assert.Equal(t, before, f.scanCount(), "no scan inside the call")
@@ -352,7 +352,7 @@ func TestStopSaysWhyNoScanCanRun(t *testing.T) {
 	assert.Equal(t, tinyRepo, res.Model, "the answer names the repository the object served")
 	assert.False(t, res.Inventory.Refreshing)
 	assert.Contains(t, res.Inventory.Reason, "no node of the GPU pool")
-	obj, err := f.b.findServing(ctx, f.b.cfg.settings(ctx), "tiny")
+	obj, err := f.b.getServing(ctx, f.b.cfg.settings(ctx).Namespace, "tiny")
 	require.NoError(t, err)
 	assert.Nil(t, obj, "the serving object is deleted")
 	time.Sleep(20 * time.Millisecond)

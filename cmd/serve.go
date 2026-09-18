@@ -87,8 +87,6 @@ type kserveFlags struct {
 	discoveryNamespace  string
 	discoveryConfigMap  string
 	namespace           string
-	servingKind         string
-	runtime             string
 	gpuResourceName     string
 	cacheClaim          string
 	cacheMountPath      string
@@ -145,14 +143,12 @@ environment variable named next to it; flags win over the environment.`,
 	k := &o.kserve
 	f.StringVar(&k.discoveryNamespace, "kserve-discovery-namespace", envOr("KSERVE_DISCOVERY_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace of the model-serving discovery ConfigMap; defaults to the pod's namespace (KSERVE_DISCOVERY_NAMESPACE, POD_NAMESPACE)")
 	f.StringVar(&k.discoveryConfigMap, "kserve-discovery-configmap", envOr("KSERVE_DISCOVERY_CONFIGMAP", kserve.DefaultDiscoveryConfigMap), "Name of the discovery ConfigMap (kind ModelServingConfig, key config.yaml) (KSERVE_DISCOVERY_CONFIGMAP)")
-	f.StringVar(&k.namespace, "kserve-namespace", envOr("KSERVE_NAMESPACE", ""), "Serving namespace for InferenceServices, download Jobs and the cache claim; empty: discovery, else "+kserve.DefaultNamespace+" (KSERVE_NAMESPACE)")
-	f.StringVar(&k.servingKind, "kserve-serving-kind", envOr("KSERVE_SERVING_KIND", kserve.ServingKindAuto), "Kind a serving preset is composed into: "+kserve.ServingKindLLM+" (llm-d control plane, KServe's own router and well-known configs), "+kserve.ServingKindClassic+" (predictor on the vLLM ClusterServingRuntime) or "+kserve.ServingKindAuto+": "+kserve.ServingKindLLM+" wherever its API is served, else the classic kind (KSERVE_SERVING_KIND)")
-	f.StringVar(&k.runtime, "kserve-runtime", envOr("KSERVE_RUNTIME", ""), "ClusterServingRuntime for presets without one; empty: discovery, else "+kserve.DefaultRuntime+" (KSERVE_RUNTIME)")
+	f.StringVar(&k.namespace, "kserve-namespace", envOr("KSERVE_NAMESPACE", ""), "Serving namespace for LLMInferenceServices, download Jobs and the cache claim; empty: discovery, else "+kserve.DefaultNamespace+" (KSERVE_NAMESPACE)")
 	f.StringVar(&k.gpuResourceName, "kserve-gpu-resource", envOr("KSERVE_GPU_RESOURCE", ""), "Accelerator resource name; empty: discovery, else "+kserve.DefaultGPUResourceName+" (KSERVE_GPU_RESOURCE)")
 	f.StringVar(&k.cacheClaim, "kserve-cache-claim", envOr("KSERVE_CACHE_CLAIM", ""), "PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty: discovery, else "+kserve.DefaultCacheClaim+" (KSERVE_CACHE_CLAIM)")
 	f.StringVar(&k.cacheMountPath, "kserve-cache-mount-path", envOr("KSERVE_CACHE_MOUNT_PATH", ""), "Where predictors mount the cache; empty: discovery, else "+kserve.DefaultCacheMountPath+" (KSERVE_CACHE_MOUNT_PATH)")
 	f.StringVar(&k.cacheNodes, "kserve-cache-nodes", envOr("KSERVE_CACHE_NODES", ""), "Comma-separated nodes holding the cache; empty derives them from the bound PersistentVolume's node affinity (KSERVE_CACHE_NODES)")
-	f.StringVar(&k.cacheIndexConfigMap, "kserve-cache-index-configmap", envOr("KSERVE_CACHE_INDEX_CONFIGMAP", kserve.DefaultCacheIndexConfigMap), "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from it, kept after it is gone (KSERVE_CACHE_INDEX_CONFIGMAP)")
+	f.StringVar(&k.cacheIndexConfigMap, "kserve-cache-index-configmap", envOr("KSERVE_CACHE_INDEX_CONFIGMAP", kserve.DefaultCacheIndexConfigMap), "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an LLMInferenceService serves from it, kept after it is gone (KSERVE_CACHE_INDEX_CONFIGMAP)")
 	f.StringVar(&k.presetNamespace, "kserve-preset-namespace", envOr("KSERVE_PRESET_NAMESPACE", ""), "Namespace of the serving-preset ConfigMaps; empty: discovery, else the discovery namespace (KSERVE_PRESET_NAMESPACE)")
 	f.StringVar(&k.presetSelector, "kserve-preset-selector", envOr("KSERVE_PRESET_SELECTOR", ""), "Label selector of the serving-preset ConfigMaps; empty: discovery, else "+kserve.DefaultPresetSelector+" (KSERVE_PRESET_SELECTOR)")
 	f.StringVar(&k.hfEndpoint, "kserve-hf-endpoint", envOr("KSERVE_HF_ENDPOINT", kserve.DefaultHFEndpoint), "Hugging Face Hub base URL (KSERVE_HF_ENDPOINT)")
@@ -161,7 +157,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.DurationVar(&k.hfTimeout, "kserve-hf-timeout", envDuration("KSERVE_HF_TIMEOUT", kserve.DefaultHFTimeout), "Time budget of the Hugging Face Hub lookups of one fit check (repository metadata, file tree, safetensors index) or search; a hub that does not answer (egress blocked) lets check_fit fall back to the preset's requirements within a client's meta-tool deadline. Download Jobs are not affected (KSERVE_HF_TIMEOUT)")
 	f.StringVar(&k.downloadImage, "kserve-download-image", envOr("KSERVE_DOWNLOAD_IMAGE", kserve.DefaultDownloadImage), "Image of the pre-warm download Job (the KServe storage-initializer) (KSERVE_DOWNLOAD_IMAGE)")
 	f.DurationVar(&k.downloadStall, "kserve-download-stall-timeout", envDuration("KSERVE_DOWNLOAD_STALL_TIMEOUT", kserve.DefaultDownloadStallTimeout), "A download Job that writes nothing to its target directory for this long fails with a reason the pull job shows instead of hanging; partial files stay for a retry (KSERVE_DOWNLOAD_STALL_TIMEOUT)")
-	f.StringVar(&k.downloadIgnore, "kserve-download-ignore-patterns", envOr("KSERVE_DOWNLOAD_IGNORE_PATTERNS", ""), "Comma-separated file patterns downloads skip (STORAGE_IGNORE_PATTERNS); empty downloads the whole repository like an InferenceService does (KSERVE_DOWNLOAD_IGNORE_PATTERNS)")
+	f.StringVar(&k.downloadIgnore, "kserve-download-ignore-patterns", envOr("KSERVE_DOWNLOAD_IGNORE_PATTERNS", ""), "Comma-separated file patterns downloads skip (STORAGE_IGNORE_PATTERNS); empty downloads the whole repository like an LLMInferenceService does (KSERVE_DOWNLOAD_IGNORE_PATTERNS)")
 	f.StringVar(&k.initImage, "kserve-init-image", envOr("KSERVE_INIT_IMAGE", kserve.DefaultInitImage), "Image that prepares cache directories and scans the cache (KSERVE_INIT_IMAGE)")
 	f.DurationVar(&k.jobTTL, "kserve-job-ttl", envDuration("KSERVE_JOB_TTL", kserve.DefaultJobTTL), "ttlSecondsAfterFinished of download Jobs (KSERVE_JOB_TTL)")
 	f.DurationVar(&k.inventoryTTL, "kserve-inventory-ttl", envDuration("KSERVE_INVENTORY_TTL", kserve.DefaultInventoryTTL), "How long a cache scan is reused (KSERVE_INVENTORY_TTL)")
@@ -171,7 +167,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.IntVar(&k.inventoryAgentPort, "kserve-inventory-agent-port", envInt("KSERVE_INVENTORY_AGENT_PORT", kserve.DefaultInventoryAgentPort), "Port of the cache-agent pods (daemonset mode) (KSERVE_INVENTORY_AGENT_PORT)")
 	f.StringVar(&k.budgetSource, "kserve-budget-source", envOr("KSERVE_BUDGET_SOURCE", kserve.DefaultBudgetSource), "Node memory budget: auto (GPU labels when present, else allocatable memory), gpu-labels, allocatable; the node annotation "+kserve.BudgetAnnotation+" (GiB) overrides it per node (KSERVE_BUDGET_SOURCE)")
 	f.Float64Var(&k.defaultOverheadGiB, "kserve-default-overhead-gib", envFloat("KSERVE_DEFAULT_OVERHEAD_GIB", kserve.DefaultOverheadGiB), "Serving overhead added to the weights when the preset has none (KSERVE_DEFAULT_OVERHEAD_GIB)")
-	f.DurationVar(&k.readyTimeout, "kserve-ready-timeout", envDuration("KSERVE_READY_TIMEOUT", kserve.DefaultReadyTimeout), "How long a load job waits for an InferenceService to become ready (KSERVE_READY_TIMEOUT)")
+	f.DurationVar(&k.readyTimeout, "kserve-ready-timeout", envDuration("KSERVE_READY_TIMEOUT", kserve.DefaultReadyTimeout), "How long a load job waits for an LLMInferenceService to become ready (KSERVE_READY_TIMEOUT)")
 	f.DurationVar(&k.scaleUpTimeout, "kserve-scale-up-timeout", envDuration("KSERVE_SCALE_UP_TIMEOUT", kserve.DefaultScaleUpTimeout), "The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (InsufficientInstanceCapacity) before its scheduling step and the phase read failed naming the refusal, counted from the pod's creation (KSERVE_SCALE_UP_TIMEOUT)")
 	f.DurationVar(&k.pollInterval, "kserve-poll-interval", envDuration("KSERVE_POLL_INTERVAL", kserve.DefaultPollInterval), "Poll period for Job progress and readiness (KSERVE_POLL_INTERVAL)")
 
@@ -376,8 +372,6 @@ func (k kserveFlags) options() backend.KServeOptions {
 		DiscoveryNamespace:     k.discoveryNamespace,
 		DiscoveryConfigMap:     k.discoveryConfigMap,
 		Namespace:              k.namespace,
-		Runtime:                k.runtime,
-		ServingKind:            k.servingKind,
 		GPUResourceName:        k.gpuResourceName,
 		CacheClaim:             k.cacheClaim,
 		CacheMountPath:         k.cacheMountPath,

@@ -79,7 +79,7 @@ Usage: include "model-manager.hasBackend" (dict "root" . "name" "kserve")
 {{- end }}
 
 {{/*
-Serving namespace of the kserve backend (InferenceServices, download Jobs,
+Serving namespace of the kserve backend (LLMInferenceServices, download Jobs,
 cache); defaults to the release namespace.
 */}}
 {{- define "model-manager.kserveNamespace" -}}

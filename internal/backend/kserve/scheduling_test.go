@@ -111,7 +111,7 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 
 	// Unset: nothing changes and the tainted node is reported as blocked.
 	s := f.b.cfg.settings(ctx)
-	obj := f.b.compose(mustPreset(t, f, "big"), s, testGPUNode)
+	obj := f.b.composeLLM(mustPreset(t, f, "big"), s, testGPUNode)
 	_, has, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "tolerations")
 	assert.False(t, has, "no tolerations without an input")
 	job := f.b.buildJob(downloadPlan{Dir: "big", Repo: bigRepo, Node: testCacheNode}, s)
@@ -131,21 +131,18 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 	s = f.b.cfg.settings(ctx)
 	want := map[string]any{"key": poolTaintKey, "operator": "Exists", "effect": "NoSchedule"}
 
-	// The classic predictor: pool toleration, pool label under the preset's selector and the pin.
-	obj = f.b.compose(mustPreset(t, f, "big"), s, poolNode)
-	tols, _, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "tolerations")
+	// The workload: pool toleration, pool label under the preset's selector and the pin.
+	obj = f.b.composeLLM(mustPreset(t, f, "big"), s, poolNode)
+	tols, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "tolerations")
 	assert.Equal(t, []any{want}, tols)
-	sel, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "nodeSelector")
+	sel, _, _ := unstructured.NestedMap(obj.Object, "spec", "template", "nodeSelector")
 	assert.Equal(t, map[string]any{poolLabel: poolName, "accelerator": "gpu", labelHostname: poolNode}, sel)
 
-	// The LLMInferenceService: the preset's tolerations follow the pool's, a repeated entry once.
+	// The preset's tolerations follow the pool's, a repeated entry once.
 	custom := presetDoc("custom", "org/custom", 1, poolToleranceYAML)
 	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap("custom", custom), metav1.CreateOptions{})
 	require.NoError(t, err)
-	f.serveLLMAPI()
-	s = f.b.cfg.settings(ctx)
-	require.Equal(t, ServingKindLLM, s.ServingKind)
-	obj = f.b.compose(mustPreset(t, f, "custom"), s, "")
+	obj = f.b.composeLLM(mustPreset(t, f, "custom"), s, "")
 	loadLLMISVCSchema(t).assertValid(t, obj)
 	tols, _, _ = unstructured.NestedSlice(obj.Object, "spec", "template", "tolerations")
 	assert.Equal(t, []any{want, map[string]any{"key": "dedicated", "operator": "Equal", "value": "llm", "effect": "NoExecute"}}, tols)
@@ -208,11 +205,11 @@ func TestFitCheckPoolScalesFromZero(t *testing.T) {
 	assert.Contains(t, res.Reason, "outside the GPU pool node selector")
 
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
-	isvcs, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	llmisvcs, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, isvcs.Items, 1, "the serving object exists; its pending predictor brings the pool's node")
-	_, pinned, _ := unstructured.NestedString(isvcs.Items[0].Object, "spec", "predictor", "nodeName")
-	assert.False(t, pinned, "no node pin: the pool decides")
+	require.Len(t, llmisvcs.Items, 1, "the serving object exists; its pending workload brings the pool's node")
+	selector, _, _ := unstructured.NestedMap(llmisvcs.Items[0].Object, "spec", "template", "nodeSelector")
+	assert.NotContains(t, selector, labelHostname, "no node pin: the pool decides")
 
 	// With a node in the pool the fit is against that node again.
 	_, err = f.cs.CoreV1().Nodes().Create(ctx, taintedPoolNode(), metav1.CreateOptions{})

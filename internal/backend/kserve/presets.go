@@ -44,7 +44,6 @@ type presetSpec struct {
 		Capabilities  []string `json:"capabilities"`
 		License       string   `json:"license"`
 	} `json:"model"`
-	Runtime      string           `json:"runtime"`
 	Args         []string         `json:"args"`
 	Env          []map[string]any `json:"env"`
 	ChatTemplate *struct {
@@ -65,16 +64,14 @@ type presetSpec struct {
 		NodeSelector map[string]string `json:"nodeSelector"`
 		Tolerations  []map[string]any  `json:"tolerations"`
 	} `json:"scheduling"`
-	// Predictor holds extra InferenceService predictor fields copied on top
-	// verbatim (classic kind); Template the LLMInferenceService's
-	// spec.template extras, with containers merged by name so a preset can
-	// override template.containers[main].image without repeating the rest.
-	// BaseRefs names custom LLMInferenceServiceConfigs; absent for every
-	// shipped preset — KServe picks its well-known configs from the spec's
-	// shape and appends them itself.
-	Predictor map[string]any   `json:"predictor"`
-	Template  map[string]any   `json:"template"`
-	BaseRefs  []map[string]any `json:"baseRefs"`
+	// Template holds the LLMInferenceService's spec.template extras, with
+	// containers merged by name so a preset can override
+	// template.containers[main].image without repeating the rest. BaseRefs
+	// names custom LLMInferenceServiceConfigs; absent for every shipped
+	// preset — KServe picks its well-known configs from the spec's shape and
+	// appends them itself.
+	Template map[string]any   `json:"template"`
+	BaseRefs []map[string]any `json:"baseRefs"`
 	// Router decides the LLMInferenceService's router shape for this preset
 	// alone: Scheduler set composes (true) or leaves out (false) the llm-d
 	// endpoint picker whatever the backend's default; nil follows it.
@@ -154,7 +151,6 @@ func (p *servingPreset) view(defaultOverheadGiB float64) backend.Preset {
 		Model:         p.Spec.Model.ID,
 		StorageURI:    p.Spec.Model.StorageURI,
 		Format:        p.Spec.Model.Format,
-		Runtime:       p.Spec.Runtime,
 		ContextLength: p.Spec.Model.ContextLength,
 		Capabilities:  p.Spec.Model.Capabilities,
 		License:       p.Spec.Model.License,

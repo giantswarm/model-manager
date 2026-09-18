@@ -23,11 +23,11 @@ names the others.
   `OpenAI` provider against `lmstudio.agentHost` plus `/v1`. It serves no
   delete: that call answers `501 unsupported`, and a model is removed with
   `lms rm` on the host.
-- `kserve` — InferenceServices composed from the platform's serving presets,
+- `kserve` — LLMInferenceServices composed from the platform's serving presets,
   the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
   download Jobs with progress, Hugging Face Hub search and node fit checks.
   Agent wiring uses kagent's `OpenAI` provider against the predictor URL with
-  a placeholder API-key Secret, created when the InferenceService is ready.
+  a placeholder API-key Secret, created when the LLMInferenceService is ready.
 
 A component of the [`giantswarm/agent-platform`](https://github.com/giantswarm/agent-platform)
 meta chart (`components.model-manager.enabled`), which sets `backend`, the
@@ -57,13 +57,13 @@ connectivity chart): the discovery
 ConfigMap `agent-platform-model-serving` (`kserve.discovery.*`), the
 `ServingPreset` ConfigMaps and the cache `PersistentVolumeClaim` in the serving
 namespace. `kserve.namespace` must equal the platform's serving namespace: the
-Role for InferenceServices, Jobs, pods and the claim is created there. Every
+Role for LLMInferenceServices, Jobs, pods and the claim is created there. Every
 other `kserve.*` value is an override of what the discovery ConfigMap says and
 can stay empty.
 
 - Downloads run as Jobs in the serving namespace with the KServe
   storage-initializer image (`kserve.download.image`), into
-  `<claim>/<preset name>` — the directory the preset's InferenceService mounts
+  `<claim>/<preset name>` — the directory the preset's LLMInferenceService mounts
   — after a fit check against the node's memory budget (`kserve.budget.*`;
   the node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"`
   overrides one node's budget, e.g. a unified-memory node without GPU memory
@@ -82,18 +82,18 @@ can stay empty.
   filled it: the marker of a pre-warm download, else the **cache index** — the
   ConfigMap `kserve.cache.indexConfigMap` (default `model-manager-cache-index`)
   in the serving namespace, in which model-manager records, while an
-  InferenceService exists, that its name is the directory the
+  LLMInferenceService exists, that its name is the directory the
   storage-initializer fills and its `hf://` storageUri the repository — so a
-  directory keeps its repository and preset after its InferenceService is
+  directory keeps its repository and preset after its LLMInferenceService is
   deleted. Directories whose top level holds no model (no `config.json`, no
   weights file: Hugging Face client internals such as `hf-home`, `xet`) are
   not listed as downloads.
-- RBAC: a Role in the serving namespace (InferenceServices, Jobs, pods, the
+- RBAC: a Role in the serving namespace (LLMInferenceServices, Jobs, pods, the
   claim, `create` on ConfigMaps and `update`/`patch` on the cache index
   ConfigMap), a Role for the ConfigMaps in the discovery/preset namespace when
   it differs, and a ClusterRole for nodes and PersistentVolumes.
 - Kubernetes access does not depend on wiring: the kserve driver needs the API
-  for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
+  for LLMInferenceServices, Jobs, cache scans and nodes, so the pod mounts the
   ServiceAccount token and the RBAC above renders even with
   `kagent.disableWiring: true` — that value only removes the ModelConfig
   management and its Role in `kagent.namespace`. Only the ollama backend runs

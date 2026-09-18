@@ -82,7 +82,7 @@ type ModelConfigRef struct {
 	// (the portal's, hand-written ones) are reported but never modified.
 	Managed bool `json:"managed"`
 	// ProviderModel is spec.model — the name the provider serves the model
-	// under (kserve: the InferenceService name); Model is the backend's
+	// under (kserve: the LLMInferenceService name); Model is the backend's
 	// reference.
 	ProviderModel string `json:"providerModel,omitempty"`
 	// Endpoint is the provider endpoint: openAI.baseUrl or ollama.host.
@@ -228,7 +228,7 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	}
 	// An owned ModelConfig for this (backend, model) keeps the name it has —
 	// plain or suffixed — so a repeated Ensure never deletes and recreates
-	// it. Only a backend-chosen name (ep.Name, the kserve InferenceService
+	// it. Only a backend-chosen name (ep.Name, the kserve LLMInferenceService
 	// rule) converges an older derived name onto the new one, replacing it,
 	// never duplicating it.
 	name := target

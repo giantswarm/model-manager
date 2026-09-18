@@ -155,7 +155,6 @@ spec:
     format: vLLM
     contextLength: 4096
     capabilities: [chat, tools]
-  runtime: kserve-vllm
   args:
     - --max-model-len=4096
   resources:
@@ -281,13 +280,59 @@ func (f *fixture) setDiscoveryOpts(ctx context.Context, o discoveryOpts) {
 }
 
 // serveLLMAPI makes the fake API server serve the LLMInferenceService API,
-// the way a cluster with the llmisvc control plane does.
+// the way a cluster with the llm-d CRDs does; the fixture starts this way.
 func (f *fixture) serveLLMAPI() {
 	f.t.Helper()
 	f.cs.Discovery().(*discoveryfake.FakeDiscovery).Resources = []*metav1.APIResourceList{{
 		GroupVersion: llmisvcGVR.GroupVersion().String(),
-		APIResources: []metav1.APIResource{{Name: llmisvcGVR.Resource, Kind: ServingKindLLM, Namespaced: true}},
+		APIResources: []metav1.APIResource{
+			{Name: llmisvcGVR.Resource, Kind: kindLLMInferenceService, Namespaced: true},
+			{Name: llmisvcConfigGVR.Resource, Kind: "LLMInferenceServiceConfig", Namespaced: true},
+		},
 	}}
+	f.resetSettings()
+}
+
+// dropLLMAPI makes the fake API server serve no serving.kserve.io API at all
+// — a cluster without the llm-d CRDs.
+func (f *fixture) dropLLMAPI() {
+	f.t.Helper()
+	f.cs.Discovery().(*discoveryfake.FakeDiscovery).Resources = nil
+	f.resetSettings()
+}
+
+// testControlPlaneNS is where the fixture's llm-d control plane keeps its
+// well-known configs (the platform release namespace on a real cluster).
+const testControlPlaneNS = "kserve"
+
+// wellKnownConfig is the LLMInferenceServiceConfig the llm-d controller
+// composes every workload from, as the kserve-runtime-configs component
+// publishes it — its presence is how the driver tells a controller from bare
+// CRDs.
+func wellKnownConfig() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": llmisvcConfigGVR.GroupVersion().String(),
+		"kind":       "LLMInferenceServiceConfig",
+		"metadata":   map[string]any{"name": wellKnownTemplateConfig, "namespace": testControlPlaneNS},
+		"spec":       map[string]any{"template": map[string]any{"containers": []any{map[string]any{"name": llmisvcMainContainer, "image": "gsoci.azurecr.io/giantswarm/llm-d-cuda:v0.4.0"}}}},
+	}}
+}
+
+// dropControlPlane removes the well-known config: the llm-d CRDs stand alone,
+// the way an installation with kserve-llmisvc-crd on and the controller off
+// looks (giantswarm/model-manager#129).
+func (f *fixture) dropControlPlane(ctx context.Context) {
+	f.t.Helper()
+	err := f.dyn.Resource(llmisvcConfigGVR).Namespace(testControlPlaneNS).Delete(ctx, wellKnownTemplateConfig, metav1.DeleteOptions{})
+	require.NoError(f.t, err)
+	f.resetSettings()
+}
+
+// installControlPlane puts the well-known config back.
+func (f *fixture) installControlPlane(ctx context.Context) {
+	f.t.Helper()
+	_, err := f.dyn.Resource(llmisvcConfigGVR).Namespace(testControlPlaneNS).Create(ctx, wellKnownConfig(), metav1.CreateOptions{})
+	require.NoError(f.t, err)
 	f.resetSettings()
 }
 
@@ -350,7 +395,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	base := []runtime.Object{
 		discoveryConfigMap(),
 		presetConfigMap("tiny", presetDoc("tiny", tinyRepo, 0.001, "")),
-		presetConfigMap("big", presetDoc("big", bigRepo, 100, "  chatTemplate:\n    configMap: agent-platform-chat-template-big\n    key: chat-template.jinja\n    mountPath: /mnt/chat-template\n  scheduling:\n    nodeSelector:\n      accelerator: gpu\n  predictor:\n    minReplicas: 1\n")),
+		presetConfigMap("big", presetDoc("big", bigRepo, 100, "  chatTemplate:\n    configMap: agent-platform-chat-template-big\n    key: chat-template.jinja\n    mountPath: /mnt/chat-template\n  scheduling:\n    nodeSelector:\n      accelerator: gpu\n  template:\n    terminationGracePeriodSeconds: 30\n")),
 		// The cache node advertises its GPU as a resource only (a unified-memory
 		// node without feature-discovery labels); the GPU node is known from
 		// its labels alone; the CPU node must never show up as capacity.
@@ -369,8 +414,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 		},
 	}
 	cs := kubefake.NewSimpleClientset(append(base, objs...)...)
-	scheme := runtime.NewScheme()
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{isvcGVR: "InferenceServiceList", llmisvcGVR: "LLMInferenceServiceList"})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), llmisvcListKinds(), wellKnownConfig())
 	b, err := New(backend.KServeOptions{
 		Dynamic:            dyn,
 		Clientset:          cs,
@@ -385,6 +429,7 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	b.log = slog.New(slog.DiscardHandler)
 	b.cfg.log = b.log
 	f := &fixture{t: t, b: b, cs: cs, dyn: dyn, hub: hub, entries: map[string][]cacheEntry{}, logs: map[string]string{}}
+	f.serveLLMAPI()
 	b.scan = func(_ context.Context, node string) ([]cacheEntry, string, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -528,15 +573,22 @@ func (f *fixture) finishJob(ctx context.Context, name string, logs string, cond 
 	}()
 }
 
-func (f *fixture) isvc(ctx context.Context, name string) map[string]any {
-	obj, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, name, metav1.GetOptions{})
+// llmisvcListKinds registers the list kinds the fake dynamic client needs for
+// the serving.kserve.io resources the driver lists.
+func llmisvcListKinds() map[schema.GroupVersionResource]string {
+	return map[schema.GroupVersionResource]string{llmisvcGVR: "LLMInferenceServiceList", llmisvcConfigGVR: "LLMInferenceServiceConfigList"}
+}
+
+// llmisvc reads the LLMInferenceService of the name from the serving namespace.
+func (f *fixture) llmisvc(ctx context.Context, name string) map[string]any {
+	obj, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, name, metav1.GetOptions{})
 	require.NoError(f.t, err)
 	return obj.Object
 }
 
-// isvcObject is a hand-written InferenceService serving storageURI, carrying
-// only the given labels.
-func isvcObject(name, storageURI string, labels map[string]string) *unstructured.Unstructured {
+// llmisvcObject is a hand-written LLMInferenceService serving modelURI,
+// carrying only the given labels.
+func llmisvcObject(name, modelURI string, labels map[string]string) *unstructured.Unstructured {
 	meta := map[string]any{"name": name, "namespace": testServingNS}
 	if len(labels) > 0 {
 		l := map[string]any{}
@@ -546,9 +598,9 @@ func isvcObject(name, storageURI string, labels map[string]string) *unstructured
 		meta["labels"] = l
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": isvcGVR.Group + "/" + isvcGVR.Version,
-		"kind":       "InferenceService",
+		"apiVersion": llmisvcGVR.GroupVersion().String(),
+		"kind":       kindLLMInferenceService,
 		"metadata":   meta,
-		"spec":       map[string]any{"predictor": map[string]any{"model": map[string]any{"storageUri": storageURI, "modelFormat": map[string]any{"name": "vLLM"}}}},
+		"spec":       map[string]any{"model": map[string]any{"uri": modelURI}, "replicas": int64(1), "router": map[string]any{"route": map[string]any{}}},
 	}}
 }

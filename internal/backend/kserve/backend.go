@@ -1,9 +1,10 @@
-// Package kserve implements the serving backend over KServe: the inventory is
-// the per-node Hugging Face cache (a PersistentVolumeClaim scanned by a
-// short-lived pod) plus the InferenceServices of the serving namespace; pull
-// is a pre-warm download Job into that cache; load composes an
-// InferenceService from a curated serving preset (the modelServing contract of
-// the agent-platform connectivity chart); unload deletes it. Sizes come from the Hugging
+// Package kserve implements the serving backend over KServe's llm-d control
+// plane: the inventory is the per-node Hugging Face cache (a
+// PersistentVolumeClaim scanned by a short-lived pod) plus the
+// LLMInferenceServices of the serving namespace; pull is a pre-warm download
+// Job into that cache; load composes an LLMInferenceService from a curated
+// serving preset (the modelServing contract of the agent-platform
+// connectivity chart); unload deletes it. Sizes come from the Hugging
 // Face Hub and are fit-checked against node memory budgets before any download
 // or start. Agents reach a served model through kagent's OpenAI provider: a
 // model routed on the models Gateway with the caller's own token forwarded
@@ -76,7 +77,7 @@ func (b *Backend) k8s(ctx context.Context) kubernetes.Interface {
 	return b.cs
 }
 
-// dynamic is k8s for the dynamic client (InferenceServices).
+// dynamic is k8s for the dynamic client (LLMInferenceServices).
 func (b *Backend) dynamic(ctx context.Context) dynamic.Interface {
 	if b.opts.ClientsFor != nil {
 		if _, dyn := b.opts.ClientsFor(ctx); dyn != nil {
@@ -97,9 +98,6 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		return nil, fmt.Errorf("kserve backend needs Kubernetes access")
 	}
 	applyDefaults(&opts)
-	if !validServingKind(opts.ServingKind) {
-		return nil, fmt.Errorf("kserve: serving kind %q; want %s, %s or %s", opts.ServingKind, ServingKindAuto, ServingKindLLM, ServingKindClassic)
-	}
 	switch opts.BudgetSource {
 	case budgetSourceAuto, budgetSourceGPULabels, budgetSourceAllocatable:
 	default:
@@ -151,27 +149,31 @@ func (b *Backend) Capabilities() backend.Capabilities {
 	}
 }
 
-// Info implements backend.Backend: healthy when the InferenceService API
-// answers in the serving namespace.
+// Info implements backend.Backend: healthy when the LLMInferenceService API
+// answers in the serving namespace. The message says what keeps a load from
+// being served — the llm-d controller not installed, the API not served —
+// before anyone tries one (giantswarm/model-manager#129), else what the
+// discovery document is up to.
 func (b *Backend) Info(ctx context.Context) backend.Info {
 	s := b.cfg.settings(ctx)
-	gvr := gvrFor(s.ServingKind)
 	info := backend.Info{
 		Backend:  backend.NameKServe,
-		Version:  gvr.Group + "/" + gvr.Version,
-		Endpoint: fmt.Sprintf("%s.%s/%s", gvr.Resource, gvr.Group, s.Namespace),
-		// An InferenceService serves only while it exists: nothing loads a
-		// stopped model on request and nothing evicts a running one.
+		Version:  llmisvcGVR.GroupVersion().String(),
+		Endpoint: fmt.Sprintf("%s.%s/%s", llmisvcGVR.Resource, llmisvcGVR.Group, s.Namespace),
+		// An LLMInferenceService serves only while it exists: nothing loads
+		// a stopped model on request and nothing evicts a running one.
 		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
 		Target:  b.Target(),
 		GPUPool: s.gpuPoolReport(),
 	}
-	if _, err := b.dynamic(ctx).Resource(gvr).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
-		info.Message = fmt.Sprintf("%s API not available in %s: %v", s.ServingKind, s.Namespace, err)
+	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		info.Message = fmt.Sprintf("%s API not available in %s: %v", kindLLMInferenceService, s.Namespace, err)
 		return info
 	}
 	info.Healthy = true
 	switch {
+	case s.servingUnavailable() != "":
+		info.Message = s.servingUnavailable()
 	case s.DiscoveryError != "":
 		info.Message = "discovery: " + s.DiscoveryError
 	case !s.DiscoveryFound:
@@ -255,9 +257,9 @@ func anyDir(seen map[string]bool, dir string) bool {
 
 // modelFromEntry names a cache directory by what is known to have filled it:
 // the marker a pre-warm download wrote, the cache index record of the
-// InferenceService that served from it (index.go — live InferenceServices are
-// part of the index), then the assumptions — the preset of the same name, the
-// InferenceService of the same name — else the directory itself. The preset is
+// LLMInferenceService that served from it (index.go — live objects are part
+// of the index), then the assumptions — the preset of the same name, the
+// LLMInferenceService of the same name — else the directory itself. The preset is
 // the one of the same name, else the one the record names when it still serves
 // that model, else the single preset serving the model.
 func (b *Backend) modelFromEntry(e cacheEntry, idx presetIndex, servedByName map[string]served, index map[string]indexEntry) backend.Model {
@@ -358,7 +360,7 @@ func (b *Backend) cacheEntries(ctx context.Context) ([]cacheEntry, error) {
 
 // GetModel implements backend.Backend. Names resolve as repository id, cache
 // directory or preset name; a model only known from a preset is returned with
-// downloaded=false so it can be loaded (the InferenceService downloads).
+// downloaded=false so it can be loaded (the LLMInferenceService downloads).
 func (b *Backend) GetModel(ctx context.Context, name string) (*backend.Model, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -399,7 +401,7 @@ func (b *Backend) GetModel(ctx context.Context, name string) (*backend.Model, er
 	}, nil
 }
 
-// ListLoaded implements backend.Backend: the InferenceServices.
+// ListLoaded implements backend.Backend: the LLMInferenceServices.
 func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error) {
 	servedList, err := b.listServed(ctx)
 	if err != nil {
@@ -420,7 +422,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Reason:    sv.Reason,
 			Message:   sv.Message,
 			Resource:  sv.Name,
-			Kind:      sv.Kind,
+			Kind:      kindLLMInferenceService,
 			Preset:    sv.Preset,
 			GPUs:      sv.GPUs,
 			ManagedBy: sv.ManagedBy,
@@ -440,7 +442,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 }
 
 // Pull implements backend.Backend: fit-check, then a download Job into the
-// cache directory the model's InferenceService will mount. A preset served
+// cache directory the model's LLMInferenceService will mount. A preset served
 // from an OCI model image has nothing to pull into the cache — the nodes pull
 // the image themselves — and is refused as invalid before the hub is asked
 // (giantswarm/model-manager#123).
@@ -501,7 +503,7 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 	}
 	for _, sv := range servedList {
 		if sv.Name == m.Path || strings.EqualFold(sv.Model, m.Name) {
-			return fmt.Errorf("%w: %s is served by InferenceService %s; unload it first", backend.ErrConflict, m.Name, sv.Name)
+			return fmt.Errorf("%w: %s is served by %s %s; unload it first", backend.ErrConflict, m.Name, kindLLMInferenceService, sv.Name)
 		}
 	}
 	loc, err := b.cacheNodes(ctx)
@@ -520,19 +522,26 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// Load implements backend.Backend: fit-check, then create the InferenceService
-// composed from the preset. Loading the same preset again is a no-op.
+// Load implements backend.Backend: fit-check, then create the
+// LLMInferenceService composed from the preset. Loading the same preset again
+// is a no-op.
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	_, err := b.Serve(ctx, req)
 	return err
 }
 
 // Serve implements backend.Server: Load with the fit verdict the model was
-// judged by in the answer (giantswarm/model-manager#110).
+// judged by in the answer (giantswarm/model-manager#110). It fails fast, before
+// the fit check and with nothing created, where no llm-d control plane would
+// reconcile the object (settings.servingUnavailable).
 func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.LoadResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" && req.Preset == "" {
 		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+	}
+	s := b.cfg.settings(ctx)
+	if reason := s.servingUnavailable(); reason != "" {
+		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
 	}
 	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node}, true)
 	if err != nil {
@@ -546,27 +555,27 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	res := &backend.LoadResult{Fit: &fit}
 	// A CPU preset is composed without the GPU pool's scheduling and the
 	// accelerator RuntimeClass (settings.forPreset).
-	s := b.cfg.settings(ctx).forPreset(plan.Preset)
-	existing, err := b.findServing(ctx, s, plan.Preset.name())
+	s = s.forPreset(plan.Preset)
+	existing, err := b.getServing(ctx, s.Namespace, plan.Preset.name())
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
-			b.log.Info("serving object already exists", "kind", sv.Kind, "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
+			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
 			return res, nil
 		}
-		return nil, fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, sv.Kind, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
+		return nil, fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, kindLLMInferenceService, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)
 	}
 	if !plan.Result.Fits {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
-	obj := b.compose(plan.Preset, s, req.Node)
+	obj := b.composeLLM(plan.Preset, s, req.Node)
 	if err := b.createServing(ctx, obj); err != nil {
 		return nil, err
 	}
-	b.log.Info("serving object created", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
+	b.log.Info("serving object created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
 	b.inv.invalidate()
 	return res, nil
 }
@@ -577,13 +586,13 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 	return err
 }
 
-// Stop implements backend.Stopper: deletes the InferenceServices serving the
-// model — found among the served objects by repository id, object name or
+// Stop implements backend.Stopper: deletes the LLMInferenceServices serving
+// the model — found among the served objects by repository id, object name or
 // preset name, never through the cache inventory — and answers what follows;
 // the cache stays, and so does the index entry of a directory in it, while an
 // entry that names a directory in no cache goes (forgetStale). model-manager's
-// own InferenceServices and the ones the
-// portal created from a preset are deleted; hand-written ones are not. The
+// own objects and the ones the portal created from a preset are deleted;
+// hand-written ones are not. The
 // inventory is rescanned in the background where a scan pod may run
 // (refreshInventory), so a caller under a short deadline gets the deletion
 // done whatever the scan would take (giantswarm/model-manager#119).
@@ -597,25 +606,25 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		return nil, err
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
+		return nil, fmt.Errorf("%w: no %s serves %s", backend.ErrNotFound, kindLLMInferenceService, name)
 	}
 	for _, sv := range matches {
 		if !sv.manageable() {
-			return nil, fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Kind, sv.Namespace, sv.Name, sv.ManagedBy)
+			return nil, fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, kindLLMInferenceService, sv.Namespace, sv.Name, sv.ManagedBy)
 		}
 	}
 	for _, sv := range matches {
-		if err := b.deleteServing(ctx, sv.Kind, sv.Namespace, sv.Name); err != nil {
+		if err := b.deleteServing(ctx, sv.Namespace, sv.Name); err != nil {
 			return nil, err
 		}
-		b.log.Info("serving object deleted", "kind", sv.Kind, "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
+		b.log.Info("serving object deleted", "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
 	}
 	b.forgetStale(ctx, matches)
 	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
 }
 
-// servedFor finds the InferenceServices serving a model (by repository id,
-// InferenceService name or preset name).
+// servedFor finds the LLMInferenceServices serving a model (by repository id,
+// object name or preset name).
 func (b *Backend) servedFor(ctx context.Context, name string) ([]served, error) {
 	servedList, err := b.listServed(ctx)
 	if err != nil {
@@ -648,7 +657,7 @@ func (b *Backend) WaitReady(ctx context.Context, model string) error {
 		case err != nil:
 			b.log.Warn("readiness poll failed", "model", model, "error", err)
 		case len(matches) == 0:
-			return fmt.Errorf("%w: InferenceService for %s is gone", backend.ErrNotFound, model)
+			return fmt.Errorf("%w: %s for %s is gone", backend.ErrNotFound, kindLLMInferenceService, model)
 		default:
 			for _, sv := range matches {
 				if sv.Ready {
@@ -681,10 +690,9 @@ func (b *Backend) RunningPulls(ctx context.Context) ([]backend.PullRequest, erro
 // Knowing the routed address at compose time is what lets a load wire the
 // ModelConfig in the same call, before the model is ready
 // (giantswarm/model-manager#115). vLLM serves the model under the
-// InferenceService name (--served-model-name {{.Name}} in the platform
-// runtime) or an LLMInferenceService's spec.model.name. The ModelConfig is
-// named after the object — the rule the portal's serve flow applies, so both
-// wire a served model to the same ModelConfig.
+// LLMInferenceService's spec.model.name (the well-known template passes it).
+// The ModelConfig is named after the object — the rule the portal's serve
+// flow applies, so both wire a served model to the same ModelConfig.
 func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	repo, _ := splitRevision(model)
 	b.mu.Lock()
@@ -696,10 +704,10 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 			return sv.agentEndpoint()
 		}
 	}
-	// Not served (yet): the object the preset would create, in the
-	// configured kind, at the address it will get.
+	// Not served (yet): the object the preset would create, at the address
+	// it will get.
 	s := b.cfg.last()
-	sv := served{Kind: s.ServingKind, Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo}
+	sv := served{Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo}
 	if p, err := indexPresets(presets).resolve(repo, ""); err == nil && p != nil {
 		sv.Name, sv.Model = p.name(), p.Spec.Model.ID
 	}

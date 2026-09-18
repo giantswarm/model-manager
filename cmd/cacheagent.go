@@ -31,7 +31,7 @@ func newCacheAgentCmd() *cobra.Command {
 		Use:   "cache-agent",
 		Short: "Serve the contents of a mounted model cache over HTTP (DaemonSet inventory)",
 		Long: `Run the cache agent: walk the mounted model cache (one directory per
-InferenceService plus the pre-warm download markers) on every request and
+LLMInferenceService plus the pre-warm download markers) on every request and
 serve the result as JSON at ` + cacheagent.InventoryPath + `. The kserve driver of
 model-manager reads it from the agent pod on a node instead of creating a scan
 pod there (kserve.inventory.mode=daemonset in the chart).`,

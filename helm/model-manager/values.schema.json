@@ -10,7 +10,7 @@
         },
         "backend": {
             "type": "string",
-            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. Empty (the default), like an empty `backends`, starts with no static backend: backends are then registered at runtime with the `add_backend` tool as backend documents — ConfigMaps in the release namespace labelled `agent-platform.giantswarm.io/model-backend=true` — and listed with `source: person` or `cluster-manager` (see docs/backends.md); a static value here is listed as `source: static` and cannot be registered again at runtime."
+            "description": "Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/llm-d on GPU installs: LLMInferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. Empty (the default), like an empty `backends`, starts with no static backend: backends are then registered at runtime with the `add_backend` tool as backend documents — ConfigMaps in the release namespace labelled `agent-platform.giantswarm.io/model-backend=true` — and listed with `source: person` or `cluster-manager` (see docs/backends.md); a static value here is listed as `source: static` and cannot be registered again at runtime."
         },
         "backends": {
             "type": "array",
@@ -185,7 +185,7 @@
                 },
                 "disableWiring": {
                     "type": "boolean",
-                    "description": "Disable all ModelConfig management; the `wire` capability reports false. A release that runs the kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only releases with the ollama and lemonade backends alone run without the API when wiring is off."
+                    "description": "Disable all ModelConfig management; the `wire` capability reports false. A release that runs the kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for LLMInferenceServices, Jobs and nodes; only releases with the ollama and lemonade backends alone run without the API when wiring is off."
                 },
                 "modelConfigPrefix": {
                     "type": "string",
@@ -225,7 +225,7 @@
                         },
                         "indexConfigMap": {
                             "type": "string",
-                            "description": "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from the directory (its name), kept after the InferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch`/`delete` on this name."
+                            "description": "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an LLMInferenceService serves from the directory (its name), kept after the LLMInferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch`/`delete` on this name."
                         },
                         "mountPath": {
                             "type": "string",
@@ -257,11 +257,11 @@
                     "properties": {
                         "ignorePatterns": {
                             "type": "array",
-                            "description": "File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an InferenceService does."
+                            "description": "File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an LLMInferenceService does."
                         },
                         "image": {
                             "type": "object",
-                            "description": "Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an InferenceService would, so a later start finds the files and skips the download.",
+                            "description": "Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an LLMInferenceService would, so a later start finds the files and skips the download.",
                             "additionalProperties": false,
                             "properties": {
                                 "name": {
@@ -438,7 +438,7 @@
                 },
                 "namespace": {
                     "type": "string",
-                    "description": "Serving namespace: InferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`."
+                    "description": "Serving namespace: LLMInferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`."
                 },
                 "presets": {
                     "type": "object",
@@ -456,19 +456,11 @@
                 },
                 "readyTimeout": {
                     "type": "string",
-                    "description": "How long a load job waits for an InferenceService to become ready before it gives up on wiring."
-                },
-                "runtime": {
-                    "type": "string",
-                    "description": "ClusterServingRuntime for presets that name none (classic kind); empty takes the discovery value (default `kserve-vllm`)."
+                    "description": "How long a load job waits for an LLMInferenceService to become ready before it gives up on wiring."
                 },
                 "scaleUpTimeout": {
                     "type": "string",
                     "description": "The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (`InsufficientInstanceCapacity`) before its `scheduling` step and the phase read `failed` naming the refusal (`CapacityUnavailable`), counted from the pod's creation."
-                },
-                "servingKind": {
-                    "type": "string",
-                    "description": "Kind a serving preset is composed into: `LLMInferenceService` (the llm-d control plane: KServe's own router and well-known configs), `InferenceService` (the classic predictor on the vLLM ClusterServingRuntime) or empty for `auto` — `LLMInferenceService` wherever its API is served, else the classic kind."
                 }
             }
         },
@@ -654,7 +646,7 @@
                     "properties": {
                         "enabled": {
                             "type": "boolean",
-                            "description": "Call the Kubernetes API as the caller: everything a request does (InferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials."
+                            "description": "Call the Kubernetes API as the caller: everything a request does (LLMInferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials."
                         }
                     }
                 },

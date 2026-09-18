@@ -116,7 +116,7 @@ func TestOCIPresetPlacesOnAnyEligibleNode(t *testing.T) {
 	assert.Equal(t, testGPUNode, got.Fit.Node)
 	assert.Equal(t, backend.CacheSourceOCIImage, got.Fit.CacheSource)
 	assert.Equal(t, 1, servingObjects(t, f, ctx))
-	uri, _, err := unstructured.NestedString(f.isvc(ctx, "modelcar"), "spec", "predictor", "model", "storageUri")
+	uri, _, err := unstructured.NestedString(f.llmisvc(ctx, "modelcar"), "spec", "model", "uri")
 	require.NoError(t, err)
 	assert.Equal(t, ociImage, uri)
 }

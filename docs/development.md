@@ -25,8 +25,9 @@ make helm-docs      # regenerate helm/model-manager/README.md
   the cache-agent client), `scangate.go` (when a scan may run: never on an
   unbound claim or a pool at zero, never inline under a short deadline), `internal/cacheagent` (the DaemonSet's HTTP
   inventory, `model-manager cache-agent`),
-  `jobs.go` (download Jobs), `isvc.go` (InferenceService composition/status),
-  `fit.go`, `backend.go`.
+  `jobs.go` (download Jobs), `llmisvc.go` (LLMInferenceService composition),
+  `served.go` (the served objects: listing, status, addresses), `fit.go`,
+  `backend.go`.
 - `internal/jobs` — in-memory job manager (pulls with progress, cancel, retention).
 - `internal/wiring` — kagent `ModelConfig` create/update/delete via the dynamic
   client; owns only CRs labelled `app.kubernetes.io/managed-by=model-manager`.

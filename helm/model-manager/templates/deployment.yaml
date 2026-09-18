@@ -29,7 +29,7 @@ spec:
       serviceAccountName: {{ include "model-manager.serviceAccountName" . }}
       {{- /*
       Kubernetes access. The kserve driver talks to the API for everything it
-      does (InferenceServices, download Jobs, cache scans, nodes), so a release
+      does (LLMInferenceServices, download Jobs, cache scans, nodes), so a release
       running it keeps the ServiceAccount token even with kagent.disableWiring:
       that flag only switches off the ModelConfig management. Only releases
       with the ollama and lemonade drivers alone run without the API once
@@ -93,12 +93,6 @@ spec:
             - --kserve-namespace={{ include "model-manager.kserveNamespace" . }}
             - --kserve-discovery-configmap={{ $k.discovery.configMap }}
             - --kserve-discovery-namespace={{ include "model-manager.kserveDiscoveryNamespace" . }}
-            {{- with $k.servingKind }}
-            - --kserve-serving-kind={{ . }}
-            {{- end }}
-            {{- with $k.runtime }}
-            - --kserve-runtime={{ . }}
-            {{- end }}
             {{- with $k.gpuResourceName }}
             - --kserve-gpu-resource={{ . }}
             {{- end }}

@@ -73,7 +73,7 @@ data:
 | `spec.kserve.target.organization` | no | The target's organization; reported with the cluster as `target` on the backend, its models, nodes and presets |
 | `spec.kserve.target.apiServer` | remote | The target apiserver URL; required unless `cluster` is `local`, not accepted for `local` |
 | `spec.kserve.target.caBundle` | remote | The target apiserver's CA, PEM; required unless `cluster` is `local` |
-| `spec.kserve.target.servingNamespace` | yes | Namespace on the target holding the InferenceServices, download Jobs and the cache |
+| `spec.kserve.target.servingNamespace` | yes | Namespace on the target holding the LLMInferenceServices, download Jobs and the cache |
 | `spec.kserve.discovery.namespace` | no | Where the model-serving discovery ConfigMap (`kind: ModelServingConfig`) lives on the target; defaults to `servingNamespace` |
 | `spec.kserve.discovery.name` | no | Its name; defaults to `agent-platform-model-serving` |
 | `spec.kserve.gpuPool` | no | The GPU node pool's scheduling; replaces the discovery ConfigMap's `spec.gpuPool` (see below) |
@@ -198,8 +198,8 @@ its route on the models Gateway when the discovery document names the Gateway
   else, so the agent forwards the Bearer token of its incoming request as the API key — the
   person reaches the model as themselves. A static or placeholder key answers `401` on every
   turn (`the token header is malformed`).
-- **Reached on its in-cluster Service** (no Gateway in discovery and no route published, or a
-  classic `InferenceService`):
+- **Reached on its in-cluster workload Service** (no Gateway in discovery and no route
+  published):
   `apiKeySecret: <name>-api-key` / `apiKeySecretKey: OPENAI_API_KEY`, a placeholder Secret
   model-manager creates and removes with the ModelConfig. vLLM checks no key; the placeholder
   satisfies the runtime.
