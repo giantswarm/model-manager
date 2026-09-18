@@ -390,12 +390,21 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 		}
 		return out, ranOn, nil
 	}
-	b.logs = func(_ context.Context, _, name string, _ int64) (string, error) {
+	b.logs = func(_ context.Context, _, name string, opts corev1.PodLogOptions) (string, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.logs[name], nil
+		return f.logs[logKey(name, opts.Previous)], nil
 	}
 	return f
+}
+
+// logKey is where the fixture keeps a pod's log: the running instance's
+// under the pod's name, the previous instance's under a suffix.
+func logKey(pod string, previous bool) string {
+	if previous {
+		return pod + "/previous"
+	}
+	return pod
 }
 
 func (f *fixture) setEntries(node string, entries ...cacheEntry) {
@@ -408,6 +417,14 @@ func (f *fixture) setEntries(node string, entries ...cacheEntry) {
 func (f *fixture) setLogs(pod, logs string) {
 	f.mu.Lock()
 	f.logs[pod] = logs
+	f.mu.Unlock()
+}
+
+// setPreviousLogs is the log of a pod's container instance that died — what
+// `previous=true` reads.
+func (f *fixture) setPreviousLogs(pod, logs string) {
+	f.mu.Lock()
+	f.logs[logKey(pod, true)] = logs
 	f.mu.Unlock()
 }
 

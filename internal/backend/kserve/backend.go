@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
@@ -30,9 +31,10 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 )
 
-// logReader reads a pod's log (replaced in tests: the fake clientset returns
+// logReader reads a pod's log with the options given — the container, a
+// tail, the previous instance (replaced in tests: the fake clientset returns
 // a fixed body).
-type logReader func(ctx context.Context, namespace, name string, tail int64) (string, error)
+type logReader func(ctx context.Context, namespace, name string, opts corev1.PodLogOptions) (string, error)
 
 // Backend is the kserve driver.
 type Backend struct {

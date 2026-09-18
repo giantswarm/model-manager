@@ -571,10 +571,10 @@ scheduling by the registered backend document (`docs/backends.md`).
   | `nodeStarting` | a node is nominated or bound, its GPU not allocatable yet | Karpenter's `Nominated` event, `nominatedNodeName`, the node's allocatable `nvidia.com/gpu`; ≈ 1 min |
   | `downloadingWeights` | the `storage-initializer` fills the cache directory | the init container; `bytesTotal` (the preset's weights), `bytesCompleted` (a bounded cache-agent scan while filling, cache-agent mode only), `cached: true` when it finished within 15 s — the claim held the weights (72 s for 8 GB, else 0.3 s) |
   | `pullingImage` | the kubelet pulls the runtime image | the container `Waiting` (`ContainerCreating`), `Pulling`/`Pulled` events (the message carries the duration); ≈ 4 min |
-  | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min |
+  | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min. A runtime that died and is restarted by the kubelet keeps the step under way with `reason: CrashLoop` and a message naming the crash count, the exit code and the last error line of the crashed container's log (`kubectl logs --previous`, read as the caller): `runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'`; a caller who may not read `pods/log` gets the message with the reason the line is missing |
   | `routing` | the pod is ready, KServe resolves the route | `Ready=False` `HTTPRoutesNotReady` |
   | `ready` | the endpoint answers | `Ready=True` (`since` = its `lastTransitionTime`) |
-  | `failed` | a step failed — the step says why | `ImagePullBackOff`/`ErrImagePull`, `CrashLoopBackOff`, an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`), `modelStatus.lastFailureInfo` |
+  | `failed` | a step failed — the step says why | `ImagePullBackOff`/`ErrImagePull`; `CrashLoopBackOff` (the kubelet backed off from restarting a runtime that keeps dying: the `loading` step fails with the crash message and the back-off, and the model's `reason`/`message` carry it); an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`); `modelStatus.lastFailureInfo` |
   | `terminating` | the object is being deleted | `deletionTimestamp`; the steps stay as they were |
 
   Without a pod yet the object is `scheduling` (`WaitingForPod`) since its

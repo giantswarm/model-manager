@@ -242,7 +242,7 @@ func TestScanRunsAsOwnedJob(t *testing.T) {
 	defer cancel()
 	f.completePods(ctx)
 	scanOut := lineDir + "\ttiny\t100\t3\t0\t1\n" + lineEnd + "\n"
-	f.b.logs = func(context.Context, string, string, int64) (string, error) { return scanOut, nil }
+	f.b.logs = func(context.Context, string, string, corev1.PodLogOptions) (string, error) { return scanOut, nil }
 
 	entries, ranOn, err := f.b.scanNode(ctx, testCacheNode)
 	require.NoError(t, err)
