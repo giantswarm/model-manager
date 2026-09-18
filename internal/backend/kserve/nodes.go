@@ -218,8 +218,10 @@ type cacheLocation struct {
 	Nodes []string
 	// Shared is true for a claim without node affinity (network storage).
 	Shared bool
-	// Bound is false when the claim has no volume yet.
-	Bound bool
+	// Bound is false when the claim has no volume yet; Volume names the
+	// PersistentVolume bound (empty with the cache nodes given by flag).
+	Bound  bool
+	Volume string
 	// Missing is true when the claim does not exist.
 	Missing bool
 	// Zones are the zones the volume's node affinity names (a zonal volume,
@@ -258,7 +260,7 @@ func (b *Backend) cacheNodes(ctx context.Context) (cacheLocation, error) {
 	if pvc.Spec.VolumeName == "" {
 		return loc, nil
 	}
-	loc.Bound = true
+	loc.Bound, loc.Volume = true, pvc.Spec.VolumeName
 	pv, err := b.k8s(ctx).CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsForbidden(err) || errors.IsNotFound(err) {

@@ -597,9 +597,8 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, jobs.Items, "the cleanup Job is removed afterwards (its pod goes with it)")
 	assert.Equal(t, 3, f.scanCount(), "the load's, the served-conflict read's and the unload's background scan; the deletes read the fresh inventory and the last one invalidated it without a scan")
-	cm, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.NotContains(t, cm.Data, "tiny", "the removed directory is forgotten")
+	_, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "the removed directory is forgotten, and the ConfigMap goes with its last entry")
 }
 
 func TestListNodes(t *testing.T) {
@@ -945,7 +944,7 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 	var rec indexEntry
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["clone"]), &rec))
 	assert.False(t, rec.RecordedAt.IsZero())
-	assert.Equal(t, indexEntry{Model: tinyRepo, Revision: "abc", Dir: "clone", InferenceService: "clone", RecordedAt: rec.RecordedAt}, rec)
+	assert.Equal(t, indexEntry{Model: tinyRepo, Revision: "abc", Dir: "clone", InferenceService: "clone", Claim: DefaultCacheClaim, Volume: "pv-cache", RecordedAt: rec.RecordedAt}, rec, "bound to the claim and its volume")
 
 	// The InferenceService goes; the directory keeps its repository, preset
 	// and revision, and the repository resolves to it.
@@ -1042,4 +1041,65 @@ func TestCacheIndexToleratesAMissingPermission(t *testing.T) {
 	assert.Equal(t, "clone", models[0].Name, "nothing could be remembered")
 	_, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+// giantswarm/model-manager#130: no cache, no index. With the serving layer's
+// cache off — or its claim without a volume — the storage-initializer fills
+// storage that goes with the pod: load_model records nothing, unload_model
+// drops what an older release (or another cache) recorded for the model and
+// leaves other directories' entries alone, and the ConfigMap goes with its
+// last entry.
+func TestCacheIndexNeedsACache(t *testing.T) {
+	stale := func(repo, dir, binding string) string {
+		return `{"model":"` + repo + `","dir":"` + dir + `","inferenceService":"` + dir + `"` + binding + `}`
+	}
+	run := func(t *testing.T, f *fixture) {
+		ctx := context.Background()
+		cms := f.cs.CoreV1().ConfigMaps(testServingNS)
+		require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+		_, err := cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err), "nothing recorded: no directory outlives the pod")
+		require.NoError(t, f.b.Unload(ctx, tinyRepo))
+		_, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+
+		// What an older release recorded for the model, and an entry of
+		// another directory bound to some cache.
+		_, err = cms.Create(ctx, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: DefaultCacheIndexConfigMap, Namespace: testServingNS},
+			Data:       map[string]string{"tiny": stale(tinyRepo, "tiny", ""), "other": stale(bigRepo, "other", `,"claim":"hf-cache","volume":"pv-old"`)},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+		f.b.index.set(nil)
+		require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+		cm, err := cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, stale(tinyRepo, "tiny", ""), cm.Data["tiny"], "not rewritten: there is no cache to bind it to")
+		require.NoError(t, f.b.Unload(ctx, tinyRepo))
+		cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.NotContains(t, cm.Data, "tiny", "the unloaded model's entry names a directory in no cache")
+		assert.Contains(t, cm.Data, "other", "another directory's entry is not this unload's to judge")
+		f.b.forgetDir(ctx, "other")
+		_, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err), "the ConfigMap goes with its last entry")
+	}
+
+	t.Run("the serving layer has no cache", func(t *testing.T) {
+		f := newFixture(t)
+		f.setDiscoveryOpts(context.Background(), discoveryOpts{cacheDisabled: true})
+		run(t, f)
+	})
+
+	t.Run("the claim has no volume", func(t *testing.T) {
+		f := newFixture(t)
+		ctx := context.Background()
+		pvcs := f.cs.CoreV1().PersistentVolumeClaims(testServingNS)
+		pvc, err := pvcs.Get(ctx, DefaultCacheClaim, metav1.GetOptions{})
+		require.NoError(t, err)
+		pvc.Spec.VolumeName = ""
+		_, err = pvcs.Update(ctx, pvc, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		run(t, f)
+	})
 }

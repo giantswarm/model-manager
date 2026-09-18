@@ -157,8 +157,10 @@ func TestCacheEntriesUnderDeadlineScansInBackground(t *testing.T) {
 }
 
 // While no scan can answer, the cache index stands in for it: a directory an
-// InferenceService filled for the repository counts as cached, anything else
-// does not.
+// InferenceService filled for the repository — in this claim and volume —
+// counts as cached, anything else does not. A record bound to another
+// volume, or to none (an older release's), is no verdict
+// (giantswarm/model-manager#130).
 func TestIsCachedFromIndexWhenNoScanCanAnswer(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -169,15 +171,30 @@ func TestIsCachedFromIndexWhenNoScanCanAnswer(t *testing.T) {
 	cached, source := f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
 	assert.False(t, cached, "index miss")
 	assert.Equal(t, backend.CacheSourceUnknown, source, "no scan, no index record: unknown, not no")
+	cms := f.cs.CoreV1().ConfigMaps(testServingNS)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: f.b.opts.CacheIndexConfigMap, Namespace: testServingNS},
 		Data:       map[string]string{"tiny": `{"model":"` + tinyRepo + `","dir":"tiny","inferenceService":"tiny"}`},
 	}
-	_, err = f.cs.CoreV1().ConfigMaps(testServingNS).Create(ctx, cm, metav1.CreateOptions{})
+	_, err = cms.Create(ctx, cm, metav1.CreateOptions{})
 	require.NoError(t, err)
 	f.b.index.set(nil)
 	cached, source = f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
-	assert.True(t, cached, "index hit")
+	assert.False(t, cached, "a record bound to no cache is no verdict")
+	assert.Equal(t, backend.CacheSourceUnknown, source)
+	cm.Data["tiny"] = `{"model":"` + tinyRepo + `","dir":"tiny","inferenceService":"tiny","claim":"hf-cache","volume":"pv-old"}`
+	_, err = cms.Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.b.index.set(nil)
+	cached, source = f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
+	assert.False(t, cached, "a record bound to another volume is no verdict")
+	assert.Equal(t, backend.CacheSourceUnknown, source)
+	cm.Data["tiny"] = `{"model":"` + tinyRepo + `","dir":"tiny","inferenceService":"tiny","claim":"hf-cache","volume":"pv-cache"}`
+	_, err = cms.Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.b.index.set(nil)
+	cached, source = f.b.isCached(ctx, "", "tiny", tinyRepo, loc)
+	assert.True(t, cached, "index hit: bound to this claim and volume")
 	assert.Equal(t, backend.CacheSourceIndex, source)
 	cached, _ = f.b.isCached(ctx, "", "big", bigRepo, loc)
 	assert.False(t, cached, "another directory: miss")

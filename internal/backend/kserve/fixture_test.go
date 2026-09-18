@@ -205,6 +205,9 @@ type discoveryOpts struct {
 	// gateway is the models Gateway's origin (spec.gateway.endpoint, enabled
 	// when set); the block says enabled: false when empty.
 	gateway string
+	// cacheDisabled renders spec.cache.enabled: false — the serving layer
+	// without a cache claim.
+	cacheDisabled bool
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -249,7 +252,7 @@ spec:
 %s  deploymentStrategyType: Recreate
   timeoutSeconds: 1800
   cache:
-    enabled: true
+    enabled: %t
     claimName: hf-cache
     mountPath: /mnt/models
     redirectPolicy: %t
@@ -257,7 +260,7 @@ spec:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, o.redirectPolicy, gateway)
+`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings

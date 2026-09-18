@@ -94,7 +94,7 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: [{{ . | quote }}]
-    verbs: ["update", "patch"]
+    verbs: ["update", "patch", "delete"]
   {{- end }}
   {{- with .Values.kserve.hf.tokenSecret.name }}
   - apiGroups: [""]
