@@ -481,22 +481,43 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 
 // servedURL is the address KServe published for the object — status.address
 // (classic), status.url, the first of status.addresses (llmisvc) — else the
-// address it is expected on (expectedURL).
+// address it is expected on (expectedURL). An LLMInferenceService routed on
+// the models Gateway is published at the Gateway's address as the controller
+// sees it; inside the cluster that is the Gateway's Service name
+// (<gateway>.<namespace>.svc.cluster.local, a Gateway whose load balancer
+// has no address), which no caller uses — the Gateway terminates TLS and
+// verifies a person's token there as everywhere — so such an address keeps
+// KServe's path under the discovery Gateway's origin (onGateway).
 func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "address", "url"); u != "" {
-		return u
+		return onGateway(u, sv, gateway)
 	}
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "url"); u != "" {
-		return u
+		return onGateway(u, sv, gateway)
 	}
 	if addrs, _, _ := unstructured.NestedSlice(obj.Object, "status", "addresses"); len(addrs) > 0 {
 		if first, ok := addrs[0].(map[string]any); ok {
 			if u, _ := first["url"].(string); u != "" {
-				return u
+				return onGateway(u, sv, gateway)
 			}
 		}
 	}
 	return sv.expectedURL(gateway)
+}
+
+// onGateway rewrites a published LLMInferenceService address whose host is a
+// Service DNS name — the models Gateway's in-cluster address — to the
+// discovery Gateway's origin with the published path; every other address,
+// and every address without a Gateway in discovery, stands as published.
+func onGateway(published string, sv served, gateway string) string {
+	if gateway == "" || sv.Kind != ServingKindLLM {
+		return published
+	}
+	u, err := url.Parse(published)
+	if err != nil || u.Host == "" || !isClusterLocalHost(u.Hostname()) {
+		return published
+	}
+	return gateway + strings.TrimRight(u.Path, "/")
 }
 
 // defaultURL is the in-cluster Service the kind gets: the workload Service

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- kserve: an `LLMInferenceService` routed on the models Gateway keeps its address under the discovery Gateway's origin when KServe publishes the Gateway's in-cluster address (`<gateway>.<namespace>.svc.cluster.local`, what a Gateway without a load balancer address gets): the Gateway terminates TLS and demands the person's token there too, and the cluster-local https address was taken for the keyless workload Service, rewritten to plain http and wired into kagent with the placeholder key — an endpoint nothing answered on. KServe's path stays; an external published address stands as before (giantswarm/agentlab#221).
+
 ### Added
 
 - kserve: a preset that requests no GPU (`resources.gpus: 0`) is CPU work — the fit judges every node against its allocatable memory instead of the accelerator nodes alone, and the preset knows no GPU pool and no accelerator RuntimeClass: the `LLMInferenceService` it composes requests no `nvidia.com/gpu`, carries neither the pool's toleration and label nor `runtimeClassName`, so it lands on the cluster's CPU capacity (a tainted GPU pool stays out of reach); an explicit accelerator node is refused with the taint as the reason. A GPU preset and a bare model reference keep the accelerator nodes as their capacity, and `GET /api/v1/nodes` still lists those. What a lab without a GPU, or a small model on CPU capacity, needs to serve on the llm-d path (giantswarm/agentlab#221).
