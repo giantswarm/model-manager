@@ -559,33 +559,44 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	return res, nil
 }
 
-// Unload implements backend.Backend: deletes the InferenceServices serving the
-// model; the cache stays. model-manager's own InferenceServices and the ones
-// the portal created from a preset are deleted; hand-written ones are not.
+// Unload implements backend.Backend: Stop without the answer.
 func (b *Backend) Unload(ctx context.Context, name string) error {
+	_, err := b.Stop(ctx, name)
+	return err
+}
+
+// Stop implements backend.Stopper: deletes the InferenceServices serving the
+// model — found among the served objects by repository id, object name or
+// preset name, never through the cache inventory — and answers what follows;
+// the cache stays. model-manager's own InferenceServices and the ones the
+// portal created from a preset are deleted; hand-written ones are not. The
+// inventory is rescanned in the background where a scan pod may run
+// (refreshInventory), so a caller under a short deadline gets the deletion
+// done whatever the scan would take (giantswarm/model-manager#119).
+func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)
+		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
 	matches, err := b.servedFor(ctx, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
+		return nil, fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
 	}
 	for _, sv := range matches {
 		if !sv.manageable() {
-			return fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Kind, sv.Namespace, sv.Name, sv.ManagedBy)
+			return nil, fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, sv.Kind, sv.Namespace, sv.Name, sv.ManagedBy)
 		}
 	}
 	for _, sv := range matches {
 		if err := b.deleteServing(ctx, sv.Kind, sv.Namespace, sv.Name); err != nil {
-			return err
+			return nil, err
 		}
 		b.log.Info("serving object deleted", "kind", sv.Kind, "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
 	}
-	return nil
+	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
 }
 
 // servedFor finds the InferenceServices serving a model (by repository id,

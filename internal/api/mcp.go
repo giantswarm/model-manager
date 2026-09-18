@@ -187,7 +187,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.listNodes)
 
 	s.AddTool(mcp.NewTool(ToolUnloadModel,
-		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays."),
+		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays. On kserve the serving object is deleted and its ModelConfig unwired within the call, whatever the cache scan would take; the answer's inventory says whether the cache is rescanned in the background or why it cannot be, and next says what list_loaded_models shows meanwhile."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -373,16 +373,25 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if err != nil {
 		return errResult(err), nil
 	}
-	b, err := t.svc.Unload(ctx, req.GetString(argBackend, ""), name)
+	view, err := t.svc.Unload(ctx, req.GetString(argBackend, ""), name)
 	if err != nil {
 		return errResult(err), nil
 	}
-	out := map[string]any{argBackend: b, argModel: name, "loaded": false}
-	if b == backend.NameKServe {
+	out := map[string]any{argBackend: view.Backend, argModel: name, "loaded": false}
+	if view.Backend == backend.NameKServe {
 		// The serving object is deleted, not gone: the list shows it as
 		// Terminating until Kubernetes has removed it and its pod.
 		out["status"] = "Terminating"
-		out["next"] = "the serving object is being deleted; list_loaded_models shows it with status Terminating (phase terminating) until it is gone, then no longer"
+		next := "the serving object is being deleted; list_loaded_models shows it with status Terminating (phase terminating) until it is gone, then no longer"
+		if inv := view.Inventory; inv != nil {
+			out["inventory"] = inv
+			if inv.Refreshing {
+				next += "; the cache inventory is rescanned in the background — list_models answers from the new scan once it is done"
+			} else {
+				next += "; the cache inventory is not rescanned (" + inv.Reason + ") — list_models answers from the last scan"
+			}
+		}
+		out["next"] = next
 	}
 	return jsonResult(out)
 }

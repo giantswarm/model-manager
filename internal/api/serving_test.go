@@ -35,6 +35,9 @@ type fakeServing struct {
 	// managedBy overrides the managed-by label of a served object (default
 	// model-manager's own value).
 	managedBy map[string]string
+	// inventory, when set, is what an inventory read (GetModel) waits for
+	// before answering — a cache scan pod that outlasts the caller.
+	inventory chan struct{}
 }
 
 func newFakeServing() *fakeServing {
@@ -66,14 +69,55 @@ func (f *fakeServing) Name() backend.Name {
 	return backend.NameKServe
 }
 
-// GetModel resolves preset names too, as the kserve driver does.
+// GetModel resolves preset names too, as the kserve driver does — after the
+// cache scan an inventory read waits for, when the test holds one.
 func (f *fakeServing) GetModel(ctx context.Context, name string) (*backend.Model, error) {
-	for _, p := range f.presets {
-		if p.Name == name {
-			name = p.Model
+	f.mu.Lock()
+	scan := f.inventory
+	f.mu.Unlock()
+	if scan != nil {
+		select {
+		case <-scan:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("scan cache on any node: waiting for Job mm-scan: %w", ctx.Err())
 		}
 	}
-	return f.fakeBackend.GetModel(ctx, name)
+	return f.fakeBackend.GetModel(ctx, f.repoOf(name))
+}
+
+// repoOf is the repository a reference names: the preset's model for a
+// preset name, else the reference itself.
+func (f *fakeServing) repoOf(name string) string {
+	for _, p := range f.presets {
+		if p.Name == name {
+			return p.Model
+		}
+	}
+	return name
+}
+
+// blockInventory holds every inventory read until block is closed.
+func (f *fakeServing) blockInventory(block chan struct{}) {
+	f.mu.Lock()
+	f.inventory = block
+	f.mu.Unlock()
+}
+
+// Stop is the kserve driver's unload: the served object is found by its
+// repository or preset name — never through the inventory — and the answer
+// says the inventory is rescanned in the background.
+func (f *fakeServing) Stop(ctx context.Context, name string) (*backend.UnloadResult, error) {
+	repo := f.repoOf(name)
+	f.fakeBackend.mu.Lock()
+	served := f.loaded[repo]
+	f.fakeBackend.mu.Unlock()
+	if !served {
+		return nil, fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
+	}
+	if err := f.Unload(ctx, repo); err != nil {
+		return nil, err
+	}
+	return &backend.UnloadResult{Model: repo, Inventory: backend.InventoryRefresh{Refreshing: true}}, nil
 }
 func (f *fakeServing) Info(context.Context) backend.Info {
 	return backend.Info{Backend: f.Name(), Version: "serving.kserve.io/v1beta1", Healthy: true}
@@ -296,7 +340,7 @@ func TestServingPullRefusesWireAndUnfit(t *testing.T) {
 	assert.Nil(t, done["result"])
 	assert.Equal(t, "tiny", done["preset"])
 	assert.Equal(t, "n1", done["node"])
-	assert.Empty(t, f.wirer.refs, "kserve models are wired when served, not when pulled")
+	assert.Zero(t, f.wirer.count(), "kserve models are wired when served, not when pulled")
 	f.backend.mu.Lock()
 	require.Len(t, f.backend.pulls, 1)
 	assert.Equal(t, backend.PullRequest{Ref: "org/new", Preset: "tiny", Node: "n1"}, f.backend.pulls[0])
@@ -379,7 +423,7 @@ func TestServingLoadWiresInTheCallAndUnloadUnwires(t *testing.T) {
 	result := done["result"].(map[string]any)
 	assert.Equal(t, "org-tiny", result["name"])
 	assert.Equal(t, "OpenAI", result["provider"])
-	assert.Len(t, f.wirer.refs, 1, "the job refreshed the ModelConfig the load wired; it did not create a second one")
+	assert.Equal(t, 1, f.wirer.count(), "the job refreshed the ModelConfig the load wired; it did not create a second one")
 
 	status, body = f.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
 	require.Equal(t, http.StatusOK, status)
@@ -401,7 +445,7 @@ func TestServingLoadWiresInTheCallAndUnloadUnwires(t *testing.T) {
 	// Unload deletes the endpoint and the ModelConfig with it.
 	status, _ = f.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
 	require.Equal(t, http.StatusOK, status)
-	assert.Empty(t, f.wirer.refs, "unload unwires on a serve-lifecycle backend")
+	assert.Zero(t, f.wirer.count(), "unload unwires on a serve-lifecycle backend")
 	status, body = f.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, false, body["loaded"])
@@ -443,7 +487,7 @@ func TestServingReadWiresAManagedServedModelWithoutModelConfig(t *testing.T) {
 	f.backend.mu.Lock()
 	f.backend.managedBy["org/theirs"] = "backstage"
 	f.backend.mu.Unlock()
-	assert.Empty(t, f.wirer.refs, "nothing wired yet")
+	assert.Zero(t, f.wirer.count(), "nothing wired yet")
 
 	status, body := f.do(t, http.MethodGet, Prefix+"/loaded", nil)
 	require.Equal(t, http.StatusOK, status, body)
@@ -480,7 +524,7 @@ func TestServingReadWiresAManagedServedModelWithoutModelConfig(t *testing.T) {
 			assert.Nil(t, em["wiring"])
 		}
 	}
-	assert.Len(t, f.wirer.refs, 1)
+	assert.Equal(t, 1, f.wirer.count())
 }
 
 // A model-manager restart between load and Ready drops the in-memory load
@@ -524,16 +568,25 @@ func TestServingRestartDuringColdStartLeavesAWiredModel(t *testing.T) {
 	_, ok = f.wirer.get(backend.NameKServe, "org/tiny")
 	assert.True(t, ok)
 
-	// Ready, and still one ModelConfig; unload removes it.
+	// Ready: the first process's load job — alive in this test, dead in the
+	// restart it stands for — refreshes the ModelConfig and ends; waiting for
+	// it keeps its refresh from landing behind the unload below. Still one
+	// ModelConfig; unload removes it.
 	f.backend.setReady("org/tiny")
+	_, list = f.do(t, http.MethodGet, Prefix+"/jobs", nil)
+	for _, j := range list["jobs"].([]any) {
+		if jm := j.(map[string]any); jm["type"] == "load" && jm["model"] == "org/tiny" {
+			f.waitJob(t, jm["id"].(string))
+		}
+	}
 	status, body = after.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "Ready", body["running"].(map[string]any)["status"])
 	assert.Equal(t, "org-tiny", body["modelConfig"].(map[string]any)["name"])
-	assert.Len(t, f.wirer.refs, 1)
+	assert.Equal(t, 1, f.wirer.count())
 	status, _ = after.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
 	require.Equal(t, http.StatusOK, status)
-	assert.Empty(t, f.wirer.refs, "unload still unwires")
+	assert.Zero(t, f.wirer.count(), "unload still unwires")
 }
 
 func TestServingRunAdoptsPullsAndReconcilesWiring(t *testing.T) {
@@ -614,6 +667,15 @@ func TestServingMCPTools(t *testing.T) {
 	assert.True(t, isErr, out)
 	assert.Contains(t, out, "invalid_request")
 
+	out, isErr = callTool(t, srv, ToolUnloadModel, map[string]any{argModel: "org/tiny"})
+	require.False(t, isErr, out)
+	assert.Contains(t, out, `"status": "Terminating"`)
+	assert.Contains(t, out, `"refreshing": true`, "the answer says the inventory is rescanned in the background")
+	assert.Contains(t, out, "the cache inventory is rescanned in the background")
+	out, isErr = callTool(t, srv, ToolUnloadModel, map[string]any{argModel: "org/tiny"})
+	assert.True(t, isErr, out)
+	assert.Contains(t, out, "not_found", "nothing serves it any more")
+
 	out, isErr = callTool(t, srv, ToolPullModel, map[string]any{argModel: "org/huge"})
 	require.False(t, isErr, out, "the job is accepted; the fit refusal fails the job")
 	out, isErr = callTool(t, srv, ToolPullModel, map[string]any{argModel: "org/x", argWire: true})
@@ -655,7 +717,7 @@ func TestServingDedupesPortalWiredModelConfigs(t *testing.T) {
 	result := done["result"].(map[string]any)
 	assert.Equal(t, "org-tiny", result["name"])
 	assert.Equal(t, false, result["managed"], "the portal's ModelConfig is reported, not replaced")
-	assert.Empty(t, f.wirer.refs, "no duplicate ModelConfig was created")
+	assert.Zero(t, f.wirer.count(), "no duplicate ModelConfig was created")
 
 	// The model view shows the portal's ModelConfig through the endpoint join.
 	status, body = f.do(t, http.MethodGet, Prefix+"/models/org/tiny", nil)
@@ -684,4 +746,54 @@ func TestServingDedupesPortalWiredModelConfigs(t *testing.T) {
 		r, ok := f.wirer.get(backend.NameKServe, "org/tiny")
 		return ok && r.Name == "org-tiny" && r.Managed
 	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// unload on a serving backend whose inventory read would outlast the caller
+// (a cache scan pod that cannot start): the serving object is deleted, the
+// ModelConfig unwired and the call answered within the caller's deadline —
+// the backend is asked to stop by the reference, no inventory read stands
+// in between — and the answer says the inventory is rescanned in the
+// background (giantswarm/model-manager#119).
+func TestServingUnloadAnswersWithinDeadlineWithASlowInventory(t *testing.T) {
+	f := newServingFixture(t)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	_, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok, "wired on load")
+
+	// Every inventory read now waits for a scan that never finishes within
+	// the caller's deadline.
+	block := make(chan struct{})
+	defer close(block)
+	f.backend.blockInventory(block)
+	const deadline = 500 * time.Millisecond
+	client := &http.Client{Timeout: deadline}
+	start := time.Now()
+	status, body = f.doWith(t, client, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Less(t, time.Since(start), deadline, "answered within the deadline")
+	assert.Equal(t, "kserve", body["backend"])
+	assert.Equal(t, "org/tiny", body["model"])
+	assert.Equal(t, false, body["loaded"])
+	assert.Equal(t, true, body["inventory"].(map[string]any)["refreshing"], "the answer says what follows")
+	assert.Zero(t, f.wirer.count(), "unwired within the call")
+	loaded, err := f.backend.ListLoaded(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, loaded, "the serving object is gone")
+
+	// Nothing serves it any more: not found, still without an inventory read.
+	status, body = f.doWith(t, client, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	assert.Equal(t, http.StatusNotFound, status, body)
+	// The reads that need the inventory still wait for it: the deadline is
+	// theirs to spend.
+	_, err = client.Get(f.srv.URL + Prefix + "/models/org/tiny")
+	assert.Error(t, err, "an inventory read waits for the scan")
+}
+
+// doWith is do with the caller's HTTP client (its timeout is the caller's
+// deadline).
+func (f *servingFixture) doWith(t *testing.T, client *http.Client, method, path string, body any) (int, map[string]any) {
+	t.Helper()
+	fx := &fixture{srv: f.srv}
+	return fx.doWith(t, client, method, path, body)
 }

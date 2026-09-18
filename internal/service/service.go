@@ -847,28 +847,84 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 	}
 }
 
+// UnloadView is what an unload answers: the backend the model was on, the
+// reference as the caller gave it, and — on a backend.Stopper (kserve) —
+// what follows the deletion in the cache inventory.
+type UnloadView struct {
+	Backend   backend.Name              `json:"backend"`
+	Model     string                    `json:"model"`
+	Loaded    bool                      `json:"loaded"`
+	Inventory *backend.InventoryRefresh `json:"inventory,omitempty"`
+}
+
 // Unload evicts a model and reports the backend it was on. On ServeLifecycle
-// backends the ModelConfig goes with the endpoint.
-func (s *Service) Unload(ctx context.Context, name, ref string) (backend.Name, error) {
-	b, m, err := s.resolve(ctx, name, ref)
+// backends the ModelConfig goes with the endpoint. A backend.Stopper named by
+// the caller — or the only backend — is asked to stop by the reference
+// directly: it finds the served object itself, so no inventory read stands
+// between the call and the deletion, and the answer carries what follows
+// (giantswarm/model-manager#119); every other backend is resolved first.
+func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, error) {
+	b, model, res, err := s.stop(ctx, name, ref)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if !b.Capabilities().Unload {
-		return b.Name(), fmt.Errorf("%w: unload on %s", backend.ErrUnsupported, b.Name())
-	}
-	if err := b.Unload(ctx, m.Name); err != nil {
-		return b.Name(), err
-	}
-	s.log.Info("model unloaded", "backend", b.Name(), "model", m.Name, identity.LogAttr(ctx))
+	s.log.Info("model unloaded", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
-		if err := s.wirer.Remove(ctx, b.Name(), m.Name); err != nil {
-			s.log.Warn("unwire after unload failed", "backend", b.Name(), "model", m.Name, "error", err)
+		if err := s.wirer.Remove(ctx, b.Name(), model); err != nil {
+			s.log.Warn("unwire after unload failed", "backend", b.Name(), "model", model, "error", err)
 		} else {
-			s.log.Info("model unwired", "backend", b.Name(), "model", m.Name, identity.LogAttr(ctx))
+			s.log.Info("model unwired", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
 		}
 	}
-	return b.Name(), nil
+	view := &UnloadView{Backend: b.Name(), Model: strings.TrimSpace(ref)}
+	if res != nil {
+		view.Inventory = &res.Inventory
+	}
+	return view, nil
+}
+
+// stop unloads ref and returns the backend, the model's name on it and, on
+// a backend.Stopper, its answer. The Stopper is addressed by the reference as
+// given when the caller named its backend or it is the only one; unqualified
+// among several, the reference is resolved across backends as every other
+// call does.
+func (s *Service) stop(ctx context.Context, name, ref string) (backend.Backend, string, *backend.UnloadResult, error) {
+	if strings.TrimSpace(name) != "" || len(s.all()) == 1 {
+		b, err := s.named(name)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		if st, ok := b.(backend.Stopper); ok {
+			if err := unloadable(b); err != nil {
+				return nil, "", nil, err
+			}
+			res, err := st.Stop(ctx, ref)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			return b, res.Model, res, nil
+		}
+	}
+	b, m, err := s.resolve(ctx, name, ref)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if err := unloadable(b); err != nil {
+		return nil, "", nil, err
+	}
+	if err := b.Unload(ctx, m.Name); err != nil {
+		return nil, "", nil, err
+	}
+	return b, m.Name, nil, nil
+}
+
+// unloadable is the error for a backend without the unload capability; nil
+// for one with it.
+func unloadable(b backend.Backend) error {
+	if b.Capabilities().Unload {
+		return nil
+	}
+	return fmt.Errorf("%w: unload on %s", backend.ErrUnsupported, b.Name())
 }
 
 // Delete removes a downloaded model, unwiring it first when requested, and

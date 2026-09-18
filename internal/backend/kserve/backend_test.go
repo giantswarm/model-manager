@@ -586,6 +586,7 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, cm.Data, "tiny", "the InferenceService's directory is in the cache index")
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
+	require.Eventually(t, func() bool { return f.b.inv.fresh(testCacheNode, f.b.opts.InventoryTTL) != nil }, time.Second, 5*time.Millisecond, "the unload rescanned the cache in the background")
 
 	// Not cached -> not found; cached -> a cleanup Job runs on the cache node
 	// and the index forgets the directory.
@@ -595,7 +596,7 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	jobs, err := f.cs.BatchV1().Jobs(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, jobs.Items, "the cleanup Job is removed afterwards (its pod goes with it)")
-	assert.Equal(t, 2, f.scans, "the inventory was invalidated after the delete")
+	assert.Equal(t, 3, f.scanCount(), "the load's, the served-conflict read's and the unload's background scan; the deletes read the fresh inventory and the last one invalidated it without a scan")
 	cm, err = f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.NotContains(t, cm.Data, "tiny", "the removed directory is forgotten")

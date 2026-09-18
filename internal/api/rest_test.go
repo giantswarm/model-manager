@@ -161,6 +161,14 @@ func newFakeWirer() *fakeWirer { return &fakeWirer{refs: map[string]wiring.Model
 
 func refKey(b backend.Name, model string) string { return string(b) + "|" + model }
 
+// count is how many ModelConfigs of model-manager's own exist — read under
+// the lock, since a load job wires in the background while a test asserts.
+func (w *fakeWirer) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.refs)
+}
+
 // get returns model-manager's own ModelConfig for (b, model), if any.
 func (w *fakeWirer) get(b backend.Name, model string) (wiring.ModelConfigRef, bool) {
 	w.mu.Lock()
@@ -246,6 +254,13 @@ func newFixture(t *testing.T, withWirer bool) *fixture {
 
 func (f *fixture) do(t *testing.T, method, path string, body any) (int, map[string]any) {
 	t.Helper()
+	return f.doWith(t, http.DefaultClient, method, path, body)
+}
+
+// doWith is do with the caller's HTTP client (its timeout is the caller's
+// deadline).
+func (f *fixture) doWith(t *testing.T, client *http.Client, method, path string, body any) (int, map[string]any) {
+	t.Helper()
 	var rd *bytes.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -256,7 +271,7 @@ func (f *fixture) do(t *testing.T, method, path string, body any) (int, map[stri
 	}
 	req, err := http.NewRequest(method, f.srv.URL+path, rd)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	var out map[string]any
@@ -393,7 +408,7 @@ func TestPullWithoutWire(t *testing.T) {
 	done := f.waitJob(t, body["job"].(map[string]any)["id"].(string))
 	assert.Equal(t, "succeeded", done["phase"])
 	assert.Nil(t, done["result"])
-	assert.Empty(t, f.wirer.refs)
+	assert.Zero(t, f.wirer.count())
 }
 
 func TestPullFailureAndValidation(t *testing.T) {
@@ -461,7 +476,7 @@ func TestLoadUnloadDelete(t *testing.T) {
 	assert.Equal(t, true, body["deleted"])
 	assert.Equal(t, "ollama", body["backend"], "the delete echoes the backend it resolved to")
 	assert.Equal(t, true, body["unwired"])
-	assert.Empty(t, f.wirer.refs, "delete unwires by default")
+	assert.Zero(t, f.wirer.count(), "delete unwires by default")
 	status, _ = f.do(t, http.MethodGet, Prefix+"/models/qwen3:0.6b", nil)
 	assert.Equal(t, http.StatusNotFound, status)
 }
@@ -486,7 +501,7 @@ func TestWireUnwireAndDisabled(t *testing.T) {
 	status, body = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3:0.6b"})
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Nil(t, body["modelConfig"])
-	assert.Empty(t, f.wirer.refs)
+	assert.Zero(t, f.wirer.count())
 
 	nf := newFixture(t, false)
 	status, body = nf.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b"})

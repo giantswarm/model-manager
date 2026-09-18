@@ -7,6 +7,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+
+	"github.com/giantswarm/model-manager/internal/backend"
 )
 
 // deadlineReserve is what a call keeps of its context deadline for the
@@ -86,6 +88,34 @@ func (b *Backend) cacheSnapshotFor(ctx context.Context, node string, loc cacheLo
 	snap := b.inv.last(node)
 	snap.Pending, snap.PendingReason = true, verdict.Reason
 	return snap
+}
+
+// refreshInventory drops the cached scans after a call changed what the
+// cache holds or serves and, where scanAllowed permits a scan pod, rescans
+// the cache in the background so the next read is answered from the cache
+// as it is now; the answer says whether a scan runs and, when none can, why.
+// The call never waits for it: the scan is the inventory after the change,
+// not the change (giantswarm/model-manager#119).
+func (b *Backend) refreshInventory(ctx context.Context) backend.InventoryRefresh {
+	b.inv.invalidate()
+	if !b.cfg.settings(ctx).CacheEnabled {
+		return backend.InventoryRefresh{Reason: "no cache claim is configured; there is no inventory to rescan"}
+	}
+	loc, err := b.cacheNodes(ctx)
+	if err != nil {
+		return backend.InventoryRefresh{Reason: "cannot locate the cache claim: " + err.Error()}
+	}
+	if verdict := b.scanAllowed(ctx, loc); !verdict.Allowed {
+		return backend.InventoryRefresh{Reason: verdict.Reason}
+	}
+	nodes := loc.Nodes
+	if len(nodes) == 0 {
+		nodes = []string{""}
+	}
+	for _, node := range nodes {
+		b.inv.refresh(node, b.opts.InventoryTTL, b.opts.InventoryTimeout, b.scan)
+	}
+	return backend.InventoryRefresh{Refreshing: true}
 }
 
 // deadlineAllows reports whether ctx leaves at least budget before its

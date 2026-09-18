@@ -128,7 +128,7 @@ func TestMCPToolsMirrorREST(t *testing.T) {
 
 	text, isErr = callTool(t, srv, ToolDeleteModel, map[string]any{"model": "smollm2:135m"})
 	require.False(t, isErr, text)
-	assert.Empty(t, fw.refs, "delete unwires")
+	assert.Zero(t, fw.count(), "delete unwires")
 
 	text, isErr = callTool(t, srv, ToolPullModel, map[string]any{})
 	assert.True(t, isErr, text)
