@@ -283,6 +283,17 @@ type Step struct {
 	BytesCompleted int64 `json:"bytesCompleted,omitempty"`
 	BytesTotal     int64 `json:"bytesTotal,omitempty"`
 	Cached         *bool `json:"cached,omitempty"`
+
+	// A scheduling step refused for capacity (reason CapacityUnavailable)
+	// says what was refused and what would launch: the instance types the
+	// claim asked for and the cloud refused, the zones the claim was
+	// constrained to, the zones the cloud named as having capacity (when
+	// its answer carried them), and whether the zone is the model cache
+	// claim's — the pool's pin (absent when that could not be read).
+	RefusedInstanceTypes []string `json:"refusedInstanceTypes,omitempty"`
+	RequestedZones       []string `json:"requestedZones,omitempty"`
+	AvailableZones       []string `json:"availableZones,omitempty"`
+	PinnedByCache        *bool    `json:"pinnedByCache,omitempty"`
 }
 
 // Progress is a pull-progress sample.

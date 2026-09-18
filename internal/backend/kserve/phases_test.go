@@ -480,7 +480,7 @@ func TestServePhaseSchedulingEndsWhenTheNodeLaunched(t *testing.T) {
 		assert.Equal(t, "Karpenter nominated NodeClaim gpu-l4-x7k2q; no instance has launched yet", s.Message)
 	})
 
-	t.Run("the claim refuses for capacity: scheduling, CapacityUnavailable with Karpenter's words", func(t *testing.T) {
+	t.Run("the claim refuses for capacity: scheduling, CapacityUnavailable with the cloud's answer read", func(t *testing.T) {
 		p := predictorFixture("tiny")
 		f := facts(p, nominated(p), 0)
 		f.Launch = launchFacts{Claim: claimName, State: &claimState{Created: tNominated, Launched: corev1.ConditionFalse, Since: tRefused, Reason: "InsufficientCapacityError", Message: claimRefusalMessage(claimName, fmt.Sprintf(iceMessage, claimName))}}
@@ -489,10 +489,11 @@ func TestServePhaseSchedulingEndsWhenTheNodeLaunched(t *testing.T) {
 		assert.Equal(t, backend.PhaseScheduling, phase)
 		s := assertStep(t, steps, backend.PhaseScheduling, backend.StepInProgress, t0, time.Time{})
 		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
-		assert.Contains(t, s.Message, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l4-x7k2q) at "+tRefused.Format(time.RFC3339)+" — InsufficientCapacityError: creating instance, insufficient capacity")
-		assert.Contains(t, s.Message, "sufficient g6e.2xlarge capacity in the Availability Zone you requested (eu-central-1b)")
-		assert.NotContains(t, s.Message, "event:", "the event's prefix naming the claim is dropped")
-		assert.Contains(t, s.Message, "it retries while the pod waits")
+		assert.Equal(t, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l4-x7k2q) at "+tRefused.Format(time.RFC3339)+" — InsufficientCapacityError: the cloud has no g6e.2xlarge capacity in eu-central-1b, the zone the claim was constrained to; it has capacity in eu-central-1a and eu-central-1c. The way out is a pool in eu-central-1a or eu-central-1c (create_node_pool with zones naming it); Karpenter retries while the pod waits", s.Message)
+		assert.Equal(t, []string{"g6e.2xlarge"}, s.RefusedInstanceTypes, "the one size the answer names; no requirements read")
+		assert.Equal(t, []string{"eu-central-1b"}, s.RequestedZones)
+		assert.Equal(t, []string{"eu-central-1a", "eu-central-1c"}, s.AvailableZones)
+		assert.Nil(t, s.PinnedByCache, "the cache claim was not read")
 		assert.Equal(t, backend.StepPending, stepByName(steps, backend.PhaseNodeStarting).State)
 	})
 
@@ -816,6 +817,11 @@ func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
 	}
 	claims := f.dyn.Resource(nodeClaimGVR)
 	refused := created.Add(25 * time.Second)
+	// The pool's template asks for the family's three sizes in one zone —
+	// the pool chart's shape; a refused claim is gone within seconds and
+	// the pool carries the constraint (#125).
+	_, err = f.dyn.Resource(nodePoolGVR).Create(ctx, nodePoolObject(claimPool, "g6e", []string{"2xlarge", "4xlarge", "8xlarge"}, []string{"eu-central-1b"}), metav1.CreateOptions{})
+	require.NoError(t, err)
 
 	// The claim stands with Launched=False: its condition is the refusal.
 	_, err = claims.Create(ctx, nodeClaimObject(claimName, created.Add(20*time.Second), corev1.ConditionFalse, refused, "InsufficientCapacityError", fmt.Sprintf(iceMessage, claimName), ""), metav1.CreateOptions{})
@@ -827,7 +833,13 @@ func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
 	assert.Equal(t, statusPending, loaded[0].Status)
 	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
 	assert.Contains(t, loaded[0].Message, "1 NodeClaim refused, the last (gpu-l4-x7k2q)")
-	assert.Contains(t, loaded[0].Message, "InsufficientInstanceCapacity")
+	assert.Contains(t, loaded[0].Message, "the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1b, the zone the pool constrains its nodes to; it has capacity in eu-central-1a and eu-central-1c")
+	s0 := stepByName(loaded[0].Steps, backend.PhaseScheduling)
+	assert.Equal(t, []string{"g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge"}, s0.RefusedInstanceTypes, "the pool's sizes: the claim carries no requirements")
+	assert.Equal(t, []string{"eu-central-1b"}, s0.RequestedZones)
+	assert.Equal(t, []string{"eu-central-1a", "eu-central-1c"}, s0.AvailableZones)
+	require.NotNil(t, s0.PinnedByCache)
+	assert.False(t, *s0.PinnedByCache, "the fixture's cache volume is node-local and names no zone")
 	assert.Equal(t, backend.StepInProgress, stepByName(loaded[0].Steps, backend.PhaseScheduling).State)
 	assert.Equal(t, backend.StepPending, stepByName(loaded[0].Steps, backend.PhaseNodeStarting).State)
 
@@ -845,6 +857,13 @@ func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
 		_, err = events.Create(ctx, &e, metav1.CreateOptions{})
 		require.NoError(t, err)
 	}
+	// The cache claim's volume lies in the zone: the pool's pin.
+	pv, err := f.cs.CoreV1().PersistentVolumes().Get(ctx, "pv-cache", metav1.GetOptions{})
+	require.NoError(t, err)
+	term := &pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0]
+	term.MatchExpressions = append(term.MatchExpressions, corev1.NodeSelectorRequirement{Key: labelZone, Operator: corev1.NodeSelectorOpIn, Values: []string{"eu-central-1b"}})
+	_, err = f.cs.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+	require.NoError(t, err)
 	normal := refusalEvent("gpu-l4-zzzzz", refused.Add(8*time.Minute))
 	normal.Type, normal.Reason = corev1.EventTypeNormal, "Launched"
 	_, err = events.Create(ctx, &normal, metav1.CreateOptions{})
@@ -855,6 +874,10 @@ func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
 	assert.Equal(t, backend.PhaseScheduling, loaded[0].Phase)
 	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
 	assert.Contains(t, loaded[0].Message, "3 NodeClaims refused, the last (gpu-l4-c67br)")
+	s0 = stepByName(loaded[0].Steps, backend.PhaseScheduling)
+	require.NotNil(t, s0.PinnedByCache)
+	assert.True(t, *s0.PinnedByCache, "the cache claim's volume lies in the zone: the pool follows it")
+	assert.Contains(t, loaded[0].Message, "in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache (its volume lives there); it has capacity in eu-central-1a and eu-central-1c. The way out is a pool in eu-central-1a or eu-central-1c (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned")
 
 	// The scale-up budget spent: the step and the phase fail, the model says so.
 	f.b.opts.ScaleUpTimeout = 30 * time.Second
@@ -894,4 +917,205 @@ func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
 	assert.Contains(t, loaded[0].Message, "3 NodeClaims refused")
 	assert.Contains(t, loaded[0].Message, "; whether NodeClaim gpu-l4-x7k2q launched could not be read (")
 	assert.Contains(t, loaded[0].Message, `cannot get resource "nodeclaims"`)
+}
+
+// nodePoolObject is a karpenter.sh/v1 NodePool as the pool chart renders
+// it: the family and the sizes, the zones when pinned.
+func nodePoolObject(name, family string, sizes, zones []string) *unstructured.Unstructured {
+	reqs := []any{
+		map[string]any{"key": requirementInstanceFamily, "operator": "In", "values": []any{family}},
+		map[string]any{"key": requirementInstanceSize, "operator": "In", "values": requirementValues(sizes)},
+		map[string]any{"key": "kubernetes.io/arch", "operator": "In", "values": []any{"amd64"}},
+	}
+	if len(zones) > 0 {
+		reqs = append(reqs, map[string]any{"key": labelZone, "operator": "In", "values": requirementValues(zones)})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.sh/v1", "kind": "NodePool",
+		"metadata": map[string]any{"name": name},
+		"spec":     map[string]any{"template": map[string]any{"spec": map[string]any{"requirements": reqs}}},
+	}}
+}
+
+func requirementValues(values []string) []any {
+	out := make([]any, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
+}
+
+// withRequirements gives a NodeClaim object its spec.requirements.
+func withRequirements(obj *unstructured.Unstructured, reqs []any) {
+	_ = unstructured.SetNestedSlice(obj.Object, reqs, "spec", "requirements")
+}
+
+// giantswarm/model-manager#125: a capacity refusal is read whole. As one
+// installation saw it: four NodeClaims of a pool pinned to one zone, each
+// asking g6e.2xlarge, g6e.4xlarge and g6e.8xlarge there, each refused for
+// all three — Karpenter's event holding the first 300 characters of the
+// cloud's answer (the first size and the zone, the zones with capacity cut
+// off), the claim's condition holding it whole. The step names every size,
+// the zone and whose constraint it is, the zones with capacity where the
+// answer is whole, and the way out; the fields carry the same.
+func TestServePhaseCapacityRefusalReadWhole(t *testing.T) {
+	const pool = "gpu-l40s"
+	// answer is the cloud's answer for one size, as CreateFleet words it.
+	answer := func(size string) string {
+		return fmt.Sprintf("InsufficientInstanceCapacity: We currently do not have sufficient %s capacity in the Availability Zone you requested (eu-central-1b). Our system will be working on provisioning additional capacity. You can currently get %s capacity by not specifying an Availability Zone in your request or choosing eu-central-1a, eu-central-1c.", size, size)
+	}
+	// whole is the whole answer, one fleet error per size, as the claim's
+	// condition and Karpenter's log carry it (the cloud cuts the last).
+	whole := "creating instance, insufficient capacity, with fleet error(s), " + answer("g6e.2xlarge") + "; " + answer("g6e.4xlarge") + "; InsufficientInstanceCapacity: We currently do not have sufficient g6e.8xlarge capacity in the Availability Zone you requested (eu-central-1b)"
+	// eventOf is Karpenter's refusal event on a claim: the answer cut at 300
+	// characters as Karpenter publishes it — the size the fleet error names
+	// first varies per claim.
+	eventOf := func(claim, size string, at time.Time) launchRefusal {
+		text := "creating instance, insufficient capacity, with fleet error(s), " + answer(size)
+		return launchRefusal{Claim: claim, Reason: "InsufficientCapacityError", Message: text[:300] + "...", At: at}
+	}
+	at := func(h, m, s int) time.Time { return time.Date(2026, 9, 18, h, m, s, 0, time.UTC) }
+	refusals := []launchRefusal{
+		eventOf(pool+"-5hpxb", "g6e.2xlarge", at(12, 14, 47)),
+		eventOf(pool+"-2hslz", "g6e.4xlarge", at(12, 17, 55)),
+		eventOf(pool+"-xjvdr", "g6e.2xlarge", at(12, 21, 5)),
+		eventOf(pool+"-46flj", "g6e.2xlarge", at(12, 24, 14)),
+	}
+	for _, r := range refusals {
+		require.NotContains(t, r.Message, "choosing", "Karpenter's event is cut before the zones with capacity")
+	}
+	three := []string{"g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge"}
+	poolAsks := constraints{InstanceTypes: three, Zones: []string{"eu-central-1b"}}
+	pinned := cacheLocation{Claim: DefaultCacheClaim, Bound: true, Shared: true, VolumeRead: true, Zones: []string{"eu-central-1b"}}
+	forbidden := func(resource, name, verb string) error {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: resource}, name, fmt.Errorf(`User "viewer" cannot %s resource "%s"`, verb, resource))
+	}
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	// pod is the predictor waiting since the pool's first claim, nominated
+	// to the latest one.
+	pod := func(claim string) podFacts {
+		p := predictorFixture("qwen")
+		p.CreationTimestamp = metav1.NewTime(at(12, 14, 21))
+		f := facts(p, []corev1.Event{event(p, eventNominated, "", "Pod should schedule on: nodeclaim/"+claim, at(12, 24, 11), at(12, 24, 11))}, 0)
+		f.Now = at(12, 24, 20)
+		return f
+	}
+
+	t.Run("the claims are gone, the events cut: every size from the pool, the zone, the pin, the way out", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, Pool: poolAsks, Cache: pinned}
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		assert.Equal(t, "Karpenter could not launch a node: 4 NodeClaims refused, the last (gpu-l40s-46flj) at 2026-09-18T12:24:14Z — InsufficientCapacityError: the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache (its volume lives there). The way out is a pool in another zone (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned; Karpenter retries while the pod waits", s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Equal(t, []string{"eu-central-1b"}, s.RequestedZones)
+		assert.Empty(t, s.AvailableZones, "the events are cut before the cloud names them")
+		require.NotNil(t, s.PinnedByCache)
+		assert.True(t, *s.PinnedByCache)
+	})
+
+	t.Run("the claim stands with the whole answer: the zones with capacity name the pool to create", func(t *testing.T) {
+		f := pod(pool + "-5hpxb")
+		f.Launch = launchFacts{Claim: pool + "-5hpxb", State: &claimState{Created: at(12, 14, 43), Launched: corev1.ConditionFalse, Since: at(12, 14, 47), Reason: "InsufficientCapacityError", Message: whole, Asked: poolAsks}, Pool: poolAsks, Cache: pinned}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l40s-5hpxb) at 2026-09-18T12:14:47Z — InsufficientCapacityError: the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache (its volume lives there); it has capacity in eu-central-1a and eu-central-1c. The way out is a pool in eu-central-1a or eu-central-1c (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned; Karpenter retries while the pod waits", s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Equal(t, []string{"eu-central-1a", "eu-central-1c"}, s.AvailableZones)
+	})
+
+	t.Run("the pool could not be read: the sizes and the zone the cloud names, the read named", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, PoolErr: forbidden("nodepools", pool, "get"), Cache: pinned}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, []string{"g6e.2xlarge", "g6e.4xlarge"}, s.RefusedInstanceTypes, "the sizes the cut events name, in their order")
+		assert.Equal(t, []string{"eu-central-1b"}, s.RequestedZones, "the zone the cloud names")
+		assert.Contains(t, s.Message, "the cloud has no g6e.2xlarge or g6e.4xlarge capacity in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache")
+		assert.Contains(t, s.Message, "; what NodePool gpu-l40s asks for could not be read (")
+		assert.Contains(t, s.Message, `cannot get resource "nodepools"`)
+	})
+
+	t.Run("the cache claim's volume lies elsewhere: the pool's own constraint, no claim to remove", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		elsewhere := pinned
+		elsewhere.Zones = []string{"eu-central-1a"}
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, Pool: poolAsks, Cache: elsewhere}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Contains(t, s.Message, " in eu-central-1b, the zone the pool constrains its nodes to. The way out is a pool in another zone (create_node_pool with zones naming it); Karpenter retries while the pod waits")
+		assert.NotContains(t, s.Message, "removing the cache claim")
+		require.NotNil(t, s.PinnedByCache)
+		assert.False(t, *s.PinnedByCache)
+	})
+
+	t.Run("no cache claim and no pool read: the claim's constraint, from the cloud's words", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, Cache: cacheLocation{Claim: DefaultCacheClaim, Missing: true}}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Contains(t, s.Message, " in eu-central-1b, the zone the claim was constrained to. The way out is a pool in another zone (create_node_pool with zones naming it);")
+		require.NotNil(t, s.PinnedByCache)
+		assert.False(t, *s.PinnedByCache)
+	})
+
+	t.Run("the cache claim could not be read: pinnedByCache unanswered, the read named", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, Pool: poolAsks, CacheErr: forbidden("persistentvolumes", "pv-cache", "get")}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Nil(t, s.PinnedByCache)
+		assert.Contains(t, s.Message, "the zone the pool constrains its nodes to")
+		assert.Contains(t, s.Message, "; where the cache claim lives could not be read (")
+	})
+
+	t.Run("a refusal that is not the cloud's capacity wording keeps Karpenter's words", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: []launchRefusal{{Claim: pool + "-46flj", Reason: "NodeClassNotReady", Message: "NodeClass is not ready: AMIsReady=False", At: at(12, 24, 14)}}, Pool: poolAsks, Cache: pinned}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l40s-46flj) at 2026-09-18T12:24:14Z — NodeClassNotReady: NodeClass is not ready: AMIsReady=False; Karpenter retries while the pod waits", s.Message)
+		assert.Empty(t, s.RefusedInstanceTypes)
+		assert.Nil(t, s.PinnedByCache)
+	})
+
+	t.Run("the budget spent: the step fails with the message and the budget, the fields stay", func(t *testing.T) {
+		f := pod(pool + "-46flj")
+		f.Launch = launchFacts{Claim: pool + "-46flj", Refusals: refusals, Pool: poolAsks, Cache: pinned}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, at(12, 30, 0)
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, backend.StepFailed, s.State)
+		assert.True(t, strings.HasSuffix(s.Message, "; Karpenter retries while the pod waits; no node came within the scale-up budget of 10m0s"), s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+	})
+}
+
+// The constraint's two shapes — the NodeClaim's resolved instance types,
+// the NodePool template's family and sizes — and the words of the message.
+func TestParseRequirementsAndRefusalWording(t *testing.T) {
+	poolObj := nodePoolObject("gpu-l40s", "g6e", []string{"2xlarge", "4xlarge", "8xlarge"}, []string{"eu-central-1b"})
+	reqs, _, _ := unstructured.NestedSlice(poolObj.Object, "spec", "template", "spec", "requirements")
+	assert.Equal(t, constraints{InstanceTypes: []string{"g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge"}, Zones: []string{"eu-central-1b"}}, parseRequirements(reqs), "a pool's family and sizes are composed to types")
+	reqs, _, _ = unstructured.NestedSlice(nodePoolObject("gpu-l4", "g6", []string{"xlarge"}, nil).Object, "spec", "template", "spec", "requirements")
+	assert.Equal(t, constraints{InstanceTypes: []string{"g6.xlarge"}}, parseRequirements(reqs), "no zones: the pool constrains none")
+
+	claim := nodeClaimObject(claimName, tNominated, corev1.ConditionUnknown, tNominated, "AwaitingReconciliation", "", "")
+	withRequirements(claim, []any{
+		map[string]any{"key": requirementInstanceType, "operator": "In", "values": []any{"g6e.2xlarge", "g6e.4xlarge"}},
+		map[string]any{"key": labelZone, "operator": "In", "values": []any{"eu-central-1b"}},
+		map[string]any{"key": requirementInstanceType, "operator": "NotIn", "values": []any{"g6e.8xlarge"}},
+		map[string]any{"key": "karpenter.sh/capacity-type", "operator": "In", "values": []any{"on-demand"}},
+	})
+	assert.Equal(t, constraints{InstanceTypes: []string{"g6e.2xlarge", "g6e.4xlarge"}, Zones: []string{"eu-central-1b"}}, parseClaim(claim).Asked, "a claim's resolved types; NotIn and other keys constrain nothing here")
+	assert.True(t, parseClaim(nodeClaimObject(claimName, tNominated, "", tNominated, "", "", "")).Asked.empty())
+
+	assert.Equal(t, "a", joinList([]string{"a"}, "or"))
+	assert.Equal(t, "a and b", joinList([]string{"a", "b"}, "and"))
+	assert.Equal(t, "a, b or c", joinList([]string{"a", "b", "c"}, "or"))
+	assert.Len(t, []rune(boundMessage(strings.Repeat("x", refusalMessageMax+10))), refusalMessageMax)
+	assert.Equal(t, "short", boundMessage("short"))
 }

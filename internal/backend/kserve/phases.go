@@ -139,6 +139,16 @@ func (t *timeline) fail(i int, reason, message string) {
 	t.note(i, reason, message)
 }
 
+// refused records what a capacity refusal says about the step — the sizes,
+// the zones, the cache claim's pin — as the step's fields (launch.go).
+func (t *timeline) refused(i int, cr *capacityRefusal) {
+	if cr == nil {
+		return
+	}
+	s := &t.steps[i]
+	s.RefusedInstanceTypes, s.RequestedZones, s.AvailableZones, s.PinnedByCache = cr.RefusedInstanceTypes, cr.RequestedZones, cr.AvailableZones, cr.PinnedByCache
+}
+
 // phase is the current phase: terminating while the object goes, failed when
 // a step failed, else the step under way, else ready.
 func (t *timeline) phase(deleting bool) string {
@@ -251,12 +261,13 @@ func schedule(t *timeline, pf podFacts) bool {
 	if !bound {
 		launchedAt, message, launched := nodeLaunched(pf, nominatedAt)
 		if !launched {
-			reason, message, refused := schedulingReason(pf, nominated)
-			if refused && pf.ScaleUpTimeout > 0 && pf.Now.Sub(p.CreationTimestamp.Time) > pf.ScaleUpTimeout {
+			reason, message, refusal := schedulingReason(pf, nominated)
+			if refusal != nil && pf.ScaleUpTimeout > 0 && pf.Now.Sub(p.CreationTimestamp.Time) > pf.ScaleUpTimeout {
 				t.fail(stepScheduling, reason, fmt.Sprintf("%s; no node came within the scale-up budget of %s", message, pf.ScaleUpTimeout))
-				return false
+			} else {
+				t.note(stepScheduling, reason, message)
 			}
-			t.note(stepScheduling, reason, message)
+			t.refused(stepScheduling, refusal)
 			return false
 		}
 		t.done(stepScheduling, launchedAt, "")
@@ -306,14 +317,15 @@ func nodeLaunched(pf podFacts, nominatedAt time.Time) (time.Time, string, bool) 
 }
 
 // schedulingReason is why a pod without a node waits: Karpenter's refusal to
-// launch one (refused is then true), the claim it nominated and is launching,
-// else the scheduler's own words. A read of Karpenter's objects that failed
-// is named in the message.
-func schedulingReason(pf podFacts, nominated *corev1.Event) (reason, message string, refused bool) {
+// launch one (refusal then says what was refused and what would launch), the
+// claim it nominated and is launching, else the scheduler's own words. A
+// read of Karpenter's objects that failed is named in the message.
+func schedulingReason(pf podFacts, nominated *corev1.Event) (reason, message string, refusal *capacityRefusal) {
 	lf := pf.Launch
 	if lf.Claim != "" {
-		if last, count, ok := lf.refusal(); ok {
-			reason, message, refused = reasonCapacityUnavailable, refusalMessage(last, count), true
+		if all := lf.refusals(); len(all) > 0 {
+			cr := lf.capacity(all)
+			reason, message, refusal = reasonCapacityUnavailable, refusalMessage(all[len(all)-1], len(all), cr), &cr
 		} else {
 			reason, message = reasonNodeLaunching, fmt.Sprintf("Karpenter nominated NodeClaim %s; no instance has launched yet", lf.Claim)
 			if lf.State == nil && lf.ClaimErr == nil {
@@ -323,10 +335,10 @@ func schedulingReason(pf podFacts, nominated *corev1.Event) (reason, message str
 		if unread := lf.unread(); unread != "" {
 			message += "; " + unread
 		}
-		return reason, message, refused
+		return reason, message, refusal
 	}
 	if nominated != nil {
-		return reasonNodeLaunching, nominated.Message, false
+		return reasonNodeLaunching, nominated.Message, nil
 	}
 	reason, message = podPendingReason(pf.Pod)
 	if reason == "" {
@@ -334,7 +346,7 @@ func schedulingReason(pf podFacts, nominated *corev1.Event) (reason, message str
 			reason, message = ev.Reason, ev.Message
 		}
 	}
-	return reason, message, false
+	return reason, message, nil
 }
 
 // download covers downloadingWeights: the storage-initializer init container.
