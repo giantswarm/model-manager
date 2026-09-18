@@ -933,7 +933,24 @@ func nodePoolObject(name, family string, sizes, zones []string) *unstructured.Un
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "karpenter.sh/v1", "kind": "NodePool",
 		"metadata": map[string]any{"name": name},
-		"spec":     map[string]any{"template": map[string]any{"spec": map[string]any{"requirements": reqs}}},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"requirements": reqs,
+			"nodeClassRef": map[string]any{"group": nodeClassGVR.Group, "kind": "EC2NodeClass", "name": name},
+		}}},
+	}}
+}
+
+// nodeClassObject is a karpenter.k8s.aws/v1 EC2NodeClass as Karpenter fills
+// its status: one subnet per zone given (a zone may repeat).
+func nodeClassObject(name string, zones ...string) *unstructured.Unstructured {
+	subnets := make([]any, 0, len(zones))
+	for i, z := range zones {
+		subnets = append(subnets, map[string]any{"id": fmt.Sprintf("subnet-%d", i), "zone": z, "zoneID": z + "-id"})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.aws/v1", "kind": "EC2NodeClass",
+		"metadata": map[string]any{"name": name},
+		"status":   map[string]any{"subnets": subnets},
 	}}
 }
 
@@ -1113,9 +1130,152 @@ func TestParseRequirementsAndRefusalWording(t *testing.T) {
 	assert.Equal(t, constraints{InstanceTypes: []string{"g6e.2xlarge", "g6e.4xlarge"}, Zones: []string{"eu-central-1b"}}, parseClaim(claim).Asked, "a claim's resolved types; NotIn and other keys constrain nothing here")
 	assert.True(t, parseClaim(nodeClaimObject(claimName, tNominated, "", tNominated, "", "", "")).Asked.empty())
 
+	assert.Equal(t, []string{"eu-central-1a", "eu-central-1b", "eu-central-1c"}, parseNodeClassZones(nodeClassObject("gpu", "eu-central-1c", "eu-central-1a", "eu-central-1a", "eu-central-1b")), "each zone once, sorted")
+	assert.Nil(t, parseNodeClassZones(nodeClassObject("gpu")))
+	assert.Equal(t, []string{"a", "c"}, without([]string{"a", "b", "c"}, []string{"b", "x"}))
+	assert.Nil(t, without([]string{"a"}, []string{"a"}))
 	assert.Equal(t, "a", joinList([]string{"a"}, "or"))
 	assert.Equal(t, "a and b", joinList([]string{"a", "b"}, "and"))
 	assert.Equal(t, "a, b or c", joinList([]string{"a", "b", "c"}, "or"))
 	assert.Len(t, []rune(boundMessage(strings.Repeat("x", refusalMessageMax+10))), refusalMessageMax)
 	assert.Equal(t, "short", boundMessage("short"))
+}
+
+// giantswarm/model-manager#132: a refusal in every zone the pool allows. As
+// one installation saw it: a pool pinned to no zone, Karpenter's CreateFleet
+// asking g6e.2xlarge, g6e.4xlarge and g6e.8xlarge in each of the cluster's
+// three zones, the cloud refusing all nine combinations twice — nine fleet
+// errors per answer, each naming the two other zones as the place to get
+// capacity, the event holding the first 300 characters. The step names every
+// size, every zone the pool allows and no zone as the way out; a pinned
+// refusal keeps its wording (TestServePhaseCapacityRefusalReadWhole).
+func TestServePhaseCapacityRefusalInEveryZone(t *testing.T) {
+	const pool = "gpu-l40s"
+	zones := []string{"eu-central-1a", "eu-central-1b", "eu-central-1c"}
+	three := []string{"g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge"}
+	answer := func(size, zone string) string {
+		return fmt.Sprintf("InsufficientInstanceCapacity: We currently do not have sufficient %s capacity in the Availability Zone you requested (%s). Our system will be working on provisioning additional capacity. You can currently get %s capacity by not specifying an Availability Zone in your request or choosing %s.", size, zone, size, strings.Join(without(zones, []string{zone}), ", "))
+	}
+	const prefix = "creating instance, insufficient capacity, with fleet error(s), "
+	whole := prefix + strings.Join([]string{
+		answer("g6e.8xlarge", "eu-central-1a"), answer("g6e.2xlarge", "eu-central-1c"), answer("g6e.4xlarge", "eu-central-1a"),
+		answer("g6e.4xlarge", "eu-central-1b"), answer("g6e.4xlarge", "eu-central-1c"), answer("g6e.2xlarge", "eu-central-1a"),
+		answer("g6e.2xlarge", "eu-central-1b"), answer("g6e.8xlarge", "eu-central-1c"), answer("g6e.8xlarge", "eu-central-1b"),
+	}, "; ")
+	eventOf := func(claim, size string, at time.Time) launchRefusal {
+		text := prefix + answer(size, "eu-central-1a")
+		return launchRefusal{Claim: claim, Reason: "InsufficientCapacityError", Message: text[:300] + "...", At: at}
+	}
+	at := func(h, m, s int) time.Time { return time.Date(2026, 9, 18, h, m, s, 0, time.UTC) }
+	refusals := []launchRefusal{eventOf(pool+"-44j24", "g6e.8xlarge", at(16, 14, 1)), eventOf(pool+"-snpnf", "g6e.2xlarge", at(16, 17, 21))}
+	poolAsks := constraints{InstanceTypes: three}
+	noClaim := cacheLocation{Claim: DefaultCacheClaim, Missing: true}
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	pod := func(claim string) podFacts {
+		p := predictorFixture("qwen")
+		p.CreationTimestamp = metav1.NewTime(at(16, 13, 50))
+		f := facts(p, []corev1.Event{event(p, eventNominated, "", "Pod should schedule on: nodeclaim/"+claim, at(16, 17, 12), at(16, 17, 12))}, 0)
+		f.Now = at(16, 17, 30)
+		return f
+	}
+	const every = "the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in any zone the pool allows (eu-central-1a, eu-central-1b and eu-central-1c). No zone is left to move to; wider sizes or another accelerator (a re-run of create_node_pool) give Karpenter more to choose from, and it retries while the pod waits"
+
+	t.Run("the claims are gone, the events cut, the node class read: every size, every zone, no zone as the way out", func(t *testing.T) {
+		f := pod(pool + "-snpnf")
+		f.Launch = launchFacts{Claim: pool + "-snpnf", Refusals: refusals, Pool: poolAsks, Allowed: zones, Cache: noClaim}
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		assert.Equal(t, "Karpenter could not launch a node: 2 NodeClaims refused, the last (gpu-l40s-snpnf) at 2026-09-18T16:17:21Z — InsufficientCapacityError: "+every, s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Equal(t, zones, s.RequestedZones)
+		assert.Empty(t, s.AvailableZones)
+		require.NotNil(t, s.PinnedByCache)
+		assert.False(t, *s.PinnedByCache)
+	})
+
+	t.Run("the claim stands with the whole answer and Karpenter's zone requirement: the same, the boilerplate zones dropped", func(t *testing.T) {
+		f := pod(pool + "-44j24")
+		state := &claimState{Created: at(16, 13, 52), Launched: corev1.ConditionFalse, Since: at(16, 14, 1), Reason: "InsufficientCapacityError", Message: whole, Asked: constraints{InstanceTypes: three, Zones: zones}}
+		f.Launch = launchFacts{Claim: pool + "-44j24", State: state, Pool: poolAsks, Cache: noClaim}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l40s-44j24) at 2026-09-18T16:14:01Z — InsufficientCapacityError: "+every, s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Equal(t, zones, s.RequestedZones)
+		assert.Empty(t, s.AvailableZones, "every zone the cloud named as having capacity it refused in the same answer")
+	})
+
+	t.Run("a cache claim bound in one of the zones pins nothing: the pool follows no claim", func(t *testing.T) {
+		f := pod(pool + "-snpnf")
+		bound := cacheLocation{Claim: DefaultCacheClaim, Bound: true, Shared: true, VolumeRead: true, Zones: []string{"eu-central-1b"}}
+		f.Launch = launchFacts{Claim: pool + "-snpnf", Refusals: refusals, Pool: poolAsks, Allowed: zones, Cache: bound}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.True(t, strings.HasSuffix(s.Message, every), s.Message)
+		require.NotNil(t, s.PinnedByCache)
+		assert.False(t, *s.PinnedByCache)
+	})
+
+	t.Run("the node class could not be read: the zone the cloud names, at least, and the read named", func(t *testing.T) {
+		f := pod(pool + "-snpnf")
+		unread := apierrors.NewForbidden(schema.GroupResource{Group: nodeClassGVR.Group, Resource: nodeClassGVR.Resource}, pool, errors.New(`User "viewer" cannot get resource "ec2nodeclasses"`))
+		f.Launch = launchFacts{Claim: pool + "-snpnf", Refusals: refusals, Pool: poolAsks, AllowedErr: unread, Cache: noClaim}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Contains(t, s.Message, "the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1a at least — the claim was constrained to no zone; Karpenter retries while the pod waits; the zones the pool allows could not be read (")
+		assert.Contains(t, s.Message, `cannot get resource "ec2nodeclasses"`)
+		assert.Equal(t, []string{"eu-central-1a"}, s.RequestedZones)
+		assert.NotContains(t, s.Message, "The way out")
+	})
+}
+
+// The wiring of giantswarm/model-manager#132: for a pool that pins no zone
+// the node class's subnets are read as the caller, and a caller who may not
+// read them gets the zone the cloud named and the failed read.
+func TestListLoadedReadsTheZonesAnUnpinnedPoolAllows(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.serveLLMAPI()
+	f.pendingLLMISVC(ctx, "tiny")
+	p := predictorFixture("tiny")
+	created := time.Now().Add(-time.Minute)
+	p.CreationTimestamp = metav1.NewTime(created)
+	_, err := f.cs.CoreV1().Pods(testServingNS).Create(ctx, p, metav1.CreateOptions{})
+	require.NoError(t, err)
+	for _, e := range nominated(p) {
+		_, err = f.cs.CoreV1().Events(testServingNS).Create(ctx, &e, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	_, err = f.dyn.Resource(nodePoolGVR).Create(ctx, nodePoolObject(claimPool, "g6e", []string{"2xlarge", "4xlarge", "8xlarge"}, nil), metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = f.dyn.Resource(nodeClassGVR).Create(ctx, nodeClassObject(claimPool, "eu-central-1c", "eu-central-1a", "eu-central-1b", "eu-central-1a"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	e := refusalEvent(claimName, created.Add(25*time.Second))
+	_, err = f.cs.CoreV1().Events(karpenterEventsNamespace).Create(ctx, &e, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
+	s := stepByName(loaded[0].Steps, backend.PhaseScheduling)
+	assert.Equal(t, []string{"g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge"}, s.RefusedInstanceTypes)
+	assert.Equal(t, []string{"eu-central-1a", "eu-central-1b", "eu-central-1c"}, s.RequestedZones, "the node class's zones, each once")
+	assert.Empty(t, s.AvailableZones, "the zones the cloud named it refused in the same answer")
+	assert.Contains(t, loaded[0].Message, "in any zone the pool allows (eu-central-1a, eu-central-1b and eu-central-1c). No zone is left to move to;")
+	require.NotNil(t, s.PinnedByCache)
+	assert.False(t, *s.PinnedByCache)
+
+	f.dyn.PrependReactor("get", "ec2nodeclasses", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: nodeClassGVR.Group, Resource: nodeClassGVR.Resource}, claimPool, errors.New(`User "viewer" cannot get resource "ec2nodeclasses"`))
+	})
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	s = stepByName(loaded[0].Steps, backend.PhaseScheduling)
+	assert.Equal(t, []string{"eu-central-1b"}, s.RequestedZones, "the zone the cloud named")
+	assert.Contains(t, loaded[0].Message, "in eu-central-1b at least — the claim was constrained to no zone")
+	assert.Contains(t, loaded[0].Message, "; the zones the pool allows could not be read (")
 }
