@@ -95,6 +95,13 @@ func (p *servingPreset) gpus() int64 {
 	return *p.Spec.Resources.GPUs
 }
 
+// cpu reports whether the preset requests no accelerator (resources.gpus: 0):
+// CPU work, served on the cluster's CPU capacity and judged against a node's
+// allocatable memory — never against the GPU pool, whose taint and label it
+// does not carry (settings.forPreset, nodes). A nil preset is a bare model
+// reference, which the shipped presets serve on GPUs.
+func (p *servingPreset) cpu() bool { return p != nil && p.gpus() == 0 }
+
 // routerScheduler reports whether the preset's LLMInferenceService gets the
 // llm-d endpoint picker: the preset's spec.router.scheduler when set, else
 // the backend's default.

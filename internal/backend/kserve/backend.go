@@ -544,7 +544,9 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	fit := plan.Result
 	fit.Backend = b.Name()
 	res := &backend.LoadResult{Fit: &fit}
-	s := b.cfg.settings(ctx)
+	// A CPU preset is composed without the GPU pool's scheduling and the
+	// accelerator RuntimeClass (settings.forPreset).
+	s := b.cfg.settings(ctx).forPreset(plan.Preset)
 	existing, err := b.findServing(ctx, s, plan.Preset.name())
 	if err != nil {
 		return nil, err
@@ -764,7 +766,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := b.nodes(ctx, loc)
+	nodes, err := b.nodes(ctx, loc, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -61,7 +61,8 @@ type nodeBudget struct {
 
 // isAccelerator reports whether the node advertises the configured GPU
 // resource (capacity or allocatable) or carries a gpu-feature-discovery label.
-// CPU-only nodes are not serving capacity for this backend.
+// CPU-only nodes are serving capacity for a preset that requests no GPU
+// alone (nodes).
 func isAccelerator(n *corev1.Node, gpuResource string) bool {
 	res := corev1.ResourceName(gpuResource)
 	if q, ok := n.Status.Capacity[res]; ok && q.Value() > 0 {
@@ -177,22 +178,31 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 	return nb
 }
 
-// nodes lists the accelerator nodes (isAccelerator) with their budget and
-// eligibility against the cache location, sorted by name. CPU-only nodes are
-// left out: nothing can be served there.
-func (b *Backend) nodes(ctx context.Context, loc cacheLocation) ([]nodeBudget, error) {
+// nodes lists the serving capacity for a preset with its budget and
+// eligibility against the cache location, sorted by name: the accelerator
+// nodes (isAccelerator) for a preset that requests a GPU and for a bare model
+// reference (nil), whose CPU-only nodes are left out because nothing can be
+// served there; every node for a preset that requests none (servingPreset.cpu),
+// each judged against its allocatable memory and without the GPU pool's
+// selector and taint (settings.forPreset).
+func (b *Backend) nodes(ctx context.Context, loc cacheLocation, p *servingPreset) ([]nodeBudget, error) {
 	list, err := b.k8s(ctx).CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	s := b.cfg.settings(ctx)
+	s := b.cfg.settings(ctx).forPreset(p)
+	cpu := p.cpu()
+	source := b.opts.BudgetSource
+	if cpu {
+		source = budgetSourceAllocatable
+	}
 	out := make([]nodeBudget, 0, len(list.Items))
 	for i := range list.Items {
 		n := &list.Items[i]
-		if !isAccelerator(n, s.GPUResourceName) {
+		if !cpu && !isAccelerator(n, s.GPUResourceName) {
 			continue
 		}
-		nb := budgetOf(n, s.GPUResourceName, b.opts.BudgetSource)
+		nb := budgetOf(n, s.GPUResourceName, source)
 		nb.Eligible, nb.EligibilityReason = eligibility(nb, s, loc)
 		out = append(out, nb)
 	}

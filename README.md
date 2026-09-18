@@ -388,6 +388,16 @@ scheduling by the registered backend document (`docs/backends.md`).
   refusal. `no accelerator node` is the verdict for a document that names
   no pool.
 
+- **CPU presets** — a preset whose `resources.gpus` is `0` is CPU work: the
+  fit judges every node of the cluster against its allocatable memory (the
+  accelerator nodes and the CPU nodes alike, a node's `Eligible` rules as
+  usual), and the preset knows no GPU pool and no accelerator RuntimeClass —
+  its predictor carries neither the pool's toleration and label nor
+  `runtimeClassName`, so on an installation whose GPU pool is tainted it
+  lands on the cluster's CPU capacity. A bare model reference and every
+  preset that requests a GPU keep the accelerator nodes as their capacity;
+  `GET /api/v1/nodes` lists those.
+
 - **Inventory** — the cache contents per node plus the InferenceServices of
   the serving namespace (readiness from conditions/`modelStatus`, node from the
   predictor pod, GPU request, predictor URL). The cache is read in one of two

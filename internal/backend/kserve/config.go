@@ -195,6 +195,21 @@ type settings struct {
 	DiscoveryError string
 }
 
+// forPreset is the settings a preset is judged and composed with. A preset
+// that requests no GPU (resources.gpus: 0, servingPreset.cpu) knows no GPU
+// pool and no accelerator RuntimeClass: its predictor runs on the cluster's
+// CPU capacity, so the pool's taint is not tolerated, the pool's label not
+// selected and the RuntimeClass not set — every other setting stands. Every
+// other preset gets the settings as they are.
+func (s settings) forPreset(p *servingPreset) settings {
+	if !p.cpu() {
+		return s
+	}
+	s.GPUPool = backend.GPUPool{}
+	s.RuntimeClassName = ""
+	return s
+}
+
 // config resolves settings from options plus the discovery ConfigMap, cached
 // for DiscoveryTTL so a changed ConfigMap is picked up without a restart.
 type config struct {

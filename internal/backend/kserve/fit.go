@@ -227,7 +227,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		}
 	}
 	plan.CacheLocal = len(loc.Nodes) > 0
-	nodes, err := b.nodes(ctx, loc)
+	nodes, err := b.nodes(ctx, loc, p)
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// The discovery document appeared since the settings were cached
 		// (giantswarm/model-manager#127): the nodes and their eligibility
 		// are judged again on what it says — the GPU pool above all.
-		if nodes, err = b.nodes(ctx, loc); err != nil {
+		if nodes, err = b.nodes(ctx, loc, p); err != nil {
 			return err
 		}
 		candidates, why = b.candidateNodes(ctx, nodes, req.Node, loc, p)
@@ -253,8 +253,9 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// answer is given without a node: judged against the pool's instance
 		// shapes when they are known (giantswarm/model-manager#97), else yes
 		// and unverified. An explicit node, a pool with nodes that do not
-		// fit, or no pool at all keep the refusal.
-		s := b.cfg.settings(ctx)
+		// fit, or no pool at all keep the refusal — and a CPU preset knows
+		// no pool (settings.forPreset): its refusal names the nodes.
+		s := b.cfg.settings(ctx).forPreset(p)
 		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
 			// The claim may hold the weights from an earlier serve
 			// (giantswarm/model-manager#110): a shared claim is asked
@@ -348,7 +349,8 @@ func reservedNote(reserved int64) string {
 // — refused with its eligibility reason when it is not a serving target, so
 // nothing gets scheduled onto a node that cannot run it — else the eligible
 // nodes matching the preset's node selector, preferring the nodes that hold
-// the cache. The nodes are the accelerator nodes (nodes), eligibility judged.
+// the cache. The nodes are the preset's serving capacity (nodes): the
+// accelerator nodes, or every node for a CPU preset; eligibility judged.
 func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explicit string, loc cacheLocation, p *servingPreset) ([]nodeBudget, string) {
 	s := b.cfg.settings(ctx)
 	if explicit != "" {
@@ -360,6 +362,9 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 				return nil, fmt.Sprintf("node %s is not a serving target: %s", n.Name, n.EligibilityReason)
 			}
 			return []nodeBudget{n}, ""
+		}
+		if p.cpu() {
+			return nil, fmt.Sprintf("node %q not found", explicit)
 		}
 		return nil, fmt.Sprintf("node %q not found: it does not exist or is not an accelerator node (no %s resource, no %s label)", explicit, s.GPUResourceName, labelGPUPresent)
 	}
@@ -375,6 +380,9 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 	}
 	if len(eligible) == 0 {
 		if len(nodes) == 0 {
+			if p.cpu() {
+				return nil, "no node: the cluster reports none"
+			}
 			return nil, fmt.Sprintf("no accelerator node: no node advertises %s or carries the %s label", s.GPUResourceName, labelGPUPresent)
 		}
 		why := make([]string, 0, len(nodes))
