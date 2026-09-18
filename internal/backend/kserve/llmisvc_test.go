@@ -292,12 +292,15 @@ func TestWiringFollowsThePublishedAddress(t *testing.T) {
 	assert.True(t, ep.PlaceholderAPIKey, "the in-cluster workload Service is keyless vLLM: kagent's placeholder key")
 	assert.False(t, ep.APIKeyPassthrough)
 
-	// KServe publishes the routed address; the wiring follows it.
+	// KServe publishes the route it rendered on its ingress Gateway. Without a
+	// models Gateway in discovery that address is nobody's endpoint: agents keep
+	// the workload Service.
 	obj, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
 	require.NoError(t, err)
 	obj.Object["status"] = map[string]any{
 		"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-		"addresses":  []any{map[string]any{"url": "https://models.example.com/model-serving/tiny"}},
+		"url":        "http://inference.example.com/model-serving/tiny",
+		"addresses":  []any{map[string]any{"url": "http://inference.example.com/model-serving/tiny"}},
 	}
 	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
 	require.NoError(t, err)
@@ -305,11 +308,32 @@ func TestWiringFollowsThePublishedAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, loaded, 1)
 	assert.Equal(t, statusReady, loaded[0].Status)
+	assert.Equal(t, workloadURL("tiny", testServingNS), loaded[0].Endpoint, "no models Gateway: the published ingress route is not the endpoint")
+	ep = f.b.AgentEndpoint(tinyRepo)
+	assert.Equal(t, workloadURL("tiny", testServingNS)+"/v1", ep.BaseURL)
+	assert.True(t, ep.PlaceholderAPIKey)
+	assert.False(t, ep.APIKeyPassthrough)
+
+	// With the models Gateway in discovery the wiring follows the route KServe
+	// published on it.
+	f.setDiscoveryOpts(ctx, discoveryOpts{gateway: "https://models.example.com"})
+	obj, err = llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
+	require.NoError(t, err)
+	obj.Object["status"] = map[string]any{
+		"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
+		"addresses":  []any{map[string]any{"url": "https://models.example.com/model-serving/tiny"}},
+	}
+	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
 	assert.Equal(t, "https://models.example.com/model-serving/tiny", loaded[0].Endpoint)
 	ep = f.b.AgentEndpoint(tinyRepo)
 	assert.Equal(t, "https://models.example.com/model-serving/tiny/v1", ep.BaseURL, "the wiring follows the route")
 	assert.True(t, ep.APIKeyPassthrough, "a model routed on the models Gateway is reached with the caller's own token")
 	assert.False(t, ep.PlaceholderAPIKey, "no placeholder key: the Gateway admits a person's token only")
+	f.setDiscoveryOpts(ctx, discoveryOpts{})
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
 }
 

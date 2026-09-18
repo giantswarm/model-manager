@@ -448,18 +448,50 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 // no address), which no caller uses — the Gateway terminates TLS and verifies
 // a person's token there as everywhere — so such an address keeps KServe's
 // path under the discovery Gateway's origin (onGateway).
+//
+// Without a models Gateway in discovery a published address that is not a
+// Service DNS name is nobody's endpoint, and the model is served at its
+// workload Service instead: the controller renders an HTTPRoute for every
+// LLMInferenceService (spec.router.route) on the ingress Gateway the
+// well-known router config names and publishes that route as status.url — an
+// address the platform put no token policy on and whose scheme, redirect and
+// network path model-manager cannot know (an installation saw
+// `http://inference.<domain>/<namespace>/<name>`, answered with a 301 to
+// https, wired into a ModelConfig with the caller's token). A published
+// cluster-local address stands (normalizePredictorURL gives it the Service's
+// http scheme).
 func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
+	published := publishedAddress(obj)
+	if published == "" {
+		return sv.expectedURL(gateway)
+	}
+	if gateway == "" && !isClusterLocalURL(published) {
+		return sv.expectedURL("")
+	}
+	return onGateway(published, gateway)
+}
+
+// publishedAddress is the address KServe published for the object: status.url,
+// else the first of status.addresses; empty before KServe published one.
+func publishedAddress(obj *unstructured.Unstructured) string {
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "url"); u != "" {
-		return onGateway(u, gateway)
+		return u
 	}
 	if addrs, _, _ := unstructured.NestedSlice(obj.Object, "status", "addresses"); len(addrs) > 0 {
 		if first, ok := addrs[0].(map[string]any); ok {
 			if u, _ := first["url"].(string); u != "" {
-				return onGateway(u, gateway)
+				return u
 			}
 		}
 	}
-	return sv.expectedURL(gateway)
+	return ""
+}
+
+// isClusterLocalURL reports whether raw parses to a URL whose host is a
+// Kubernetes Service DNS name.
+func isClusterLocalURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && isClusterLocalHost(u.Hostname())
 }
 
 // onGateway rewrites a published address whose host is a Service DNS name —
