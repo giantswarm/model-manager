@@ -148,6 +148,15 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
 - a model **without a preset** is judged on its weights and the default overhead against the GPU
   memory alone.
 
+The document is what tells the fit there is a pool at all. Settings resolved while the discovery
+ConfigMap was not published yet — the serving slice publishes it as its connectivity child installs —
+stand for five seconds, not the minute the document's settings stand, and a fit that finds no
+candidate node while its settings lack the document re-reads it once before answering: with a pool
+named, the scale-from-zero verdict above; still without it, `fits: false`, `retryable: true` and
+`reason: the serving layer's discovery document <namespace>/<name> is not published yet — the slice
+is still installing; retry in a moment`, which `load_model` / `pull_model` echo in their refusal.
+`no accelerator node` is the verdict for a document that names no pool.
+
 A list with an invalid entry is refused on the document (the document is reported and not loaded)
 and ignored from discovery (the answer is the unverified one). Once a node of the pool exists the
 fit is against that node again, as before.

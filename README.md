@@ -377,6 +377,16 @@ scheduling by the registered backend document (`docs/backends.md`).
   and select the pool wherever the pod is not pinned to a node already. The
   descriptor (`GET /api/v1/backend`) reports it as `gpuPool`. Unset, nothing
   changes; the chart's DaemonSet takes its own `kserve.inventory.agent.*`.
+  The document is read on the first call and cached for a minute; settings
+  resolved while it was not published yet — the slice publishes it as it
+  installs — stand for five seconds only, and a fit that finds no node while
+  they lack it reads the document once more before answering: with the pool
+  now known, the scale-from-zero path; still without it, `fits: false`,
+  `retryable: true` and a reason naming the document (`the serving layer's
+  discovery document <namespace>/<name> is not published yet — the slice is
+  still installing; retry in a moment`), which `load_model` echoes in its
+  refusal. `no accelerator node` is the verdict for a document that names
+  no pool.
 
 - **Inventory** — the cache contents per node plus the InferenceServices of
   the serving namespace (readiness from conditions/`modelStatus`, node from the

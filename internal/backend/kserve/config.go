@@ -47,10 +47,16 @@ const (
 	// download would, so a later start finds them and skips the download.
 	DefaultDownloadImage = "docker.io/kserve/storage-initializer:v0.20.0"
 	// DefaultInitImage creates cache directories and scans the cache.
-	DefaultInitImage        = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
-	DefaultBudgetSource     = "auto"
-	DefaultOverheadGiB      = 30
-	DefaultDiscoveryTTL     = time.Minute
+	DefaultInitImage    = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
+	DefaultBudgetSource = "auto"
+	DefaultOverheadGiB  = 30
+	DefaultDiscoveryTTL = time.Minute
+	// DiscoveryAbsentTTL bounds how long settings resolved without the
+	// configured discovery ConfigMap stand (config.fresh): the document
+	// appears when the serving slice's connectivity child installs, and a
+	// fit judged on settings that predate it knows no GPU pool
+	// (giantswarm/model-manager#127). A resolve error is never cached.
+	DiscoveryAbsentTTL      = 5 * time.Second
 	DefaultInventoryTTL     = 2 * time.Minute
 	DefaultInventoryTimeout = 2 * time.Minute
 	// InventoryModePod (default) scans a node's cache with a short-lived pod;
@@ -222,19 +228,84 @@ func newConfig(opts backend.KServeOptions, log *slog.Logger) *config {
 func (c *config) settings(ctx context.Context) settings {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cached != nil && c.now().Sub(c.fetchedAt) < c.opts.DiscoveryTTL {
+	if c.fresh() {
 		return *c.cached
 	}
-	s, err := c.resolve(ctx)
-	c.noteRefresh(err)
-	switch {
-	case err == nil:
-		c.cached = &s
-		c.fetchedAt = c.now()
-	case c.cached != nil:
+	s, err := c.refresh(ctx)
+	if err != nil && c.cached != nil {
 		return *c.cached
 	}
 	return s
+}
+
+// fresh reports whether the cached settings still stand: for DiscoveryTTL —
+// or for DiscoveryAbsentTTL when they were resolved without the configured
+// discovery ConfigMap. The serving slice publishes that document as it
+// installs, and settings cached a moment before it appeared know no GPU
+// pool: a fit judged on them for the full TTL refused a pool that scales
+// from zero with "no accelerator node" (giantswarm/model-manager#127).
+func (c *config) fresh() bool {
+	if c.cached == nil {
+		return false
+	}
+	ttl := c.opts.DiscoveryTTL
+	if c.discoveryAbsent(*c.cached) {
+		ttl = min(ttl, DiscoveryAbsentTTL)
+	}
+	return c.now().Sub(c.fetchedAt) < ttl
+}
+
+// refresh resolves the settings and caches them when the resolve succeeded.
+// The caller holds c.mu.
+func (c *config) refresh(ctx context.Context) (settings, error) {
+	s, err := c.resolve(ctx)
+	c.noteRefresh(err)
+	if err == nil {
+		c.cached = &s
+		c.fetchedAt = c.now()
+	}
+	return s, err
+}
+
+// recheckDiscovery re-resolves the settings once, bypassing the cache, when
+// they were resolved without the configured discovery ConfigMap, and reports
+// whether the document is there now. A fit that found no node asks before it
+// refuses: the document, and with it the GPU pool the fit is judged against,
+// may have appeared since the settings were cached
+// (giantswarm/model-manager#127).
+func (c *config) recheckDiscovery(ctx context.Context) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.discoveryConfigured() || (c.cached != nil && c.cached.DiscoveryFound) {
+		return false
+	}
+	s, err := c.refresh(ctx)
+	return err == nil && s.DiscoveryFound
+}
+
+// discoveryConfigured reports whether a discovery ConfigMap is named at all.
+func (c *config) discoveryConfigured() bool {
+	return c.opts.DiscoveryConfigMap != "" && c.opts.DiscoveryNamespace != ""
+}
+
+// discoveryAbsent reports whether s was resolved with the configured
+// discovery ConfigMap absent: the document is not published (yet).
+func (c *config) discoveryAbsent(s settings) bool {
+	return c.discoveryConfigured() && !s.DiscoveryFound && s.DiscoveryError == ""
+}
+
+// discoveryMissing is the clause a refusal carries when the settings it was
+// judged on lack the configured discovery document — not published yet, or
+// unreadable — and says to retry; empty when the document was read or none
+// is configured.
+func (c *config) discoveryMissing(s settings) string {
+	switch {
+	case !c.discoveryConfigured() || s.DiscoveryFound:
+		return ""
+	case s.DiscoveryError != "":
+		return fmt.Sprintf("the serving layer's discovery document could not be read (%s); retry in a moment", s.DiscoveryError)
+	}
+	return fmt.Sprintf("the serving layer's discovery document %s/%s is not published yet — the slice is still installing; retry in a moment", c.opts.DiscoveryNamespace, c.opts.DiscoveryConfigMap)
 }
 
 // noteRefresh logs a refresh failure when it starts and the recovery when it

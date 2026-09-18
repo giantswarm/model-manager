@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -297,4 +298,50 @@ func TestFitCheckPoolShapesNameABadRequest(t *testing.T) {
 	_, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "odd"})
 	require.ErrorIs(t, err, backend.ErrInvalid)
 	assert.Contains(t, err.Error(), `preset odd: resources.requests.cpu "two"`)
+}
+
+// TestFitCheckTakesThePoolPathOnceTheDiscoveryDocumentAppears
+// (giantswarm/model-manager#127): no node advertises a GPU, and the discovery
+// ConfigMap — with the pool — is published a moment after the settings were
+// cached without it, the way the serving slice publishes it while
+// installing. The first fit says the document is not published and to retry;
+// the next, a second later and well within DiscoveryTTL, takes the pool
+// path. "no accelerator node" is the verdict for a document that names no
+// pool.
+func TestFitCheckTakesThePoolPathOnceTheDiscoveryDocumentAppears(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	now := time.Now()
+	f.b.cfg.now = func() time.Time { return now }
+	for _, n := range []string{testCacheNode, testGPUNode, testCPUNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, n, metav1.DeleteOptions{}))
+	}
+	require.NoError(t, f.cs.CoreV1().ConfigMaps(testPlatformNS).Delete(ctx, DefaultDiscoveryConfigMap, metav1.DeleteOptions{}))
+	f.resetSettings()
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.False(t, res.Fits)
+	assert.True(t, res.Retryable)
+	assert.Equal(t, "the serving layer's discovery document "+testPlatformNS+"/"+DefaultDiscoveryConfigMap+" is not published yet — the slice is still installing; retry in a moment", res.Reason)
+	assert.Empty(t, res.BudgetSource)
+
+	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, discoveryConfigMapWith(discoveryOpts{gpuPool: poolInput()}), metav1.CreateOptions{})
+	require.NoError(t, err)
+	now = now.Add(time.Second)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.False(t, res.Retryable)
+	assert.Equal(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+	assert.Contains(t, res.Reason, "no node in the GPU pool yet ("+poolLabel+"="+poolName+"): the pool scales from zero")
+
+	// A document that names no pool: nothing scales from zero, and the
+	// nodes are the verdict.
+	f.setDiscoveryOpts(ctx, discoveryOpts{})
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.False(t, res.Fits)
+	assert.False(t, res.Retryable)
+	assert.Contains(t, res.Reason, "no accelerator node: no node advertises "+DefaultGPUResourceName)
 }
