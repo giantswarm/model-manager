@@ -436,7 +436,17 @@ scheduling by the registered backend document (`docs/backends.md`).
   does_not_fit`; `fits=false` on the fit check) before any Job or
   InferenceService exists, and never pick an ineligible node themselves. A
   second node-local GPU node becomes a serving target only with per-node
-  claims or shared storage — a chart decision, not a flag here.
+  claims or shared storage — a chart decision, not a flag here. The claim
+  has a say for the presets that store in it only — every download scheme
+  (`hf://` and, with the redirect policy on, the rest) and `pvc://`. An
+  `oci://` preset (KServe's modelcar: an OCI image containerd pulls onto the
+  node's own disk; no storage-initializer, no claim mount) is judged without
+  the claim's location: `fit-check` and `load` place it on any eligible GPU
+  node with the budget, without a cache-node preference, and answer
+  `cached: false` with `cacheSource: oci-image`; `pull` refuses it as
+  `invalid` — the image is the platform's to pre-pull; nothing to download —
+  and creates no Job. `nodes` still reports the pin: it describes the nodes,
+  not a preset.
 - **Import** — `search` proxies the Hugging Face Hub; `fit-check` resolves the
   weight size (`model.safetensors.index.json`, else the file tree, else the
   preset), adds the preset's `overheadGiB` (default 30) and compares with the
@@ -599,6 +609,8 @@ scheduling by the registered backend document (`docs/backends.md`).
   `index` (no scan could run — a GPU pool at zero, the caller's deadline —
   and the cache index remembers a directory an InferenceService filled for
   the repository), `unknown` (neither answered; `cached: false` is then no
+  verdict), `oci-image` (the preset serves an OCI model image the nodes pull
+  themselves; nothing of it is in the claim, and `cached: false` is the
   verdict). On the scale-from-zero pool path the claim is asked as a whole,
   so weights an earlier serve left in it answer `cached: true`.
 

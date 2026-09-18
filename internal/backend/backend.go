@@ -418,18 +418,21 @@ type FitResult struct {
 	// says how that was decided: "scan" (a cache scan answered in this
 	// call), "index" (no scan could run — a pool at zero, the caller's
 	// deadline — and the cache index remembers a directory an
-	// InferenceService filled for the repository), or "unknown" (neither
-	// answered: Cached false is then no verdict). Empty on backends without
-	// a cache.
+	// InferenceService filled for the repository), "unknown" (neither
+	// answered: Cached false is then no verdict), or "oci-image" (the
+	// preset serves an OCI model image the nodes pull themselves; nothing of
+	// it is in the cache, and Cached false is the verdict). Empty on
+	// backends without a cache.
 	Cached      bool   `json:"cached"`
 	CacheSource string `json:"cacheSource,omitempty"`
 }
 
 // The CacheSource values of a FitResult.
 const (
-	CacheSourceScan    = "scan"
-	CacheSourceIndex   = "index"
-	CacheSourceUnknown = "unknown"
+	CacheSourceScan     = "scan"
+	CacheSourceIndex    = "index"
+	CacheSourceUnknown  = "unknown"
+	CacheSourceOCIImage = "oci-image"
 )
 
 // LoadResult is what a Server's Serve answers next to the error: the fit

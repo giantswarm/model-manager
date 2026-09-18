@@ -105,6 +105,20 @@ func (p *servingPreset) routerScheduler(s settings) bool {
 	return s.RouterScheduler
 }
 
+// storesInCache reports whether the cache claim has a say in where the preset
+// is served because its weights live there: every scheme the KServe
+// storage-initializer downloads (hf://, which a pre-warm download fills ahead
+// of time; with the redirect policy on, the rest write into the claim mounted
+// at the model path as well) and pvc://, which reads a claim. Not oci://:
+// KServe's modelcar is an OCI image containerd pulls onto the node's own disk
+// — no storage-initializer, no claim mount — so the claim's pin and its nodes
+// have no say over the placement and there is nothing to download into it
+// (giantswarm/model-manager#123). A nil preset is a bare Hugging Face model
+// reference and stores in the cache.
+func (p *servingPreset) storesInCache() bool {
+	return p == nil || !strings.HasPrefix(p.Spec.Model.StorageURI, "oci://")
+}
+
 func (p *servingPreset) weightsBytes() int64 {
 	return gibToBytes(p.Spec.Requirements.WeightsGiB)
 }
