@@ -2,17 +2,22 @@ package kserve
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/identity"
 )
 
 // The proof-1 timeline of a fresh serve on a scale-to-zero L4 pool
@@ -123,6 +128,37 @@ func podReadyAt(p *corev1.Pod, at time.Time) {
 	p.Status.ContainerStatuses[0].Ready = true
 	p.Status.Conditions[2] = corev1.PodCondition{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(at)}
 }
+
+// restarted: the runtime died — count times so far, the last one with the
+// exit given — and the kubelet runs it again.
+func restarted(p *corev1.Pod, count, exit int32, reason string) {
+	loading(p)
+	cs := &p.Status.ContainerStatuses[0]
+	cs.RestartCount = count
+	cs.LastTerminationState.Terminated = &corev1.ContainerStateTerminated{ExitCode: exit, Reason: reason, StartedAt: metav1.NewTime(tRunning), FinishedAt: metav1.NewTime(tRunning.Add(90 * time.Second))}
+	cs.State.Running.StartedAt = metav1.NewTime(tRunning.Add(2 * time.Minute))
+}
+
+// backedOff: the runtime died again and the kubelet waits before the next
+// restart — the container's restart count still counts the starts before
+// the dead instance, as the kubelet reports it.
+func backedOff(p *corev1.Pod, count, exit int32, reason string) {
+	restarted(p, count, exit, reason)
+	p.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s restarting failed container=main pod=tiny-kserve-workload-7d9f8_serving(uid-tiny)"}}
+}
+
+// vllmCrashLog is the tail of a vLLM runtime that died at start-up: the
+// engine's traceback, logged line by line with the logger's prefix.
+const vllmCrashLog = `INFO 09-18 00:35:10 [core.py:76] Initializing a V1 LLM engine (v0.11.0) with config: model='/mnt/models'
+(EngineCore_0 pid=94) ERROR 09-18 00:35:12 [core.py:708] EngineCore failed to start.
+(EngineCore_0 pid=94) ERROR 09-18 00:35:12 [core.py:708] Traceback (most recent call last):
+(EngineCore_0 pid=94) ERROR 09-18 00:35:12 [core.py:708]   File "/opt/vllm/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 699, in run_engine_core
+(EngineCore_0 pid=94) ERROR 09-18 00:35:12 [core.py:708]     os.makedirs(cache_dir, exist_ok=True)
+(EngineCore_0 pid=94) ERROR 09-18 00:35:12 [core.py:708] PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'
+INFO 09-18 00:35:13 [launcher.py:60] Shutting down FastAPI HTTP server.
+`
+
+const crashLine = "runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'"
 
 func facts(p *corev1.Pod, events []corev1.Event, nodeGPUs int64) podFacts {
 	return podFacts{Pod: p, Events: events, NodeKnown: p.Spec.NodeName != "", NodeGPUs: nodeGPUs, GPUResource: DefaultGPUResourceName, Now: tNow}
@@ -245,6 +281,7 @@ func TestServePhaseFollowsTheProofTimeline(t *testing.T) {
 		s := assertStep(t, steps, backend.PhaseLoading, backend.StepInProgress, tRunning, time.Time{})
 		assert.Equal(t, reasonLoadingModel, s.Reason)
 		assert.Contains(t, s.Message, "Startup probe failed")
+		assert.NotContains(t, s.Message, "crashed", "a first start is not a crash")
 	})
 
 	t.Run("routing: the pod is ready, the route is not", func(t *testing.T) {
@@ -319,18 +356,6 @@ func TestServePhaseFailures(t *testing.T) {
 		assert.Contains(t, s.Message, "OOMKilled")
 	})
 
-	t.Run("a crash-looping runtime fails the loading step", func(t *testing.T) {
-		p := predictorFixture("tiny")
-		downloaded(p, 72*time.Second)
-		p.Status.ContainerStatuses[0].State.Waiting = &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s restarting failed container=main"}
-		p.Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", Message: "ValueError: model weights not found"}
-		phase, steps := servePhase(sv, facts(p, pulledEvents(p), 1))
-		assert.Equal(t, backend.PhaseFailed, phase)
-		assertStep(t, steps, backend.PhasePullingImage, backend.StepDone, tInitDone, tPulled)
-		s := assertStep(t, steps, backend.PhaseLoading, backend.StepFailed, tPulled, time.Time{})
-		assert.Equal(t, "CrashLoopBackOff", s.Reason)
-	})
-
 	t.Run("the object's own failure fails the step under way", func(t *testing.T) {
 		p := predictorFixture("tiny")
 		loading(p)
@@ -342,6 +367,158 @@ func TestServePhaseFailures(t *testing.T) {
 		assert.Equal(t, backend.StepFailed, s.State)
 		assert.Equal(t, "RuntimeUnhealthy", s.Reason)
 	})
+}
+
+// giantswarm/model-manager#117: a runtime that dies at start-up is named —
+// crash count, exit code, the crashed instance's last error line — instead
+// of the probe's "connection refused", and the phase fails once the kubelet
+// backs off.
+func TestServePhaseNamesACrashLoopingRuntime(t *testing.T) {
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	crash := crashLog{Line: lastErrorLine(vllmCrashLog)}
+	// After a crash the kubelet re-pulls the image (present on the node): a
+	// second Pulled event, later; the probe kept failing meanwhile.
+	events := func(p *corev1.Pod) []corev1.Event {
+		return append(pulledEvents(p),
+			event(p, eventUnhealthy, mainField, `Startup probe failed: Get "http://10.0.1.23:8000/health": dial tcp 10.0.1.23:8000: connect: connection refused`, tRunning.Add(10*time.Second), tRunning.Add(4*time.Minute)),
+			event(p, eventPulled, mainField, `Container image "ghcr.io/llm-d/llm-d-cuda:v0.4.0" already present on machine`, tRunning.Add(2*time.Minute), tRunning.Add(2*time.Minute)),
+		)
+	}
+
+	t.Run("restarted and running again: loading stays under way with CrashLoop, since the first pull", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		restarted(p, 2, 1, "Error")
+		f := facts(p, events(p), 1)
+		f.Crash = crash
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseLoading, phase)
+		img := assertStep(t, steps, backend.PhasePullingImage, backend.StepDone, tInitDone, tPulled)
+		assert.Contains(t, img.Message, "in 4m0.1s", "the image step keeps its first pull")
+		s := assertStep(t, steps, backend.PhaseLoading, backend.StepInProgress, tPulled, time.Time{})
+		assert.Equal(t, reasonCrashLoop, s.Reason)
+		assert.Equal(t, crashLine, s.Message)
+	})
+
+	t.Run("the kubelet backed off: the step fails with the crash and the back-off, the phase is failed", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		backedOff(p, 1, 1, "Error")
+		f := facts(p, events(p), 1)
+		f.Crash = crash
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		assertStep(t, steps, backend.PhasePullingImage, backend.StepDone, tInitDone, tPulled)
+		s := assertStep(t, steps, backend.PhaseLoading, backend.StepFailed, tPulled, time.Time{})
+		assert.Equal(t, "CrashLoopBackOff", s.Reason)
+		assert.Equal(t, crashLine+"; back-off 5m0s restarting failed container=main pod=tiny-kserve-workload-7d9f8_serving(uid-tiny)", s.Message)
+	})
+
+	t.Run("backed off with the Events expired: still the loading step, never pullingImage", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		backedOff(p, 3, 137, "OOMKilled")
+		f := facts(p, nil, 1)
+		f.Crash = crash
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		assertStep(t, steps, backend.PhasePullingImage, backend.StepDone, tInitDone, tInitDone)
+		s := assertStep(t, steps, backend.PhaseLoading, backend.StepFailed, tInitDone, time.Time{})
+		assert.Contains(t, s.Message, "runtime crashed 4× (exit 137, OOMKilled): PermissionError")
+	})
+
+	t.Run("the log could not be read: the message says why, never silently", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		restarted(p, 1, 1, "Error")
+		f := facts(p, events(p), 1)
+		f.Crash = crashLog{Err: apierrors.NewForbidden(schema.GroupResource{Resource: "pods/log"}, p.Name, errors.New(`User "viewer" cannot get resource "pods/log"`))}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseLoading)
+		assert.Equal(t, reasonCrashLoop, s.Reason)
+		assert.Contains(t, s.Message, "runtime crashed 1× (exit 1); the crashed container's log could not be read (")
+		assert.Contains(t, s.Message, "is forbidden")
+	})
+
+	t.Run("no error line in the log: the message says so", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		restarted(p, 1, 1, "Error")
+		_, steps := servePhase(sv, facts(p, events(p), 1))
+		assert.Contains(t, stepByName(steps, backend.PhaseLoading).Message, "runtime crashed 1× (exit 1); no error line in the last 200 lines")
+	})
+
+	t.Run("terminated and never restarted (restartPolicy Never): failed with the exit", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		loading(p)
+		p.Spec.RestartPolicy = corev1.RestartPolicyNever
+		p.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, Reason: "Error"}}
+		f := facts(p, pulledEvents(p), 1)
+		f.Crash = crash
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		s := stepByName(steps, backend.PhaseLoading)
+		assert.Equal(t, backend.StepFailed, s.State)
+		assert.Equal(t, "Error", s.Reason)
+		assert.Contains(t, s.Message, "runtime crashed 1× (exit 2): PermissionError")
+	})
+}
+
+func TestLastErrorLine(t *testing.T) {
+	assert.Equal(t, "PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'", lastErrorLine(vllmCrashLog), "the last error line, from the exception on")
+	assert.Equal(t, "level=error msg=\"open /mnt/models/config.json: permission denied\"", lastErrorLine("level=info msg=starting\nlevel=error msg=\"open /mnt/models/config.json: permission denied\"\n"), "a line without an exception stays whole")
+	assert.Empty(t, lastErrorLine("INFO all good\nINFO still good\n"))
+	got := lastErrorLine("INFO\nRuntimeError: " + strings.Repeat("x", 300) + "\n")
+	assert.Len(t, []rune(got), crashLineMax)
+	assert.True(t, strings.HasSuffix(got, "…"), got)
+}
+
+// The wiring of giantswarm/model-manager#117: list_loaded_models reads the
+// crashed runtime's previous log as the caller, and a caller who may not
+// read pods/log gets the crash without the line and the reason.
+func TestListLoadedNamesACrashLoopingRuntime(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.serveLLMAPI()
+	f.pendingLLMISVC(ctx, "tiny")
+	p := predictorFixture("tiny")
+	restarted(p, 2, 1, "Error")
+	f.setPreviousLogs(p.Name, vllmCrashLog)
+	_, err := f.cs.CoreV1().Nodes().Create(ctx, withGPUs(node(p.Spec.NodeName, "64Gi", nil), 1), metav1.CreateOptions{})
+	require.NoError(t, err)
+	pods := f.cs.CoreV1().Pods(testServingNS)
+	_, err = pods.Create(ctx, p, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseLoading, loaded[0].Phase)
+	s := stepByName(loaded[0].Steps, backend.PhaseLoading)
+	assert.Equal(t, backend.StepInProgress, s.State)
+	assert.Equal(t, reasonCrashLoop, s.Reason)
+	assert.Equal(t, crashLine, s.Message)
+
+	// The kubelet backs off: the phase fails and the answer's own reason and
+	// message are the crash, not the object's Ready condition.
+	backedOff(p, 2, 1, "Error")
+	_, err = pods.Update(ctx, p, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseFailed, loaded[0].Phase)
+	assert.Equal(t, "CrashLoopBackOff", loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "runtime crashed 3× (exit 1): PermissionError")
+
+	// A caller who may not read pods/log.
+	f.b.logs = func(ctx context.Context, _, name string, _ corev1.PodLogOptions) (string, error) {
+		if _, ok := identity.TokenFromContext(ctx); ok {
+			return "", apierrors.NewForbidden(schema.GroupResource{Resource: "pods/log"}, name, errors.New(`User "viewer" cannot get resource "pods/log" in API group "" in the namespace "serving"`))
+		}
+		return vllmCrashLog, nil
+	}
+	loaded, err = f.b.ListLoaded(identity.ContextWithToken(ctx, "viewer-token"))
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Contains(t, loaded[0].Message, "runtime crashed 3× (exit 1); the crashed container's log could not be read (")
+	assert.Contains(t, loaded[0].Message, `cannot get resource "pods/log"`)
+	assert.NotContains(t, loaded[0].Message, "PermissionError")
 }
 
 // The wiring: list_loaded_models reads the predictor pod, its Events (by the

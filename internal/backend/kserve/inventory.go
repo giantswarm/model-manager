@@ -519,16 +519,21 @@ func (b *Backend) runCacheJob(ctx context.Context, pod *corev1.Pod) (logs, node 
 	}
 }
 
-// podLogs reads a pod's log (the whole log with tail 0).
+// podLogs reads a single-container pod's log (the whole log with tail 0).
 func (b *Backend) podLogs(ctx context.Context, namespace, name string, tail int64) (string, error) {
-	if b.logs != nil {
-		return b.logs(ctx, namespace, name, tail)
-	}
-	opts := &corev1.PodLogOptions{}
+	opts := corev1.PodLogOptions{}
 	if tail > 0 {
 		opts.TailLines = ptr.To(tail)
 	}
-	rc, err := b.k8s(ctx).CoreV1().Pods(namespace).GetLogs(name, opts).Stream(ctx)
+	return b.podLog(ctx, namespace, name, opts)
+}
+
+// podLog reads a pod's log as the caller, with the options given.
+func (b *Backend) podLog(ctx context.Context, namespace, name string, opts corev1.PodLogOptions) (string, error) {
+	if b.logs != nil {
+		return b.logs(ctx, namespace, name, opts)
+	}
+	rc, err := b.k8s(ctx).CoreV1().Pods(namespace).GetLogs(name, &opts).Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read logs of %s: %w", name, err)
 	}

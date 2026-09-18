@@ -237,8 +237,9 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 	if len(pods) == 0 {
 		return out
 	}
-	// The phases need the pods' Events and nodes: the nodes once, the
-	// Events per pod concurrently, each read bounded (phases.go).
+	// The phases need the pods' Events and nodes — and a crashed runtime's
+	// log: the nodes once, the rest per pod concurrently, each read bounded
+	// (phases.go).
 	gpus := b.nodeGPUs(ctx, s.GPUResourceName)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -249,6 +250,9 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 			facts := podFacts{Pod: p, Events: b.podEvents(ctx, p), GPUResource: s.GPUResourceName, Now: time.Now()}
 			if n, ok := gpus[p.Spec.NodeName]; ok {
 				facts.NodeKnown, facts.NodeGPUs = true, n
+			}
+			if cs := runtimeStatus(p); cs != nil && crashed(cs) {
+				facts.Crash = b.crashLog(ctx, p, cs)
 			}
 			mu.Lock()
 			out[name] = predictorPodOf(p, facts)
@@ -327,6 +331,8 @@ func podPendingReason(p *corev1.Pod) (reason, message string) {
 // (Unschedulable: no node with a free GPU, a pool still scaling from zero) or
 // the kubelet's (ImagePullBackOff) — which says more than the object's Ready
 // condition does. A serving object whose pod waits is Pending, not NotReady.
+// A Running pod whose step failed (a runtime the kubelet backed off from
+// restarting) is NotReady with that step's reason.
 func (sv *served) applyPod(p predictorPod) {
 	sv.Node = p.Node
 	facts := p.facts
@@ -334,7 +340,13 @@ func (sv *served) applyPod(p predictorPod) {
 		facts = podFacts{Now: time.Now()}
 	}
 	sv.Phase, sv.Steps = servePhase(*sv, facts)
-	if sv.Ready || sv.Deleting || !p.Pending {
+	if sv.Ready || sv.Deleting {
+		return
+	}
+	if !p.Pending {
+		if s := failedStep(sv.Steps); s != nil && !sv.Failed {
+			sv.Reason, sv.Message = s.Reason, strings.TrimSpace(s.Reason+" "+s.Message)
+		}
 		return
 	}
 	sv.Status = statusPending
@@ -350,6 +362,16 @@ func (sv *served) applyPod(p predictorPod) {
 			return
 		}
 	}
+}
+
+// failedStep is the step that failed; nil when none did.
+func failedStep(steps []backend.Step) *backend.Step {
+	for i := range steps {
+		if steps[i].State == backend.StepFailed {
+			return &steps[i]
+		}
+	}
+	return nil
 }
 
 // parseServed reads the fields the driver needs from an InferenceService or

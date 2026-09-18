@@ -3,11 +3,13 @@ package kserve
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -22,7 +24,9 @@ import (
 // (loading), KServe resolves the route (routing), the endpoint answers
 // (ready). Conditions carry the transitions the pod records; Events carry the
 // rest — Karpenter's nomination, Pulling/Pulled with the pull's duration,
-// probe failures.
+// probe failures. A runtime that dies while loading is named by its
+// container status — how often it crashed, the exit code — and by the last
+// error line of the crashed instance's log (giantswarm/model-manager#117).
 const (
 	initContainerName = "storage-initializer"
 
@@ -34,6 +38,10 @@ const (
 	cachedWithin = 15 * time.Second
 	// downloadStallAfter: an initializer running this long has stalled.
 	downloadStallAfter = 30 * time.Minute
+	// crashLogTail bounds the read of a crashed runtime's log; crashLineMax
+	// bounds the line kept from it.
+	crashLogTail = 200
+	crashLineMax = 240
 
 	eventNominated        = "Nominated"
 	eventFailedScheduling = "FailedScheduling"
@@ -46,6 +54,18 @@ const (
 	reasonDownloadStalled    = "DownloadStalled"
 	reasonLoadingModel       = "LoadingModel"
 	reasonWaitingForPod      = "WaitingForPod"
+	// reasonCrashLoop: the runtime died and the kubelet restarts it; once it
+	// backs off the container status says CrashLoopBackOff itself.
+	reasonCrashLoop = "CrashLoop"
+)
+
+// errorLine matches the log lines a crash's cause is read from: a Python
+// traceback and its exception line, a Go error, a permission refused.
+// exceptionAt finds the exception itself in such a line (`PermissionError:
+// [Errno 13] …`), so a logger's prefix in front of it is dropped.
+var (
+	errorLine   = regexp.MustCompile(`Error|Traceback|Exception|denied`)
+	exceptionAt = regexp.MustCompile(`\b[A-Z]\w*(?:Error|Exception)\b: `)
 )
 
 // podFacts is what the phase computation reads besides the pod.
@@ -59,6 +79,15 @@ type podFacts struct {
 	// GPUResource names the accelerator resource (nvidia.com/gpu).
 	GPUResource string
 	Now         time.Time
+	// Crash is read off the crashed runtime container's log, when one died.
+	Crash crashLog
+}
+
+// crashLog is what a crashed runtime container's log says: its last error
+// line, or why the log could not be read (a caller without pods/log).
+type crashLog struct {
+	Line string
+	Err  error
 }
 
 // timeline is the steps of a serve while they are computed.
@@ -313,10 +342,12 @@ func pull(t *timeline, pf podFacts) bool {
 		t.begin(stepImage, stepEnd(t, stepWeights, pf.Now))
 		return false
 	}
-	main := &p.Status.ContainerStatuses[0]
+	main := runtimeStatus(p)
 	field := "spec.containers{" + main.Name + "}"
-	pulling := lastEvent(pf.Events, eventPulling, field)
-	pulled := lastEvent(pf.Events, eventPulled, field)
+	// The image's first pull: a restarted container is Pulled again
+	// (already present on the node), which is the crash loop, not the step.
+	pulling := firstEvent(pf.Events, eventPulling, field)
+	pulled := firstEvent(pf.Events, eventPulled, field)
 	since := stepEnd(t, stepWeights, pf.Now)
 	if at := eventTime(pulling, true); !at.IsZero() {
 		since = at
@@ -327,7 +358,7 @@ func pull(t *timeline, pf podFacts) bool {
 			t.fail(stepImage, w.Reason, w.Message)
 			return false
 		}
-		if pulled == nil {
+		if pulled == nil && !crashed(main) {
 			message := w.Message
 			if pulling != nil {
 				message = pulling.Message
@@ -335,18 +366,30 @@ func pull(t *timeline, pf podFacts) bool {
 			t.note(stepImage, nonEmpty(w.Reason, eventPulling), message)
 			return false
 		}
-		// Pulled, not yet Running: created, or crash-looping.
-		pulledAt := eventTime(pulled, false)
-		t.done(stepImage, pulledAt, pulled.Message)
+		// Pulled — or run before: a crashed runtime had its image, whether
+		// or not the Pulled event still exists — but not Running: created,
+		// or the kubelet backed off from restarting a runtime that keeps
+		// dying, which fails the loading step.
+		pulledAt, message := eventTime(pulled, true), ""
+		if pulled != nil {
+			message = pulled.Message
+		}
+		if pulledAt.IsZero() {
+			pulledAt = since
+		}
+		t.done(stepImage, pulledAt, message)
 		t.begin(stepLoading, pulledAt)
-		if isCrash(w.Reason) {
-			t.fail(stepLoading, w.Reason, nonEmpty(w.Message, lastTermination(main)))
-		} else {
+		switch {
+		case isCrash(w.Reason):
+			t.fail(stepLoading, w.Reason, crashMessage(main, pf.Crash, w.Message))
+		case crashed(main):
+			t.note(stepLoading, reasonCrashLoop, crashMessage(main, pf.Crash, w.Message))
+		default:
 			t.note(stepLoading, w.Reason, w.Message)
 		}
 		return false
 	}
-	pulledAt := eventTime(pulled, false)
+	pulledAt := eventTime(pulled, true)
 	message := ""
 	if pulled != nil {
 		message = pulled.Message
@@ -358,17 +401,26 @@ func pull(t *timeline, pf podFacts) bool {
 	return true
 }
 
-// load covers loading: the runtime container up to its probes passing.
+// load covers loading: the runtime container up to its probes passing. A
+// runtime that died is named (CrashLoop, the crash count, the exit code, the
+// crashed instance's last error line) and the step stays under way since the
+// image was pulled while the kubelet restarts it; it fails when the kubelet
+// will not (restartPolicy Never) — the back-off fails it in pull.
 func load(t *timeline, pf podFacts) bool {
 	p := pf.Pod
-	main := &p.Status.ContainerStatuses[0]
-	if term := main.State.Terminated; term != nil {
-		t.begin(stepLoading, term.StartedAt.Time)
-		t.fail(stepLoading, nonEmpty(term.Reason, "Error"), fmt.Sprintf("%s exited %d: %s", main.Name, term.ExitCode, nonEmpty(term.Message, "no message")))
+	main := runtimeStatus(p)
+	since := stepEnd(t, stepImage, pf.Now)
+	if crashed(main) {
+		t.begin(stepLoading, since)
+		message := crashMessage(main, pf.Crash, "")
+		if term := main.State.Terminated; term != nil && p.Spec.RestartPolicy == corev1.RestartPolicyNever {
+			t.fail(stepLoading, nonEmpty(term.Reason, "Error"), message)
+			return false
+		}
+		t.note(stepLoading, reasonCrashLoop, message)
 		return false
 	}
-	startedAt := containerStart(main, stepEnd(t, stepImage, pf.Now))
-	t.begin(stepLoading, startedAt)
+	t.begin(stepLoading, containerStart(main, since))
 	if !main.Ready {
 		message := "the runtime is loading the model; the startup probe has not passed yet"
 		if ev := lastEvent(pf.Events, eventUnhealthy, "spec.containers{"+main.Name+"}"); ev != nil {
@@ -403,6 +455,76 @@ func containerStatus(list []corev1.ContainerStatus, name string) *corev1.Contain
 		}
 	}
 	return nil
+}
+
+// runtimeStatus is the runtime container's status — the pod's first
+// container; nil before the kubelet reports one.
+func runtimeStatus(p *corev1.Pod) *corev1.ContainerStatus {
+	if len(p.Status.ContainerStatuses) == 0 {
+		return nil
+	}
+	return &p.Status.ContainerStatuses[0]
+}
+
+// crashed reports whether an instance of the container died: the kubelet
+// restarted it, recorded its termination, or reports it terminated now.
+func crashed(cs *corev1.ContainerStatus) bool {
+	return cs.RestartCount > 0 || cs.LastTerminationState.Terminated != nil || cs.State.Terminated != nil
+}
+
+// crashMessage names a runtime's crashes: how often it died, the exit code
+// (and the reason unless the plain Error) of the last death, the last error
+// line of the crashed instance's log — or why that line is missing, never
+// silently — and the kubelet's own words when given (its back-off).
+func crashMessage(cs *corev1.ContainerStatus, log crashLog, kubelet string) string {
+	crashes := cs.RestartCount
+	if cs.State.Running == nil {
+		crashes++ // the latest instance is dead too
+	}
+	term := cs.State.Terminated
+	if term == nil {
+		term = cs.LastTerminationState.Terminated
+	}
+	exit := "exit code unknown"
+	if term != nil {
+		exit = fmt.Sprintf("exit %d", term.ExitCode)
+		if r := term.Reason; r != "" && r != "Error" {
+			exit += ", " + r
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "runtime crashed %d× (%s)", crashes, exit)
+	switch {
+	case log.Err != nil:
+		fmt.Fprintf(&b, "; the crashed container's log could not be read (%v)", log.Err)
+	case log.Line == "":
+		fmt.Fprintf(&b, "; no error line in the last %d lines of the crashed container's log", crashLogTail)
+	default:
+		b.WriteString(": " + log.Line)
+	}
+	if kubelet = strings.TrimSpace(kubelet); kubelet != "" {
+		b.WriteString("; " + kubelet)
+	}
+	return b.String()
+}
+
+// lastErrorLine is the last line of a log that names an error — from the
+// exception on when the line carries one — bounded to crashLineMax
+// characters; empty when no line does.
+func lastErrorLine(log string) string {
+	line := ""
+	for _, l := range strings.Split(log, "\n") {
+		if errorLine.MatchString(l) {
+			line = strings.TrimSpace(l)
+		}
+	}
+	if at := exceptionAt.FindStringIndex(line); at != nil {
+		line = line[at[0]:]
+	}
+	if r := []rune(line); len(r) > crashLineMax {
+		line = string(r[:crashLineMax-1]) + "…"
+	}
+	return line
 }
 
 func lastTermination(cs *corev1.ContainerStatus) string {
@@ -466,13 +588,27 @@ func conditionTime(p *corev1.Pod, kind corev1.PodConditionType, fallback time.Ti
 // lastEvent is the latest event with the reason, for the object's fieldPath
 // (a container) when given; nil without one.
 func lastEvent(events []corev1.Event, reason, fieldPath string) *corev1.Event {
+	return pickEvent(events, reason, fieldPath, func(e, best *corev1.Event) bool {
+		return eventTime(e, false).After(eventTime(best, false))
+	})
+}
+
+// firstEvent is the earliest event with the reason (the image's first pull,
+// not a restarted container's), for the fieldPath when given.
+func firstEvent(events []corev1.Event, reason, fieldPath string) *corev1.Event {
+	return pickEvent(events, reason, fieldPath, func(e, best *corev1.Event) bool {
+		return eventTime(e, true).Before(eventTime(best, true))
+	})
+}
+
+func pickEvent(events []corev1.Event, reason, fieldPath string, better func(e, best *corev1.Event) bool) *corev1.Event {
 	var best *corev1.Event
 	for i := range events {
 		e := &events[i]
 		if e.Reason != reason || (fieldPath != "" && e.InvolvedObject.FieldPath != fieldPath) {
 			continue
 		}
-		if best == nil || eventTime(e, false).After(eventTime(best, false)) {
+		if best == nil || better(e, best) {
 			best = e
 		}
 	}
@@ -513,6 +649,22 @@ func (b *Backend) podEvents(ctx context.Context, p *corev1.Pod) []corev1.Event {
 		}
 	}
 	return out
+}
+
+// crashLog reads the log of the runtime container instance that died — the
+// previous instance while the kubelet restarts the container, the current
+// one while it lies terminated — as the caller, bounded like the Events, and
+// keeps its last error line. A read that fails keeps why, so the step says
+// it instead of dropping the line (a caller who may not read pods/log).
+func (b *Backend) crashLog(ctx context.Context, p *corev1.Pod, cs *corev1.ContainerStatus) crashLog {
+	ctx, cancel := context.WithTimeout(ctx, eventsTimeout)
+	defer cancel()
+	opts := corev1.PodLogOptions{Container: cs.Name, TailLines: ptr.To(int64(crashLogTail)), Previous: cs.State.Terminated == nil}
+	out, err := b.podLog(ctx, p.Namespace, p.Name, opts)
+	if err != nil {
+		return crashLog{Err: err}
+	}
+	return crashLog{Line: lastErrorLine(out)}
 }
 
 // nodeGPUs maps every node to its allocatable accelerator count; nil when
