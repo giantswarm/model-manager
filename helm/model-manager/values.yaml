@@ -31,7 +31,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 # -- Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop),
-# `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving
+# `kserve` (KServe/llm-d on GPU installs: LLMInferenceServices from serving
 # presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or
 # `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs,
 # llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio`
@@ -121,7 +121,7 @@ kagent:
   # -- Disable all ModelConfig management; the `wire` capability reports false.
   # A release that runs the kserve backend keeps its Kubernetes access
   # (ServiceAccount token, RBAC) regardless — it needs the API for
-  # InferenceServices, Jobs and nodes; only releases with the ollama and
+  # LLMInferenceServices, Jobs and nodes; only releases with the ollama and
   # lemonade backends alone run without the API when wiring is off.
   disableWiring: false
 
@@ -193,7 +193,7 @@ oauth:
   allowPublicClientRegistration: false
   downstream:
     # -- Call the Kubernetes API as the caller: everything a request does
-    # (InferenceServices, download Jobs, cache scans, ModelConfigs) presents
+    # (LLMInferenceServices, download Jobs, cache scans, ModelConfigs) presents
     # the caller's IdP token, so the caller's RBAC governs — the apiserver
     # must trust the IdP and the token's audience (a Dex install lists that
     # audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's
@@ -277,8 +277,8 @@ rbac:
   create: true
 
 kserve:
-  # -- Serving namespace: InferenceServices, download Jobs, cache-tool pods and
-  # the cache claim live here and the kserve RBAC Role is created here. Must
+  # -- Serving namespace: LLMInferenceServices, download Jobs, cache-tool pods
+  # and the cache claim live here and the kserve RBAC Role is created here. Must
   # match the platform's `components.modelServing.namespace.name`.
   namespace: model-serving
   discovery:
@@ -290,15 +290,6 @@ kserve:
     # -- Namespace of the discovery ConfigMap and, by default, of the preset
     # ConfigMaps. Empty means the release namespace.
     namespace: ""
-  # -- Kind a serving preset is composed into: `LLMInferenceService` (the
-  # llm-d control plane: KServe's own router and well-known configs),
-  # `InferenceService` (the classic predictor on the vLLM
-  # ClusterServingRuntime) or empty for `auto` — `LLMInferenceService`
-  # wherever its API is served, else the classic kind.
-  servingKind: ""
-  # -- ClusterServingRuntime for presets that name none (classic kind); empty
-  # takes the discovery value (default `kserve-vllm`).
-  runtime: ""
   # -- Accelerator resource name; empty takes the discovery value (default
   # `nvidia.com/gpu`).
   gpuResourceName: ""
@@ -315,8 +306,8 @@ kserve:
     nodes: []
     # -- ConfigMap in the serving namespace that remembers which Hugging Face
     # repository filled which cache directory: recorded while an
-    # InferenceService serves from the directory (its name), kept after the
-    # InferenceService is gone, so the directory keeps its repository and
+    # LLMInferenceService serves from the directory (its name), kept after the
+    # LLMInferenceService is gone, so the directory keeps its repository and
     # preset in the inventory. The kserve Role grants `create` on ConfigMaps
     # and `update`/`patch`/`delete` on this name.
     indexConfigMap: model-manager-cache-index
@@ -350,15 +341,15 @@ kserve:
     token: ""
   download:
     # -- Image of the pre-warm download Job. The KServe storage-initializer
-    # downloads exactly what an InferenceService would, so a later start finds
-    # the files and skips the download.
+    # downloads exactly what an LLMInferenceService would, so a later start
+    # finds the files and skips the download.
     image:
       registry: docker.io
       name: kserve/storage-initializer
       tag: v0.20.0
     # -- File patterns downloads skip (fnmatch, passed as
     # STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an
-    # InferenceService does.
+    # LLMInferenceService does.
     ignorePatterns: []
     # -- ttlSecondsAfterFinished of download Jobs.
     jobTTL: 1h
@@ -423,7 +414,7 @@ kserve:
     # -- Serving overhead (KV cache, activations, runtime) added to the weights
     # when the preset has no `requirements.overheadGiB`.
     defaultOverheadGiB: 30
-  # -- How long a load job waits for an InferenceService to become ready
+  # -- How long a load job waits for an LLMInferenceService to become ready
   # before it gives up on wiring.
   readyTimeout: 2h
   # -- The GPU pool's scale-up budget: how long a predictor may wait for a

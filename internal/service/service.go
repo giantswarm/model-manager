@@ -1176,7 +1176,7 @@ func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(
 // Run performs the background duties until ctx ends: adopting pulls that
 // survived a restart (PullAdopter backends) and, on ServeLifecycle backends,
 // wiring served models that became ready without a load job watching them
-// (model-manager restarted, or the InferenceService was created by someone
+// (model-manager restarted, or the LLMInferenceService was created by someone
 // else with the preset label).
 func (s *Service) Run(ctx context.Context) {
 	if s.cfg.CallerOnly {
@@ -1370,7 +1370,7 @@ type wiredView struct {
 
 // lookup finds a model's ModelConfig: model-manager's own by model reference,
 // else — for a served model l — anyone's by served endpoint and the name the
-// provider serves the model under (the object's name for a classic
+// provider serves the model under (the object's `spec.model.name` for a
 // InferenceService, the model id for an LLMInferenceService: both are tried).
 func (w wiredView) lookup(model string, l *backend.LoadedModel) (wiring.ModelConfigRef, bool) {
 	if mc, ok := w.byModel[model]; ok {

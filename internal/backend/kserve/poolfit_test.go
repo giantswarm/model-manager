@@ -52,7 +52,7 @@ func (f *fixture) setPool(ctx context.Context, shapes ...backend.InstanceShape) 
 
 func servingObjects(t *testing.T, f *fixture, ctx context.Context) int {
 	t.Helper()
-	list, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	list, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	return len(list.Items)
 }

@@ -38,19 +38,20 @@ func TestInfoAndCapabilities(t *testing.T) {
 	assert.False(t, caps.Wire, "wire is the service's call")
 	info := f.b.Info(ctx)
 	assert.True(t, info.Healthy, info.Message)
-	assert.Equal(t, "serving.kserve.io/v1beta1", info.Version)
+	assert.Equal(t, "serving.kserve.io/v1alpha2", info.Version)
 	assert.Contains(t, info.Endpoint, testServingNS)
-	assert.Empty(t, info.AgentEndpoint, "no single agent-facing endpoint: every served model has its own predictor URL")
-	assert.Empty(t, info.Message, "discovery found")
-	assert.Equal(t, backend.Loading{}, info.Loading, "kserve: nothing loads a stopped InferenceService on request, nothing evicts a running one, no keep-alive")
+	assert.Empty(t, info.AgentEndpoint, "no single agent-facing endpoint: every served model has its own address")
+	assert.Empty(t, info.Message, "discovery found, the llm-d control plane installed")
+	assert.Equal(t, backend.Loading{}, info.Loading, "kserve: nothing loads a stopped LLMInferenceService on request, nothing evicts a running one, no keep-alive")
 
 	s := f.b.cfg.settings(ctx)
 	assert.True(t, s.DiscoveryFound)
 	assert.Equal(t, testServingNS, s.Namespace)
 	assert.Equal(t, DefaultCacheClaim, s.CacheClaim)
 	assert.Equal(t, testPlatformNS, s.PresetNamespace)
-	assert.Equal(t, "Recreate", s.DeploymentStrategyType)
-	assert.EqualValues(t, 1800, s.TimeoutSeconds)
+	assert.True(t, s.LLMServed)
+	assert.Equal(t, testControlPlaneNS, s.ControlPlane, "the well-known config's namespace")
+	assert.Empty(t, s.servingUnavailable())
 }
 
 func TestOptionsOverrideDiscovery(t *testing.T) {
@@ -61,7 +62,7 @@ func TestOptionsOverrideDiscovery(t *testing.T) {
 	s := f.b.cfg.settings(context.Background())
 	assert.Equal(t, "elsewhere", s.Namespace)
 	assert.Equal(t, "other-claim", s.CacheClaim)
-	assert.Equal(t, "kserve-vllm", s.Runtime, "discovery still fills the rest")
+	assert.Equal(t, testPlatformNS, s.PresetNamespace, "discovery still fills the rest")
 }
 
 func TestListPresets(t *testing.T) {
@@ -218,7 +219,7 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 		cacheEntry{Dir: "xet", Bytes: 99, Files: 4},
 	)
 	// A served model whose weights are not cached.
-	require.NoError(t, f.b.createServing(ctx, f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
+	require.NoError(t, f.b.createServing(ctx, f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
 
 	models, err := f.b.ListModels(ctx)
 	require.NoError(t, err)
@@ -276,56 +277,6 @@ func mustPreset(t *testing.T, f *fixture, name string) *servingPreset {
 	return p
 }
 
-func TestComposeFollowsTheRecipe(t *testing.T) {
-	f := newFixture(t)
-	ctx := context.Background()
-	s := f.b.cfg.settings(ctx)
-	obj := f.b.compose(mustPreset(t, f, "big"), s, testGPUNode)
-	assert.Equal(t, "serving.kserve.io/v1beta1", obj.GetAPIVersion())
-	assert.Equal(t, "InferenceService", obj.GetKind())
-	assert.Equal(t, "big", obj.GetName())
-	assert.Equal(t, testServingNS, obj.GetNamespace())
-	assert.Equal(t, ManagedByValue, obj.GetLabels()[ManagedByLabel])
-	assert.Equal(t, "big", obj.GetLabels()[PresetLabel])
-	assert.Equal(t, bigRepo, obj.GetAnnotations()[ModelAnnotation])
-
-	model, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "model")
-	assert.Equal(t, map[string]any{"name": "vLLM"}, model["modelFormat"])
-	assert.Equal(t, "kserve-vllm", model["runtime"])
-	assert.Equal(t, "hf://"+bigRepo, model["storageUri"])
-	assert.Equal(t, []any{"--max-model-len=4096"}, model["args"])
-	req, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "model", "resources", "requests")
-	assert.Equal(t, "1", req["nvidia.com/gpu"])
-	assert.Equal(t, "2", req["cpu"])
-	assert.Equal(t, "8Gi", req["memory"])
-	lim, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "model", "resources", "limits")
-	assert.Equal(t, "1", lim["nvidia.com/gpu"])
-	assert.Equal(t, "16Gi", lim["memory"])
-	mounts, _, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "model", "volumeMounts")
-	require.Len(t, mounts, 1)
-	assert.Equal(t, "/mnt/chat-template", mounts[0].(map[string]any)["mountPath"])
-	vols, _, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "volumes")
-	require.Len(t, vols, 1)
-	assert.Equal(t, map[string]any{"name": "agent-platform-chat-template-big"}, vols[0].(map[string]any)["configMap"])
-	ns, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "nodeSelector")
-	assert.Equal(t, map[string]any{"accelerator": "gpu", labelHostname: testGPUNode}, ns)
-	strategy, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "deploymentStrategy", "type")
-	assert.Equal(t, "Recreate", strategy)
-	timeout, _, _ := unstructured.NestedInt64(obj.Object, "spec", "predictor", "timeout")
-	assert.EqualValues(t, 1800, timeout)
-	minReplicas, _, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "predictor", "minReplicas")
-	assert.EqualValues(t, 1, minReplicas, "spec.predictor extras copied verbatim")
-	_, hasRuntimeClass, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "runtimeClassName")
-	assert.False(t, hasRuntimeClass, "empty runtimeClassName is omitted")
-
-	// Without a chat template and node pin.
-	obj = f.b.compose(mustPreset(t, f, "tiny"), s, "")
-	_, hasVolumes, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "volumes")
-	assert.False(t, hasVolumes)
-	_, hasSelector, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "nodeSelector")
-	assert.False(t, hasSelector)
-}
-
 func TestLoadUnloadLifecycle(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -339,10 +290,10 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	err = f.b.Load(ctx, backend.LoadRequest{Name: bigRepo})
 	assert.ErrorIs(t, err, backend.ErrUnfit)
 
-	// Fits: the InferenceService appears; loading again is a no-op.
+	// Fits: the LLMInferenceService appears; loading again is a no-op.
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
-	isvc := f.isvc(ctx, "tiny")
-	assert.Equal(t, "hf://"+tinyRepo, mustNested(t, isvc, "spec", "predictor", "model", "storageUri"))
+	obj := f.llmisvc(ctx, "tiny")
+	assert.Equal(t, "hf://"+tinyRepo, mustNested(t, obj, "spec", "model", "uri"))
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
 
 	loaded, err := f.b.ListLoaded(ctx)
@@ -350,35 +301,38 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	require.Len(t, loaded, 1)
 	assert.Equal(t, tinyRepo, loaded[0].Name)
 	assert.Equal(t, "tiny", loaded[0].Resource)
+	assert.Equal(t, kindLLMInferenceService, loaded[0].Kind, "a loaded model names its kind")
 	assert.Equal(t, statusPending, loaded[0].Status)
-	assert.Equal(t, predictorURL("tiny", testServingNS), loaded[0].Endpoint)
+	assert.Equal(t, workloadURL("tiny", testServingNS), loaded[0].Endpoint, "the workload Service until KServe publishes an address")
 	assert.EqualValues(t, 1, loaded[0].GPUs)
 
-	// The endpoint agents get: OpenAI provider, predictor URL, served name =
-	// InferenceService name, which also names the ModelConfig.
+	// The endpoint agents get: OpenAI provider, the workload Service, the
+	// served name = spec.model.name, the ModelConfig named after the object.
 	ep := f.b.AgentEndpoint(tinyRepo)
 	assert.Equal(t, "OpenAI", ep.Provider)
-	assert.Equal(t, predictorURL("tiny", testServingNS)+"/v1", ep.BaseURL)
-	assert.Equal(t, "tiny", ep.Model)
+	assert.Equal(t, workloadURL("tiny", testServingNS)+"/v1", ep.BaseURL)
+	assert.Equal(t, tinyRepo, ep.Model, "the well-known template serves under spec.model.name")
 	assert.Equal(t, "tiny", ep.Name)
-	assert.True(t, ep.PlaceholderAPIKey)
+	assert.True(t, ep.PlaceholderAPIKey, "the in-cluster workload Service is keyless vLLM: kagent's placeholder key")
+	assert.False(t, ep.APIKeyPassthrough)
 	ep = f.b.AgentEndpoint(bigRepo)
-	assert.Equal(t, predictorURL("big", testServingNS)+"/v1", ep.BaseURL, "unserved models resolve through their preset")
+	assert.Equal(t, workloadURL("big", testServingNS)+"/v1", ep.BaseURL, "unserved models resolve through their preset")
+	assert.Equal(t, bigRepo, ep.Model)
 
-	// Readiness: patch the status like a controller would; WaitReady returns.
-	obj, err := f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, "tiny", metav1.GetOptions{})
+	// Readiness: patch the status like the controller would; WaitReady returns.
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
+	created, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
 	require.NoError(t, err)
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- f.b.WaitReady(ctx, tinyRepo) }()
 	time.Sleep(30 * time.Millisecond)
-	obj.Object["status"] = map[string]any{
+	created.Object["status"] = map[string]any{
 		"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-		// The ingress urlScheme leaks into address.url on a TLS-terminated
-		// install; the predictor Service is plain HTTP regardless.
-		"address": map[string]any{"url": "https://tiny-predictor.model-serving.svc.cluster.local/"},
-		"url":     "https://tiny-model-serving.example.com",
+		// A cluster-local address published with the ingress urlScheme: the
+		// Service speaks plain HTTP regardless.
+		"url": "https://tiny-kserve-workload-svc.model-serving.svc.cluster.local/",
 	}
-	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Update(ctx, obj, metav1.UpdateOptions{})
+	_, err = llmisvcs.Update(ctx, created, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	select {
 	case err := <-waitErr:
@@ -389,25 +343,21 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	loaded, err = f.b.ListLoaded(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, statusReady, loaded[0].Status)
-	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local", loaded[0].Endpoint, "status.address.url wins, with the http scheme the predictor Service speaks")
-	assert.Equal(t, "http://tiny-predictor.model-serving.svc.cluster.local/v1", f.b.AgentEndpoint(tinyRepo).BaseURL, "agents are wired to the http predictor, never to the ingress scheme")
+	assert.Equal(t, "http://tiny-kserve-workload-svc.model-serving.svc.cluster.local", loaded[0].Endpoint, "the published address wins, with the http scheme the Service speaks")
+	assert.Equal(t, "http://tiny-kserve-workload-svc.model-serving.svc.cluster.local/v1", f.b.AgentEndpoint(tinyRepo).BaseURL, "agents are wired to the http Service, never to the ingress scheme")
 
-	// A hand-written InferenceService of the same name blocks a load and
+	// A hand-written LLMInferenceService of the same name blocks a load and
 	// cannot be unloaded here (409); it is still listed.
-	foreign := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "serving.kserve.io/v1beta1", "kind": "InferenceService",
-		"metadata": map[string]any{"name": "big", "namespace": testServingNS, "labels": map[string]any{ManagedByLabel: "kustomize"}},
-		"spec":     map[string]any{"predictor": map[string]any{"model": map[string]any{"storageUri": "hf://" + bigRepo, "modelFormat": map[string]any{"name": "vLLM"}}}},
-	}}
-	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Create(ctx, foreign, metav1.CreateOptions{})
+	_, err = llmisvcs.Create(ctx, llmisvcObject("big", "hf://"+bigRepo, map[string]string{ManagedByLabel: "kustomize"}), metav1.CreateOptions{})
 	require.NoError(t, err)
 	err = f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode})
 	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "LLMInferenceService model-serving/big exists")
 	err = f.b.Unload(ctx, bigRepo)
 	assert.ErrorIs(t, err, backend.ErrConflict)
 	loaded, err = f.b.ListLoaded(ctx)
 	require.NoError(t, err)
-	require.Len(t, loaded, 2, "foreign InferenceServices are listed too")
+	require.Len(t, loaded, 2, "foreign LLMInferenceServices are listed too")
 	for _, l := range loaded {
 		if l.Resource == "big" {
 			assert.Equal(t, "kustomize", l.ManagedBy)
@@ -416,23 +366,23 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 
 	// One the portal created from a preset (preset label, managed-by
 	// backstage) is manageable: loading it again is a no-op, unload deletes it.
-	require.NoError(t, f.dyn.Resource(isvcGVR).Namespace(testServingNS).Delete(ctx, "big", metav1.DeleteOptions{}))
-	portal := f.b.compose(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")
+	require.NoError(t, llmisvcs.Delete(ctx, "big", metav1.DeleteOptions{}))
+	portal := f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")
 	portal.SetLabels(map[string]string{ManagedByLabel: "backstage", PresetLabel: "big"})
 	portal.SetAnnotations(nil)
-	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Create(ctx, portal, metav1.CreateOptions{})
+	_, err = llmisvcs.Create(ctx, portal, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode}), "same model behind the same preset: no-op")
 	ep = f.b.AgentEndpoint(bigRepo)
-	assert.Equal(t, "big", ep.Name, "the ModelConfig is named after the InferenceService")
-	assert.Equal(t, "big", ep.Model)
+	assert.Equal(t, "big", ep.Name, "the ModelConfig is named after the LLMInferenceService")
+	assert.Equal(t, bigRepo, ep.Model)
 	require.NoError(t, f.b.Unload(ctx, bigRepo))
-	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, "big", metav1.GetOptions{})
-	assert.Error(t, err, "the portal-created InferenceService was deleted")
+	_, err = llmisvcs.Get(ctx, "big", metav1.GetOptions{})
+	assert.Error(t, err, "the portal-created LLMInferenceService was deleted")
 
 	// Unload ours; the cache is untouched.
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
-	_, err = f.dyn.Resource(isvcGVR).Namespace(testServingNS).Get(ctx, "tiny", metav1.GetOptions{})
+	_, err = llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
 	assert.Error(t, err)
 	err = f.b.Unload(ctx, tinyRepo)
 	assert.ErrorIs(t, err, backend.ErrNotFound)
@@ -578,13 +528,13 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true})
 	f.completePods(ctx)
 
-	// Served -> conflict. Listing the InferenceService recorded its directory.
+	// Served -> conflict. Listing the LLMInferenceService recorded its directory.
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
 	err := f.b.Delete(ctx, tinyRepo)
 	assert.ErrorIs(t, err, backend.ErrConflict)
 	cm, err := f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Contains(t, cm.Data, "tiny", "the InferenceService's directory is in the cache index")
+	assert.Contains(t, cm.Data, "tiny", "the LLMInferenceService's directory is in the cache index")
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
 	require.Eventually(t, func() bool { return f.b.inv.fresh(testCacheNode, f.b.opts.InventoryTTL) != nil }, time.Second, 5*time.Millisecond, "the unload rescanned the cache in the background")
 
@@ -610,16 +560,15 @@ func TestListNodes(t *testing.T) {
 		cacheEntry{Dir: "xet", Bytes: 10, Files: 1},
 	)
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
-	// Give the predictor a pod on the cache node so its reservation counts.
-	_, err := f.cs.CoreV1().Pods(testServingNS).Create(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "tiny-predictor-x", Namespace: testServingNS, Labels: map[string]string{isvcPodLabel: "tiny"}},
-		Spec:       corev1.PodSpec{NodeName: testCacheNode},
-	}, metav1.CreateOptions{})
+	// Give the workload a pod on the cache node so its reservation counts.
+	pod := workloadPod("tiny", corev1.PodRunning)
+	pod.Spec.NodeName = testCacheNode
+	_, err := f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
 	require.NoError(t, err)
 	servedList, err := f.b.listServed(ctx)
 	require.NoError(t, err)
 	require.Len(t, servedList, 1)
-	assert.Equal(t, testCacheNode, servedList[0].Node, "predictor pod -> node")
+	assert.Equal(t, testCacheNode, servedList[0].Node, "workload pod -> node")
 	assert.Equal(t, "tiny", servedList[0].Preset)
 
 	nodes, err := f.b.ListNodes(ctx)
@@ -908,12 +857,12 @@ func TestDaemonSetInventory(t *testing.T) {
 	}
 }
 
-func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
+func TestCacheIndexRemembersTheServingObject(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	f.completePods(ctx)
-	isvcs := f.dyn.Resource(isvcGVR).Namespace(testServingNS)
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
 	cms := f.cs.CoreV1().ConfigMaps(testServingNS)
 	list := func() map[string]backend.Model {
 		t.Helper()
@@ -927,10 +876,10 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 	}
 
 	// A directory the storage-initializer filled for a hand-written
-	// InferenceService of the same name: while it exists the directory is
-	// named after its storageUri, and the pair is recorded.
+	// LLMInferenceService of the same name: while it exists the directory is
+	// named after its model URI, and the pair is recorded.
 	f.setEntries(testCacheNode, cacheEntry{Dir: "clone", Bytes: 10 * gib, Files: 3, HasModel: true})
-	_, err := isvcs.Create(ctx, isvcObject("clone", "hf://"+tinyRepo+":abc", map[string]string{ManagedByLabel: "kustomize"}), metav1.CreateOptions{})
+	_, err := llmisvcs.Create(ctx, llmisvcObject("clone", "hf://"+tinyRepo+":abc", map[string]string{ManagedByLabel: "kustomize"}), metav1.CreateOptions{})
 	require.NoError(t, err)
 	clone := list()["clone"]
 	assert.Equal(t, tinyRepo, clone.Name)
@@ -944,11 +893,11 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 	var rec indexEntry
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["clone"]), &rec))
 	assert.False(t, rec.RecordedAt.IsZero())
-	assert.Equal(t, indexEntry{Model: tinyRepo, Revision: "abc", Dir: "clone", InferenceService: "clone", Claim: DefaultCacheClaim, Volume: "pv-cache", RecordedAt: rec.RecordedAt}, rec, "bound to the claim and its volume")
+	assert.Equal(t, indexEntry{Model: tinyRepo, Revision: "abc", Dir: "clone", Claim: DefaultCacheClaim, Volume: "pv-cache", RecordedAt: rec.RecordedAt}, rec, "bound to the claim and its volume")
 
-	// The InferenceService goes; the directory keeps its repository, preset
-	// and revision, and the repository resolves to it.
-	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+	// The LLMInferenceService goes; the directory keeps its repository,
+	// preset and revision, and the repository resolves to it.
+	require.NoError(t, llmisvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
 	f.b.inv.invalidate()
 	clone = list()["clone"]
 	assert.Equal(t, tinyRepo, clone.Name)
@@ -959,8 +908,8 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 	assert.Equal(t, "clone", m.Path)
 
 	// A second preset serving the same repository makes the repository match
-	// ambiguous; the preset label of the InferenceService that filled a
-	// directory is remembered and decides. A storageUri that is not a
+	// ambiguous; the preset label of the LLMInferenceService that filled a
+	// directory is remembered and decides. A model URI that is not a
 	// Hugging Face repository records nothing.
 	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap("tiny-alt", presetDoc("tiny-alt", tinyRepo, 0.001, "")), metav1.CreateOptions{})
 	require.NoError(t, err)
@@ -969,34 +918,34 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 		cacheEntry{Dir: "labelled", Bytes: 10 * gib, Files: 3, HasModel: true},
 		cacheEntry{Dir: "pvc-model", Bytes: 5, Files: 1, HasModel: true},
 	)
-	_, err = isvcs.Create(ctx, isvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
+	_, err = llmisvcs.Create(ctx, llmisvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
 	require.NoError(t, err)
-	_, err = isvcs.Create(ctx, isvcObject("pvc-model", "pvc://weights/model", nil), metav1.CreateOptions{})
+	_, err = llmisvcs.Create(ctx, llmisvcObject("pvc-model", "pvc://weights/model", nil), metav1.CreateOptions{})
 	require.NoError(t, err)
 	models := list()
-	assert.Empty(t, models["clone"].Preset, "two presets serve the repository and the InferenceService named none")
+	assert.Empty(t, models["clone"].Preset, "two presets serve the repository and the LLMInferenceService named none")
 	assert.Equal(t, "tiny-alt", models["labelled"].Preset)
-	assert.Equal(t, "pvc-model", models["pvc-model"].Name, "the InferenceService of the same name still names it")
+	assert.Equal(t, "pvc-model", models["pvc-model"].Name, "the LLMInferenceService of the same name still names it")
 	cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Contains(t, cm.Data["labelled"], `"preset":"tiny-alt"`)
 	assert.NotContains(t, cm.Data, "pvc-model")
-	require.NoError(t, isvcs.Delete(ctx, "labelled", metav1.DeleteOptions{}))
-	require.NoError(t, isvcs.Delete(ctx, "pvc-model", metav1.DeleteOptions{}))
+	require.NoError(t, llmisvcs.Delete(ctx, "labelled", metav1.DeleteOptions{}))
+	require.NoError(t, llmisvcs.Delete(ctx, "pvc-model", metav1.DeleteOptions{}))
 	models = list()
 	assert.Equal(t, tinyRepo, models["labelled"].Name)
 	assert.Equal(t, "tiny-alt", models["labelled"].Preset, "remembered with its preset")
 	assert.Equal(t, "pvc-model", models["pvc-model"].Name, "nothing remembered: the directory name")
 
-	// A new InferenceService of the same name serving another repository wins
-	// over the record and replaces it.
-	_, err = isvcs.Create(ctx, isvcObject("clone", "hf://"+bigRepo, nil), metav1.CreateOptions{})
+	// A new LLMInferenceService of the same name serving another repository
+	// wins over the record and replaces it.
+	_, err = llmisvcs.Create(ctx, llmisvcObject("clone", "hf://"+bigRepo, nil), metav1.CreateOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, bigRepo, list()["clone"].Name)
 	cm, err = cms.Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Contains(t, cm.Data["clone"], `"model":"`+bigRepo+`"`)
-	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+	require.NoError(t, llmisvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
 
 	// Removing the directory forgets it.
 	require.NoError(t, f.b.Delete(ctx, bigRepo))
@@ -1011,7 +960,7 @@ func TestCacheIndexRemembersTheInferenceService(t *testing.T) {
 	f.cs.PrependReactor("update", "configmaps", count)
 	f.cs.PrependReactor("create", "configmaps", count)
 	f.setEntries(testCacheNode, cacheEntry{Dir: "labelled", Bytes: 10 * gib, Files: 3, HasModel: true})
-	_, err = isvcs.Create(ctx, isvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
+	_, err = llmisvcs.Create(ctx, llmisvcObject("labelled", "hf://"+tinyRepo, map[string]string{ManagedByLabel: "backstage", PresetLabel: "tiny-alt"}), metav1.CreateOptions{})
 	require.NoError(t, err)
 	list()
 	list()
@@ -1026,15 +975,15 @@ func TestCacheIndexToleratesAMissingPermission(t *testing.T) {
 	}
 	f.cs.PrependReactor("create", "configmaps", forbidden)
 	f.cs.PrependReactor("update", "configmaps", forbidden)
-	isvcs := f.dyn.Resource(isvcGVR).Namespace(testServingNS)
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
 	f.setEntries(testCacheNode, cacheEntry{Dir: "clone", Bytes: 1, Files: 1, HasModel: true})
-	_, err := isvcs.Create(ctx, isvcObject("clone", "hf://"+tinyRepo, nil), metav1.CreateOptions{})
+	_, err := llmisvcs.Create(ctx, llmisvcObject("clone", "hf://"+tinyRepo, nil), metav1.CreateOptions{})
 	require.NoError(t, err)
 	models, err := f.b.ListModels(ctx)
 	require.NoError(t, err, "the inventory works without the index")
 	require.Len(t, models, 1)
-	assert.Equal(t, tinyRepo, models[0].Name, "the live InferenceService names its directory")
-	require.NoError(t, isvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
+	assert.Equal(t, tinyRepo, models[0].Name, "the live LLMInferenceService names its directory")
+	require.NoError(t, llmisvcs.Delete(ctx, "clone", metav1.DeleteOptions{}))
 	models, err = f.b.ListModels(ctx)
 	require.NoError(t, err)
 	require.Len(t, models, 1)

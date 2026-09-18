@@ -27,7 +27,7 @@ import (
 // ready.
 func (f *fixture) pendingLLMISVC(ctx context.Context, preset string) *unstructured.Unstructured {
 	f.t.Helper()
-	obj := f.b.compose(mustPreset(f.t, f, preset), f.b.cfg.settings(ctx), "")
+	obj := f.b.composeLLM(mustPreset(f.t, f, preset), f.b.cfg.settings(ctx), "")
 	obj.Object["status"] = map[string]any{"conditions": []any{
 		map[string]any{"type": "Ready", "status": "False", "reason": "HTTPRoutesNotReady", "message": "HTTPRoute is not ready"},
 		map[string]any{"type": "WorkloadsReady", "status": "False", "reason": "WorkloadsNotReady", "message": "Deployment has 0 ready replicas"},
@@ -37,7 +37,7 @@ func (f *fixture) pendingLLMISVC(ctx context.Context, preset string) *unstructur
 	return created
 }
 
-// workloadPod is the predictor pod KServe's controller derives from an
+// workloadPod is the workload pod KServe's controller derives from an
 // LLMInferenceService, in the given phase.
 func workloadPod(name string, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
@@ -62,7 +62,7 @@ func TestPendingLLMInferenceServiceIsListedAndUnloaded(t *testing.T) {
 	require.Len(t, loaded, 1, "a serving object that is not Ready is listed")
 	assert.Equal(t, tinyRepo, loaded[0].Name)
 	assert.Equal(t, "tiny", loaded[0].Resource)
-	assert.Equal(t, ServingKindLLM, loaded[0].Kind)
+	assert.Equal(t, kindLLMInferenceService, loaded[0].Kind)
 	assert.Equal(t, statusNotReady, loaded[0].Status)
 	assert.Equal(t, "HTTPRoutesNotReady", loaded[0].Reason)
 	assert.Equal(t, "HTTPRoutesNotReady HTTPRoute is not ready", loaded[0].Message)
@@ -131,7 +131,7 @@ func unauthorizedClients() (kubernetes.Interface, dynamic.Interface) {
 	}
 	cs := kubefake.NewSimpleClientset()
 	cs.PrependReactor("*", "*", deny)
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{isvcGVR: "InferenceServiceList", llmisvcGVR: "LLMInferenceServiceList"})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), llmisvcListKinds())
 	dyn.PrependReactor("*", "*", deny)
 	return cs, dyn
 }
@@ -173,12 +173,13 @@ func TestSettingsSurviveACallerWhoseTokenExpired(t *testing.T) {
 	assert.ErrorContains(t, err, "wire_model")
 
 	// The settings do not follow the dead token: the ServiceAccount answers
-	// the discovery the caller's client cannot, and the kind stays listed
-	// for everyone else.
+	// the discovery and the control-plane lookup the caller's client cannot,
+	// and the objects stay listed for everyone else.
 	f.expireSettings()
 	s := f.b.cfg.settings(expired)
 	assert.True(t, s.LLMServed, "the ServiceAccount's client answers the API discovery")
-	assert.Equal(t, ServingKindLLM, s.ServingKind)
+	assert.Equal(t, testControlPlaneNS, s.ControlPlane, "the ServiceAccount's client finds the well-known config")
+	assert.Empty(t, s.servingUnavailable())
 	loaded, err := f.b.ListLoaded(ctx)
 	require.NoError(t, err)
 	require.Len(t, loaded, 1, "the LLMInferenceService stays visible")

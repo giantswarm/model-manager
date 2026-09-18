@@ -14,34 +14,34 @@ import (
 )
 
 // The cache index remembers which repository filled which cache directory.
-// The KServe storage-initializer fills <claim>/<InferenceService name> from
-// the InferenceService's hf:// storageUri, but leaves nothing behind that says
-// so: once the InferenceService is deleted the directory is just a name. While
-// an InferenceService exists the driver therefore records the pair — name,
+// The KServe storage-initializer fills <claim>/<LLMInferenceService name>
+// from the object's hf:// model URI, but leaves nothing behind that says so:
+// once the LLMInferenceService is deleted the directory is just a name. While
+// an LLMInferenceService exists the driver therefore records the pair — name,
 // repository, revision, preset label — in a ConfigMap of the serving namespace
 // (DefaultCacheIndexConfigMap, chart value kserve.cache.indexConfigMap), one
 // JSON entry per directory. The inventory reads it like a pre-warm marker, so
 // the directory keeps its repository, and with it its preset, after the
-// InferenceService is gone. A record is dropped when model-manager removes the
-// directory. Pre-warm downloads need no record: their marker on the claim says
-// the same.
+// LLMInferenceService is gone. A record is dropped when model-manager removes
+// the directory. Pre-warm downloads need no record: their marker on the claim
+// says the same.
 //
 // A record is bound to the cache it was made against — the claim and the
 // volume bound to it (giantswarm/model-manager#130): a record bound to
 // another cache, or to none, names a directory that is not in this one, so
-// it is no verdict for the fit and goes when its InferenceService is
+// it is no verdict for the fit and goes when its LLMInferenceService is
 // unloaded. Nothing is recorded while the serving layer has no cache (the
 // discovery document's cache block says so, or the claim is missing or has
 // no volume): the storage-initializer then fills storage that goes with the
 // pod.
 
-// indexEntry is what the index remembers about one directory.
+// indexEntry is what the index remembers about one directory: Dir is both the
+// directory and the name of the LLMInferenceService that filled it.
 type indexEntry struct {
-	Model            string `json:"model"`
-	Revision         string `json:"revision,omitempty"`
-	Dir              string `json:"dir"`
-	Preset           string `json:"preset,omitempty"`
-	InferenceService string `json:"inferenceService,omitempty"`
+	Model    string `json:"model"`
+	Revision string `json:"revision,omitempty"`
+	Dir      string `json:"dir"`
+	Preset   string `json:"preset,omitempty"`
 	// Claim and Volume bind the entry to the cache it was recorded against:
 	// the claim's name and the PersistentVolume bound to it (empty with the
 	// cache nodes given by flag). Older releases recorded neither.
@@ -52,7 +52,7 @@ type indexEntry struct {
 
 // same reports whether two entries carry the same facts (RecordedAt aside).
 func (e indexEntry) same(o indexEntry) bool {
-	return e.Model == o.Model && e.Revision == o.Revision && e.Dir == o.Dir && e.Preset == o.Preset && e.InferenceService == o.InferenceService && e.Claim == o.Claim && e.Volume == o.Volume
+	return e.Model == o.Model && e.Revision == o.Revision && e.Dir == o.Dir && e.Preset == o.Preset && e.Claim == o.Claim && e.Volume == o.Volume
 }
 
 // boundTo reports whether the entry was recorded against the cache at loc:
@@ -77,9 +77,9 @@ func (c *cacheIndex) set(entries map[string]indexEntry) {
 	c.mu.Unlock()
 }
 
-// indexEntryFor derives the record an InferenceService stands for: its name is
-// the cache directory the storage-initializer fills, its hf:// storageUri the
-// repository. Anything else (pvc://, s3://, no URI) records nothing. The
+// indexEntryFor derives the record an LLMInferenceService stands for: its
+// name is the cache directory the storage-initializer fills, its hf:// model
+// URI the repository. Anything else (pvc://, oci://, no URI) records nothing. The
 // preset is remembered only when the object says so (the preset label) — a
 // preset inferred from the name is derived again at read time.
 func indexEntryFor(sv served) (indexEntry, bool) {
@@ -90,7 +90,7 @@ func indexEntryFor(sv served) (indexEntry, bool) {
 	if !isRepoID(repo) {
 		return indexEntry{}, false
 	}
-	e := indexEntry{Model: repo, Revision: revision, Dir: sv.Name, InferenceService: sv.Name}
+	e := indexEntry{Model: repo, Revision: revision, Dir: sv.Name}
 	if sv.PresetLabelled {
 		e.Preset = sv.Preset
 	}
@@ -159,10 +159,10 @@ func (b *Backend) readIndex(ctx context.Context) map[string]indexEntry {
 }
 
 // cacheIndexWith is the index as the inventory uses it: what the ConfigMap
-// remembers, overlaid with what the InferenceServices of this moment say. A
-// live InferenceService always wins over a stale record, and a record the
-// driver could not persist still names its directory for as long as the
-// InferenceService exists.
+// remembers, overlaid with what the LLMInferenceServices of this moment say.
+// A live object always wins over a stale record, and a record the driver
+// could not persist still names its directory for as long as the object
+// exists.
 func (b *Backend) cacheIndexWith(ctx context.Context, servedList []served) map[string]indexEntry {
 	stored := b.readIndex(ctx)
 	out := make(map[string]indexEntry, len(stored)+len(servedList))
@@ -177,7 +177,7 @@ func (b *Backend) cacheIndexWith(ctx context.Context, servedList []served) map[s
 	return out
 }
 
-// recordServed remembers every InferenceService that serves a Hugging Face
+// recordServed remembers every LLMInferenceService that serves a Hugging Face
 // repository from its cache directory, bound to the cache claim and volume of
 // this moment. Nothing is recorded without a cache — the serving layer has
 // none, or the claim is missing or has no volume: no directory outlives the
@@ -261,11 +261,11 @@ func (b *Backend) forgetDirs(ctx context.Context, dirs []string) {
 	}
 }
 
-// forgetStale drops the entries of InferenceServices just deleted whose
+// forgetStale drops the entries of LLMInferenceServices just deleted whose
 // directory is in no cache: the serving layer has none, the claim is missing
 // or has no volume, or the entry was recorded against another claim or
 // volume. An entry bound to the cache of this moment stays — the directory
-// it names outlives the InferenceService, which is the index's point.
+// it names outlives the LLMInferenceService, which is the index's point.
 func (b *Backend) forgetStale(ctx context.Context, deleted []served) {
 	stored := b.readIndex(ctx)
 	var entries []indexEntry

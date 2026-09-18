@@ -143,17 +143,17 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference to pull")),
 		backendArg("to pull on; default: the default (first configured) backend"),
 		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade, lmstudio; default: the server's autoWire setting)")),
-		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its InferenceService mounts the resulting cache directory); default: the single preset serving the model")),
+		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its LLMInferenceService mounts the resulting cache directory); default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an InferenceService composed from a serving preset after a fit check (kserve); a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve the answer carries fit (the verdict), running (the serving object, its phase and steps[]) and wiring: the kagent ModelConfig created in the same call, before the model is ready, at the address the model will answer on — apiKeyPassthrough for a model routed on the models Gateway — so an agent created on it answers as soon as the model serves; a `load` job follows the model to readiness and refreshes that ModelConfig from the published address. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
+		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an LLMInferenceService composed from a serving preset after a fit check (kserve) — refused with `unavailable` and nothing created where the llm-d control plane is not installed; a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve the answer carries fit (the verdict), running (the serving object, its phase and steps[]) and wiring: the kagent ModelConfig created in the same call, before the model is ready, at the address the model will answer on — apiKeyPassthrough for a model routed on the models Gateway — so an agent created on it answers as soon as the model serves; a `load` job follows the model to readiness and refreshes that ModelConfig from the published address. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),
-		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the InferenceService from; default: the single preset serving the model")),
-		mcp.WithString(argNode, mcp.Description("kserve: pin the predictor to this node")),
+		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the LLMInferenceService from; default: the single preset serving the model")),
+		mcp.WithString(argNode, mcp.Description("kserve: pin the workload to this node")),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.load)
 

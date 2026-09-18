@@ -25,8 +25,9 @@ make helm-docs      # regenerate helm/model-manager/README.md
   the cache-agent client), `scangate.go` (when a scan may run: never on an
   unbound claim or a pool at zero, never inline under a short deadline), `internal/cacheagent` (the DaemonSet's HTTP
   inventory, `model-manager cache-agent`),
-  `jobs.go` (download Jobs), `isvc.go` (InferenceService composition/status),
-  `fit.go`, `backend.go`.
+  `jobs.go` (download Jobs), `llmisvc.go` (LLMInferenceService composition),
+  `served.go` (the served objects: listing, status, addresses), `fit.go`,
+  `backend.go`.
 - `internal/jobs` — in-memory job manager (pulls with progress, cancel, retention).
 - `internal/wiring` — kagent `ModelConfig` create/update/delete via the dynamic
   client; owns only CRs labelled `app.kubernetes.io/managed-by=model-manager`.
@@ -140,43 +141,32 @@ helm upgrade --install model-manager helm/model-manager -n agent-platform \
 Then exercise the REST API through a port-forward and the MCP tools through
 muster (`x_model-manager_*`).
 
-### kserve backend in the lab (no controller)
+### kserve backend in the lab
 
-The lab has the KServe CRDs but no controller and no GPUs, which is enough for
-everything except a real vLLM start. Install a second release in its own
-namespace with the modelServing ConfigMaps rendered from the
-`agent-platform-connectivity` chart (the wiring chart of the `agent-platform`
-meta chart) and a local-path cache claim.
-
-Render the ConfigMaps from the connectivity chart with the lab's own values
-file (`state/agent-platform-values.yaml` in the agentlab checkout): the meta
-chart forwards its values tree to the connectivity release minus its own
-`gitops` block, which the connectivity schema rejects, so strip that key first.
-A defaults-only render fails on the chart's gateway validation guards,
-`components.modelServing.enabled` turns the layer on, and
-`modelServing.namespace.name` moves the ConfigMaps into the release namespace. `yq` below is
-the Python jq wrapper (`-y` for YAML output); with the Go yq drop `-y`:
+The lab's serving switch installs the llm-d control plane (KServe's
+`kserve-llmisvc-crd`, `kserve-llmisvc-resources` and `kserve-runtime-configs`
+components) and the connectivity chart's serving slice — the discovery
+ConfigMap `agent-platform-model-serving`, the presets and the models Gateway
+in the `agent-platform` namespace; the kind node has no GPU, so the shipped
+GPU presets are refused by the fit check and the lab publishes a CPU preset
+(`resources.gpus: 0`, the llm-d CPU runtime image) that serves on the node.
+Install a second release in its own namespace, reading the platform's
+discovery document and presets, with its own serving namespace and a
+local-path cache claim:
 
 ```sh
-kubectl create ns mm-kserve
-helm pull oci://gsoci.azurecr.io/charts/giantswarm/agent-platform-connectivity --untar
-yq -y 'del(.gitops)' ~/projects/giantswarm/agentlab/state/agent-platform-values.yaml \
-  | helm template lab ./agent-platform-connectivity -n mm-kserve -f - \
-  --set components.modelServing.enabled=true --set modelServing.namespace.name=mm-kserve \
-  --api-versions serving.kserve.io/v1alpha1 --api-versions serving.kserve.io/v1beta1 \
-  | yq -y 'select(.kind == "ConfigMap" and .metadata.labels."app.kubernetes.io/component" == "model-serving")' \
-  | kubectl -n mm-kserve apply -f -
-kubectl -n mm-kserve create -f - <<PVC
+kubectl create ns mm-dev
+kubectl -n mm-dev create -f - <<PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: hf-cache}
-spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 2Gi}}}
 PVC
-helm upgrade --install model-manager-kserve helm/model-manager -n mm-kserve \
-  --set backend=kserve --set kserve.namespace=mm-kserve --set fullnameOverride=model-manager-kserve \
+helm upgrade --install mm-dev helm/model-manager -n mm-dev \
+  --set backend=kserve --set kserve.namespace=mm-dev --set kserve.discovery.namespace=agent-platform \
+  --set fullnameOverride=mm-dev \
   --set image.registry=docker.io --set image.repository=library/model-manager \
-  --set image.tag=dev-$(git rev-parse --short HEAD) --set image.pullPolicy=Never \
-  --set muster.mcpServer.enabled=true --set muster.mcpServer.name=model-manager-kserve
+  --set image.tag=dev-$(git rev-parse --short HEAD) --set image.pullPolicy=Never
 ```
 
 The chart's cluster-scoped RBAC (`ClusterRole`/`ClusterRoleBinding`
@@ -186,12 +176,17 @@ same release name (`invalid ownership metadata`). Pick a new release name and
 pass it as `fullnameOverride` so the Service, DaemonSet and RBAC names follow
 it; never delete other people's objects to free the name.
 
-`GET /api/v1/search?q=tiny-random-gpt2`, `POST /api/v1/models/fit-check`,
-`POST /api/v1/models/pull` (a Job downloads into the claim), `GET /api/v1/models`
-(the cache entry with size and node), `POST /api/v1/models/load` (an
-InferenceService appears; patch its status Ready with
-`kubectl patch --subresource=status` to see the load job wire a ModelConfig),
-`POST /api/v1/models/unload`, `DELETE /api/v1/models/<repo>`.
+`GET /api/v1/backends` (healthy, and `message` empty: the API is served and
+the well-known `LLMInferenceServiceConfig` found — on a cluster with the CRDs
+alone it names the missing controller and `POST /api/v1/models/load` answers
+`503 unavailable` without creating anything), `GET /api/v1/presets`,
+`POST /api/v1/models/fit-check` (the CPU preset fits the kind node against
+its allocatable memory, a GPU preset is refused with `no accelerator node`),
+`POST /api/v1/models/load` (an `LLMInferenceService` appears in the release's
+serving namespace and the llm-d controller reconciles it — the workload
+Deployment, the `HTTPRoute` on the models Gateway, the status conditions —
+and the load job wires a ModelConfig once it is Ready), `GET /api/v1/loaded`,
+`POST /api/v1/models/unload`.
 
 The DaemonSet inventory (`kserve.inventory.mode=daemonset`) is exercised the
 same way — the kind node is the cache node, so the DaemonSet needs no node

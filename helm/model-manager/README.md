@@ -22,11 +22,11 @@ names the others.
   `OpenAI` provider against `lmstudio.agentHost` plus `/v1`. It serves no
   delete: that call answers `501 unsupported`, and a model is removed with
   `lms rm` on the host.
-- `kserve` — InferenceServices composed from the platform's serving presets,
+- `kserve` — LLMInferenceServices composed from the platform's serving presets,
   the per-node Hugging Face cache (scanned by short-lived pods), pre-warm
   download Jobs with progress, Hugging Face Hub search and node fit checks.
   Agent wiring uses kagent's `OpenAI` provider against the predictor URL with
-  a placeholder API-key Secret, created when the InferenceService is ready.
+  a placeholder API-key Secret, created when the LLMInferenceService is ready.
 
 A component of the [`giantswarm/agent-platform`](https://github.com/giantswarm/agent-platform)
 meta chart (`components.model-manager.enabled`), which sets `backend`, the
@@ -56,13 +56,13 @@ connectivity chart): the discovery
 ConfigMap `agent-platform-model-serving` (`kserve.discovery.*`), the
 `ServingPreset` ConfigMaps and the cache `PersistentVolumeClaim` in the serving
 namespace. `kserve.namespace` must equal the platform's serving namespace: the
-Role for InferenceServices, Jobs, pods and the claim is created there. Every
+Role for LLMInferenceServices, Jobs, pods and the claim is created there. Every
 other `kserve.*` value is an override of what the discovery ConfigMap says and
 can stay empty.
 
 - Downloads run as Jobs in the serving namespace with the KServe
   storage-initializer image (`kserve.download.image`), into
-  `<claim>/<preset name>` — the directory the preset's InferenceService mounts
+  `<claim>/<preset name>` — the directory the preset's LLMInferenceService mounts
   — after a fit check against the node's memory budget (`kserve.budget.*`;
   the node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"`
   overrides one node's budget, e.g. a unified-memory node without GPU memory
@@ -81,18 +81,18 @@ can stay empty.
   filled it: the marker of a pre-warm download, else the **cache index** — the
   ConfigMap `kserve.cache.indexConfigMap` (default `model-manager-cache-index`)
   in the serving namespace, in which model-manager records, while an
-  InferenceService exists, that its name is the directory the
+  LLMInferenceService exists, that its name is the directory the
   storage-initializer fills and its `hf://` storageUri the repository — so a
-  directory keeps its repository and preset after its InferenceService is
+  directory keeps its repository and preset after its LLMInferenceService is
   deleted. Directories whose top level holds no model (no `config.json`, no
   weights file: Hugging Face client internals such as `hf-home`, `xet`) are
   not listed as downloads.
-- RBAC: a Role in the serving namespace (InferenceServices, Jobs, pods, the
+- RBAC: a Role in the serving namespace (LLMInferenceServices, Jobs, pods, the
   claim, `create` on ConfigMaps and `update`/`patch` on the cache index
   ConfigMap), a Role for the ConfigMaps in the discovery/preset namespace when
   it differs, and a ClusterRole for nodes and PersistentVolumes.
 - Kubernetes access does not depend on wiring: the kserve driver needs the API
-  for InferenceServices, Jobs, cache scans and nodes, so the pod mounts the
+  for LLMInferenceServices, Jobs, cache scans and nodes, so the pod mounts the
   ServiceAccount token and the RBAC above renders even with
   `kagent.disableWiring: true` — that value only removes the ModelConfig
   management and its Role in `kagent.namespace`. Only the ollama backend runs
@@ -123,7 +123,7 @@ can stay empty.
 | imagePullSecrets | list | `[]` | Image pull secrets. |
 | nameOverride | string | `""` | Override the chart name. |
 | fullnameOverride | string | `""` | Override the fully qualified release name (the umbrella chart pins the Service name through this). |
-| backend | string | `""` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/vLLM on GPU installs: InferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. Empty (the default), like an empty `backends`, starts with no static backend: backends are then registered at runtime with the `add_backend` tool as backend documents — ConfigMaps in the release namespace labelled `agent-platform.giantswarm.io/model-backend=true` — and listed with `source: person` or `cluster-manager` (see docs/backends.md); a static value here is listed as `source: static` and cannot be registered again at runtime. |
+| backend | string | `""` | Serving backend driver: `ollama` (host Ollama — laptop/agentlab dev loop), `kserve` (KServe/llm-d on GPU installs: LLMInferenceServices from serving presets, per-node Hugging Face cache, pre-warm download Jobs, fit checks) or `lemonade` (a Lemonade Server on the host — FastFlowLM on AMD Ryzen AI NPUs, llama.cpp on GPU and CPU; the same proxying shape as ollama) or `lmstudio` (an LM Studio on the host — llama.cpp on GPU and CPU, MLX on Apple silicon; proxied like ollama, but it serves no delete). The API reports the backend and its capability flags at /api/v1/backend. The one-backend form of `backends`. Empty (the default), like an empty `backends`, starts with no static backend: backends are then registered at runtime with the `add_backend` tool as backend documents — ConfigMaps in the release namespace labelled `agent-platform.giantswarm.io/model-backend=true` — and listed with `source: person` or `cluster-manager` (see docs/backends.md); a static value here is listed as `source: static` and cannot be registered again at runtime. |
 | backends | list | `[]` | Serving backends to run at once, in the operator's order — one process in front of several servers, for example `[ollama, lemonade]` on a host running both. Each driver at most once; every listed driver reads its own block (`ollama.*`, `lemonade.*`, `lmstudio.*`, `kserve.*`). The first is the default backend: the one `GET /api/v1/backend` describes and an unqualified pull goes to; every model, job and node the API returns names its backend, every request may name one (`GET /api/v1/backends` lists them). Empty runs `backend` alone — and with `backend` empty too, no static backend at all. |
 | ollama.endpoint | string | `"http://host.docker.internal:11434"` | Ollama API base URL as reached from pods. On kind this is the docker network gateway (for example http://172.21.0.1:11434 — agentlab sets it); Docker Desktop resolves host.docker.internal. |
 | ollama.agentHost | string | `""` | Ollama host written into kagent ModelConfigs, as reached by agent pods; reported as `agentEndpoint` by `GET /api/v1/backend`. Empty means the same as `ollama.endpoint`. |
@@ -136,7 +136,7 @@ can stay empty.
 | kagent.apiVersion | string | `"auto"` | kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version. |
 | kagent.modelConfigPrefix | string | `""` | Prefix for generated ModelConfig names (empty: the sanitized model name, e.g. smollm2:135m -> smollm2-135m). |
 | kagent.autoWire | bool | `true` | Create a ModelConfig automatically when a pull completes or a model is loaded. |
-| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. A release that runs the kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for InferenceServices, Jobs and nodes; only releases with the ollama and lemonade backends alone run without the API when wiring is off. |
+| kagent.disableWiring | bool | `false` | Disable all ModelConfig management; the `wire` capability reports false. A release that runs the kserve backend keeps its Kubernetes access (ServiceAccount token, RBAC) regardless — it needs the API for LLMInferenceServices, Jobs and nodes; only releases with the ollama and lemonade backends alone run without the API when wiring is off. |
 | mcp.enabled | bool | `true` | Serve the MCP streamable-HTTP endpoint alongside the REST API. |
 | mcp.path | string | `"/mcp"` | MCP endpoint path. |
 | oauth.enabled | bool | `false` | Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's id_token through the gateway; both are validated against the IdP's JWKS when their audience is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount — only for a server nothing but a trusted proxy can reach. |
@@ -153,7 +153,7 @@ can stay empty.
 | oauth.trustedAudiences | list | `[]` | OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO token forwarding). Empty falls back to `[global.identity.clientId]`, the platform client MCP clients and the muster CLI log in with. The server trusts the union of this list and `muster.mcpServer.auth.requiredAudiences` (in that order, without duplicates): every token muster forwards carries the required audiences by construction and they are what the kube-apiserver trusts, so a portal session — whose id_token carries them but not the platform client — is accepted without listing its client here. |
 | oauth.sso.allowPrivateIPs | bool | `false` | Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (an in-cluster Dex). |
 | oauth.allowPublicClientRegistration | bool | `false` | Accept unauthenticated dynamic client registration (labs only). |
-| oauth.downstream.enabled | bool | `false` | Call the Kubernetes API as the caller: everything a request does (InferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's client id is the apiserver's `--oidc-client-id`). The ServiceAccount then holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials. |
+| oauth.downstream.enabled | bool | `false` | Call the Kubernetes API as the caller: everything a request does (LLMInferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's client id is the apiserver's `--oidc-client-id`). The ServiceAccount then holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials. |
 | muster.mcpServer.enabled | bool | `false` | Register this server with muster by rendering an `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then appear as `x_<name>_<tool>`. |
 | muster.mcpServer.name | string | `"model-manager"` | MCPServer CR name (drives the tool prefix). |
 | muster.mcpServer.autoStart | bool | `true` | Start the server connection when muster initializes. |
@@ -173,16 +173,14 @@ can stay empty.
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name (generated when empty). |
 | rbac.create | bool | `true` | Create the Role/RoleBinding for ModelConfigs and Secrets in `kagent.namespace` (and, when kserve is among the backends, the Role in the serving namespace, the Role for the discovery/preset ConfigMaps and the ClusterRole for nodes and PersistentVolumes) — the ServiceAccount's own permissions. Ignored with `oauth.downstream.enabled`: the ServiceAccount then gets no RBAC at all. |
-| kserve.namespace | string | `"model-serving"` | Serving namespace: InferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`. |
+| kserve.namespace | string | `"model-serving"` | Serving namespace: LLMInferenceServices, download Jobs, cache-tool pods and the cache claim live here and the kserve RBAC Role is created here. Must match the platform's `components.modelServing.namespace.name`. |
 | kserve.discovery.configMap | string | `"agent-platform-model-serving"` | Name of the platform's model-serving discovery ConfigMap (kind `ModelServingConfig`, key `config.yaml`) that carries the runtime, GPU resource name, cache claim and preset selector. Empty `kserve.*` overrides below take their value from it. |
 | kserve.discovery.namespace | string | `""` | Namespace of the discovery ConfigMap and, by default, of the preset ConfigMaps. Empty means the release namespace. |
-| kserve.servingKind | string | `""` | Kind a serving preset is composed into: `LLMInferenceService` (the llm-d control plane: KServe's own router and well-known configs), `InferenceService` (the classic predictor on the vLLM ClusterServingRuntime) or empty for `auto` — `LLMInferenceService` wherever its API is served, else the classic kind. |
-| kserve.runtime | string | `""` | ClusterServingRuntime for presets that name none (classic kind); empty takes the discovery value (default `kserve-vllm`). |
 | kserve.gpuResourceName | string | `""` | Accelerator resource name; empty takes the discovery value (default `nvidia.com/gpu`). |
 | kserve.cache.claimName | string | `""` | PersistentVolumeClaim of the Hugging Face cache in the serving namespace; empty takes the discovery value (default `hf-cache`). |
 | kserve.cache.mountPath | string | `""` | Where predictors mount the cache; empty takes the discovery value (default `/mnt/models`). |
 | kserve.cache.nodes | list | `[]` | Nodes that hold the cache. Empty derives them from the node affinity of the PersistentVolume bound to the claim (a static local PV pins the cache to its node). |
-| kserve.cache.indexConfigMap | string | `"model-manager-cache-index"` | ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from the directory (its name), kept after the InferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch`/`delete` on this name. |
+| kserve.cache.indexConfigMap | string | `"model-manager-cache-index"` | ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an LLMInferenceService serves from the directory (its name), kept after the LLMInferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch`/`delete` on this name. |
 | kserve.presets.namespace | string | `""` | Namespace of the serving-preset ConfigMaps; empty takes the discovery value, else `kserve.discovery.namespace`. |
 | kserve.presets.labelSelector | string | `""` | Label selector of the serving-preset ConfigMaps; empty takes the discovery value (default `agent-platform.giantswarm.io/serving-preset=true`). |
 | kserve.hf.endpoint | string | `"https://huggingface.co"` | Hugging Face Hub base URL (search, repository metadata, sizes). |
@@ -190,8 +188,8 @@ can stay empty.
 | kserve.hf.tokenSecret.name | string | `""` | Secret in the serving namespace holding a Hugging Face token for gated repositories (read by model-manager, mounted into download Jobs). Empty: anonymous hub access, gated models refused. |
 | kserve.hf.tokenSecret.key | string | `"token"` | Key of the token in that Secret. |
 | kserve.hf.token | string | `""` | Render the token Secret (`kserve.hf.tokenSecret.name`, in the serving namespace) from this value. Prefer a pre-created Secret; this is for installs whose values are already secret-managed. |
-| kserve.download.image | object | `{"name":"kserve/storage-initializer","registry":"docker.io","tag":"v0.20.0"}` | Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an InferenceService would, so a later start finds the files and skips the download. |
-| kserve.download.ignorePatterns | list | `[]` | File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an InferenceService does. |
+| kserve.download.image | object | `{"name":"kserve/storage-initializer","registry":"docker.io","tag":"v0.20.0"}` | Image of the pre-warm download Job. The KServe storage-initializer downloads exactly what an LLMInferenceService would, so a later start finds the files and skips the download. |
+| kserve.download.ignorePatterns | list | `[]` | File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an LLMInferenceService does. |
 | kserve.download.jobTTL | string | `"1h"` | ttlSecondsAfterFinished of download Jobs. |
 | kserve.download.stallTimeout | string | `"10m"` | A download Job that writes nothing to its target directory for this long fails with a reason the pull job shows (`DOWNLOAD STALLED: no bytes written to <dir> for <N>s`) instead of hanging; partial files stay for a retry. The Job downloads with `HF_HUB_DISABLE_XET=1` and `HF_HUB_ENABLE_HF_TRANSFER=1`: the Xet client connects to CDN addresses a Cilium `toFQDNs` DNS proxy never resolved and hangs on the dropped SYNs, hf_transfer resolves per connection through the system resolver. |
 | kserve.inventory.mode | string | `"pod"` | How the per-node cache contents are read. `pod`: a short-lived scan pod per cache node whenever the inventory is older than `ttl` (no long-running pods, but pod churn in the serving namespace). `daemonset`: the chart renders a DaemonSet (`kserve.inventory.agent.*`) in the serving namespace running `model-manager cache-agent`, which mounts the cache claim read-only and serves its contents over HTTP; model-manager asks the agent on the node instead of creating pods. Requires `kserve.cache.claimName` (the DaemonSet mounts the claim; the chart cannot read the discovery ConfigMap). Deletes still use a one-shot pod. |
@@ -206,7 +204,7 @@ can stay empty.
 | kserve.inventory.timeout | string | `"2m"` | Time budget of one scan (scan Job, or cache-agent request); a caller whose deadline leaves less is answered from the last scan while a new one runs in the background. |
 | kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`). |
 | kserve.budget.defaultOverheadGiB | int | `30` | Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`. |
-| kserve.readyTimeout | string | `"2h"` | How long a load job waits for an InferenceService to become ready before it gives up on wiring. |
+| kserve.readyTimeout | string | `"2h"` | How long a load job waits for an LLMInferenceService to become ready before it gives up on wiring. |
 | kserve.scaleUpTimeout | string | `"10m"` | The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (`InsufficientInstanceCapacity`) before its `scheduling` step and the phase read `failed` naming the refusal (`CapacityUnavailable`), counted from the pod's creation. |
 | podAnnotations | object | `{}` | Annotations on the pod. |
 | podLabels | object | `{}` | Labels on the pod. |

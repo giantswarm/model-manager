@@ -311,7 +311,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "inferact-qwen3-8-27b-nvfp4", old.Name)
 
-	// The backend now names the ModelConfig after the InferenceService.
+	// The backend now names the ModelConfig after the LLMInferenceService.
 	ep := backend.AgentEndpoint{Provider: "OpenAI", BaseURL: "http://qwen3-8-27b-predictor.model-serving.svc.cluster.local/v1", Model: "qwen3-8-27b", PlaceholderAPIKey: true, Name: "qwen3-8-27b"}
 	ref, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)

@@ -263,7 +263,7 @@ type Target struct {
 	// CABundle is the target apiserver's CA, PEM (base64 not needed in YAML).
 	CABundle string `json:"caBundle,omitempty"`
 	// ServingNamespace is the namespace on the target holding the
-	// InferenceServices, Jobs and the cache.
+	// LLMInferenceServices, Jobs and the cache.
 	ServingNamespace string `json:"servingNamespace"`
 }
 

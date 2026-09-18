@@ -246,16 +246,16 @@ func TestHubHelpers(t *testing.T) {
 	assert.Equal(t, "512 B", humanBytes(512))
 }
 
-func TestNormalizePredictorURL(t *testing.T) {
-	// KServe raw deployment publishes status.address.url with the ingress
-	// urlScheme; the predictor Service is plain HTTP on port 80 regardless.
-	assert.Equal(t, "http://m-predictor.serving.svc.cluster.local", normalizePredictorURL("https://m-predictor.serving.svc.cluster.local/"))
-	assert.Equal(t, "http://m-predictor.serving.svc", normalizePredictorURL("https://m-predictor.serving.svc"))
-	assert.Equal(t, "http://m-predictor.serving.svc.cluster.local", normalizePredictorURL("http://m-predictor.serving.svc.cluster.local/"))
-	assert.Equal(t, "https://m-serving.example.com", normalizePredictorURL("https://m-serving.example.com/"), "external hosts keep their scheme")
-	assert.Equal(t, "https://m-predictor.serving.svc.cluster.local:8443", normalizePredictorURL("https://m-predictor.serving.svc.cluster.local:8443"), "an explicit port is deliberate")
-	assert.Equal(t, "not a url", normalizePredictorURL("not a url"))
-	assert.Equal(t, "", normalizePredictorURL(""))
+func TestNormalizeServedURL(t *testing.T) {
+	// A cluster-local address KServe publishes with the ingress urlScheme:
+	// the Service is plain HTTP regardless.
+	assert.Equal(t, "http://m-kserve-workload-svc.serving.svc.cluster.local", normalizeServedURL("https://m-kserve-workload-svc.serving.svc.cluster.local/"))
+	assert.Equal(t, "http://m-kserve-workload-svc.serving.svc", normalizeServedURL("https://m-kserve-workload-svc.serving.svc"))
+	assert.Equal(t, "http://m-kserve-workload-svc.serving.svc.cluster.local", normalizeServedURL("http://m-kserve-workload-svc.serving.svc.cluster.local/"))
+	assert.Equal(t, "https://m-serving.example.com", normalizeServedURL("https://m-serving.example.com/"), "external hosts keep their scheme")
+	assert.Equal(t, "https://m-kserve-workload-svc.serving.svc.cluster.local:8000", normalizeServedURL("https://m-kserve-workload-svc.serving.svc.cluster.local:8000"), "an explicit port is deliberate")
+	assert.Equal(t, "not a url", normalizeServedURL("not a url"))
+	assert.Equal(t, "", normalizeServedURL(""))
 }
 
 func TestBudgetOfAnnotationWinsOverEverySource(t *testing.T) {

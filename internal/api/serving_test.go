@@ -112,7 +112,7 @@ func (f *fakeServing) Stop(ctx context.Context, name string) (*backend.UnloadRes
 	served := f.loaded[repo]
 	f.fakeBackend.mu.Unlock()
 	if !served {
-		return nil, fmt.Errorf("%w: no InferenceService serves %s", backend.ErrNotFound, name)
+		return nil, fmt.Errorf("%w: no LLMInferenceService serves %s", backend.ErrNotFound, name)
 	}
 	if err := f.Unload(ctx, repo); err != nil {
 		return nil, err
@@ -249,8 +249,8 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, "kserve", body["backend"])
 	loading := body["loading"].(map[string]any)
-	assert.Equal(t, false, loading["onDemand"], "a stopped InferenceService does not come back on request")
-	assert.Equal(t, false, loading["idleEviction"], "a running InferenceService stays until unloaded")
+	assert.Equal(t, false, loading["onDemand"], "a stopped LLMInferenceService does not come back on request")
+	assert.Equal(t, false, loading["idleEviction"], "a running LLMInferenceService stays until unloaded")
 	assert.NotContains(t, loading, "keepAliveDefault", "no keep-alive on kserve")
 	assert.NotContains(t, loading, "keepAliveScope", "no keep-alive on kserve")
 	caps := body["capabilities"].(map[string]any)
@@ -736,7 +736,7 @@ func TestServingDedupesPortalWiredModelConfigs(t *testing.T) {
 	f.wirer.mu.Unlock()
 
 	// Without the portal's ModelConfig, model-manager names its own after the
-	// served resource (the InferenceService name).
+	// served resource (the LLMInferenceService name).
 	f.wirer.mu.Lock()
 	f.wirer.foreign = nil
 	f.wirer.mu.Unlock()

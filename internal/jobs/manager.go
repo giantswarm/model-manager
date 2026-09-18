@@ -34,7 +34,7 @@ const (
 	// TypePull is a model import.
 	TypePull Type = "pull"
 	// TypeLoad tracks a served model from start to ready (and its wiring) on
-	// backends where serving takes time (kserve InferenceServices).
+	// backends where serving takes time (kserve LLMInferenceServices).
 	TypeLoad Type = "load"
 )
 

@@ -14,21 +14,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
 
-// Labels and annotations model-manager puts on the objects it creates, plus
-// the KServe label that links predictor pods to their InferenceService.
+// Labels and annotations model-manager puts on the objects it creates.
 const (
 	ManagedByLabel  = "app.kubernetes.io/managed-by"
 	ManagedByValue  = "model-manager"
 	BackendLabel    = "model-manager.giantswarm.io/backend"
 	ComponentLabel  = "model-manager.giantswarm.io/component"
 	ModelAnnotation = "model-manager.giantswarm.io/model"
-
-	isvcPodLabel = "serving.kserve.io/inferenceservice"
 
 	statusReady    = "Ready"
 	statusNotReady = "NotReady"
@@ -38,12 +34,8 @@ const (
 	statusTerminating = "Terminating"
 )
 
-var isvcGVR = schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1beta1", Resource: "inferenceservices"}
-
-// served is the driver's view of one InferenceService.
+// served is the driver's view of one LLMInferenceService.
 type served struct {
-	// Kind is ServingKindLLM or ServingKindClassic.
-	Kind      string
 	Name      string
 	Namespace string
 	Model     string
@@ -52,10 +44,9 @@ type served struct {
 	ManagedBy string
 	// PresetLabelled is true when the object carries the preset label (set
 	// by model-manager and by the portal's serve flow); a preset inferred from
-	// the name alone does not make an InferenceService manageable.
+	// the name alone does not make an LLMInferenceService manageable.
 	PresetLabelled bool
 	StorageURI     string
-	Runtime        string
 	GPUs           int64
 	Ready          bool
 	Status         string
@@ -77,38 +68,20 @@ type served struct {
 }
 
 // manageable reports whether model-manager may operate on the
-// InferenceService: the ones it created and the ones the portal's serve flow
-// created from a preset (label agent-platform.giantswarm.io/preset). Anything
-// else in the serving namespace is inventory only.
+// LLMInferenceService: the ones it created and the ones the portal's serve
+// flow created from a preset (label agent-platform.giantswarm.io/preset).
+// Anything else in the serving namespace is inventory only.
 func (sv served) manageable() bool {
 	return sv.Managed || sv.PresetLabelled
 }
 
-// servedName is the model name vLLM answers under: the object's name for a
-// classic InferenceService (the ClusterServingRuntime passes
-// --served-model-name {{.Name}}), spec.model.name for an LLMInferenceService
-// (the well-known template passes the spec's model name).
-func (sv served) servedName() string {
-	if sv.Kind == ServingKindLLM {
-		return sv.Model
-	}
-	return sv.Name
-}
-
-// predictorURL is the in-cluster URL KServe gives a raw-deployment predictor
-// (Service <name>-predictor, port 80).
-func predictorURL(name, namespace string) string {
-	return fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local", name, namespace)
-}
-
-// normalizePredictorURL fixes the scheme of the address KServe publishes for a
-// predictor. In raw-deployment mode the controller writes status.address.url
-// with the ingress urlScheme — https wherever the external route is
-// TLS-terminated — although the predictor Service itself speaks plain HTTP on
-// port 80. A cluster-local host without an explicit port therefore always gets
-// the http scheme; external hosts and explicit ports are kept as published.
-// Trailing slashes are dropped.
-func normalizePredictorURL(raw string) string {
+// normalizeServedURL fixes the scheme of a cluster-local address KServe
+// publishes for a served model: a Service address written with the ingress
+// urlScheme — https wherever the external route is TLS-terminated — although
+// the Service itself speaks plain HTTP. A cluster-local host without an
+// explicit port therefore always gets the http scheme; external hosts and
+// explicit ports are kept as published. Trailing slashes are dropped.
+func normalizeServedURL(raw string) string {
 	raw = strings.TrimRight(raw, "/")
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -141,39 +114,38 @@ func (sv served) routed() bool {
 // expectedURL is the address the object gets before KServe has published
 // one: its route on the models Gateway — <gateway>/<namespace>/<name>, the
 // path KServe renders for every LLMInferenceService attached to it — when
-// discovery names the Gateway, else the kind's in-cluster Service. Known at
+// discovery names the Gateway, else its in-cluster workload Service. Known at
 // compose time, so the ModelConfig a load wires points where the model will
 // answer and carries the token shape the Gateway demands
 // (giantswarm/model-manager#115).
 func (sv served) expectedURL(gateway string) string {
-	if gateway != "" && sv.Kind == ServingKindLLM {
+	if gateway != "" {
 		return gateway + "/" + sv.Namespace + "/" + sv.Name
 	}
-	return sv.defaultURL()
+	return workloadURL(sv.Name, sv.Namespace)
 }
 
 // agentEndpoint is how kagent reaches the served model: its OpenAI-compatible
 // API at sv.URL, the caller's token forwarded when that is the route on the
 // models Gateway (the Gateway's JWT policy admits nothing else), kagent's
-// placeholder key when it is the keyless in-cluster Service. The ModelConfig
-// is named after the object — the rule the portal's serve flow applies.
+// placeholder key when it is the keyless in-cluster Service. The served model
+// name is spec.model.name (the well-known template passes it to vLLM); the
+// ModelConfig is named after the object — the rule the portal's serve flow
+// applies.
 func (sv served) agentEndpoint() backend.AgentEndpoint {
 	routed := sv.routed()
-	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.servedName(), APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
+	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.Model, APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
 }
 
-// listServed lists the InferenceServices of the serving namespace with the
-// node their predictor runs on.
+// listServed lists the LLMInferenceServices of the serving namespace with the
+// node their workload runs on.
 func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	s := b.cfg.settings(ctx)
-	var items []unstructured.Unstructured
-	for _, kind := range s.kinds() {
-		list, err := b.dynamic(ctx).Resource(gvrFor(kind)).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("list %ss in %s: %w", kind, s.Namespace, err)
-		}
-		items = append(items, list.Items...)
+	list, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list %ss in %s: %w", kindLLMInferenceService, s.Namespace, err)
 	}
+	items := list.Items
 	presets, _, err := b.presets(ctx)
 	if err != nil {
 		b.log.Warn("listing presets failed; serving objects are shown without preset details", "error", err)
@@ -199,8 +171,8 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	return out, nil
 }
 
-// predictorPod is what the driver reads off the predictor (workload) pod of
-// an InferenceService or LLMInferenceService.
+// predictorPod is what the driver reads off the workload pod of an
+// LLMInferenceService.
 type predictorPod struct {
 	Node        string
 	Terminating bool
@@ -227,11 +199,9 @@ func (p predictorPod) outranks(other predictorPod) bool {
 	return p.Node != "" && other.Node == ""
 }
 
-// predictorPods maps the name of an InferenceService or LLMInferenceService
-// to its predictor (workload) pod.
+// predictorPods maps the name of an LLMInferenceService to its workload pod.
 func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]predictorPod {
 	pods := map[string]*corev1.Pod{}
-	b.podsByName(ctx, s.Namespace, isvcPodLabel, isvcPodLabel, pods)
 	b.podsByName(ctx, s.Namespace, llmisvcPodSelector, llmisvcPodLabel, pods)
 	out := make(map[string]predictorPod, len(pods))
 	if len(pods) == 0 {
@@ -273,7 +243,7 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel string, out map[string]*corev1.Pod) {
 	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
-		b.log.Warn("listing predictor pods failed", "namespace", namespace, "selector", selector, "error", err)
+		b.log.Warn("listing workload pods failed", "namespace", namespace, "selector", selector, "error", err)
 		return
 	}
 	for i := range pods.Items {
@@ -403,13 +373,11 @@ func failedStep(steps []backend.Step) *backend.Step {
 	return nil
 }
 
-// parseServed reads the fields the driver needs from an InferenceService or
-// an LLMInferenceService; s names the GPU resource the accelerator count is
-// read under and the models Gateway an unpublished address is expected on.
+// parseServed reads the fields the driver needs from an LLMInferenceService;
+// s names the GPU resource the accelerator count is read under and the models
+// Gateway an unpublished address is expected on.
 func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) served {
-	gpuResource := s.GPUResourceName
 	sv := served{
-		Kind:           ServingKindClassic,
 		Name:           obj.GetName(),
 		Namespace:      obj.GetNamespace(),
 		Managed:        obj.GetLabels()[ManagedByLabel] == ManagedByValue,
@@ -419,23 +387,15 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 		Created:        obj.GetCreationTimestamp().Time,
 		Deleting:       obj.GetDeletionTimestamp() != nil,
 	}
-	if obj.GetKind() == ServingKindLLM {
-		sv.Kind = ServingKindLLM
-		sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
-		if main := mainContainer(obj); main != nil {
-			sv.GPUs = gpusOf(main["resources"], gpuResource)
-		}
-	} else {
-		sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storageUri")
-		sv.Runtime, _, _ = unstructured.NestedString(obj.Object, "spec", "predictor", "model", "runtime")
-		model, _, _ := unstructured.NestedMap(obj.Object, "spec", "predictor", "model")
-		sv.GPUs = gpusOf(model["resources"], gpuResource)
+	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
+	if main := mainContainer(obj); main != nil {
+		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
 	}
 
-	// Model id: the annotation, the LLMInferenceService's model name, the
-	// preset, then the hf:// storage URI.
+	// Model id: the annotation, the object's model name, the preset, then
+	// the hf:// storage URI.
 	sv.Model = obj.GetAnnotations()[ModelAnnotation]
-	if sv.Model == "" && sv.Kind == ServingKindLLM {
+	if sv.Model == "" {
 		sv.Model, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "name")
 	}
 	if p, ok := idx.byName[sv.Preset]; ok && sv.Preset != "" {
@@ -457,7 +417,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv.ReadyAt = readyTransition(obj)
 	failure, ok, _ := unstructured.NestedMap(obj.Object, "status", "modelStatus", "lastFailureInfo")
 	sv.Failed = ok && len(failure) > 0
-	sv.URL = normalizePredictorURL(servedURL(obj, sv, s.GatewayEndpoint))
+	sv.URL = normalizeServedURL(servedURL(obj, sv, s.GatewayEndpoint))
 	return sv
 }
 
@@ -479,38 +439,35 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 	return time.Time{}
 }
 
-// servedURL is the address KServe published for the object — status.address
-// (classic), status.url, the first of status.addresses (llmisvc) — else the
-// address it is expected on (expectedURL). An LLMInferenceService routed on
-// the models Gateway is published at the Gateway's address as the controller
-// sees it; inside the cluster that is the Gateway's Service name
-// (<gateway>.<namespace>.svc.cluster.local, a Gateway whose load balancer
-// has no address), which no caller uses — the Gateway terminates TLS and
-// verifies a person's token there as everywhere — so such an address keeps
-// KServe's path under the discovery Gateway's origin (onGateway).
+// servedURL is the address KServe published for the object — status.url, the
+// first of status.addresses — else the address it is expected on
+// (expectedURL). An LLMInferenceService routed on the models Gateway is
+// published at the Gateway's address as the controller sees it; inside the
+// cluster that is the Gateway's Service name
+// (<gateway>.<namespace>.svc.cluster.local, a Gateway whose load balancer has
+// no address), which no caller uses — the Gateway terminates TLS and verifies
+// a person's token there as everywhere — so such an address keeps KServe's
+// path under the discovery Gateway's origin (onGateway).
 func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
-	if u, _, _ := unstructured.NestedString(obj.Object, "status", "address", "url"); u != "" {
-		return onGateway(u, sv, gateway)
-	}
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "url"); u != "" {
-		return onGateway(u, sv, gateway)
+		return onGateway(u, gateway)
 	}
 	if addrs, _, _ := unstructured.NestedSlice(obj.Object, "status", "addresses"); len(addrs) > 0 {
 		if first, ok := addrs[0].(map[string]any); ok {
 			if u, _ := first["url"].(string); u != "" {
-				return onGateway(u, sv, gateway)
+				return onGateway(u, gateway)
 			}
 		}
 	}
 	return sv.expectedURL(gateway)
 }
 
-// onGateway rewrites a published LLMInferenceService address whose host is a
-// Service DNS name — the models Gateway's in-cluster address — to the
-// discovery Gateway's origin with the published path; every other address,
-// and every address without a Gateway in discovery, stands as published.
-func onGateway(published string, sv served, gateway string) string {
-	if gateway == "" || sv.Kind != ServingKindLLM {
+// onGateway rewrites a published address whose host is a Service DNS name —
+// the models Gateway's in-cluster address — to the discovery Gateway's origin
+// with the published path; every other address, and every address without a
+// Gateway in discovery, stands as published.
+func onGateway(published, gateway string) string {
+	if gateway == "" {
 		return published
 	}
 	u, err := url.Parse(published)
@@ -518,15 +475,6 @@ func onGateway(published string, sv served, gateway string) string {
 		return published
 	}
 	return gateway + strings.TrimRight(u.Path, "/")
-}
-
-// defaultURL is the in-cluster Service the kind gets: the workload Service
-// of an LLMInferenceService, the predictor Service of an InferenceService.
-func (sv served) defaultURL() string {
-	if sv.Kind == ServingKindLLM {
-		return workloadURL(sv.Name, sv.Namespace)
-	}
-	return predictorURL(sv.Name, sv.Namespace)
 }
 
 // gpusOf reads the accelerator count from a container's resources: requests,
@@ -602,241 +550,31 @@ func quantityValue(v any) int64 {
 	return 0
 }
 
-// compose builds the serving object for a preset in the configured kind.
-func (b *Backend) compose(p *servingPreset, s settings, node string) *unstructured.Unstructured {
-	if s.ServingKind == ServingKindLLM {
-		return b.composeLLM(p, s, node)
-	}
-	return b.composeClassic(p, s, node)
-}
-
-// composeClassic builds the InferenceService for a preset following the
-// modelServing contract's composition recipe (agent-platform-connectivity,
-// templates/model-serving/): predictor.model from the preset, defaults from
-// discovery, scheduling merged, chat template mounted, spec.predictor extras
-// copied on top verbatim.
-func (b *Backend) composeClassic(p *servingPreset, s settings, node string) *unstructured.Unstructured {
-	model := map[string]any{
-		"modelFormat": map[string]any{"name": p.Spec.Model.Format},
-		"storageUri":  p.Spec.Model.StorageURI,
-	}
-	runtime := p.Spec.Runtime
-	if runtime == "" {
-		runtime = s.Runtime
-	}
-	if runtime != "" {
-		model["runtime"] = runtime
-	}
-	if len(p.Spec.Args) > 0 {
-		model["args"] = toAnySlice(p.Spec.Args)
-	}
-	if len(p.Spec.Env) > 0 {
-		model["env"] = mapsToAny(p.Spec.Env)
-	}
-	if res := p.resources(s); len(res) > 0 {
-		model["resources"] = res
-	}
-
-	predictor := map[string]any{}
-	if mount, volume := p.chatTemplateMount(); mount != nil {
-		model["volumeMounts"] = []any{mount}
-		predictor["volumes"] = []any{volume}
-	}
-	predictor["model"] = model
-	if ns := p.nodeSelector(s, node); len(ns) > 0 {
-		predictor["nodeSelector"] = ns
-	}
-	if tols := p.tolerations(s); len(tols) > 0 {
-		predictor["tolerations"] = tols
-	}
-	if s.RuntimeClassName != "" {
-		predictor["runtimeClassName"] = s.RuntimeClassName
-	}
-	if s.DeploymentStrategyType != "" {
-		predictor["deploymentStrategy"] = map[string]any{"type": s.DeploymentStrategyType}
-	}
-	if s.TimeoutSeconds > 0 {
-		predictor["timeout"] = s.TimeoutSeconds
-	}
-	for k, v := range p.Spec.Predictor {
-		predictor[k] = v
-	}
-
-	obj := newServingObject(ServingKindClassic, p, s.Namespace)
-	obj.Object["spec"] = map[string]any{"predictor": predictor}
-	return obj
-}
-
-// newServingObject is the metadata both kinds share: the preset's name, the
-// labels that make the object model-manager's and link it to its preset, the
-// model annotation.
-func newServingObject(kind string, p *servingPreset, namespace string) *unstructured.Unstructured {
-	gvr := gvrFor(kind)
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": gvr.Group + "/" + gvr.Version,
-		"kind":       kind,
-		"metadata": map[string]any{
-			"name":      p.name(),
-			"namespace": namespace,
-			"labels": map[string]any{
-				ManagedByLabel:                          ManagedByValue,
-				BackendLabel:                            "kserve",
-				PresetLabel:                             p.name(),
-				"app.kubernetes.io/name":                p.name(),
-				"app.kubernetes.io/component":           "inference",
-				"app.kubernetes.io/part-of":             "agent-platform",
-				"model-manager.giantswarm.io/model-dir": p.name(),
-			},
-			"annotations": map[string]any{
-				ModelAnnotation: p.Spec.Model.ID,
-			},
-		},
-	}}
-}
-
-// resources is the preset's requests/limits with the accelerator count
-// added under the discovery's resource name; empty when there is nothing.
-func (p *servingPreset) resources(s settings) map[string]any {
-	requests := copyResourceMap(p.Spec.Resources.Requests)
-	limits := copyResourceMap(p.Spec.Resources.Limits)
-	if gpus := p.gpus(); gpus > 0 && s.GPUResourceName != "" {
-		requests[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
-		limits[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
-	}
-	resources := map[string]any{}
-	if len(requests) > 0 {
-		resources["requests"] = requests
-	}
-	if len(limits) > 0 {
-		resources["limits"] = limits
-	}
-	return resources
-}
-
-// nodeSelector merges the discovery's serving selector, the GPU pool's
-// label, the preset's selector and the node pin, each overriding the one
-// before; empty when there is nothing.
-func (p *servingPreset) nodeSelector(s settings, node string) map[string]any {
-	out := map[string]any{}
-	for k, v := range s.NodeSelector {
-		out[k] = v
-	}
-	for k, v := range s.GPUPool.NodeSelector {
-		out[k] = v
-	}
-	for k, v := range p.Spec.Scheduling.NodeSelector {
-		out[k] = v
-	}
-	if node != "" {
-		out[labelHostname] = node
-	}
-	return out
-}
-
-// chatTemplateMount is the volume mount and volume for the preset's chat
-// template ConfigMap; nil, nil without one.
-func (p *servingPreset) chatTemplateMount() (mount, volume map[string]any) {
-	ct := p.Spec.ChatTemplate
-	if ct == nil || ct.ConfigMap == "" {
-		return nil, nil
-	}
-	mountPath := ct.MountPath
-	if mountPath == "" {
-		mountPath = "/mnt/chat-template"
-	}
-	return map[string]any{"name": "chat-template", "mountPath": mountPath, "readOnly": true},
-		map[string]any{"name": "chat-template", "configMap": map[string]any{"name": ct.ConfigMap}}
-}
-
-// getServing fetches the serving object of the given kind; nil when there
-// is none.
-func (b *Backend) getServing(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error) {
-	obj, err := b.dynamic(ctx).Resource(gvrFor(kind)).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+// getServing fetches the LLMInferenceService of the name; nil when there is
+// none.
+func (b *Backend) getServing(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	obj, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, name, err)
+		return nil, fmt.Errorf("get %s %s/%s: %w", kindLLMInferenceService, namespace, name, err)
 	}
 	return obj, nil
 }
 
-// findServing looks a name up in every kind the cluster serves, the
-// configured kind first.
-func (b *Backend) findServing(ctx context.Context, s settings, name string) (*unstructured.Unstructured, error) {
-	for _, kind := range s.kinds() {
-		obj, err := b.getServing(ctx, kind, s.Namespace, name)
-		if err != nil || obj != nil {
-			return obj, err
-		}
-	}
-	return nil, nil
-}
-
 func (b *Backend) createServing(ctx context.Context, obj *unstructured.Unstructured) error {
-	if _, err := b.dynamic(ctx).Resource(gvrFor(obj.GetKind())).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
+	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
 		return fmt.Errorf("create %s %s/%s: %w", obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
 	return nil
 }
 
-func (b *Backend) deleteServing(ctx context.Context, kind, namespace, name string) error {
+func (b *Backend) deleteServing(ctx context.Context, namespace, name string) error {
 	propagation := metav1.DeletePropagationForeground
-	err := b.dynamic(ctx).Resource(gvrFor(kind)).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
+	err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
 	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete %s %s/%s: %w", kind, namespace, name, err)
+		return fmt.Errorf("delete %s %s/%s: %w", kindLLMInferenceService, namespace, name, err)
 	}
 	return nil
-}
-
-// kinds lists the serving kinds to read, the configured one first: the
-// classic InferenceService always, the LLMInferenceService where its API is
-// served.
-func (s settings) kinds() []string {
-	if !s.LLMServed && s.ServingKind != ServingKindLLM {
-		return []string{ServingKindClassic}
-	}
-	if s.ServingKind == ServingKindLLM {
-		return []string{ServingKindLLM, ServingKindClassic}
-	}
-	return []string{ServingKindClassic, ServingKindLLM}
-}
-
-func toAnySlice(in []string) []any {
-	out := make([]any, 0, len(in))
-	for _, s := range in {
-		out = append(out, s)
-	}
-	return out
-}
-
-func mapsToAny(in []map[string]any) []any {
-	out := make([]any, 0, len(in))
-	for _, m := range in {
-		out = append(out, m)
-	}
-	return out
-}
-
-// copyResourceMap copies a requests/limits map, stringifying numbers so the
-// API server's quantity parser accepts them.
-func copyResourceMap(in map[string]any) map[string]any {
-	out := make(map[string]any, len(in)+1)
-	for k, v := range in {
-		switch n := v.(type) {
-		case float64:
-			if n == float64(int64(n)) {
-				out[k] = strconv.FormatInt(int64(n), 10)
-			} else {
-				out[k] = strconv.FormatFloat(n, 'f', -1, 64)
-			}
-		case int64:
-			out[k] = strconv.FormatInt(n, 10)
-		case int:
-			out[k] = strconv.Itoa(n)
-		default:
-			out[k] = v
-		}
-	}
-	return out
 }

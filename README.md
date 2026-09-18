@@ -25,7 +25,7 @@ into kagent automatically as `ModelConfig`s (native keyless `Ollama` provider
 for the ollama backend; `OpenAI` provider with the caller's token forwarded
 (`apiKeyPassthrough`) for a kserve model routed on the models Gateway;
 `OpenAI` provider plus a placeholder API-key Secret —
-against the predictor URL for a kserve model on its in-cluster Service, and
+against the workload URL for a kserve model on its in-cluster Service, and
 against Lemonade's `/api/v1` for lemonade; a kserve model's ModelConfig is
 created by the load call, before the model is ready), so agents can use them
 without manual steps. They are written in the kagent.dev API version the
@@ -109,7 +109,7 @@ defaulting to the endpoint; lemonade: `--lemonade-agent-host` plus `/api/v1`,
 the OpenAI-compatible base URL the ModelConfigs carry). A client that matches
 ModelConfigs it did not
 create to models by hostname (the portal's "Used by") compares against
-`agentEndpoint`. kserve omits it: every served model has its own predictor URL
+`agentEndpoint`. kserve omits it: every served model has its own address
 (`running.endpoint`, `modelConfig.endpoint`).
 
 On ollama, `GET /api/v1/nodes` reports the proxied host as one node so a
@@ -164,7 +164,7 @@ not-loaded model correctly without keying off the backend name:
   — the deadline Ollama reports right then — and the next agent request resets
   the timer to the server default again, even after a load with `-1`.
 - **kserve** — `onDemand: false`, `idleEviction: false`, no keep-alive fields:
-  a stopped InferenceService does not come back on request, agents on its
+  a stopped LLMInferenceService does not come back on request, agents on its
   ModelConfig fail at their first turn, and a running one stays until unloaded.
 - **lemonade** — `onDemand: true`: Lemonade loads a model on the first
   completion naming it (a few seconds for a 4B model on the NPU), so a
@@ -261,7 +261,7 @@ the bridge subnets through the host firewall, as for Ollama.
   `openAI.baseUrl` = the agent host plus `/api/v1` (`--lemonade-agent-host`,
   defaulting to the endpoint; reported as `agentEndpoint`) and the
   placeholder `OPENAI_API_KEY` Secret the kagent runtime insists on — the
-  same path the kserve backend takes to a vLLM predictor.
+  same path the kserve backend takes to a vLLM workload.
 - **Node** — `GET /api/v1/nodes` reports the host as Lemonade sees it: memory
   from `Physical Memory` of `GET /api/v1/system-info` (`budgetSource:
   system-info`), the accelerators Lemonade found available as `gpuCount` /
@@ -373,7 +373,7 @@ scheduling by the registered backend document (`docs/backends.md`).
   `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the chart's
   `modelServing.gpuPool.*`), or the backend document's `spec.kserve.gpuPool`,
   make the driver tolerate the taint on everything it schedules onto the pool
-  — the composed predictors, the download Jobs and the inventory scan Jobs —
+  — the composed workloads, the download Jobs and the inventory scan Jobs —
   and select the pool wherever the pod is not pinned to a node already. The
   descriptor (`GET /api/v1/backend`) reports it as `gpuPool`. Unset, nothing
   changes; the chart's DaemonSet takes its own `kserve.inventory.agent.*`.
@@ -398,9 +398,9 @@ scheduling by the registered backend document (`docs/backends.md`).
   preset that requests a GPU keep the accelerator nodes as their capacity;
   `GET /api/v1/nodes` lists those.
 
-- **Inventory** — the cache contents per node plus the InferenceServices of
+- **Inventory** — the cache contents per node plus the LLMInferenceServices of
   the serving namespace (readiness from conditions/`modelStatus`, node from the
-  predictor pod, GPU request, predictor URL). The cache is read in one of two
+  workload pod, GPU request, address). The cache is read in one of two
   ways (`kserve.inventory.mode`): a **short-lived scan Job** per cache node
   mounts the claim read-only and walks `<claim>/<dir>` whenever the inventory
   is older than the TTL (default; never while the cache claim is unbound or
@@ -417,13 +417,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   have filled it: the marker a pre-warm download Job wrote, else the **cache
   index** — a ConfigMap in the serving namespace (`model-manager-cache-index`,
   `kserve.cache.indexConfigMap`) in which the driver records, while an
-  InferenceService exists, that its name is the directory the KServe
+  LLMInferenceService exists, that its name is the directory the KServe
   storage-initializer fills and its `hf://` storageUri the repository
   (repository, revision, preset label, one JSON entry per directory). The
-  record outlives the InferenceService, so the directory keeps its repository
+  record outlives the LLMInferenceService, so the directory keeps its repository
   and, through it, its preset (the labelled one, else the single preset
-  serving the repository) after the InferenceService is deleted; a live
-  InferenceService always wins over a stale record, and the record is dropped
+  serving the repository) after the LLMInferenceService is deleted; a live
+  LLMInferenceService always wins over a stale record, and the record is dropped
   when model-manager removes the directory. A record is bound to the cache it
   was made against (`claim`, `volume`): nothing is recorded while the serving
   layer has no cache (`cache.enabled: false` in the discovery document, a
@@ -431,13 +431,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   goes with the pod), `unload_model` drops a record that names a directory in
   no cache (bound to another claim or volume, or to none), and the ConfigMap
   goes with its last record. Without a marker or record the
-  preset or InferenceService of the same name is assumed, else the directory
+  preset or LLMInferenceService of the same name is assumed, else the directory
   is listed by its bare name. Directories whose top level holds no model —
   no `config.json` and no weights file (`*.safetensors`, `*.gguf`, `*.bin`,
   `*.pt`, `*.pth`, `*.onnx`) — are not listed as downloads: Hugging Face
   client internals such as `hf-home` and `xet` live on the same claim and
   count towards `nodes[].cache.bytesUsed`, but they are not models, and a
-  directory an InferenceService is still filling shows as that served model
+  directory an LLMInferenceService is still filling shows as that served model
   with `downloaded: false` until its files arrive.
 - **Nodes and eligibility** — `GET /api/v1/nodes` lists the **accelerator
   nodes only**: nodes that advertise the configured GPU resource
@@ -450,8 +450,8 @@ scheduling by the registered backend document (`docs/backends.md`).
   `NoExecute` taint the pool toleration does not cover (a tainted pool node
   is capacity once its taint is the configured one), and can mount the cache
   claim whenever
-  predictors mount it (cache enabled and `cache.redirectPolicy` on — the
-  Kyverno rule that mounts the claim into every predictor) and the claim is
+  workloads mount it (cache enabled and `cache.redirectPolicy` on — the
+  Kyverno rule that mounts the claim into every workload) and the claim is
   pinned to nodes (a static local PersistentVolume or a `local-path` volume);
   a shared (RWX), unbound, missing or disabled cache never disqualifies a
   node. `eligibilityReason` names every failing rule (`not ready`, `outside
@@ -460,7 +460,7 @@ scheduling by the registered backend document (`docs/backends.md`).
   claim hf-cache is pinned to spark-8723`). `pull`, `load` and `fit-check` refuse
   an explicit `node` that is not eligible with that reason (`412
   does_not_fit`; `fits=false` on the fit check) before any Job or
-  InferenceService exists, and never pick an ineligible node themselves. A
+  LLMInferenceService exists, and never pick an ineligible node themselves. A
   second node-local GPU node becomes a serving target only with per-node
   claims or shared storage — a chart decision, not a flag here. The claim
   has a say for the presets that store in it only — every download scheme
@@ -483,7 +483,7 @@ scheduling by the registered backend document (`docs/backends.md`).
   `budgetSource: annotation` — for unified-memory nodes whose allocatable
   memory overstates what a model may use); `pull` refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
-  into `<claim>/<preset name>` — the directory the preset's InferenceService
+  into `<claim>/<preset name>` — the directory the preset's LLMInferenceService
   mounts — reporting bytes on disk against the repository size. The Job
   downloads with `HF_HUB_DISABLE_XET=1` and `HF_HUB_ENABLE_HF_TRANSFER=1`:
   the Xet client connects to CDN addresses a Cilium `toFQDNs` DNS proxy never
@@ -518,73 +518,72 @@ scheduling by the registered backend document (`docs/backends.md`).
   that cannot start never delays the deletion — and rescans the cache in the
   background where a scan pod may run, the answer's `inventory` saying
   whether one runs or why none can (the cache persists); `delete` removes
-  the cache directory (refused while served). The kind is `--kserve-serving-kind` (`kserve.servingKind`):
-  `auto` (default) composes an **`LLMInferenceService`**
-  (`serving.kserve.io/v1alpha2`, the llm-d control plane) wherever that API
-  is served and a classic `InferenceService` elsewhere; both kinds are
-  listed, stopped and deleted, and a loaded model names its `kind`.
-  - **`LLMInferenceService`, by spec shape**: `spec.model.uri` from the
-    preset's `storageUri` (`hf://`, or `pvc://` into the cache),
-    `spec.model.name` from `model.id`, `replicas: 1`,
-    `router: {route: {}}` (KServe renders the `HTTPRoute` on the configured
-    ingress gateway with the workload Service as its backend; the llm-d
-    endpoint picker, `router.scheduler`, is opt-in through the backend
-    document's `spec.kserve.router.scheduler` or a preset's
-    `spec.router.scheduler`, and its `InferencePool` needs the Gateway API
-    Inference Extension on the gateway — `docs/backends.md`),
-    `template.containers[main]` with the preset's `args`,
-    `env` and `resources` (GPU count under the discovery's resource name),
-    `scheduling` as the template's `nodeSelector`/`tolerations` (merged with
-    the discovery selector, the GPU pool's label and toleration, and the
-    node pin), the chat template mounted, and
-    **`template.runtimeClassName` from the discovery ConfigMap's
-    `runtimeClassName`** when non-empty — absent when empty (the same rule
-    as the classic predictor). **No `baseRefs`**: KServe chooses its
-    well-known `LLMInferenceServiceConfig`s from the spec's shape and
-    appends them itself; a preset that names a custom config
-    (`spec.baseRefs: [{name: …}]`) is the only `baseRefs` case. **No
-    image**: the container runs the image the well-known template names
-    (`llm-d-cuda`, mirrored through the platform's registry override); a
-    preset overrides it with `spec.template.containers[{name: main, image:
-    …}]` when it has a reason — `spec.template` extras are copied on top,
-    containers merged by name. model-manager creates and lists no
-    `LLMInferenceServiceConfig`; `list_presets` lists one kind.
-  - **`InferenceService`** (classic): `predictor.model` from the preset
-    (runtime, format, storageUri, args, env, chat-template mount, GPU
-    count); nodeSelector, the GPU pool's label and toleration,
-    runtimeClassName, deployment strategy and timeout from discovery;
-    `spec.predictor` extras verbatim.
+  the cache directory (refused while served). The object is an
+  **`LLMInferenceService`** (`serving.kserve.io/v1alpha2`, KServe's llm-d
+  control plane), the only kind the backend composes, lists, stops and
+  deletes; a loaded model names it as its `kind`. A load **fails fast, with
+  nothing created**, where no llm-d control plane would reconcile the object
+  (`503 unavailable`, MCP `unavailable`): the API is not served, or the CRDs
+  are installed without the controller — the backend looks for the well-known
+  `LLMInferenceServiceConfig` `kserve-config-llm-template` the controller
+  composes from, which ships with the platform's `kserve-runtime-configs`
+  component, not with the CRDs — or the driver can read neither (the error
+  names the permission: `get`/`list` on `llminferenceserviceconfigs`
+  cluster-wide, which the chart's ClusterRole grants). `get_backend` /
+  `GET /api/v1/backends` carry the same reason in `message` before anyone
+  tries. The composition, by spec shape: `spec.model.uri` from the preset's
+  `storageUri` (`hf://`, `pvc://` into the cache, or an `oci://` model
+  image), `spec.model.name` from `model.id`, `replicas: 1`,
+  `router: {route: {}}` (KServe renders the `HTTPRoute` on the configured
+  ingress gateway with the workload Service as its backend; the llm-d
+  endpoint picker, `router.scheduler`, is opt-in through the backend
+  document's `spec.kserve.router.scheduler` or a preset's
+  `spec.router.scheduler`, and its `InferencePool` needs the Gateway API
+  Inference Extension on the gateway — `docs/backends.md`),
+  `template.containers[main]` with the preset's `args`, `env` and
+  `resources` (GPU count under the discovery's resource name), `scheduling`
+  as the template's `nodeSelector`/`tolerations` (merged with the discovery
+  selector, the GPU pool's label and toleration, and the node pin), the chat
+  template mounted, and **`template.runtimeClassName` from the discovery
+  ConfigMap's `runtimeClassName`** when non-empty — absent when empty. **No
+  `baseRefs`**: KServe chooses its well-known `LLMInferenceServiceConfig`s
+  from the spec's shape and appends them itself; a preset that names a custom
+  config (`spec.baseRefs: [{name: …}]`) is the only `baseRefs` case. **No
+  image**: the container runs the image the well-known template names
+  (`llm-d-cuda`, mirrored through the platform's registry override); a
+  preset overrides it with `spec.template.containers[{name: main, image:
+  …}]` when it has a reason — `spec.template` extras are copied on top,
+  containers merged by name. model-manager creates and lists no
+  `LLMInferenceServiceConfig`.
 - **Wiring** — in the load call, before the model is ready, a kagent
-  `ModelConfig` **named after the InferenceService** (`provider: OpenAI`,
+  `ModelConfig` **named after the LLMInferenceService** (`provider: OpenAI`,
   `baseUrl` = the model's address + `/v1`, `model` = the served model name:
-  the InferenceService name, which the ClusterServingRuntime serves under
-  `--served-model-name {{.Name}}`, or an LLMInferenceService's
-  `spec.model.name`) — the same rule the portal's serve flow applies; the
+  the object's `spec.model.name`, which the well-known template passes to
+  vLLM) — the same rule the portal's serve flow applies; the
   `load` answer's `wiring` names it, the `load` job refreshes it from the
   address KServe publishes once the model is ready, and a served model
   model-manager manages that has none is wired by the caller's next
   `list_loaded_models` (`wiring.reason: "wired on read"`). The address is the
   one KServe published or, until then, the one the object is expected on: the
   discovery document's models Gateway (`spec.gateway.endpoint` +
-  `/<namespace>/<name>`) for an `LLMInferenceService`, the in-cluster Service
-  otherwise. The API key follows the address: a model **routed on the models
+  `/<namespace>/<name>`), the in-cluster workload Service otherwise. The API key follows the address: a model **routed on the models
   Gateway** (an external host) gets `apiKeyPassthrough: true` and no Secret —
   the agent forwards the person's own token, the only thing the Gateway's JWT
   policy admits, so a placeholder key would fail every turn with 401; a model
   reached on its **in-cluster Service** gets the placeholder
   `OPENAI_API_KEY` Secret the go ADK runtime insists on, which keyless vLLM
   never checks. A re-wire that moves a ModelConfig onto the Gateway removes
-  its placeholder Secret. A ModelConfig that already points at the predictor (same
+  its placeholder Secret. A ModelConfig that already points at the model (same
   host, same served model name), whoever created it, counts as the model's
   wiring: it is reported with `managed: false`, never duplicated and never
   deleted; `unwire`/`unload` only remove ModelConfigs model-manager created.
-- **Ownership** — InferenceServices in the serving namespace that
+- **Ownership** — LLMInferenceServices in the serving namespace that
   model-manager created or that carry the `agent-platform.giantswarm.io/preset`
   label (the portal's serve flow) can be unloaded here; hand-written ones are
   inventory only (`409 conflict` on unload; `managedBy` says who owns them).
 - **State** — the loaded models (`GET /api/v1/loaded`, `list_loaded_models`)
   are every InferenceService and LLMInferenceService of the serving namespace
-  whatever their readiness: `status` `Ready`, `Pending` (the predictor pod
+  whatever their readiness: `status` `Ready`, `Pending` (the workload pod
   waits for a node, the weights or an image — `reason` `Unschedulable` with
   the scheduler's message, `DownloadingWeights`, `ImagePullBackOff`),
   `NotReady` (the Ready condition's `reason`, a failed load) or
@@ -633,7 +632,7 @@ scheduling by the registered backend document (`docs/backends.md`).
 - **Cache verdict** — `check_fit`'s `cached` is a boolean and `cacheSource`
   says how it was decided: `scan` (a cache scan answered in this call),
   `index` (no scan could run — a GPU pool at zero, the caller's deadline —
-  and the cache index remembers a directory an InferenceService filled for
+  and the cache index remembers a directory an LLMInferenceService filled for
   the repository in the claim and volume bound now; a record bound to another
   cache, or to none, is no verdict), `unknown` (neither answered; `cached: false` is then no
   verdict), `oci-image` (the preset serves an OCI model image the nodes pull
@@ -652,12 +651,12 @@ remembering the request; ollama jobs carry neither. A restart loses the job
 list, not the work — kserve pulls are Kubernetes Jobs that model-manager
 re-adopts on start (`GET /api/v1/jobs` lists them again as running pulls,
 node and preset read back from the Job's annotations), a kserve `load` is
-recovered by the reconcile loop that wires ready InferenceServices without a
+recovered by the reconcile loop that wires ready LLMInferenceServices without a
 job, and an ollama or lemonade pull simply is re-issued (Ollama resumes the layers
 it has, Lemonade the files).
 A persistent job store is deliberately not built until a second replica or a
 job history across restarts is needed; until then, treat the job list as a
-progress view, and the backend (Jobs, InferenceServices, Ollama) as the truth.
+progress view, and the backend (Jobs, LLMInferenceServices, Ollama) as the truth.
 
 ## Running
 
@@ -721,7 +720,7 @@ else the `sub` — is on every mutation's log line and recorded as
 `requestedBy` on jobs.
 
 `--downstream-oauth` goes one step further: everything a request does against
-the Kubernetes API (InferenceServices, download Jobs, cache scans, kagent
+the Kubernetes API (LLMInferenceServices, download Jobs, cache scans, kagent
 ModelConfigs, the discovery ConfigMap) presents the caller's IdP token, and
 the ServiceAccount holds no permissions at all — the chart renders none of its
 Roles and ClusterRoles; the caller's RBAC is the only RBAC. That needs an

@@ -199,7 +199,7 @@ func assertStep(t *testing.T, steps []backend.Step, name, state string, since, f
 }
 
 func notReadyServed(reason, message string) served {
-	return served{Kind: ServingKindLLM, Name: "tiny", Model: tinyRepo, GPUs: 1, Status: statusNotReady, Reason: reason, Message: message, Created: t0.Add(-2 * time.Second)}
+	return served{Name: "tiny", Model: tinyRepo, GPUs: 1, Status: statusNotReady, Reason: reason, Message: message, Created: t0.Add(-2 * time.Second)}
 }
 
 func TestServePhaseFollowsTheProofTimeline(t *testing.T) {
@@ -315,7 +315,7 @@ func TestServePhaseFollowsTheProofTimeline(t *testing.T) {
 	t.Run("ready: every step done, ready since the Ready condition", func(t *testing.T) {
 		p := predictorFixture("tiny")
 		podReadyAt(p, tContReady)
-		ready := served{Kind: ServingKindLLM, Name: "tiny", GPUs: 1, Status: statusReady, Ready: true, ReadyAt: tObjReady, Created: t0}
+		ready := served{Name: "tiny", GPUs: 1, Status: statusReady, Ready: true, ReadyAt: tObjReady, Created: t0}
 		phase, steps := servePhase(ready, facts(p, pulledEvents(p), 1))
 		assert.Equal(t, backend.PhaseReady, phase)
 		for _, s := range steps {
@@ -328,7 +328,7 @@ func TestServePhaseFollowsTheProofTimeline(t *testing.T) {
 	t.Run("terminating: the phase says so, the steps stay", func(t *testing.T) {
 		p := predictorFixture("tiny")
 		podReadyAt(p, tContReady)
-		going := served{Kind: ServingKindLLM, Name: "tiny", GPUs: 1, Status: statusReady, Ready: true, ReadyAt: tObjReady, Deleting: true}
+		going := served{Name: "tiny", GPUs: 1, Status: statusReady, Ready: true, ReadyAt: tObjReady, Deleting: true}
 		phase, steps := servePhase(going, facts(p, pulledEvents(p), 1))
 		assert.Equal(t, backend.PhaseTerminating, phase)
 		assert.Equal(t, backend.StepDone, stepByName(steps, backend.PhaseReady).State)

@@ -38,7 +38,7 @@ type fitPlan struct {
 
 // fitCheck sizes a model (hub, falling back to the preset) and compares
 // weights + overhead with the budget of the target node. forServe subtracts
-// what the node's running InferenceServices already need; a pull only asks
+// what the node's running LLMInferenceServices already need; a pull only asks
 // whether the model can ever be served there.
 func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe bool) (*fitPlan, error) {
 	plan, idx, err := b.resolveFit(ctx, req)
@@ -409,13 +409,13 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 	return eligible, ""
 }
 
-// reservedByNode sums what the running InferenceServices need per node, from
+// reservedByNode sums what the running LLMInferenceServices need per node, from
 // their presets. The preset being (re)loaded is not counted against itself.
 func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset) map[string]int64 {
 	out := map[string]int64{}
 	servedList, err := b.listServed(ctx)
 	if err != nil {
-		b.log.Warn("listing InferenceServices for the fit check failed", "error", err)
+		b.log.Warn("listing LLMInferenceServices for the fit check failed", "error", err)
 		return out
 	}
 	for _, sv := range servedList {
@@ -443,7 +443,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 // was decided (backend.CacheSource*): what the scan says, and — while no scan
 // can answer in this call (the pool at zero, the caller's deadline;
 // cacheSnapshotFor) — what the cache index remembers: a directory an
-// InferenceService filled for the repository, in this claim and volume, and
+// LLMInferenceService filled for the repository, in this claim and volume, and
 // model-manager has not removed (index.go; a record bound to another cache,
 // or to none, is no verdict). Neither answering is "unknown", not "no". Without a
 // node the cache is asked as a whole (a pinned claim: its node; a shared

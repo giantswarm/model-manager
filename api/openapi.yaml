@@ -274,7 +274,7 @@ paths:
                   description: Create a ModelConfig on completion (ollama, lemonade, lmstudio; default = server autoWire; kserve refuses true — models are wired when served)
                 preset:
                   type: string
-                  description: kserve — the serving preset the download is for; its InferenceService mounts the resulting cache directory. Default = the single preset serving the model.
+                  description: kserve — the serving preset the download is for; its LLMInferenceService mounts the resulting cache directory. Default = the single preset serving the model.
                 node:
                   type: string
                   description: "kserve — node whose cache receives the download; must be eligible (GET /api/v1/nodes), else the job fails with does_not_fit and the eligibility reason. Default = the cache node, else the eligible node with the largest budget."
@@ -303,9 +303,11 @@ paths:
         request (`loading.keepAliveScope: request`). The response is the
         loaded model with `running.expiresAt`, the deadline Ollama reports
         right after the load. kserve: fit-checks the model, composes an
-        InferenceService from the preset (the only way to serve on kserve) and
-        creates it; the response has `loaded=true` with `running.status`
-        `Pending` until the predictor is ready, and a `load` job (see
+        `LLMInferenceService` from the preset (the only way to serve on kserve)
+        and creates it — refused with `503 unavailable` and nothing created
+        where the llm-d control plane is not installed (the API not served, or
+        the CRDs without the controller); the response has `loaded=true` with
+        `running.status` `Pending` until the workload is ready, and a `load` job (see
         `GET /api/v1/jobs`) follows readiness and wires the model into kagent.
         Loading an already-served preset again is a no-op. lemonade: `POST
         /api/v1/load` on the Lemonade Server, which starts the model's
@@ -345,10 +347,10 @@ paths:
                     model has no idle timer to set.
                 preset:
                   type: string
-                  description: kserve — serving preset to compose the InferenceService from. Default = the single preset serving the model.
+                  description: kserve — serving preset to compose the LLMInferenceService from. Default = the single preset serving the model.
                 node:
                   type: string
-                  description: "kserve — pin the predictor to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no InferenceService is created."
+                  description: "kserve — pin the workload to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no LLMInferenceService is created."
       responses:
         "200":
           description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; lemonade with `device` and `pinned`; kserve with `status` Pending)
@@ -358,7 +360,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: an InferenceService of that name exists for another model or is not managed by model-manager; or the reference exists on several backends and none was named
+          description: an LLMInferenceService of that name exists for another model or is not managed by model-manager; or the reference exists on several backends and none was named
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -383,7 +385,7 @@ paths:
         (`eligible: false` on `GET /api/v1/nodes`, or a CPU-only node that is
         not listed there) answers `fits=false` with the eligibility reason
         and no `node`; pull and load refuse it the same way, before any Job
-        or InferenceService is created. Without a `node` only eligible nodes
+        or LLMInferenceService is created. Without a `node` only eligible nodes
         are considered. The hub lookups are bounded (`--kserve-hf-timeout`,
         default 4 s): when the hub does not answer, a preset's `weightsGiB`
         sizes the model (`weightsSource: preset`) and `reason` says the hub did
@@ -750,7 +752,7 @@ components:
           properties:
             code:
               type: string
-              enum: [not_found, invalid_request, unsupported, conflict, does_not_fit, backend_error]
+              enum: [not_found, invalid_request, unsupported, conflict, does_not_fit, unavailable, backend_error]
             message: { type: string }
     BackendName:
       type: string
@@ -908,7 +910,7 @@ components:
         parameterSize: { type: string, example: 134.52M }
         quantization: { type: string, example: Q8_0 }
         contextLength: { type: integer, format: int64 }
-        runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama (one runtime) and kserve (the preset says)" }
+        runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama and kserve (one runtime)" }
         capabilities:
           type: array
           description: "model features (completion, tools, vision, embedding, thinking); lemonade maps its labels onto these (chat → completion, tool-calling → tools, reasoning → thinking, embeddings → embedding) and passes the others through (transcription, image, tts, coding, ...); lmstudio maps its capability object (trained_for_tool_use → tools, vision → vision, reasoning → thinking) and reports embedding models as embedding"
@@ -916,9 +918,9 @@ components:
         node: { type: string, description: node holding the cache entry (kserve) }
         downloaded:
           type: boolean
-          description: kserve — false for a model known only from a preset or a running InferenceService whose weights are not cached yet; absent means the backend lists downloads only
-        path: { type: string, description: "kserve — cache directory (the InferenceService name the storage-initializer uses). Directories whose top level holds no model (no config.json, no weights file — Hugging Face client internals such as hf-home or xet) are not listed. The name is the repository known to have filled the directory (pre-warm marker, else the cache index recorded while an InferenceService served from it), else the preset or InferenceService of the same name, else the directory name." }
-        preset: { type: string, description: "kserve — the serving preset whose model this is: the preset of the same name, else the one the InferenceService that filled the directory was composed from, else the single preset serving the repository" }
+          description: kserve — false for a model known only from a preset or a running LLMInferenceService whose weights are not cached yet; absent means the backend lists downloads only
+        path: { type: string, description: "kserve — cache directory (the LLMInferenceService name the storage-initializer uses). Directories whose top level holds no model (no config.json, no weights file — Hugging Face client internals such as hf-home or xet) are not listed. The name is the repository known to have filled the directory (pre-warm marker, else the cache index recorded while an InferenceService served from it), else the preset or InferenceService of the same name, else the directory name." }
+        preset: { type: string, description: "kserve — the serving preset whose model this is: the preset of the same name, else the one the LLMInferenceService that filled the directory was composed from, else the single preset serving the repository" }
         loaded: { type: boolean }
         running: { $ref: "#/components/schemas/LoadedModel" }
         modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
@@ -937,14 +939,14 @@ components:
         node: { type: string }
         status:
           type: string
-          description: "ollama, lemonade and lmstudio `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers; lmstudio lists an instance only once it is resident); kserve InferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
+          description: "ollama, lemonade and lmstudio `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers; lmstudio lists an instance only once it is resident); kserve LLMInferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
           example: loaded
         message: { type: string, description: kserve — why the model is not ready }
-        resource: { type: string, description: kserve — InferenceService name (also the served model name) }
-        kind: { type: string, enum: [InferenceService, LLMInferenceService], description: kserve — the serving object's kind behind `resource` }
-        preset: { type: string, description: kserve — preset the InferenceService was created from }
-        gpus: { type: integer, format: int64, description: kserve — accelerators the predictor requests }
-        managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the InferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
+        resource: { type: string, description: kserve — LLMInferenceService name (also the cache directory and the kagent ModelConfig name) }
+        kind: { type: string, enum: [LLMInferenceService], description: kserve — the serving object's kind behind `resource` }
+        preset: { type: string, description: kserve — preset the LLMInferenceService was created from }
+        gpus: { type: integer, format: int64, description: kserve — accelerators the workload requests }
+        managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the LLMInferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
         device: { type: string, example: npu, description: "lemonade — where the model runs as Lemonade reports it: npu, gpu, cpu, or several such as `gpu npu`" }
         pinned: { type: boolean, description: lemonade — exempt from slot eviction (loaded with keepAlive -1) }
     ModelConfigRef:
@@ -953,7 +955,7 @@ components:
         kagent ModelConfig of a model. ollama, lemonade and lmstudio: named after the model
         reference (`smollm2:135m` → `smollm2-135m`, `qwen3-it-4b-FLM` →
         `qwen3-it-4b-flm`). kserve: named after the
-        InferenceService (`qwen3-8-27b`), the same rule the portal's serve flow
+        LLMInferenceService (`qwen3-8-27b`), the same rule the portal's serve flow
         applies; a ModelConfig someone else created for the same predictor
         (same host, same served model name) counts as the model's wiring and is
         reported with `managed: false` — model-manager never duplicates or
@@ -966,7 +968,7 @@ components:
         apiVersion: { type: string, example: kagent.dev/v1alpha3 }
         provider: { type: string, example: Ollama }
         model: { type: string, description: the backend's model reference }
-        providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the InferenceService name) }
+        providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the LLMInferenceService's spec.model.name) }
         endpoint: { type: string, description: openAI.baseUrl or ollama.host }
         apiKeyPassthrough: { type: boolean, description: "spec.apiKeyPassthrough — the agent forwards the caller's Bearer token to the endpoint as the API key (kserve models routed on the models Gateway); absent when a Secret supplies the key" }
         apiKeySecret: { type: string, description: "spec.apiKeySecret — the Secret the static key is read from: model-manager's placeholder <name>-api-key, or the caller's own; absent with apiKeyPassthrough" }
@@ -1015,7 +1017,7 @@ components:
       description: a published ServingPreset, resolved for clients (kserve)
       required: [name, displayName, model, gpus, weightsBytes, overheadBytes, requiredBytes]
       properties:
-        name: { type: string, example: qwen3-14b, description: also the InferenceService name a load creates }
+        name: { type: string, example: qwen3-14b, description: also the LLMInferenceService name a load creates }
         backend: { $ref: "#/components/schemas/BackendName" }
         displayName: { type: string }
         description: { type: string, description: operator notes (markdown) }
@@ -1023,7 +1025,6 @@ components:
         model: { type: string, example: Qwen/Qwen3-14B, description: Hugging Face repository }
         storageUri: { type: string, example: hf://Qwen/Qwen3-14B }
         format: { type: string, example: vLLM }
-        runtime: { type: string, example: kserve-vllm }
         contextLength: { type: integer, format: int64 }
         capabilities: { type: array, items: { type: string } }
         license: { type: string }
