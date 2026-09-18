@@ -490,10 +490,10 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 // KServe's path under the discovery Gateway's origin (onGateway).
 func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "address", "url"); u != "" {
-		return u
+		return onGateway(u, sv, gateway)
 	}
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "url"); u != "" {
-		return u
+		return onGateway(u, sv, gateway)
 	}
 	if addrs, _, _ := unstructured.NestedSlice(obj.Object, "status", "addresses"); len(addrs) > 0 {
 		if first, ok := addrs[0].(map[string]any); ok {

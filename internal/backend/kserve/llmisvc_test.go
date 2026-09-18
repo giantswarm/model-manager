@@ -392,7 +392,12 @@ func TestLLMInferenceServiceIsRoutedOnTheDiscoveryGatewayBeforeKServePublishes(t
 	// workload Service and rewritten to plain http.
 	obj, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, "tiny", metav1.GetOptions{})
 	require.NoError(t, err)
-	obj.Object["status"] = map[string]any{"addresses": []any{map[string]any{"url": "https://models.agent-platform.svc.cluster.local/model-serving/tiny"}}}
+	// KServe writes the route into status.url and its addresses alike; the
+	// controller's own root address comes first in the list.
+	obj.Object["status"] = map[string]any{
+		"url":       "https://models.agent-platform.svc.cluster.local/model-serving/tiny",
+		"addresses": []any{map[string]any{"url": "https://models.agent-platform.svc.cluster.local/"}, map[string]any{"url": "https://models.agent-platform.svc.cluster.local/model-serving/tiny"}},
+	}
 	_, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Update(ctx, obj, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	loaded, err = f.b.ListLoaded(ctx)
