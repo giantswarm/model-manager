@@ -462,6 +462,10 @@
                     "type": "string",
                     "description": "ClusterServingRuntime for presets that name none (classic kind); empty takes the discovery value (default `kserve-vllm`)."
                 },
+                "scaleUpTimeout": {
+                    "type": "string",
+                    "description": "The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (`InsufficientInstanceCapacity`) before its `scheduling` step and the phase read `failed` naming the refusal (`CapacityUnavailable`), counted from the pod's creation."
+                },
                 "servingKind": {
                     "type": "string",
                     "description": "Kind a serving preset is composed into: `LLMInferenceService` (the llm-d control plane: KServe's own router and well-known configs), `InferenceService` (the classic predictor on the vLLM ClusterServingRuntime) or empty for `auto` — `LLMInferenceService` wherever its API is served, else the classic kind."

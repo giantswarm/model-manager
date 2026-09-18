@@ -207,6 +207,7 @@ can stay empty.
 | kserve.budget.source | string | `"auto"` | Node memory budget for fit checks: `auto` (GPU memory from the nvidia.com/gpu.memory x gpu.count labels when present, else allocatable memory — unified-memory nodes), `gpu-labels`, `allocatable`. A node annotation `model-manager.giantswarm.io/memory-budget-gib: "96"` (GiB) overrides the budget of that node whatever the source (reported as `budgetSource: annotation`). |
 | kserve.budget.defaultOverheadGiB | int | `30` | Serving overhead (KV cache, activations, runtime) added to the weights when the preset has no `requirements.overheadGiB`. |
 | kserve.readyTimeout | string | `"2h"` | How long a load job waits for an InferenceService to become ready before it gives up on wiring. |
+| kserve.scaleUpTimeout | string | `"10m"` | The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (`InsufficientInstanceCapacity`) before its `scheduling` step and the phase read `failed` naming the refusal (`CapacityUnavailable`), counted from the pod's creation. |
 | podAnnotations | object | `{}` | Annotations on the pod. |
 | podLabels | object | `{}` | Labels on the pod. |
 | podSecurityContext | object | `{"fsGroup":1000,"runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. |

@@ -69,15 +69,20 @@ const (
 	// for far longer.
 	DefaultDownloadStallTimeout = 10 * time.Minute
 	DefaultReadyTimeout         = 2 * time.Hour
-	DefaultPollInterval         = 5 * time.Second
-	discoveryConfigKey          = "config.yaml"
-	discoveryKind               = "ModelServingConfig"
-	presetConfigKey             = "preset.yaml"
-	presetKind                  = "ServingPreset"
-	agentPlatformAPIVersion     = "agent-platform.giantswarm.io/v1alpha1"
-	budgetSourceAuto            = "auto"
-	budgetSourceGPULabels       = "gpu-labels"
-	budgetSourceAllocatable     = "allocatable"
+	// DefaultScaleUpTimeout is the GPU pool's scale-up budget: a node the
+	// autoscaler launches registers in ≈ 3.5 min, and a capacity refusal is
+	// retried every ≈ 3 min — ten minutes without a node say the pool cannot
+	// launch one as it stands.
+	DefaultScaleUpTimeout   = 10 * time.Minute
+	DefaultPollInterval     = 5 * time.Second
+	discoveryConfigKey      = "config.yaml"
+	discoveryKind           = "ModelServingConfig"
+	presetConfigKey         = "preset.yaml"
+	presetKind              = "ServingPreset"
+	agentPlatformAPIVersion = "agent-platform.giantswarm.io/v1alpha1"
+	budgetSourceAuto        = "auto"
+	budgetSourceGPULabels   = "gpu-labels"
+	budgetSourceAllocatable = "allocatable"
 	// budgetSourceAnnotation is reported when the node's BudgetAnnotation
 	// overrode the configured source.
 	budgetSourceAnnotation       = "annotation"
@@ -493,6 +498,9 @@ func applyDefaults(o *backend.KServeOptions) {
 	}
 	if o.ReadyTimeout <= 0 {
 		o.ReadyTimeout = DefaultReadyTimeout
+	}
+	if o.ScaleUpTimeout <= 0 {
+		o.ScaleUpTimeout = DefaultScaleUpTimeout
 	}
 	if o.PollInterval <= 0 {
 		o.PollInterval = DefaultPollInterval

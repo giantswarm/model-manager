@@ -426,6 +426,11 @@ kserve:
   # -- How long a load job waits for an InferenceService to become ready
   # before it gives up on wiring.
   readyTimeout: 2h
+  # -- The GPU pool's scale-up budget: how long a predictor may wait for a
+  # node while Karpenter refuses to launch one (`InsufficientInstanceCapacity`)
+  # before its `scheduling` step and the phase read `failed` naming the
+  # refusal (`CapacityUnavailable`), counted from the pod's creation.
+  scaleUpTimeout: 10m
 
 # -- Annotations on the pod.
 podAnnotations: {}  # @schema additionalProperties: true

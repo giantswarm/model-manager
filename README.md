@@ -571,22 +571,29 @@ scheduling by the registered backend document (`docs/backends.md`).
 
   | `phase` | What is happening | Read from |
   |---|---|---|
-  | `scheduling` | no node has a free GPU; the autoscaler is asked | `PodScheduled=False` (`Unschedulable`), `FailedScheduling` events; ≈ 3.5 min while a node launches |
-  | `nodeStarting` | a node is nominated or bound, its GPU not allocatable yet | Karpenter's `Nominated` event, `nominatedNodeName`, the node's allocatable `nvidia.com/gpu`; ≈ 1 min |
+  | `scheduling` | no node has a free GPU; the autoscaler is asked and, once it nominated a NodeClaim, until that claim has launched an instance | `PodScheduled=False` (`Unschedulable`), `FailedScheduling` events; Karpenter's `Nominated` event names the NodeClaim (`karpenter.sh/v1`, read as the caller): `Launched` not yet `True` keeps the step with `reason: NodeLaunching` (`Karpenter nominated NodeClaim gpu-l4-x7k2q; no instance has launched yet`); `Launched=False`, or an `InsufficientCapacityError` / `NodeClassNotReady` Warning event on a NodeClaim of the pool (in the `default` namespace, where a cluster-scoped object's events land — Karpenter deletes a refused claim within seconds and nominates another) gives `reason: CapacityUnavailable` with Karpenter's words: `Karpenter could not launch a node: 3 NodeClaims refused, the last (gpu-l4-c67br) at 2026-09-18T06:51:44Z — InsufficientCapacityError: creating instance, insufficient capacity, with fleet error(s), InsufficientInstanceCapacity: We currently do not have sufficient g6e.2xlarge capacity in the Availability Zone you requested (eu-central-1b). …; it retries while the pod waits`; ≈ 30 s from nomination to launch |
+  | `nodeStarting` | the node exists — an instance launched — and its GPU is not allocatable yet | the NodeClaim's `Launched=True` (`since` = its transition; the message names the node once the claim registered it), a `nominatedNodeName`, the pod bound; the node's allocatable `nvidia.com/gpu`; ≈ 3.5 min until the node registers, ≈ 1 min more for the GPU |
   | `downloadingWeights` | the `storage-initializer` fills the cache directory | the init container; `bytesTotal` (the preset's weights), `bytesCompleted` (a bounded cache-agent scan while filling, cache-agent mode only), `cached: true` when it finished within 15 s — the claim held the weights (72 s for 8 GB, else 0.3 s) |
   | `pullingImage` | the kubelet pulls the runtime image | the container `Waiting` (`ContainerCreating`), `Pulling`/`Pulled` events (the message carries the duration); ≈ 4 min |
   | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min. A runtime that died and is restarted by the kubelet keeps the step under way with `reason: CrashLoop` and a message naming the crash count, the exit code and the last error line of the crashed container's log (`kubectl logs --previous`, read as the caller): `runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'`; a caller who may not read `pods/log` gets the message with the reason the line is missing |
   | `routing` | the pod is ready, KServe resolves the route | `Ready=False` `HTTPRoutesNotReady` |
   | `ready` | the endpoint answers | `Ready=True` (`since` = its `lastTransitionTime`) |
-  | `failed` | a step failed — the step says why | `ImagePullBackOff`/`ErrImagePull`; `CrashLoopBackOff` (the kubelet backed off from restarting a runtime that keeps dying: the `loading` step fails with the crash message and the back-off, and the model's `reason`/`message` carry it); an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`); `modelStatus.lastFailureInfo` |
+  | `failed` | a step failed — the step says why | a capacity refusal standing when the GPU pool's scale-up budget is spent — `--kserve-scale-up-timeout` / `KSERVE_SCALE_UP_TIMEOUT` / chart value `kserve.scaleUpTimeout`, default `10m`, counted from the pod's creation: the `scheduling` step fails with `CapacityUnavailable`, its message plus `; no node came within the scale-up budget of 10m0s`, and the model's `reason`/`message` carry it (a nominated claim still launching without a refusal never fails the step); `ImagePullBackOff`/`ErrImagePull`; `CrashLoopBackOff` (the kubelet backed off from restarting a runtime that keeps dying: the `loading` step fails with the crash message and the back-off, and the model's `reason`/`message` carry it); an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`); `modelStatus.lastFailureInfo` |
   | `terminating` | the object is being deleted | `deletionTimestamp`; the steps stay as they were |
 
   Without a pod yet the object is `scheduling` (`WaitingForPod`) since its
   creation; a Ready object whose pod the driver cannot see has every step
-  done. Backends without a serve lifecycle (ollama, lemonade, lmstudio)
-  answer neither `phase` nor `steps`. Reading the Events and the nodes costs
-  one bounded (3 s) list per pod, concurrently, so three served models stay
-  inside a caller's ~10 s deadline.
+  done. While the pod has no node, Karpenter's account of the one it waits
+  for — the claim launching, its refusal, the instance registering — is the
+  model's `reason`/`message` in `list_loaded_models` instead of the
+  scheduler's `Unschedulable`; a caller who may not read
+  `nodeclaims.karpenter.sh` or the `default` namespace's events gets the
+  step's message with the reason the read failed, never silently. Backends
+  without a serve lifecycle (ollama, lemonade, lmstudio) answer neither
+  `phase` nor `steps`. Reading the Events and the nodes costs one bounded
+  (3 s) list per pod — plus, for a pod without a node, the nominated
+  NodeClaim and Karpenter's Warning events — concurrently, so three served
+  models stay inside a caller's ~10 s deadline.
 - **Cache verdict** — `check_fit`'s `cached` is a boolean and `cacheSource`
   says how it was decided: `scan` (a cache scan answered in this call),
   `index` (no scan could run — a GPU pool at zero, the caller's deadline —

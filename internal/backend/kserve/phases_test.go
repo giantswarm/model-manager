@@ -3,6 +3,7 @@ package kserve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +14,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/identity"
@@ -28,6 +32,7 @@ import (
 var (
 	t0          = time.Date(2026, 9, 17, 6, 59, 0, 0, time.UTC)
 	tNominated  = t0.Add(35 * time.Second)
+	tLaunched   = tNominated.Add(28 * time.Second)
 	tBound      = t0.Add(4*time.Minute + 2*time.Second)
 	tInitStart  = tBound.Add(20 * time.Second)
 	tInitDone   = tInitStart.Add(72 * time.Second)
@@ -218,14 +223,26 @@ func TestServePhaseFollowsTheProofTimeline(t *testing.T) {
 		assert.Contains(t, s.Message, "Insufficient nvidia.com/gpu")
 	})
 
-	t.Run("nominated: nodeStarting since Karpenter's nomination", func(t *testing.T) {
+	t.Run("nominated: a NodeClaim, not a node — still scheduling", func(t *testing.T) {
 		p := predictorFixture("tiny")
 		phase, steps := servePhase(sv, facts(p, nominated(p), 0))
-		assert.Equal(t, backend.PhaseNodeStarting, phase)
-		assertStep(t, steps, backend.PhaseScheduling, backend.StepDone, t0, tNominated)
-		s := assertStep(t, steps, backend.PhaseNodeStarting, backend.StepInProgress, tNominated, time.Time{})
-		assert.Equal(t, reasonNodeStarting, s.Reason)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := assertStep(t, steps, backend.PhaseScheduling, backend.StepInProgress, t0, time.Time{})
+		assert.Equal(t, reasonNodeLaunching, s.Reason)
 		assert.Contains(t, s.Message, "nodeclaim/gpu-l4-x7k2q")
+		assertStep(t, steps, backend.PhaseNodeStarting, backend.StepPending, time.Time{}, time.Time{})
+	})
+
+	t.Run("launched: nodeStarting since the NodeClaim's instance came", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launched(claimName, "")
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseNodeStarting, phase)
+		assertStep(t, steps, backend.PhaseScheduling, backend.StepDone, t0, tLaunched)
+		s := assertStep(t, steps, backend.PhaseNodeStarting, backend.StepInProgress, tLaunched, time.Time{})
+		assert.Equal(t, reasonNodeStarting, s.Reason)
+		assert.Contains(t, s.Message, "NodeClaim gpu-l4-x7k2q launched an instance")
 	})
 
 	t.Run("bound, GPU not allocatable yet: still nodeStarting", func(t *testing.T) {
@@ -366,6 +383,219 @@ func TestServePhaseFailures(t *testing.T) {
 		s := stepByName(steps, backend.PhaseLoading)
 		assert.Equal(t, backend.StepFailed, s.State)
 		assert.Equal(t, "RuntimeUnhealthy", s.Reason)
+	})
+}
+
+// The NodeClaim Karpenter nominated in nominated(): the pool gpu-l4, the
+// claim's five-character suffix.
+const (
+	claimName = "gpu-l4-x7k2q"
+	claimPool = "gpu-l4"
+	// iceMessage is Karpenter's InsufficientCapacityError event as the cloud
+	// words it, with the event's prefix naming the claim.
+	iceMessage = "NodeClaim %s event: creating instance, insufficient capacity, with fleet error(s), InsufficientInstanceCapacity: We currently do not have sufficient g6e.2xlarge capacity in the Availability Zone you requested (eu-central-1b). Our system will be working on provisioning additional capacity. You can currently get g6e.2xlarge capacity by not specifying an Availability Zone in your request or choosing eu-central-1a, eu-central-1c."
+)
+
+// launched is the nominated claim with its instance up since tLaunched, on
+// node when given.
+func launched(claim, node string) launchFacts {
+	return launchFacts{Claim: claim, State: &claimState{Created: tNominated, Launched: corev1.ConditionTrue, Since: tLaunched, Node: node}}
+}
+
+// refusalEvent is Karpenter's Warning on a claim it could not launch, in
+// the default namespace.
+func refusalEvent(claim string, at time.Time) corev1.Event {
+	return corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: claim + "." + at.Format("150405"), Namespace: karpenterEventsNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: kindNodeClaim, Name: claim, APIVersion: "karpenter.sh/v1"},
+		Reason:         "InsufficientCapacityError", Message: fmt.Sprintf(iceMessage, claim), Type: corev1.EventTypeWarning,
+		FirstTimestamp: metav1.NewTime(at), LastTimestamp: metav1.NewTime(at), Count: 1,
+	}
+}
+
+func refusalOf(e corev1.Event) launchRefusal {
+	return launchRefusal{Claim: e.InvolvedObject.Name, Reason: e.Reason, Message: claimRefusalMessage(e.InvolvedObject.Name, e.Message), At: e.LastTimestamp.Time}
+}
+
+// nodeClaimObject is a karpenter.sh/v1 NodeClaim as the API serves it.
+func nodeClaimObject(name string, created time.Time, launched corev1.ConditionStatus, at time.Time, reason, message, node string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.sh/v1", "kind": kindNodeClaim,
+		"metadata": map[string]any{"name": name, "creationTimestamp": created.UTC().Format(time.RFC3339), "labels": map[string]any{"karpenter.sh/nodepool": claimPool}},
+		"status":   map[string]any{},
+	}}
+	if launched != "" {
+		obj.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": conditionLaunched, "status": string(launched), "lastTransitionTime": at.UTC().Format(time.RFC3339), "reason": reason, "message": message}}
+	}
+	if node != "" {
+		obj.Object["status"].(map[string]any)["nodeName"] = node
+	}
+	return obj
+}
+
+// giantswarm/model-manager#121: Karpenter's Nominated event names a
+// NodeClaim, not a node — a claim the cloud refuses for capacity is deleted
+// within seconds and another nominated, for as long as Karpenter retries.
+// The scheduling step ends when the claim launched an instance; a refusal
+// is the step's reason, and fails it once the scale-up budget is spent.
+func TestServePhaseSchedulingEndsWhenTheNodeLaunched(t *testing.T) {
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	tRefused := tNominated.Add(3 * time.Second)
+	refusals := []launchRefusal{
+		refusalOf(refusalEvent(claimName, tRefused)),
+		refusalOf(refusalEvent("gpu-l4-75lh8", tRefused.Add(3*time.Minute))),
+		refusalOf(refusalEvent("gpu-l4-c67br", tRefused.Add(6*time.Minute))),
+	}
+	within := tNominated.Add(8 * time.Minute)
+	spent := t0.Add(DefaultScaleUpTimeout + time.Second)
+
+	t.Run("the pod names a node: nodeStarting", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		p.Status.NominatedNodeName = "ip-10-0-1-23.eu-west-2.compute.internal"
+		phase, steps := servePhase(sv, facts(p, nil, 0))
+		assert.Equal(t, backend.PhaseNodeStarting, phase)
+		s := assertStep(t, steps, backend.PhaseNodeStarting, backend.StepInProgress, tNow, time.Time{})
+		assert.Contains(t, s.Message, "nominated to node ip-10-0-1-23")
+	})
+
+	t.Run("the claim registered its node: nodeStarting names it", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launched(claimName, "ip-10-0-1-23.eu-west-2.compute.internal")
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseNodeStarting, phase)
+		s := stepByName(steps, backend.PhaseNodeStarting)
+		assert.Contains(t, s.Message, "launched node ip-10-0-1-23")
+	})
+
+	t.Run("a claim nominated and launching: scheduling, NodeLaunching", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, State: &claimState{Created: tNominated, Launched: corev1.ConditionUnknown}}
+		f.ScaleUpTimeout = DefaultScaleUpTimeout
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := assertStep(t, steps, backend.PhaseScheduling, backend.StepInProgress, t0, time.Time{})
+		assert.Equal(t, reasonNodeLaunching, s.Reason)
+		assert.Equal(t, "Karpenter nominated NodeClaim gpu-l4-x7k2q; no instance has launched yet", s.Message)
+	})
+
+	t.Run("the claim refuses for capacity: scheduling, CapacityUnavailable with Karpenter's words", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, State: &claimState{Created: tNominated, Launched: corev1.ConditionFalse, Since: tRefused, Reason: "InsufficientCapacityError", Message: claimRefusalMessage(claimName, fmt.Sprintf(iceMessage, claimName))}}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, within
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := assertStep(t, steps, backend.PhaseScheduling, backend.StepInProgress, t0, time.Time{})
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		assert.Contains(t, s.Message, "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l4-x7k2q) at "+tRefused.Format(time.RFC3339)+" — InsufficientCapacityError: creating instance, insufficient capacity")
+		assert.Contains(t, s.Message, "sufficient g6e.2xlarge capacity in the Availability Zone you requested (eu-central-1b)")
+		assert.NotContains(t, s.Message, "event:", "the event's prefix naming the claim is dropped")
+		assert.Contains(t, s.Message, "it retries while the pod waits")
+		assert.Equal(t, backend.StepPending, stepByName(steps, backend.PhaseNodeStarting).State)
+	})
+
+	t.Run("the claim is gone, the refusals stand in the events: the count and the last", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, Refusals: refusals}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, within
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		assert.Contains(t, s.Message, "3 NodeClaims refused, the last (gpu-l4-c67br) at "+refusals[2].At.Format(time.RFC3339))
+	})
+
+	t.Run("a claim created after the refusals is Karpenter's retry: the claim speaks", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, State: &claimState{Created: refusals[2].At.Add(time.Second), Launched: corev1.ConditionUnknown}, Refusals: refusals}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, within
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonNodeLaunching, s.Reason)
+	})
+
+	t.Run("the scale-up budget spent against a refusal: the step and the phase fail naming it", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, Refusals: refusals}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, spent
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		s := assertStep(t, steps, backend.PhaseScheduling, backend.StepFailed, t0, time.Time{})
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		assert.Contains(t, s.Message, "3 NodeClaims refused")
+		assert.Contains(t, s.Message, "; no node came within the scale-up budget of 10m0s")
+	})
+
+	t.Run("the budget spent without a refusal: still scheduling — nothing to name", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, State: &claimState{Created: tNominated, Launched: corev1.ConditionUnknown}}
+		f.ScaleUpTimeout, f.Now = DefaultScaleUpTimeout, spent
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+		assert.Equal(t, backend.StepInProgress, stepByName(steps, backend.PhaseScheduling).State)
+	})
+
+	t.Run("no budget (0) never fails the step", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName, Refusals: refusals}
+		f.Now = spent
+		phase, _ := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseScheduling, phase)
+	})
+
+	t.Run("reads that failed are named, never silent", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{
+			Claim:       claimName,
+			ClaimErr:    apierrors.NewForbidden(schema.GroupResource{Group: "karpenter.sh", Resource: "nodeclaims"}, claimName, errors.New(`User "viewer" cannot get resource "nodeclaims" in API group "karpenter.sh" at the cluster scope`)),
+			RefusalsErr: apierrors.NewForbidden(schema.GroupResource{Resource: "events"}, "", errors.New(`User "viewer" cannot list resource "events" in API group "" in the namespace "default"`)),
+		}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonNodeLaunching, s.Reason)
+		assert.Contains(t, s.Message, "whether NodeClaim gpu-l4-x7k2q launched could not be read (")
+		assert.Contains(t, s.Message, `cannot get resource "nodeclaims"`)
+		assert.Contains(t, s.Message, "Karpenter's events in default could not be read (")
+	})
+
+	t.Run("the claim is gone and no refusal is recorded: said so", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		f := facts(p, nominated(p), 0)
+		f.Launch = launchFacts{Claim: claimName}
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonNodeLaunching, s.Reason)
+		assert.Contains(t, s.Message, "which is gone, and no refusal is recorded for the pool")
+	})
+
+	t.Run("bound: scheduling ended when the claim launched, when known", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		bound(p)
+		f := facts(p, nominated(p), 0)
+		f.Launch = launched(claimName, p.Spec.NodeName)
+		_, steps := servePhase(sv, f)
+		assertStep(t, steps, backend.PhaseScheduling, backend.StepDone, t0, tLaunched)
+		assertStep(t, steps, backend.PhaseNodeStarting, backend.StepInProgress, tLaunched, time.Time{})
+	})
+
+	t.Run("parseClaim reads the Launched condition, the node and the creation", func(t *testing.T) {
+		obj := nodeClaimObject(claimName, tNominated, corev1.ConditionFalse, tRefused, "InsufficientCapacityError", fmt.Sprintf(iceMessage, claimName), "")
+		s := parseClaim(obj)
+		assert.Equal(t, tNominated, s.Created)
+		assert.Equal(t, corev1.ConditionFalse, s.Launched)
+		assert.Equal(t, tRefused, s.Since)
+		assert.Equal(t, "InsufficientCapacityError", s.Reason)
+		assert.True(t, strings.HasPrefix(s.Message, "creating instance, insufficient capacity"), s.Message)
+		assert.Equal(t, claimPool, nodeClaimPool(claimName))
+		assert.Empty(t, nodeClaimPool("ip-10-0-1-23"), "not a claim name")
 	})
 }
 
@@ -562,4 +792,106 @@ func TestListLoadedCarriesPhaseAndSteps(t *testing.T) {
 	assert.Positive(t, w.BytesTotal, "the preset's weights")
 	assert.Zero(t, w.BytesCompleted, "no cache agent: no live bytes")
 	assert.Equal(t, backend.StepPending, stepByName(lm.Steps, backend.PhaseReady).State)
+}
+
+// The wiring behind giantswarm/model-manager#121: for a pod without a node,
+// list_loaded_models reads the NodeClaim Karpenter nominated (by the name in
+// the pod's Nominated event) and, unless it launched, Karpenter's refusal
+// events in the default namespace — as the caller — and the model's own
+// reason and message carry Karpenter's answer instead of the scheduler's
+// Unschedulable.
+func TestListLoadedNamesAKarpenterRefusal(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.serveLLMAPI()
+	f.pendingLLMISVC(ctx, "tiny")
+	p := predictorFixture("tiny")
+	created := time.Now().Add(-time.Minute)
+	p.CreationTimestamp = metav1.NewTime(created)
+	_, err := f.cs.CoreV1().Pods(testServingNS).Create(ctx, p, metav1.CreateOptions{})
+	require.NoError(t, err)
+	for _, e := range nominated(p) {
+		_, err = f.cs.CoreV1().Events(testServingNS).Create(ctx, &e, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	claims := f.dyn.Resource(nodeClaimGVR)
+	refused := created.Add(25 * time.Second)
+
+	// The claim stands with Launched=False: its condition is the refusal.
+	_, err = claims.Create(ctx, nodeClaimObject(claimName, created.Add(20*time.Second), corev1.ConditionFalse, refused, "InsufficientCapacityError", fmt.Sprintf(iceMessage, claimName), ""), metav1.CreateOptions{})
+	require.NoError(t, err)
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseScheduling, loaded[0].Phase)
+	assert.Equal(t, statusPending, loaded[0].Status)
+	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "1 NodeClaim refused, the last (gpu-l4-x7k2q)")
+	assert.Contains(t, loaded[0].Message, "InsufficientInstanceCapacity")
+	assert.Equal(t, backend.StepInProgress, stepByName(loaded[0].Steps, backend.PhaseScheduling).State)
+	assert.Equal(t, backend.StepPending, stepByName(loaded[0].Steps, backend.PhaseNodeStarting).State)
+
+	// Karpenter deleted the claim and retried twice more; the events carry
+	// the refusals. A Warning on another pool's claim, and a Normal event,
+	// are not counted.
+	require.NoError(t, claims.Delete(ctx, claimName, metav1.DeleteOptions{}))
+	events := f.cs.CoreV1().Events(karpenterEventsNamespace)
+	for _, e := range []corev1.Event{
+		refusalEvent(claimName, refused),
+		refusalEvent("gpu-l4-75lh8", refused.Add(3*time.Minute)),
+		refusalEvent("gpu-l4-c67br", refused.Add(6*time.Minute)),
+		refusalEvent("other-pool-abcde", refused.Add(7*time.Minute)),
+	} {
+		_, err = events.Create(ctx, &e, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	normal := refusalEvent("gpu-l4-zzzzz", refused.Add(8*time.Minute))
+	normal.Type, normal.Reason = corev1.EventTypeNormal, "Launched"
+	_, err = events.Create(ctx, &normal, metav1.CreateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseScheduling, loaded[0].Phase)
+	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "3 NodeClaims refused, the last (gpu-l4-c67br)")
+
+	// The scale-up budget spent: the step and the phase fail, the model says so.
+	f.b.opts.ScaleUpTimeout = 30 * time.Second
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseFailed, loaded[0].Phase)
+	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "no node came within the scale-up budget of 30s")
+	assert.Equal(t, backend.StepFailed, stepByName(loaded[0].Steps, backend.PhaseScheduling).State)
+	f.b.opts.ScaleUpTimeout = DefaultScaleUpTimeout
+
+	// A fresh claim launched: nodeStarting, the refusals before it are history.
+	launchedAt := refused.Add(9 * time.Minute)
+	_, err = claims.Create(ctx, nodeClaimObject(claimName, launchedAt.Add(-20*time.Second), corev1.ConditionTrue, launchedAt, "Launched", "", ""), metav1.CreateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseNodeStarting, loaded[0].Phase)
+	assert.Equal(t, reasonNodeStarting, loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "NodeClaim gpu-l4-x7k2q launched an instance")
+	s := stepByName(loaded[0].Steps, backend.PhaseScheduling)
+	assert.Equal(t, backend.StepDone, s.State)
+	require.NotNil(t, s.FinishedAt)
+	assert.Equal(t, launchedAt.UTC().Truncate(time.Second), s.FinishedAt.UTC())
+
+	// A caller who may not read NodeClaims: the step says so.
+	f.dyn.PrependReactor("get", "nodeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "karpenter.sh", Resource: "nodeclaims"}, claimName, errors.New(`User "viewer" cannot get resource "nodeclaims" in API group "karpenter.sh" at the cluster scope`))
+	})
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, backend.PhaseScheduling, loaded[0].Phase, "the refusals stand (the pool's events), the claim's own state is unknown")
+	assert.Equal(t, reasonCapacityUnavailable, loaded[0].Reason)
+	assert.Contains(t, loaded[0].Message, "3 NodeClaims refused")
+	assert.Contains(t, loaded[0].Message, "; whether NodeClaim gpu-l4-x7k2q launched could not be read (")
+	assert.Contains(t, loaded[0].Message, `cannot get resource "nodeclaims"`)
 }

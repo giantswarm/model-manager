@@ -132,6 +132,12 @@ type KServeOptions struct {
 	DefaultOverheadGiB float64
 	// ReadyTimeout bounds WaitReady.
 	ReadyTimeout time.Duration
+	// ScaleUpTimeout is the GPU pool's scale-up budget: how long a predictor
+	// may wait for a node while Karpenter refuses to launch one
+	// (InsufficientInstanceCapacity) before its scheduling step, and the
+	// phase, fail naming the refusal. Counted from the pod's creation; 0
+	// never fails it.
+	ScaleUpTimeout time.Duration
 	// PollInterval is the readiness / job progress poll period.
 	PollInterval time.Duration
 }

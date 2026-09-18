@@ -237,9 +237,10 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 	if len(pods) == 0 {
 		return out
 	}
-	// The phases need the pods' Events and nodes — and a crashed runtime's
-	// log: the nodes once, the rest per pod concurrently, each read bounded
-	// (phases.go).
+	// The phases need the pods' Events and nodes — a crashed runtime's log,
+	// and for a pod without a node the NodeClaim Karpenter nominated and
+	// its refusals: the nodes once, the rest per pod concurrently, each read
+	// bounded (phases.go, launch.go).
 	gpus := b.nodeGPUs(ctx, s.GPUResourceName)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -247,12 +248,15 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 		wg.Add(1)
 		go func(name string, p *corev1.Pod) {
 			defer wg.Done()
-			facts := podFacts{Pod: p, Events: b.podEvents(ctx, p), GPUResource: s.GPUResourceName, Now: time.Now()}
+			facts := podFacts{Pod: p, Events: b.podEvents(ctx, p), GPUResource: s.GPUResourceName, Now: time.Now(), ScaleUpTimeout: b.opts.ScaleUpTimeout}
 			if n, ok := gpus[p.Spec.NodeName]; ok {
 				facts.NodeKnown, facts.NodeGPUs = true, n
 			}
 			if cs := runtimeStatus(p); cs != nil && crashed(cs) {
 				facts.Crash = b.crashLog(ctx, p, cs)
+			}
+			if p.Spec.NodeName == "" && !conditionIs(p, corev1.PodScheduled, corev1.ConditionTrue) {
+				facts.Launch = b.launchFacts(ctx, facts.Events)
 			}
 			mu.Lock()
 			out[name] = predictorPodOf(p, facts)
@@ -293,6 +297,9 @@ func podRank(p *corev1.Pod) predictorPod {
 // predictorPodOf reads a pod for its object: the node, whether it goes,
 // why it is Pending — and, from the facts around it, where the serve is.
 // The phase is completed against the object in applyPod (routing, ready).
+// Karpenter's account of the node a pod without one waits for — the claim
+// it is launching, its refusal, the instance registering — says more than
+// the scheduler's Unschedulable and is the pod's reason then.
 func predictorPodOf(p *corev1.Pod, facts podFacts) predictorPod {
 	pp := podRank(p)
 	pp.Found = true
@@ -301,8 +308,30 @@ func predictorPodOf(p *corev1.Pod, facts podFacts) predictorPod {
 		pp.Reason, pp.Message = podPendingReason(p)
 	}
 	pp.Phase, pp.Steps = servePhase(served{}, facts)
+	if pp.Pending && p.Spec.NodeName == "" {
+		if s := karpenterStep(pp.Steps); s != nil {
+			pp.Reason, pp.Message = s.Reason, s.Message
+		}
+	}
 	pp.facts = facts
 	return pp
+}
+
+// karpenterStep is the step under way or failed when its reason is
+// Karpenter's account of the node (launch.go); nil otherwise.
+func karpenterStep(steps []backend.Step) *backend.Step {
+	for i := range steps {
+		s := &steps[i]
+		if s.State != backend.StepInProgress && s.State != backend.StepFailed {
+			continue
+		}
+		switch s.Reason {
+		case reasonCapacityUnavailable, reasonNodeLaunching, reasonNodeStarting:
+			return s
+		}
+		return nil
+	}
+	return nil
 }
 
 // podPendingReason is why a pod is Pending: the first container waiting with
