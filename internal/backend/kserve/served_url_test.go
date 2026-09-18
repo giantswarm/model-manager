@@ -26,4 +26,10 @@ func TestServedURLWithoutGatewayUsesWorkloadService(t *testing.T) {
 	if got, want := servedURL(obj, sv, "https://models.example.com"), "http://inference.example.com/model-serving/qwen"; got != want {
 		t.Fatalf("with a Gateway: got %q, want the published address %q", got, want)
 	}
+	local := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"url": "https://qwen-kserve-workload-svc.model-serving.svc.cluster.local"},
+	}}
+	if got, want := servedURL(local, sv, ""), "https://qwen-kserve-workload-svc.model-serving.svc.cluster.local"; got != want {
+		t.Fatalf("a published cluster-local address stands: got %q, want %q", got, want)
+	}
 }
