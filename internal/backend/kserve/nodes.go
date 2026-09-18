@@ -22,6 +22,11 @@ const (
 	labelGPUMemory  = "nvidia.com/gpu.memory" // MiB
 	labelGPUProduct = "nvidia.com/gpu.product"
 	labelHostname   = "kubernetes.io/hostname"
+	// The zone a volume's node affinity (and a Karpenter requirement)
+	// names: the topology label, else the beta label older provisioners
+	// wrote.
+	labelZone       = "topology.kubernetes.io/zone"
+	labelZoneLegacy = "failure-domain.beta.kubernetes.io/zone"
 	mib             = int64(1 << 20)
 
 	// BudgetAnnotation on a Node overrides its memory budget for fit checks,
@@ -217,6 +222,12 @@ type cacheLocation struct {
 	Bound bool
 	// Missing is true when the claim does not exist.
 	Missing bool
+	// Zones are the zones the volume's node affinity names (a zonal volume,
+	// EBS: every node mounting it is there); VolumeRead says the volume was
+	// read at all — false without access to it, or with the cache nodes
+	// given by flag — so an empty Zones is known to name none.
+	Zones      []string
+	VolumeRead bool
 }
 
 // pinned reports whether the claim can only be mounted on known nodes (a
@@ -258,20 +269,37 @@ func (b *Backend) cacheNodes(ctx context.Context) (cacheLocation, error) {
 		}
 		return loc, fmt.Errorf("get volume %s: %w", pvc.Spec.VolumeName, err)
 	}
+	loc.VolumeRead = true
 	loc.Nodes = pvNodes(pv)
+	loc.Zones = pvZones(pv)
 	loc.Shared = len(loc.Nodes) == 0
 	return loc, nil
 }
 
 // pvNodes extracts the hostnames a volume's node affinity allows.
 func pvNodes(pv *corev1.PersistentVolume) []string {
+	return pvAffinityValues(pv, labelHostname)
+}
+
+// pvZones extracts the zones a volume's node affinity names: the topology
+// label, else the beta label older provisioners wrote.
+func pvZones(pv *corev1.PersistentVolume) []string {
+	if zones := pvAffinityValues(pv, labelZone); len(zones) > 0 {
+		return zones
+	}
+	return pvAffinityValues(pv, labelZoneLegacy)
+}
+
+// pvAffinityValues are the values a volume's required node affinity allows
+// for key, sorted.
+func pvAffinityValues(pv *corev1.PersistentVolume, key string) []string {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return nil
 	}
 	var out []string
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
 		for _, expr := range term.MatchExpressions {
-			if expr.Key == labelHostname && expr.Operator == corev1.NodeSelectorOpIn {
+			if expr.Key == key && expr.Operator == corev1.NodeSelectorOpIn {
 				out = append(out, expr.Values...)
 			}
 		}
