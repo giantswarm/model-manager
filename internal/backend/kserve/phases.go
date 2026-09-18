@@ -16,17 +16,21 @@ import (
 
 // Where a serve is, read off the predictor pod, its Events and its node
 // (giantswarm/model-manager#110). A fresh serve on a scale-to-zero pool moves
-// through backend.ServePhases: the scheduler finds no node and the autoscaler
-// nominates one (scheduling), the node registers and its GPU becomes
-// allocatable (nodeStarting), the storage-initializer fills the cache
-// directory (downloadingWeights), the kubelet pulls the runtime image
-// (pullingImage), vLLM loads the weights until the startup probe passes
-// (loading), KServe resolves the route (routing), the endpoint answers
-// (ready). Conditions carry the transitions the pod records; Events carry the
-// rest — Karpenter's nomination, Pulling/Pulled with the pull's duration,
-// probe failures. A runtime that dies while loading is named by its
-// container status — how often it crashed, the exit code — and by the last
-// error line of the crashed instance's log (giantswarm/model-manager#117).
+// through backend.ServePhases: the scheduler finds no node, the autoscaler
+// nominates a NodeClaim and launches its instance (scheduling), the node
+// registers and its GPU becomes allocatable (nodeStarting), the
+// storage-initializer fills the cache directory (downloadingWeights), the
+// kubelet pulls the runtime image (pullingImage), vLLM loads the weights
+// until the startup probe passes (loading), KServe resolves the route
+// (routing), the endpoint answers (ready). Conditions carry the transitions
+// the pod records; Events carry the rest — Karpenter's nomination,
+// Pulling/Pulled with the pull's duration, probe failures; the nominated
+// NodeClaim says whether an instance came, and Karpenter's refusal to launch
+// one is the scheduling step's reason until a node comes or the scale-up
+// budget runs out (launch.go, giantswarm/model-manager#121). A runtime that
+// dies while loading is named by its container status — how often it
+// crashed, the exit code — and by the last error line of the crashed
+// instance's log (giantswarm/model-manager#117).
 const (
 	initContainerName = "storage-initializer"
 
@@ -81,6 +85,11 @@ type podFacts struct {
 	Now         time.Time
 	// Crash is read off the crashed runtime container's log, when one died.
 	Crash crashLog
+	// Launch is Karpenter's account of the node a pod without one waits for
+	// (launch.go); ScaleUpTimeout is how long the scheduling step may stand
+	// against a refusal before it fails (0: never).
+	Launch         launchFacts
+	ScaleUpTimeout time.Duration
 }
 
 // crashLog is what a crashed runtime container's log says: its last error
@@ -230,7 +239,9 @@ func indexOf(name string) int {
 }
 
 // schedule covers scheduling and nodeStarting; false while one of them is
-// under way.
+// under way. Scheduling ends when a node exists for the pod: the nominated
+// NodeClaim launched an instance, the pod names a node, or it is bound — a
+// nomination alone is a claim, not a node (launch.go).
 func schedule(t *timeline, pf podFacts) bool {
 	p := pf.Pod
 	t.begin(stepScheduling, p.CreationTimestamp.Time)
@@ -238,36 +249,29 @@ func schedule(t *timeline, pf podFacts) bool {
 	nominatedAt := eventTime(nominated, true)
 	bound := conditionIs(p, corev1.PodScheduled, corev1.ConditionTrue)
 	if !bound {
-		if nominated == nil && p.Status.NominatedNodeName == "" {
-			reason, message := podPendingReason(p)
-			if reason == "" {
-				if ev := lastEvent(pf.Events, eventFailedScheduling, ""); ev != nil {
-					reason, message = ev.Reason, ev.Message
-				}
+		launchedAt, message, launched := nodeLaunched(pf, nominatedAt)
+		if !launched {
+			reason, message, refused := schedulingReason(pf, nominated)
+			if refused && pf.ScaleUpTimeout > 0 && pf.Now.Sub(p.CreationTimestamp.Time) > pf.ScaleUpTimeout {
+				t.fail(stepScheduling, reason, fmt.Sprintf("%s; no node came within the scale-up budget of %s", message, pf.ScaleUpTimeout))
+				return false
 			}
 			t.note(stepScheduling, reason, message)
 			return false
 		}
-		// The autoscaler answered: the node is on its way.
-		if nominatedAt.IsZero() {
-			nominatedAt = pf.Now
-		}
-		t.done(stepScheduling, nominatedAt, "")
-		t.begin(stepNodeStarting, nominatedAt)
-		message := "the node is starting"
-		if nominated != nil {
-			message = nominated.Message
-		} else if p.Status.NominatedNodeName != "" {
-			message = "nominated to " + p.Status.NominatedNodeName
-		}
+		t.done(stepScheduling, launchedAt, "")
+		t.begin(stepNodeStarting, launchedAt)
 		t.note(stepNodeStarting, reasonNodeStarting, message)
 		return false
 	}
-	// Scheduling ended when the autoscaler answered, else when the pod
-	// bound; the node started then.
+	// A bound pod's node did launch: when its claim says, else at the
+	// nomination — near enough, the instance follows it within seconds —,
+	// else when the pod bound; the node started then.
 	boundAt := conditionTime(p, corev1.PodScheduled, p.CreationTimestamp.Time)
 	scheduledAt := boundAt
-	if !nominatedAt.IsZero() && nominatedAt.Before(boundAt) {
+	if at, ok := pf.Launch.launched(); ok && at.Before(boundAt) {
+		scheduledAt = at
+	} else if !nominatedAt.IsZero() && nominatedAt.Before(boundAt) {
 		scheduledAt = nominatedAt
 	}
 	t.done(stepScheduling, scheduledAt, "")
@@ -278,6 +282,59 @@ func schedule(t *timeline, pf podFacts) bool {
 	}
 	t.done(stepNodeStarting, boundAt, "")
 	return true
+}
+
+// nodeLaunched reports whether a node exists for a pod that is not bound
+// yet — the pod names a node, or the nominated NodeClaim launched — with
+// when it came and what the nodeStarting step says.
+func nodeLaunched(pf podFacts, nominatedAt time.Time) (time.Time, string, bool) {
+	if node := pf.Pod.Status.NominatedNodeName; node != "" {
+		if nominatedAt.IsZero() {
+			nominatedAt = pf.Now
+		}
+		return nominatedAt, "nominated to node " + node, true
+	}
+	at, ok := pf.Launch.launched()
+	if !ok {
+		return time.Time{}, "", false
+	}
+	message := fmt.Sprintf("NodeClaim %s launched an instance; the node is registering", pf.Launch.Claim)
+	if node := pf.Launch.State.Node; node != "" {
+		message = fmt.Sprintf("NodeClaim %s launched node %s; its GPU is not allocatable yet", pf.Launch.Claim, node)
+	}
+	return at, message, true
+}
+
+// schedulingReason is why a pod without a node waits: Karpenter's refusal to
+// launch one (refused is then true), the claim it nominated and is launching,
+// else the scheduler's own words. A read of Karpenter's objects that failed
+// is named in the message.
+func schedulingReason(pf podFacts, nominated *corev1.Event) (reason, message string, refused bool) {
+	lf := pf.Launch
+	if lf.Claim != "" {
+		if last, count, ok := lf.refusal(); ok {
+			reason, message, refused = reasonCapacityUnavailable, refusalMessage(last, count), true
+		} else {
+			reason, message = reasonNodeLaunching, fmt.Sprintf("Karpenter nominated NodeClaim %s; no instance has launched yet", lf.Claim)
+			if lf.State == nil && lf.ClaimErr == nil {
+				message = fmt.Sprintf("Karpenter nominated NodeClaim %s, which is gone, and no refusal is recorded for the pool; it retries", lf.Claim)
+			}
+		}
+		if unread := lf.unread(); unread != "" {
+			message += "; " + unread
+		}
+		return reason, message, refused
+	}
+	if nominated != nil {
+		return reasonNodeLaunching, nominated.Message, false
+	}
+	reason, message = podPendingReason(pf.Pod)
+	if reason == "" {
+		if ev := lastEvent(pf.Events, eventFailedScheduling, ""); ev != nil {
+			reason, message = ev.Reason, ev.Message
+		}
+	}
+	return reason, message, false
 }
 
 // download covers downloadingWeights: the storage-initializer init container.

@@ -143,6 +143,7 @@ spec:
             - --kserve-budget-source={{ $k.budget.source }}
             - --kserve-default-overhead-gib={{ $k.budget.defaultOverheadGiB }}
             - --kserve-ready-timeout={{ $k.readyTimeout }}
+            - --kserve-scale-up-timeout={{ $k.scaleUpTimeout }}
             {{- end }}
             {{- if $kubeAccess }}
             - --in-cluster=true

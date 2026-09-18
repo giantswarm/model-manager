@@ -113,6 +113,7 @@ type kserveFlags struct {
 	budgetSource        string
 	defaultOverheadGiB  float64
 	readyTimeout        time.Duration
+	scaleUpTimeout      time.Duration
 	pollInterval        time.Duration
 }
 
@@ -171,6 +172,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&k.budgetSource, "kserve-budget-source", envOr("KSERVE_BUDGET_SOURCE", kserve.DefaultBudgetSource), "Node memory budget: auto (GPU labels when present, else allocatable memory), gpu-labels, allocatable; the node annotation "+kserve.BudgetAnnotation+" (GiB) overrides it per node (KSERVE_BUDGET_SOURCE)")
 	f.Float64Var(&k.defaultOverheadGiB, "kserve-default-overhead-gib", envFloat("KSERVE_DEFAULT_OVERHEAD_GIB", kserve.DefaultOverheadGiB), "Serving overhead added to the weights when the preset has none (KSERVE_DEFAULT_OVERHEAD_GIB)")
 	f.DurationVar(&k.readyTimeout, "kserve-ready-timeout", envDuration("KSERVE_READY_TIMEOUT", kserve.DefaultReadyTimeout), "How long a load job waits for an InferenceService to become ready (KSERVE_READY_TIMEOUT)")
+	f.DurationVar(&k.scaleUpTimeout, "kserve-scale-up-timeout", envDuration("KSERVE_SCALE_UP_TIMEOUT", kserve.DefaultScaleUpTimeout), "The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (InsufficientInstanceCapacity) before its scheduling step and the phase read failed naming the refusal, counted from the pod's creation (KSERVE_SCALE_UP_TIMEOUT)")
 	f.DurationVar(&k.pollInterval, "kserve-poll-interval", envDuration("KSERVE_POLL_INTERVAL", kserve.DefaultPollInterval), "Poll period for Job progress and readiness (KSERVE_POLL_INTERVAL)")
 
 	f.StringVar(&o.kubeconfig, "kubeconfig", envOr("KUBECONFIG", ""), "Kubeconfig path for agent wiring; empty uses the default loading rules or in-cluster auth (KUBECONFIG)")
@@ -400,6 +402,7 @@ func (k kserveFlags) options() backend.KServeOptions {
 		BudgetSource:           k.budgetSource,
 		DefaultOverheadGiB:     k.defaultOverheadGiB,
 		ReadyTimeout:           k.readyTimeout,
+		ScaleUpTimeout:         k.scaleUpTimeout,
 		PollInterval:           k.pollInterval,
 	}
 }

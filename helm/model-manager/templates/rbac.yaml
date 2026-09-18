@@ -52,7 +52,10 @@ cache-tool pods that scan and clean the cache claim; the claim itself; the
 cache index ConfigMap model-manager writes (create cannot be limited to a
 name, update and patch are); the optional hub-token Secret. In the discovery / preset namespace: the
 ModelServingConfig and ServingPreset ConfigMaps. Cluster-wide: nodes (memory
-budgets, GPU labels) and PersistentVolumes (which node holds the cache).
+budgets, GPU labels), PersistentVolumes (which node holds the cache) and
+Karpenter's NodeClaims (whether the node a predictor waits for launched). In
+the default namespace: Karpenter's Warning events on the NodeClaims it could
+not launch (the events of a cluster-scoped object land there).
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -163,6 +166,37 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodeclaims"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "model-manager.fullname" . }}-karpenter-events
+  namespace: default
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-karpenter-events
+  namespace: default
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "model-manager.fullname" . }}-karpenter-events
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
