@@ -448,7 +448,19 @@ func readyTransition(obj *unstructured.Unstructured) time.Time {
 // no address), which no caller uses — the Gateway terminates TLS and verifies
 // a person's token there as everywhere — so such an address keeps KServe's
 // path under the discovery Gateway's origin (onGateway).
+//
+// Without a models Gateway in discovery the model is served at its workload
+// Service, whatever KServe published: the controller renders an HTTPRoute for
+// every LLMInferenceService (spec.router.route) on the ingress Gateway the
+// well-known router config names and publishes that route as status.url — an
+// address the platform put no token policy on and whose scheme, redirect and
+// network path model-manager cannot know (an installation saw
+// `http://inference.<domain>/<namespace>/<name>`, answered with a 301 to
+// https, wired into a ModelConfig with the caller's token).
 func servedURL(obj *unstructured.Unstructured, sv served, gateway string) string {
+	if gateway == "" {
+		return sv.expectedURL("")
+	}
 	if u, _, _ := unstructured.NestedString(obj.Object, "status", "url"); u != "" {
 		return onGateway(u, gateway)
 	}
