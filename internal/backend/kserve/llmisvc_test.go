@@ -384,6 +384,25 @@ func TestLLMInferenceServiceIsRoutedOnTheDiscoveryGatewayBeforeKServePublishes(t
 	assert.Equal(t, "https://models.example.com/model-serving/tiny-renamed", loaded[0].Endpoint)
 	assert.Equal(t, "https://models.example.com/model-serving/tiny-renamed/v1", f.b.AgentEndpoint(tinyRepo).BaseURL)
 
+	// KServe publishing the Gateway's in-cluster address — the Gateway's
+	// Service name, what a Gateway without a load balancer address gets —
+	// keeps the route under the discovery Gateway's origin: the Gateway
+	// terminates TLS and demands the person's token there too, and a
+	// cluster-local https address would otherwise be taken for the keyless
+	// workload Service and rewritten to plain http.
+	obj, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, "tiny", metav1.GetOptions{})
+	require.NoError(t, err)
+	obj.Object["status"] = map[string]any{"addresses": []any{map[string]any{"url": "https://models.agent-platform.svc.cluster.local/model-serving/tiny"}}}
+	_, err = f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny", loaded[0].Endpoint, "the Gateway's origin, KServe's path")
+	ep = f.b.AgentEndpoint(tinyRepo)
+	assert.Equal(t, "https://models.example.com/model-serving/tiny/v1", ep.BaseURL)
+	assert.True(t, ep.APIKeyPassthrough, "still routed on the Gateway")
+	assert.False(t, ep.PlaceholderAPIKey)
+
 	// A classic InferenceService is not routed on the Gateway: its predictor
 	// Service and the placeholder key, as before.
 	classic := newFixture(t)
