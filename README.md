@@ -414,7 +414,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   and, through it, its preset (the labelled one, else the single preset
   serving the repository) after the InferenceService is deleted; a live
   InferenceService always wins over a stale record, and the record is dropped
-  when model-manager removes the directory. Without a marker or record the
+  when model-manager removes the directory. A record is bound to the cache it
+  was made against (`claim`, `volume`): nothing is recorded while the serving
+  layer has no cache (`cache.enabled: false` in the discovery document, a
+  missing or unbound claim — the storage-initializer then fills storage that
+  goes with the pod), `unload_model` drops a record that names a directory in
+  no cache (bound to another claim or volume, or to none), and the ConfigMap
+  goes with its last record. Without a marker or record the
   preset or InferenceService of the same name is assumed, else the directory
   is listed by its bare name. Directories whose top level holds no model —
   no `config.json` and no weights file (`*.safetensors`, `*.gguf`, `*.bin`,
@@ -618,7 +624,8 @@ scheduling by the registered backend document (`docs/backends.md`).
   says how it was decided: `scan` (a cache scan answered in this call),
   `index` (no scan could run — a GPU pool at zero, the caller's deadline —
   and the cache index remembers a directory an InferenceService filled for
-  the repository), `unknown` (neither answered; `cached: false` is then no
+  the repository in the claim and volume bound now; a record bound to another
+  cache, or to none, is no verdict), `unknown` (neither answered; `cached: false` is then no
   verdict), `oci-image` (the preset serves an OCI model image the nodes pull
   themselves; nothing of it is in the claim, and `cached: false` is the
   verdict). On the scale-from-zero pool path the claim is asked as a whole,

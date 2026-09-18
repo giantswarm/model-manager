@@ -578,7 +578,9 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 // Stop implements backend.Stopper: deletes the InferenceServices serving the
 // model — found among the served objects by repository id, object name or
 // preset name, never through the cache inventory — and answers what follows;
-// the cache stays. model-manager's own InferenceServices and the ones the
+// the cache stays, and so does the index entry of a directory in it, while an
+// entry that names a directory in no cache goes (forgetStale). model-manager's
+// own InferenceServices and the ones the
 // portal created from a preset are deleted; hand-written ones are not. The
 // inventory is rescanned in the background where a scan pod may run
 // (refreshInventory), so a caller under a short deadline gets the deletion
@@ -606,6 +608,7 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		}
 		b.log.Info("serving object deleted", "kind", sv.Kind, "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
 	}
+	b.forgetStale(ctx, matches)
 	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
 }
 

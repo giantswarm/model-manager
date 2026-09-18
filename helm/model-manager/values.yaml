@@ -318,7 +318,7 @@ kserve:
     # InferenceService serves from the directory (its name), kept after the
     # InferenceService is gone, so the directory keeps its repository and
     # preset in the inventory. The kserve Role grants `create` on ConfigMaps
-    # and `update`/`patch` on this name.
+    # and `update`/`patch`/`delete` on this name.
     indexConfigMap: model-manager-cache-index
   presets:
     # -- Namespace of the serving-preset ConfigMaps; empty takes the discovery

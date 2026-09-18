@@ -225,7 +225,7 @@
                         },
                         "indexConfigMap": {
                             "type": "string",
-                            "description": "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from the directory (its name), kept after the InferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch` on this name."
+                            "description": "ConfigMap in the serving namespace that remembers which Hugging Face repository filled which cache directory: recorded while an InferenceService serves from the directory (its name), kept after the InferenceService is gone, so the directory keeps its repository and preset in the inventory. The kserve Role grants `create` on ConfigMaps and `update`/`patch`/`delete` on this name."
                         },
                         "mountPath": {
                             "type": "string",

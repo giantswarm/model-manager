@@ -25,20 +25,41 @@ import (
 // InferenceService is gone. A record is dropped when model-manager removes the
 // directory. Pre-warm downloads need no record: their marker on the claim says
 // the same.
+//
+// A record is bound to the cache it was made against — the claim and the
+// volume bound to it (giantswarm/model-manager#130): a record bound to
+// another cache, or to none, names a directory that is not in this one, so
+// it is no verdict for the fit and goes when its InferenceService is
+// unloaded. Nothing is recorded while the serving layer has no cache (the
+// discovery document's cache block says so, or the claim is missing or has
+// no volume): the storage-initializer then fills storage that goes with the
+// pod.
 
 // indexEntry is what the index remembers about one directory.
 type indexEntry struct {
-	Model            string    `json:"model"`
-	Revision         string    `json:"revision,omitempty"`
-	Dir              string    `json:"dir"`
-	Preset           string    `json:"preset,omitempty"`
-	InferenceService string    `json:"inferenceService,omitempty"`
-	RecordedAt       time.Time `json:"recordedAt"`
+	Model            string `json:"model"`
+	Revision         string `json:"revision,omitempty"`
+	Dir              string `json:"dir"`
+	Preset           string `json:"preset,omitempty"`
+	InferenceService string `json:"inferenceService,omitempty"`
+	// Claim and Volume bind the entry to the cache it was recorded against:
+	// the claim's name and the PersistentVolume bound to it (empty with the
+	// cache nodes given by flag). Older releases recorded neither.
+	Claim      string    `json:"claim,omitempty"`
+	Volume     string    `json:"volume,omitempty"`
+	RecordedAt time.Time `json:"recordedAt"`
 }
 
 // same reports whether two entries carry the same facts (RecordedAt aside).
 func (e indexEntry) same(o indexEntry) bool {
-	return e.Model == o.Model && e.Revision == o.Revision && e.Dir == o.Dir && e.Preset == o.Preset && e.InferenceService == o.InferenceService
+	return e.Model == o.Model && e.Revision == o.Revision && e.Dir == o.Dir && e.Preset == o.Preset && e.InferenceService == o.InferenceService && e.Claim == o.Claim && e.Volume == o.Volume
+}
+
+// boundTo reports whether the entry was recorded against the cache at loc:
+// the same claim and the same volume. An entry without a binding is bound
+// to nothing.
+func (e indexEntry) boundTo(loc cacheLocation) bool {
+	return e.Claim != "" && e.Claim == loc.Claim && e.Volume == loc.Volume
 }
 
 // cacheIndex is the driver's copy of the index ConfigMap.
@@ -157,9 +178,15 @@ func (b *Backend) cacheIndexWith(ctx context.Context, servedList []served) map[s
 }
 
 // recordServed remembers every InferenceService that serves a Hugging Face
-// repository from its cache directory. Nothing is written while the index
-// already says so.
+// repository from its cache directory, bound to the cache claim and volume of
+// this moment. Nothing is recorded without a cache — the serving layer has
+// none, or the claim is missing or has no volume: no directory outlives the
+// pod then — and nothing is written while the index already says so.
 func (b *Backend) recordServed(ctx context.Context, servedList []served) {
+	s := b.cfg.settings(ctx)
+	if !s.CacheEnabled {
+		return
+	}
 	want := make([]indexEntry, 0, len(servedList))
 	for _, sv := range servedList {
 		if e, ok := indexEntryFor(sv); ok {
@@ -168,6 +195,17 @@ func (b *Backend) recordServed(ctx context.Context, servedList []served) {
 	}
 	if len(want) == 0 {
 		return
+	}
+	loc, err := b.cacheNodes(ctx)
+	if err != nil {
+		b.warnIndex("locating the cache for the index failed", s.Namespace, err)
+		return
+	}
+	if loc.Missing || !loc.Bound {
+		return
+	}
+	for i := range want {
+		want[i].Claim, want[i].Volume = loc.Claim, loc.Volume
 	}
 	stored := b.readIndex(ctx)
 	dirty := false
@@ -181,7 +219,7 @@ func (b *Backend) recordServed(ctx context.Context, servedList []served) {
 		return
 	}
 	var recorded []string
-	err := b.updateIndex(ctx, func(entries map[string]indexEntry) bool {
+	err = b.updateIndex(ctx, func(entries map[string]indexEntry) bool {
 		recorded = recorded[:0]
 		for _, e := range want {
 			if cur, ok := entries[e.Dir]; ok && cur.same(e) {
@@ -205,21 +243,67 @@ func (b *Backend) recordServed(ctx context.Context, servedList []served) {
 // forgetDir drops a directory from the index once it is removed from the
 // cache.
 func (b *Backend) forgetDir(ctx context.Context, dir string) {
+	b.forgetDirs(ctx, []string{dir})
+}
+
+// forgetDirs drops directories from the index; the ConfigMap goes with its
+// last entry (updateIndex).
+func (b *Backend) forgetDirs(ctx context.Context, dirs []string) {
 	err := b.updateIndex(ctx, func(entries map[string]indexEntry) bool {
-		if _, ok := entries[dir]; !ok {
-			return false
+		n := len(entries)
+		for _, dir := range dirs {
+			delete(entries, dir)
 		}
-		delete(entries, dir)
-		return true
+		return len(entries) != n
 	})
 	if err != nil {
-		b.warnIndex("forgetting a cache index entry failed", b.cfg.settings(ctx).Namespace, err)
+		b.warnIndex("forgetting cache index entries failed", b.cfg.settings(ctx).Namespace, err)
 	}
 }
 
+// forgetStale drops the entries of InferenceServices just deleted whose
+// directory is in no cache: the serving layer has none, the claim is missing
+// or has no volume, or the entry was recorded against another claim or
+// volume. An entry bound to the cache of this moment stays — the directory
+// it names outlives the InferenceService, which is the index's point.
+func (b *Backend) forgetStale(ctx context.Context, deleted []served) {
+	stored := b.readIndex(ctx)
+	var entries []indexEntry
+	for _, sv := range deleted {
+		if e, ok := stored[sv.Name]; ok {
+			entries = append(entries, e)
+		}
+	}
+	if len(entries) == 0 {
+		return
+	}
+	s := b.cfg.settings(ctx)
+	var loc cacheLocation
+	if s.CacheEnabled {
+		var err error
+		if loc, err = b.cacheNodes(ctx); err != nil {
+			b.warnIndex("locating the cache for the index failed", s.Namespace, err)
+			return
+		}
+	}
+	live := s.CacheEnabled && !loc.Missing && loc.Bound
+	var stale []string
+	for _, e := range entries {
+		if !live || !e.boundTo(loc) {
+			stale = append(stale, e.Dir)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	b.forgetDirs(ctx, stale)
+	b.log.Info("cache index entries forgotten: their directory is in no cache", "configMap", b.opts.CacheIndexConfigMap, "directories", strings.Join(stale, ","))
+}
+
 // updateIndex applies mutate to the ConfigMap's current content and writes it
-// back, creating the ConfigMap on first use; a concurrent write is retried on
-// the re-read content. mutate returns false when nothing changed.
+// back, creating the ConfigMap on first use and deleting it with its last
+// entry; a concurrent write is retried on the re-read content. mutate returns
+// false when nothing changed.
 func (b *Backend) updateIndex(ctx context.Context, mutate func(map[string]indexEntry) bool) error {
 	s := b.cfg.settings(ctx)
 	name := b.opts.CacheIndexConfigMap
@@ -245,9 +329,17 @@ func (b *Backend) updateIndex(ctx context.Context, mutate func(map[string]indexE
 			return nil
 		}
 		cm.Data = encodeIndex(entries)
-		if create {
+		switch {
+		case len(entries) == 0:
+			// The last entry went: the ConfigMap goes with it — the one read,
+			// not one written meanwhile.
+			err = cms.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{ResourceVersion: &cm.ResourceVersion}})
+			if errors.IsNotFound(err) {
+				err = nil
+			}
+		case create:
 			_, err = cms.Create(ctx, cm, metav1.CreateOptions{FieldManager: ManagedByValue})
-		} else {
+		default:
 			_, err = cms.Update(ctx, cm, metav1.UpdateOptions{FieldManager: ManagedByValue})
 		}
 		if err == nil {
@@ -277,7 +369,7 @@ func (b *Backend) warnIndex(msg, namespace string, err error) {
 	}
 	args := []any{"configMap", namespace + "/" + b.opts.CacheIndexConfigMap, "error", err}
 	if errors.IsForbidden(err) {
-		args = append(args, "hint", "the chart's kserve Role grants create on ConfigMaps and update/patch on kserve.cache.indexConfigMap; upgrade the chart or grant them")
+		args = append(args, "hint", "the chart's kserve Role grants create on ConfigMaps and update/patch/delete on kserve.cache.indexConfigMap; upgrade the chart or grant them")
 	}
 	b.log.Warn(msg, args...)
 }

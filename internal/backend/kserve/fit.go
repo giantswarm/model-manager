@@ -435,8 +435,9 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 // was decided (backend.CacheSource*): what the scan says, and — while no scan
 // can answer in this call (the pool at zero, the caller's deadline;
 // cacheSnapshotFor) — what the cache index remembers: a directory an
-// InferenceService filled for the repository and model-manager has not
-// removed (index.go). Neither answering is "unknown", not "no". Without a
+// InferenceService filled for the repository, in this claim and volume, and
+// model-manager has not removed (index.go; a record bound to another cache,
+// or to none, is no verdict). Neither answering is "unknown", not "no". Without a
 // node the cache is asked as a whole (a pinned claim: its node; a shared
 // one: any).
 func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cacheLocation) (bool, string) {
@@ -459,7 +460,7 @@ func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cach
 		}
 	}
 	if snap.Pending && len(snap.Entries) == 0 {
-		if rec, ok := b.readIndex(ctx)[dir]; ok && strings.EqualFold(rec.Model, repo) {
+		if rec, ok := b.readIndex(ctx)[dir]; ok && strings.EqualFold(rec.Model, repo) && rec.boundTo(loc) {
 			return true, backend.CacheSourceIndex
 		}
 		return false, backend.CacheSourceUnknown
