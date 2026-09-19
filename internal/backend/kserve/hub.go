@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -149,9 +150,31 @@ func (c *hubClient) Tree(ctx context.Context, repo, revision string) ([]hubFile,
 	return out, nil
 }
 
-// SafetensorsTotal reads metadata.total_size from model.safetensors.index.json;
-// 0 and nil when the repository has no index.
-func (c *hubClient) SafetensorsTotal(ctx context.Context, repo, revision string, files []hubFile) (int64, error) {
+// safetensorsIndex is what model.safetensors.index.json says about a
+// checkpoint: the total_size its metadata declares and the distinct shard
+// files its weight_map names.
+type safetensorsIndex struct {
+	TotalSize int64
+	Shards    []string
+}
+
+// shardBytes sums the shards the index names, from the file tree; a shard the
+// tree does not hold counts nothing.
+func (idx *safetensorsIndex) shardBytes(files []hubFile) int64 {
+	size := make(map[string]int64, len(files))
+	for _, f := range files {
+		size[f.Path] = f.bytes()
+	}
+	var total int64
+	for _, s := range idx.Shards {
+		total += size[s]
+	}
+	return total
+}
+
+// SafetensorsIndex reads model.safetensors.index.json; nil and no error when
+// the repository has no index.
+func (c *hubClient) SafetensorsIndex(ctx context.Context, repo, revision string, files []hubFile) (*safetensorsIndex, error) {
 	const index = "model.safetensors.index.json"
 	found := false
 	for _, f := range files {
@@ -161,7 +184,7 @@ func (c *hubClient) SafetensorsTotal(ctx context.Context, repo, revision string,
 		}
 	}
 	if !found {
-		return 0, nil
+		return nil, nil
 	}
 	if revision == "" {
 		revision = "main"
@@ -170,11 +193,49 @@ func (c *hubClient) SafetensorsTotal(ctx context.Context, repo, revision string,
 		Metadata struct {
 			TotalSize int64 `json:"total_size"`
 		} `json:"metadata"`
+		WeightMap map[string]string `json:"weight_map"`
 	}
 	if err := c.getJSON(ctx, "/"+escapeRepo(repo)+"/resolve/"+url.PathEscape(revision)+"/"+index, &doc); err != nil {
-		return 0, mapHubErr(err, repo)
+		return nil, mapHubErr(err, repo)
 	}
-	return doc.Metadata.TotalSize, nil
+	named := make(map[string]struct{})
+	for _, shard := range doc.WeightMap {
+		named[shard] = struct{}{}
+	}
+	shards := make([]string, 0, len(named))
+	for shard := range named {
+		shards = append(shards, shard)
+	}
+	slices.Sort(shards)
+	return &safetensorsIndex{TotalSize: doc.Metadata.TotalSize, Shards: shards}, nil
+}
+
+// weightsFromIndex sizes a checkpoint from its safetensors index: the declared
+// total_size when it agrees within one percent with the sum of the shards the
+// weight_map names, else that sum — quantized repacks keep the original BF16
+// total in the index while their shards hold half of it. Summing every
+// .safetensors file of the tree would be wrong in turn: Mistral repositories
+// carry a second, consolidated copy the index does not name. An index that
+// names no shard the tree holds cannot be checked and its total stands; no
+// index sizes nothing.
+func weightsFromIndex(idx *safetensorsIndex, files []hubFile) (int64, string) {
+	if idx == nil {
+		return 0, ""
+	}
+	shards := idx.shardBytes(files)
+	if shards == 0 || withinOnePercent(idx.TotalSize, shards) {
+		return idx.TotalSize, weightsSourceIndex
+	}
+	return shards, weightsSourceShards
+}
+
+// withinOnePercent says whether a differs from b by at most one percent of b.
+func withinOnePercent(a, b int64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d*100 <= b
 }
 
 // weightsFromTree sums the weight files: safetensors when present, else the

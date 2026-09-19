@@ -222,6 +222,56 @@ func TestServedStatus(t *testing.T) {
 	assert.Equal(t, "Scheduling", reason)
 }
 
+// TestWeightsFromIndex: the safetensors index sizes a checkpoint by its
+// total_size only while the shards its weight_map names agree with it.
+func TestWeightsFromIndex(t *testing.T) {
+	shard := func(name string, n int64) hubFile {
+		return hubFile{Type: "file", Path: name, Size: 135, LFS: &struct {
+			Size int64 `json:"size"`
+		}{Size: n}}
+	}
+	index := hubFile{Type: "file", Path: "model.safetensors.index.json", Size: 90_000}
+	shards := []string{"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
+
+	// Agreeing: total_size stands, from the index — also when the shards
+	// differ from it by under one percent.
+	agreeing := []hubFile{index, shard(shards[0], 4_900_000_000), shard(shards[1], 5_100_000_000)}
+	idx := &safetensorsIndex{TotalSize: 10_000_000_000, Shards: shards}
+	n, source := weightsFromIndex(idx, agreeing)
+	assert.EqualValues(t, 10_000_000_000, n)
+	assert.Equal(t, weightsSourceIndex, source)
+	idx.TotalSize = 10_090_000_000
+	n, source = weightsFromIndex(idx, agreeing)
+	assert.EqualValues(t, 10_090_000_000, n)
+	assert.Equal(t, weightsSourceIndex, source)
+
+	// Disagreeing — an FP8 repack keeping the BF16 total (58.25 GiB declared,
+	// 30.98 GiB of shards): the shards size it.
+	repack := []hubFile{index, shard(shards[0], 29_000_000_000), shard(shards[1], 4_264_521_216)}
+	idx = &safetensorsIndex{TotalSize: 62_548_352_000, Shards: shards}
+	n, source = weightsFromIndex(idx, repack)
+	assert.EqualValues(t, 33_264_521_216, n, "the shards, not the total the index declares")
+	assert.Equal(t, weightsSourceShards, source)
+
+	// A consolidated copy beside the shards (Mistral layout): the index names
+	// the shards alone, so the copy is not counted twice — the tree sum would.
+	mistral := []hubFile{index, shard(shards[0], 4_900_000_000), shard(shards[1], 5_100_000_000), shard("consolidated.safetensors", 10_000_000_000)}
+	idx = &safetensorsIndex{TotalSize: 10_000_000_000, Shards: shards}
+	n, source = weightsFromIndex(idx, mistral)
+	assert.EqualValues(t, 10_000_000_000, n)
+	assert.Equal(t, weightsSourceIndex, source)
+	assert.EqualValues(t, 20_000_000_000, weightsFromTree(mistral), "the naive tree sum double-counts the copy")
+
+	// An index naming no shard the tree holds cannot be checked: its total
+	// stands. No index sizes nothing.
+	n, source = weightsFromIndex(&safetensorsIndex{TotalSize: 7}, agreeing)
+	assert.EqualValues(t, 7, n)
+	assert.Equal(t, weightsSourceIndex, source)
+	n, source = weightsFromIndex(nil, agreeing)
+	assert.Zero(t, n)
+	assert.Empty(t, source)
+}
+
 func TestHubHelpers(t *testing.T) {
 	files := []hubFile{
 		{Type: "file", Path: "config.json", Size: 100},

@@ -140,7 +140,7 @@ func TestFitCheckPoolShapesJudgeGPUMemory(t *testing.T) {
 	assert.False(t, res.Fits)
 	assert.Equal(t, int64(100)*gib, res.WeightsBytes, "the hub's safetensors index sizes the weights")
 	assert.Contains(t, res.Reason, "no size of the pool (xlarge, 2xlarge) hosts preset big: 2 vCPU / 8 GiB requested, 1 GPU, 101 GiB of GPU memory")
-	assert.Contains(t, res.Reason, "carries 1 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (100.0 GiB weights + 1.0 GiB overhead = 101.0 GiB needed)")
+	assert.Contains(t, res.Reason, "carries 1 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (100.0 GiB weights (safetensors-index) + 1.0 GiB overhead = 101.0 GiB needed)")
 
 	// No preset: 10 GiB of weights and the 30 GiB default overhead need 40
 	// GiB of GPU memory; an L4 has 24, an L40S 48.
@@ -221,7 +221,7 @@ func TestFitCheckPoolShapesBudgetTheRequestedGPUs(t *testing.T) {
 	assert.False(t, res.Fits, "30 GiB on one 24 GiB GPU, whatever the node's four add up to")
 	assert.Equal(t, int64(24)*gib, res.BudgetBytes, "the budget is one GPU's memory")
 	assert.Contains(t, res.Reason, "no size of the pool (12xlarge) hosts preset one: 2 vCPU / 8 GiB requested, 1 GPU, 30 GiB of GPU memory")
-	assert.Contains(t, res.Reason, "carries 4 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (29.0 GiB weights + 1.0 GiB overhead = 30.0 GiB needed)")
+	assert.Contains(t, res.Reason, "carries 4 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests (29.0 GiB weights (preset) + 1.0 GiB overhead = 30.0 GiB needed)")
 	assert.NotContains(t, res.Reason, "declares", "the preset sized the weights itself: nothing to reconcile")
 	err = f.b.Load(ctx, backend.LoadRequest{Preset: "one"})
 	require.ErrorIs(t, err, backend.ErrUnfit)
@@ -233,7 +233,7 @@ func TestFitCheckPoolShapesBudgetTheRequestedGPUs(t *testing.T) {
 	assert.Equal(t, "g6.12xlarge", res.InstanceType)
 	assert.Equal(t, int64(48)*gib, res.BudgetBytes, "two of the four GPUs")
 	assert.Equal(t, res.BudgetBytes, res.FreeBytes)
-	assert.Contains(t, res.Reason, "39.0 GiB weights + 1.0 GiB overhead = 40.0 GiB fit within 48.0 GiB on the 2 GPU the predictor requests")
+	assert.Contains(t, res.Reason, "39.0 GiB weights (preset) + 1.0 GiB overhead = 40.0 GiB fit within 48.0 GiB on the 2 GPU the predictor requests")
 	assert.Contains(t, res.Reason, "12xlarge hosts 2 vCPU / 8 GiB requested, 2 GPU, 40 GiB of GPU memory")
 
 	f.setPool(ctx, shape12XLarge, shapeL40S2XLarge)

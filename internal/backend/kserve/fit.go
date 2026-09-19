@@ -12,6 +12,7 @@ import (
 
 const (
 	weightsSourceIndex  = "safetensors-index"
+	weightsSourceShards = "safetensors-shards"
 	weightsSourceTree   = "tree"
 	weightsSourcePreset = "preset"
 	// budgetSourcePoolScaleFromZero marks a fit answered without a node: the
@@ -112,7 +113,8 @@ func (b *Backend) resolveFit(ctx context.Context, req backend.FitRequest) (*fitP
 }
 
 // sizeModel resolves the weights and what a pull downloads: from the hub —
-// the safetensors index, else the file tree — within the hub lookup timeout,
+// the safetensors index (its total_size, or the shards it names when they
+// contradict it), else the file tree — within the hub lookup timeout,
 // and from the preset's requirements when the hub cannot tell (gated without
 // a token, unreachable, not answering in time). It returns the note the
 // answer carries when the preset stood in for the hub.
@@ -136,13 +138,17 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		}
 		plan.Files = files
 		res.DownloadBytes = downloadTotal(files, b.opts.DownloadIgnorePatterns)
-		total, err := b.hub.SafetensorsTotal(hctx, repo, plan.Revision, files)
+		idx, err := b.hub.SafetensorsIndex(hctx, repo, plan.Revision, files)
 		if err != nil {
 			b.log.Warn("reading the safetensors index failed; summing the tree instead", "model", repo, "error", err)
 		}
+		fromIndex, indexSource := weightsFromIndex(idx, files)
+		if indexSource == weightsSourceShards {
+			b.log.Info("the safetensors index declares a total_size the shards its weight_map names contradict; sized from the shards", "model", repo, "total_size", idx.TotalSize, "shards", fromIndex, "shardFiles", len(idx.Shards))
+		}
 		switch {
-		case total > 0:
-			res.WeightsBytes, res.WeightsSource = total, weightsSourceIndex
+		case fromIndex > 0:
+			res.WeightsBytes, res.WeightsSource = fromIndex, indexSource
 		case weightsFromTree(files) > 0:
 			res.WeightsBytes, res.WeightsSource = weightsFromTree(files), weightsSourceTree
 		case p != nil:
@@ -303,11 +309,11 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	res.Fits = res.RequiredBytes <= limit
 	if res.Fits {
-		res.Reason = fmt.Sprintf("%s weights + %s overhead = %s fit within %s on %s (%s%s)",
-			humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes), humanBytes(limit), best.Name, best.BudgetSource, reservedNote(res.ReservedBytes))
+		res.Reason = fmt.Sprintf("%s fit within %s on %s (%s%s)",
+			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, reservedNote(res.ReservedBytes))
 	} else {
-		res.Reason = fmt.Sprintf("%s weights + %s overhead = %s exceed the %s available on %s (%s budget %s%s)",
-			humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
+		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
+			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
 	}
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
@@ -336,6 +342,12 @@ func anyNodeMatches(nodes []nodeBudget, selector map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// weightsNeed is the "weights + overhead = required" clause of a fit verdict,
+// naming where the weight size came from.
+func weightsNeed(res *backend.FitResult) string {
+	return fmt.Sprintf("%s weights (%s) + %s overhead = %s", humanBytes(res.WeightsBytes), res.WeightsSource, humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes))
 }
 
 func reservedNote(reserved int64) string {

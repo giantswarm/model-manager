@@ -474,8 +474,9 @@ scheduling by the registered backend document (`docs/backends.md`).
   and creates no Job. `nodes` still reports the pin: it describes the nodes,
   not a preset.
 - **Import** — `search` proxies the Hugging Face Hub; `fit-check` resolves the
-  weight size (`model.safetensors.index.json`, else the file tree, else the
-  preset), adds the preset's `overheadGiB` (default 30) and compares with the
+  weight size (`model.safetensors.index.json` — its `total_size`, or the shards
+  its `weight_map` names when they disagree with it by more than one percent —
+  else the file tree, else the preset), adds the preset's `overheadGiB` (default 30) and compares with the
   node budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
   allocatable memory — unified-memory nodes; a node annotation
   `model-manager.giantswarm.io/memory-budget-gib: "96"` overrides that node's

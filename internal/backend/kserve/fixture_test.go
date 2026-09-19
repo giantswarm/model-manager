@@ -35,6 +35,7 @@ const (
 	testCPUNode    = "cpu1"
 	tinyRepo       = "org/tiny"
 	bigRepo        = "org/big"
+	repackRepo     = "org/repack"
 	gatedRepo      = "org/gated"
 	presetlessRepo = "other/tiny-clone"
 )
@@ -75,7 +76,7 @@ func newFakeHub(t *testing.T) *fakeHub {
 		switch id {
 		case tinyRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "abc", "gated": false, "private": false, "siblings": []map[string]string{{"rfilename": "config.json"}, {"rfilename": "model.safetensors"}}, "safetensors": map[string]any{"total": 111968}})
-		case bigRepo:
+		case bigRepo, repackRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "def", "gated": false, "private": false, "siblings": []map[string]string{{"rfilename": "model.safetensors.index.json"}}})
 		case presetlessRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "ghi", "gated": false, "private": false})
@@ -109,6 +110,13 @@ func newFakeHub(t *testing.T) *fakeHub {
 				{"type": "file", "path": "model-00001-of-00002.safetensors", "size": 50 * gib, "lfs": map[string]any{"size": 50 * gib}},
 				{"type": "file", "path": "model-00002-of-00002.safetensors", "size": 50 * gib, "lfs": map[string]any{"size": 50 * gib}},
 			})
+		case repackRepo:
+			// An FP8 repack: the index keeps the BF16 total (100 GiB), the shards hold 31 GiB.
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"type": "file", "path": "model.safetensors.index.json", "size": 1000},
+				{"type": "file", "path": "model-00001-of-00002.safetensors", "size": 16 * gib, "lfs": map[string]any{"size": 16 * gib}},
+				{"type": "file", "path": "model-00002-of-00002.safetensors", "size": 15 * gib, "lfs": map[string]any{"size": 15 * gib}},
+			})
 		case gatedRepo, presetlessRepo:
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"type": "file", "path": "model.safetensors", "size": 10 * gib, "lfs": map[string]any{"size": 10 * gib}}})
 		default:
@@ -118,11 +126,16 @@ func newFakeHub(t *testing.T) *fakeHub {
 	// safetensors index.
 	mux.HandleFunc("GET /{owner}/{name}/resolve/{rev}/model.safetensors.index.json", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		if r.PathValue("owner")+"/"+r.PathValue("name") != bigRepo {
+		if id := r.PathValue("owner") + "/" + r.PathValue("name"); id != bigRepo && id != repackRepo {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"total_size": 100 * gib}})
+		// Both indexes declare 100 GiB over the same two shards: big's shards
+		// hold that, repack's hold 31 GiB.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"metadata":   map[string]any{"total_size": 100 * gib},
+			"weight_map": map[string]string{"model.embed_tokens.weight": "model-00001-of-00002.safetensors", "model.layers.0.mlp.weight": "model-00001-of-00002.safetensors", "lm_head.weight": "model-00002-of-00002.safetensors"},
+		})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
