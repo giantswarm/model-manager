@@ -344,8 +344,8 @@ kserve:
     # downloads exactly what an LLMInferenceService would, so a later start
     # finds the files and skips the download.
     image:
-      registry: docker.io
-      name: kserve/storage-initializer
+      registry: gsoci.azurecr.io
+      name: giantswarm/storage-initializer
       tag: v0.20.0
     # -- File patterns downloads skip (fnmatch, passed as
     # STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an
