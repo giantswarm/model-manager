@@ -42,10 +42,12 @@ const (
 	// not answer must leave the preset fallback time to answer within a
 	// meta-tool deadline (muster: 10 s).
 	DefaultHFTimeout = 4 * time.Second
-	// DefaultDownloadImage is the KServe storage-initializer: a pre-warm
-	// download then produces exactly the files an LLMInferenceService's own
-	// download would, so a later start finds them and skips the download.
-	DefaultDownloadImage = "docker.io/kserve/storage-initializer:v0.20.0"
+	// DefaultDownloadImage is the KServe storage-initializer, from the
+	// platform's registry like every image the platform runs and at the version
+	// the platform's KServe chart injects into a predictor: a pre-warm download
+	// then produces exactly the files an LLMInferenceService's own download
+	// would, so a later start finds them and skips the download.
+	DefaultDownloadImage = "gsoci.azurecr.io/giantswarm/storage-initializer:v0.20.0"
 	// DefaultInitImage creates cache directories and scans the cache.
 	DefaultInitImage    = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
 	DefaultBudgetSource = "auto"
