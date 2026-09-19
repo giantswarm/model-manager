@@ -1061,7 +1061,7 @@ components:
         preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
         presets: { type: array, items: { type: string }, description: every preset serving the model }
         weightsBytes: { type: integer, format: int64 }
-        weightsSource: { type: string, enum: [safetensors-index, tree, preset] }
+        weightsSource: { type: string, enum: [safetensors-index, safetensors-shards, tree, preset], description: "safetensors-shards when the index's total_size disagrees by more than one percent with the shards its weight_map names" }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64 }
         downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }

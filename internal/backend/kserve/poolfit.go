@@ -104,7 +104,7 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 	res := &plan.Result
 	res.BudgetSource = budgetSourcePoolScaleFromZero
 	where := fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero", formatSelector(pool.NodeSelector))
-	need := fmt.Sprintf("%s weights + %s overhead = %s", humanBytes(res.WeightsBytes), humanBytes(res.OverheadBytes), humanBytes(res.RequiredBytes))
+	need := weightsNeed(res)
 	if len(pool.Instances) == 0 {
 		res.Fits = true
 		res.Reason = fmt.Sprintf("%s — the predictor waits for its node; the fit of %s against the pool's accelerator is unverified", where, need)

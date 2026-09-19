@@ -403,7 +403,9 @@ type FitResult struct {
 	Preset  string   `json:"preset,omitempty"`
 	Presets []string `json:"presets,omitempty"`
 	// WeightsBytes is the size of the weights as served; WeightsSource says
-	// where the number came from (safetensors-index, tree, preset).
+	// where the number came from: safetensors-index (the index's total_size),
+	// safetensors-shards (the shards the index names, when its total_size
+	// disagrees with them by more than one percent), tree, preset.
 	// DeclaredWeightsBytes is what the preset declares
 	// (requirements.weightsGiB) when a preset serves the model — the number
 	// a GPU pool was sized from; the two differ when the hub holds more than

@@ -119,6 +119,16 @@ func TestFitCheck(t *testing.T) {
 	assert.Equal(t, 100*gib, res.WeightsBytes)
 	assert.Contains(t, res.Reason, "exceed")
 	assert.Contains(t, res.Reason, testCacheNode)
+	assert.Contains(t, res.Reason, "100.0 GiB weights (safetensors-index)", "the refusal names the sizing source")
+
+	// A repack whose index keeps the original total (100 GiB) over 31 GiB of
+	// shards: the shards size it, and it fits where the declared total would not.
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: repackRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, weightsSourceShards, res.WeightsSource)
+	assert.Equal(t, 31*gib, res.WeightsBytes)
+	assert.Contains(t, res.Reason, "31.0 GiB weights (safetensors-shards)")
 
 	// ... but fits the GPU node when asked for it (GPU labels budget 128 GiB).
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: bigRepo, Node: testGPUNode})
