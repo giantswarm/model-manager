@@ -533,13 +533,15 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 // Serve implements backend.Server: Load with the fit verdict the model was
 // judged by in the answer (giantswarm/model-manager#110). It fails fast, before
 // the fit check and with nothing created, where no llm-d control plane would
-// reconcile the object (settings.servingUnavailable).
+// reconcile the object (settings.servingUnavailable) — judged on the cluster
+// as it is now, not on a verdict cached before the serving slice's runtime
+// configs landed (config.settingsForLoad).
 func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.LoadResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" && req.Preset == "" {
 		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
 	}
-	s := b.cfg.settings(ctx)
+	s := b.cfg.settingsForLoad(ctx)
 	if reason := s.servingUnavailable(); reason != "" {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
 	}

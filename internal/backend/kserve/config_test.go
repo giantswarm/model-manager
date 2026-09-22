@@ -51,6 +51,53 @@ func TestSettingsWithoutTheDiscoveryDocumentStandBriefly(t *testing.T) {
 	assert.False(t, f.b.cfg.settings(ctx).DiscoveryFound)
 }
 
+// The settings cache predating the llm-d control plane
+// (giantswarm/model-manager#148): the serving slice's CRD and runtime-configs
+// children land seconds after its discovery document, and settings resolved
+// in between say nothing would reconcile a load. Resolved without the control
+// plane, the settings stand for ControlPlaneAbsentTTL — not DiscoveryTTL — so
+// get_backend and check_fit see it soon after it lands; settings with the
+// control plane stand for the full TTL.
+func TestSettingsWithoutTheControlPlaneStandBriefly(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	now := time.Now()
+	f.b.cfg.now = func() time.Time { return now }
+	f.dropControlPlane(ctx)
+
+	s := f.b.cfg.settings(ctx)
+	require.True(t, s.DiscoveryFound, "the slice's document is published")
+	require.True(t, s.LLMServed, "the CRDs stand")
+	assert.Empty(t, s.ControlPlane, "the runtime configs have not landed")
+	assert.True(t, s.controlPlaneAbsent())
+	require.NotNil(t, f.b.cfg.cached, "the result is cached — briefly")
+
+	// The runtime configs land. Within ControlPlaneAbsentTTL the cache still
+	// answers; after it — long before DiscoveryTTL — the control plane is seen.
+	_, err := f.dyn.Resource(llmisvcConfigGVR).Namespace(testControlPlaneNS).Create(ctx, wellKnownConfig(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	now = now.Add(ControlPlaneAbsentTTL - time.Second)
+	assert.Empty(t, f.b.cfg.settings(ctx).ControlPlane, "within the short TTL the cache answers")
+	now = now.Add(2 * time.Second)
+	assert.Equal(t, testControlPlaneNS, f.b.cfg.settings(ctx).ControlPlane, "after it the control plane is seen")
+
+	// Settings with the control plane stand for the full TTL.
+	require.NoError(t, f.dyn.Resource(llmisvcConfigGVR).Namespace(testControlPlaneNS).Delete(ctx, wellKnownTemplateConfig, metav1.DeleteOptions{}))
+	now = now.Add(DefaultDiscoveryTTL - time.Second)
+	assert.Equal(t, testControlPlaneNS, f.b.cfg.settings(ctx).ControlPlane, "a control plane that was seen stands for DiscoveryTTL")
+	now = now.Add(2 * time.Second)
+	assert.Empty(t, f.b.cfg.settings(ctx).ControlPlane)
+
+	// The API itself not served — the slice's CRD child still landing — is
+	// cached as briefly.
+	f.dropLLMAPI()
+	require.False(t, f.b.cfg.settings(ctx).LLMServed)
+	now = now.Add(ControlPlaneAbsentTTL - time.Second)
+	assert.True(t, f.b.cfg.fresh())
+	now = now.Add(2 * time.Second)
+	assert.False(t, f.b.cfg.fresh(), "settings without the API stand for ControlPlaneAbsentTTL")
+}
+
 // recheckDiscovery bypasses the cache: a document created a moment after the
 // settings were cached without it is read at once, and the fresh settings
 // are what the next call gets. Without a configured discovery ConfigMap

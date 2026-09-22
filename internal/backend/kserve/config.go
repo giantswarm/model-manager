@@ -58,7 +58,16 @@ const (
 	// appears when the serving slice's connectivity child installs, and a
 	// fit judged on settings that predate it knows no GPU pool
 	// (giantswarm/model-manager#127). A resolve error is never cached.
-	DiscoveryAbsentTTL      = 5 * time.Second
+	DiscoveryAbsentTTL = 5 * time.Second
+	// ControlPlaneAbsentTTL bounds how long settings resolved without the
+	// llm-d control plane stand (config.fresh) — the LLMInferenceService API
+	// not served, or served by the CRDs alone without the well-known
+	// LLMInferenceServiceConfig. The serving slice's CRD and runtime-configs
+	// children land seconds after its discovery document, and a load judged
+	// on settings cached in between was refused for the full DiscoveryTTL
+	// with a hint to turn on components that were on
+	// (giantswarm/model-manager#148).
+	ControlPlaneAbsentTTL   = DiscoveryAbsentTTL
 	DefaultInventoryTTL     = 2 * time.Minute
 	DefaultInventoryTimeout = 2 * time.Minute
 	// InventoryModePod (default) scans a node's cache with a short-lived pod;
@@ -217,11 +226,32 @@ func (s settings) servingUnavailable() string {
 	case s.ServingError != "":
 		return fmt.Sprintf("cannot tell whether the llm-d control plane serves this cluster: %s; the driver needs to read the %s API and list %s cluster-wide", s.ServingError, gv, llmisvcConfigGVR.Resource)
 	case !s.LLMServed:
-		return fmt.Sprintf("the %s API (%s) is not served on this cluster; install the llm-d control plane — the platform's kserve-llmisvc-crd, kserve-llmisvc-resources and kserve-runtime-configs components", kindLLMInferenceService, gv)
+		return fmt.Sprintf("the %s API (%s) is not served on this cluster%s", kindLLMInferenceService, gv, s.controlPlaneHint("kserve-llmisvc-crd, kserve-llmisvc-resources and kserve-runtime-configs"))
 	case s.ControlPlane == "":
-		return fmt.Sprintf("the %s API is served but the llm-d controller is not installed: no LLMInferenceServiceConfig %s in any namespace, so nothing would reconcile a created object; turn on the platform's kserve-llmisvc-resources and kserve-runtime-configs components", kindLLMInferenceService, wellKnownTemplateConfig)
+		return fmt.Sprintf("the %s API is served but the llm-d controller is not installed: no LLMInferenceServiceConfig %s in any namespace, so nothing would reconcile a created object%s", kindLLMInferenceService, wellKnownTemplateConfig, s.controlPlaneHint("kserve-llmisvc-resources and kserve-runtime-configs"))
 	}
 	return ""
+}
+
+// controlPlaneAbsent reports whether s was resolved without the llm-d control
+// plane — the LLMInferenceService API not served, or the well-known config
+// absent — as a result, not an error: what the serving slice's CRD and
+// runtime-configs children change as they land.
+func (s settings) controlPlaneAbsent() bool {
+	return s.ServingError == "" && (!s.LLMServed || s.ControlPlane == "")
+}
+
+// controlPlaneHint is what to do about the missing llm-d control plane,
+// naming the platform components that install it. With the serving layer's
+// discovery document published, the slice that publishes it is most likely
+// still landing — its CRD and runtime-configs children follow the document by
+// seconds — so the hint is to retry; without the document, the components are
+// off (giantswarm/model-manager#148).
+func (s settings) controlPlaneHint(components string) string {
+	if s.DiscoveryFound {
+		return fmt.Sprintf("; the serving layer's discovery document is published, so its slice is most likely still landing: retry in a moment, and turn on the platform's %s components if this persists", components)
+	}
+	return fmt.Sprintf("; install the llm-d control plane — the platform's %s components", components)
 }
 
 // config resolves settings from options plus the discovery ConfigMap, cached
@@ -269,10 +299,14 @@ func (c *config) settings(ctx context.Context) settings {
 
 // fresh reports whether the cached settings still stand: for DiscoveryTTL —
 // or for DiscoveryAbsentTTL when they were resolved without the configured
-// discovery ConfigMap. The serving slice publishes that document as it
-// installs, and settings cached a moment before it appeared know no GPU
-// pool: a fit judged on them for the full TTL refused a pool that scales
-// from zero with "no accelerator node" (giantswarm/model-manager#127).
+// discovery ConfigMap, and for ControlPlaneAbsentTTL when without the llm-d
+// control plane. The serving slice publishes that document as it installs,
+// and settings cached a moment before it appeared know no GPU pool: a fit
+// judged on them for the full TTL refused a pool that scales from zero with
+// "no accelerator node" (giantswarm/model-manager#127). The slice's CRDs and
+// runtime configs follow the document by seconds, and a load judged on
+// settings cached in between was refused as if the components were off
+// (giantswarm/model-manager#148).
 func (c *config) fresh() bool {
 	if c.cached == nil {
 		return false
@@ -281,7 +315,29 @@ func (c *config) fresh() bool {
 	if c.discoveryAbsent(*c.cached) {
 		ttl = min(ttl, DiscoveryAbsentTTL)
 	}
+	if c.cached.controlPlaneAbsent() {
+		ttl = min(ttl, ControlPlaneAbsentTTL)
+	}
 	return c.now().Sub(c.fetchedAt) < ttl
+}
+
+// settingsForLoad returns the settings a load is judged on: the cached ones
+// while they stand and say a control plane would reconcile the object, else
+// resolved once more first. A refusal is given on what the cluster says now,
+// not on a verdict cached moments before the slice's runtime configs landed
+// (giantswarm/model-manager#148); a resolve that fails keeps the last good
+// settings, as settings does.
+func (c *config) settingsForLoad(ctx context.Context) settings {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fresh() && !c.cached.controlPlaneAbsent() {
+		return *c.cached
+	}
+	s, err := c.refresh(ctx)
+	if err != nil && c.cached != nil {
+		return *c.cached
+	}
+	return s
 }
 
 // refresh resolves the settings and caches them when the resolve succeeded.
