@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -425,6 +426,7 @@ func TestLoadFailsFastWithoutTheLLMDControlPlane(t *testing.T) {
 		require.ErrorIs(t, err, backend.ErrUnavailable)
 		assert.ErrorContains(t, err, "the LLMInferenceService API (serving.kserve.io/v1alpha2) is not served on this cluster")
 		assert.ErrorContains(t, err, "kserve-llmisvc-crd")
+		assert.ErrorContains(t, err, "its slice is most likely still landing: retry in a moment", "the discovery document is published")
 		assert.Equal(t, 0, objects(t, f), "nothing created")
 		assert.Empty(t, f.hub.calls, "refused before the hub is asked")
 		s := f.b.cfg.settings(ctx)
@@ -440,6 +442,7 @@ func TestLoadFailsFastWithoutTheLLMDControlPlane(t *testing.T) {
 		require.ErrorIs(t, err, backend.ErrUnavailable)
 		assert.ErrorContains(t, err, "the llm-d controller is not installed: no LLMInferenceServiceConfig "+wellKnownTemplateConfig+" in any namespace")
 		assert.ErrorContains(t, err, "kserve-runtime-configs")
+		assert.ErrorContains(t, err, "its slice is most likely still landing: retry in a moment", "the discovery document is published")
 		assert.Equal(t, 0, objects(t, f), "nothing created, nothing to wait for")
 		assert.Empty(t, f.hub.calls, "refused before the fit check")
 		s := f.b.cfg.settings(ctx)
@@ -456,6 +459,17 @@ func TestLoadFailsFastWithoutTheLLMDControlPlane(t *testing.T) {
 		assert.Empty(t, f.b.Info(ctx).Message)
 	})
 
+	t.Run("the components are off", func(t *testing.T) {
+		f := newFixture(t)
+		require.NoError(t, f.cs.CoreV1().ConfigMaps(testPlatformNS).Delete(ctx, DefaultDiscoveryConfigMap, metav1.DeleteOptions{}))
+		f.dropControlPlane(ctx)
+		err := f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"})
+		require.ErrorIs(t, err, backend.ErrUnavailable)
+		assert.ErrorContains(t, err, "install the llm-d control plane — the platform's kserve-llmisvc-resources and kserve-runtime-configs components")
+		assert.NotContains(t, err.Error(), "retry", "no discovery document: nothing is landing")
+		assert.Equal(t, 0, objects(t, f))
+	})
+
 	t.Run("the driver cannot tell", func(t *testing.T) {
 		f := newFixture(t)
 		f.dyn.PrependReactor("list", llmisvcConfigGVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
@@ -469,4 +483,37 @@ func TestLoadFailsFastWithoutTheLLMDControlPlane(t *testing.T) {
 		assert.Equal(t, 0, objects(t, f), "not judged on a guess")
 		assert.Nil(t, f.b.cfg.cached, "an answer that could not be read is not cached")
 	})
+}
+
+// A load judged on settings cached before the slice's runtime configs landed
+// (giantswarm/model-manager#148): the pool's slice publishes its discovery
+// document first and the well-known config seconds later, and a load_model
+// with every chart of the slice Ready was refused on settings resolved in
+// between — with a hint to turn on components that were on. A load about to
+// be refused resolves the settings once more first, and everyone gets the
+// fresh ones.
+func TestLoadRechecksAControlPlaneThatJustLanded(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	now := time.Now()
+	f.b.cfg.now = func() time.Time { return now }
+	f.dropControlPlane(ctx)
+	s := f.b.cfg.settings(ctx)
+	require.True(t, s.LLMServed)
+	require.Empty(t, s.ControlPlane)
+	require.Contains(t, f.b.Info(ctx).Message, "the llm-d controller is not installed")
+
+	// The runtime configs land a second later; the cache still says no.
+	_, err := f.dyn.Resource(llmisvcConfigGVR).Namespace(testControlPlaneNS).Create(ctx, wellKnownConfig(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	now = now.Add(time.Second)
+	require.Empty(t, f.b.cfg.settings(ctx).ControlPlane, "the cached verdict stands for the moment")
+
+	// The load asks once more before it would refuse, and goes.
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
+	list, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, 1, "the object is created")
+	assert.Equal(t, testControlPlaneNS, f.b.cfg.settings(ctx).ControlPlane, "the fresh settings are cached for everyone")
+	assert.Empty(t, f.b.Info(ctx).Message)
 }

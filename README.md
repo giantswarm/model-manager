@@ -532,7 +532,13 @@ scheduling by the registered backend document (`docs/backends.md`).
   names the permission: `get`/`list` on `llminferenceserviceconfigs`
   cluster-wide, which the chart's ClusterRole grants). `get_backend` /
   `GET /api/v1/backends` carry the same reason in `message` before anyone
-  tries. The composition, by spec shape: `spec.model.uri` from the preset's
+  tries. The verdict is taken on the cluster as it is at the load: settings
+  resolved without the control plane stand for five seconds, not the minute
+  the settings cache keeps otherwise, and a load about to be refused resolves
+  them once more first — the serving slice's CRD and runtime-configs children
+  land seconds after its discovery document. With that document published the
+  refusal says the slice is most likely still landing and to retry in a
+  moment; without it, which components to turn on. The composition, by spec shape: `spec.model.uri` from the preset's
   `storageUri` (`hf://`, `pvc://` into the cache, or an `oci://` model
   image), `spec.model.name` from `model.id`, `replicas: 1`,
   `router: {route: {}}` (KServe renders the `HTTPRoute` on the configured
