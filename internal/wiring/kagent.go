@@ -12,17 +12,24 @@
 // The ModelConfig is written in the kagent.dev API version the apiserver
 // serves — kagent API v2 serves v1alpha3 only (no v1alpha2, no conversion
 // webhook). apiKeyPassthrough exists in v1alpha3 only; the other spec fields
-// model-manager writes (provider, model, ollama.host, openAI.baseUrl,
-// apiKeySecret/apiKeySecretKey) are the same in v1alpha2 and v1alpha3. The
-// status is not: v1alpha3 reports Accepted (the spec is valid) and
-// ResolvedRefs (the referenced Secret exists and holds the key) as separate
-// conditions, so a ModelConfig is ready only when both hold.
+// model-manager writes (provider, model, ollama.host, ollama.options,
+// openAI.baseUrl, apiKeySecret/apiKeySecretKey) are the same in v1alpha2 and
+// v1alpha3. The status is not: v1alpha3 reports Accepted (the spec is valid)
+// and ResolvedRefs (the referenced Secret exists and holds the key) as
+// separate conditions, so a ModelConfig is ready only when both hold.
+//
+// An Ollama ModelConfig carries the context window agents run the model at
+// (spec.ollama.options.num_ctx, AgentEndpoint.ContextLength): without it
+// every request runs at the server's default, which Ollama derives from the
+// host's VRAM — 4,096 tokens below 24 GiB — and a longer agent prompt loses
+// its front, the system prompt and the tool schemas, without an error.
 package wiring
 
 import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -58,6 +65,9 @@ const (
 	acceptedCondition      = "Accepted"
 	resolvedRefsCondition  = "ResolvedRefs"
 	maxNameLength          = 63
+	// ollamaNumCtx is the spec.ollama.options key of the context window. The
+	// CRD's options are strings; the ADK sends num_ctx as an integer.
+	ollamaNumCtx = "num_ctx"
 )
 
 var secretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
@@ -98,6 +108,10 @@ type ModelConfigRef struct {
 	// identifies the ModelConfig when one model-manager runs several
 	// backends. Empty on a ModelConfig without the label.
 	Backend backend.Name `json:"backend,omitempty"`
+	// ContextLength is the context window in tokens agents run the model at:
+	// spec.ollama.options.num_ctx. 0 when the ModelConfig sets none, and the
+	// server's default applies.
+	ContextLength int64 `json:"contextLength,omitempty"`
 }
 
 // Wirer manages the agent-facing configuration for models. A ModelConfig is
@@ -454,7 +468,11 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 	}
 	switch ep.Provider {
 	case "Ollama":
-		spec["ollama"] = map[string]any{"host": ep.Host}
+		ollama := map[string]any{"host": ep.Host}
+		if ep.ContextLength > 0 {
+			ollama["options"] = map[string]any{ollamaNumCtx: strconv.FormatInt(ep.ContextLength, 10)}
+		}
+		spec["ollama"] = ollama
 	case "OpenAI":
 		spec["openAI"] = map[string]any{"baseUrl": ep.BaseURL}
 	}
@@ -554,6 +572,9 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	}
 	ref.APIKeyPassthrough, _, _ = unstructured.NestedBool(obj.Object, "spec", "apiKeyPassthrough")
 	ref.APIKeySecret, _, _ = unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
+	if n, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "options", ollamaNumCtx); n != "" {
+		ref.ContextLength, _ = strconv.ParseInt(n, 10, 64)
+	}
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	ref.Ready, ref.Message = readiness(conds)
 	return ref

@@ -22,7 +22,12 @@ const (
 	// one; it mirrors Ollama's own default idle timeout. The service replaces
 	// it with the configured --default-keep-alive.
 	DefaultKeepAlive = "5m"
-	latestTag        = ":latest"
+	// DefaultContextLength is the context window agents run models at when
+	// the operator sets none: an agent turn carries its system prompt and
+	// every tool schema (6–9k tokens) and grows past 24k once a large tool
+	// result lands, while Ollama's own default below 24 GiB of VRAM is 4,096.
+	DefaultContextLength = 32768
+	latestTag            = ":latest"
 )
 
 // loading is how Ollama manages memory: a model is loaded by the first
@@ -47,6 +52,9 @@ type Backend struct {
 	// memoryBudgetGiB is the operator's budget override for the host node
 	// (OllamaOptions.MemoryBudgetGiB), raw; empty means none.
 	memoryBudgetGiB string
+	// contextLength is the num_ctx agents run models at
+	// (OllamaOptions.ContextLength); 0 leaves it to the server.
+	contextLength int64
 }
 
 // Factory builds the driver from backend.Options.
@@ -56,6 +64,9 @@ func Factory(opts backend.Options) (backend.Backend, error) {
 
 // New builds the driver. AgentHost defaults to Endpoint.
 func New(opts backend.OllamaOptions) (*Backend, error) {
+	if opts.ContextLength < 0 {
+		return nil, fmt.Errorf("ollama context length %d must not be negative (0 leaves it to the server)", opts.ContextLength)
+	}
 	endpoint := strings.TrimRight(strings.TrimSpace(opts.Endpoint), "/")
 	if endpoint == "" {
 		return nil, fmt.Errorf("ollama endpoint is required")
@@ -73,7 +84,7 @@ func New(opts backend.OllamaOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo, memoryBudgetGiB: opts.MemoryBudgetGiB}, nil
+	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo, memoryBudgetGiB: opts.MemoryBudgetGiB, contextLength: opts.ContextLength}, nil
 }
 
 // NewWithClient builds the driver around an existing client (tests).
@@ -227,7 +238,8 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 // Load implements backend.Backend: a generate call with a positive keep_alive
 // loads the model and keeps it resident for that long after the last request.
 // It pre-warms only — every later request re-arms the timer with its own
-// keep-alive (see loading).
+// keep-alive (see loading). It loads at req.ContextLength, the num_ctx agents
+// send: Ollama reloads a model whose num_ctx differs from the request's.
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)
@@ -239,7 +251,7 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	if keepAlive == "0" || keepAlive == "0s" {
 		return fmt.Errorf("%w: keepAlive must be positive to load (use unload)", backend.ErrInvalid)
 	}
-	return mapErr(b.client.SetKeepAlive(ctx, req.Name, keepAlive), req.Name)
+	return mapErr(b.client.SetKeepAlive(ctx, req.Name, keepAlive, req.ContextLength), req.Name)
 }
 
 // Unload implements backend.Backend: keep_alive 0 evicts the model.
@@ -247,13 +259,14 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
-	return mapErr(b.client.SetKeepAlive(ctx, name, 0), name)
+	return mapErr(b.client.SetKeepAlive(ctx, name, 0, 0), name)
 }
 
 // AgentEndpoint implements backend.Backend: kagent's native keyless Ollama
-// provider pointed at the host as agent pods reach it.
+// provider pointed at the host as agent pods reach it, at the configured
+// context window (the service caps it at the model's own).
 func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Provider: "Ollama", Host: b.agentHost, Model: model}
+	return backend.AgentEndpoint{Provider: "Ollama", Host: b.agentHost, Model: model, ContextLength: b.contextLength}
 }
 
 func toModel(t apiModel) backend.Model {

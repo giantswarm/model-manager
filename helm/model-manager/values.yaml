@@ -76,6 +76,18 @@ ollama:
   # The ollama counterpart of the kserve node annotation
   # `model-manager.giantswarm.io/memory-budget-gib`.
   memoryBudgetGiB: 0  # @schema type: [number, string]; minimum: 0
+  # -- Context window in tokens that agents run Ollama models at: written into
+  # every Ollama ModelConfig model-manager creates or re-wires as
+  # `spec.ollama.options.num_ctx`, used by loads, and capped at each model's own
+  # context length; reported as `modelConfig.contextLength`. Without it Ollama
+  # picks its default from the host's VRAM (4096 tokens below 24 GiB, which is
+  # every CPU-only host, 32768 up to 48 GiB, 262144 above) and a longer prompt
+  # silently loses its front: the agent's system prompt and tool schemas.
+  # Ollama reserves the KV cache for the whole window in the host's memory when
+  # it loads a model, for example about 2.5 GiB at 32768 for a 3B model that
+  # keeps 80 KiB per token; lower it on a host short of memory. 0 writes none
+  # and leaves the window to the server (`OLLAMA_CONTEXT_LENGTH` on the host).
+  contextLength: 32768  # @schema type: integer; minimum: 0
 
 lemonade:
   # -- Lemonade Server base URL as reached from pods (its API is under

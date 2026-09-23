@@ -37,14 +37,19 @@ type fakeBackend struct {
 	caps    backend.Capabilities
 	// pullBlock, when set, holds pulls until closed (for cancel tests).
 	pullBlock chan struct{}
+	// contextLength is the window its AgentEndpoint carries (ollama's
+	// configured num_ctx); loadContext records each load's ContextLength.
+	contextLength int64
+	loadContext   map[string]int64
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
-		models:  map[string]backend.Model{},
-		loaded:  map[string]bool{},
-		expires: map[string]time.Time{},
-		caps:    backend.Capabilities{Pull: true, PullProgress: true, Delete: true, Load: true, Unload: true, LoadedModels: true},
+		models:      map[string]backend.Model{},
+		loaded:      map[string]bool{},
+		expires:     map[string]time.Time{},
+		loadContext: map[string]int64{},
+		caps:        backend.Capabilities{Pull: true, PullProgress: true, Delete: true, Load: true, Unload: true, LoadedModels: true},
 	}
 }
 
@@ -130,6 +135,7 @@ func (f *fakeBackend) Load(_ context.Context, req backend.LoadRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loaded[req.Name] = true
+	f.loadContext[req.Name] = req.ContextLength
 	// A parseable keep-alive yields a deadline as Ollama's /api/ps would
 	// report it; anything else (kserve paths, -1) leaves none.
 	if keepAlive, err := time.ParseDuration(req.KeepAlive); err == nil && keepAlive > 0 {
@@ -145,7 +151,7 @@ func (f *fakeBackend) Unload(_ context.Context, name string) error {
 	return nil
 }
 func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model}
+	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: f.contextLength}
 }
 
 // fakeWirer records ModelConfigs in memory: refs holds model-manager's own
@@ -188,7 +194,7 @@ func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndp
 	if endpoint == "" {
 		endpoint = ep.Host
 	}
-	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend, APIKeyPassthrough: ep.APIKeyPassthrough, APIKeySecret: ep.APIKeySecret}
+	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend, APIKeyPassthrough: ep.APIKeyPassthrough, APIKeySecret: ep.APIKeySecret, ContextLength: ep.ContextLength}
 	w.refs[refKey(ep.Backend, model)] = ref
 	return &ref, nil
 }

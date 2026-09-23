@@ -38,7 +38,7 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 }
 
 func ollamaEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model}
+	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: 32768}
 }
 
 func lemonadeEndpoint(model string) backend.AgentEndpoint {
@@ -80,6 +80,9 @@ func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	assert.Equal(t, "http://172.21.0.1:11434", host)
 	_, hasKey, _ := unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
 	assert.False(t, hasKey, "the native Ollama provider is keyless")
+	numCtx, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "options", "num_ctx")
+	assert.Equal(t, "32768", numCtx, "the context window rides on every request, not the server's VRAM-tiered default")
+	assert.Equal(t, int64(32768), ref.ContextLength, "the ref reports the window agents run at")
 
 	// No placeholder secret for Ollama.
 	secrets, err := client.Resource(secretGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
@@ -116,6 +119,47 @@ func TestEnsureIsIdempotentAndUpdates(t *testing.T) {
 	require.Len(t, list.Items, 1, "second Ensure must not create a duplicate")
 	host, _, _ := unstructured.NestedString(list.Items[0].Object, "spec", "ollama", "host")
 	assert.Equal(t, "http://10.0.0.1:11434", host, "spec is refreshed")
+}
+
+// TestEnsureOllamaContextLength: the ModelConfig carries the endpoint's
+// context window and follows it on a re-wire — a num_ctx set by hand is
+// replaced — and an endpoint without one leaves the options out.
+func TestEnsureOllamaContextLength(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	numCtx := func() (string, bool) {
+		t.Helper()
+		obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b", metav1.GetOptions{})
+		require.NoError(t, err)
+		v, found, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "options", "num_ctx")
+		return v, found
+	}
+
+	_, err := k.Ensure(ctx, "qwen3:0.6b", ollamaEndpoint("qwen3:0.6b"))
+	require.NoError(t, err)
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, unstructured.SetNestedField(obj.Object, "2048", "spec", "ollama", "options", "num_ctx"))
+	_, err = client.Resource(testGVR).Namespace("kagent").Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	ref, err := k.Lookup(ctx, backend.NameOllama, "qwen3:0.6b")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2048), ref.ContextLength, "Lookup reports what the ModelConfig says")
+
+	ep := ollamaEndpoint("qwen3:0.6b")
+	ep.ContextLength = 16384
+	ref, err = k.Ensure(ctx, "qwen3:0.6b", ep)
+	require.NoError(t, err)
+	assert.Equal(t, int64(16384), ref.ContextLength)
+	v, _ := numCtx()
+	assert.Equal(t, "16384", v, "a re-wire writes the endpoint's window over the hand-set one")
+
+	ep.ContextLength = 0
+	ref, err = k.Ensure(ctx, "qwen3:0.6b", ep)
+	require.NoError(t, err)
+	assert.Zero(t, ref.ContextLength)
+	_, found := numCtx()
+	assert.False(t, found, "no window: the server's default applies")
 }
 
 func TestEnsureRefusesForeignModelConfig(t *testing.T) {

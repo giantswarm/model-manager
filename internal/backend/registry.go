@@ -148,6 +148,12 @@ type OllamaOptions struct {
 	// host's. Empty or 0: none. Parsed by the driver so that an unusable value
 	// is reported on the node rather than dropped.
 	MemoryBudgetGiB string
+	// ContextLength is the context window in tokens written into Ollama
+	// ModelConfigs as options.num_ctx and used by loads, capped at each
+	// model's own context length. Ollama reserves the KV cache for the whole
+	// window in the host's memory when it loads the model. 0 writes none:
+	// Ollama's own default applies, which depends on the host's VRAM.
+	ContextLength int64
 }
 
 // LemonadeOptions configures the lemonade driver.
