@@ -22,12 +22,12 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
-Chart label value.
+Chart label value. A label value must begin and end alphanumeric: the
+63-character cut of a branch build's version (0.x.y-dev.<branch>.<timestamp>.<sha>)
+can land on any run of ".", "_" (from "+") and "-", so the whole run is trimmed.
 */}}
 {{- define "model-manager.chart" -}}
-{{- /* A label value ends alphanumeric: the 63-char cut of a branch build's
-       version (0.x.y-dev.<branch>.<timestamp>.<sha>) can land on a "." too. */}}
-{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | trimSuffix "." }}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimAll "-._" }}
 {{- end }}
 
 {{/*
