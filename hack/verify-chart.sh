@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Render assertions for helm/model-manager: rules the templates encode that
-# `helm lint` and the values schema cannot check. Runs as a pre-commit hook
-# (locally and in the pre-commit CI workflow) whenever the chart changes, and
-# as `make helm-verify`. Needs helm.
+# `helm lint` and the values schema cannot check. Runs in the chart workflow
+# (.github/workflows/chart.yml) on every change and as `make helm-verify`.
+# Needs helm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CHART=helm/model-manager
@@ -210,5 +210,25 @@ echo "$got" | grep -q -- '^            runAsUser: 1000$' || fail "cache-agent: t
 if echo "$got" | grep -q -- 'runAsUser: 0\|runAsNonRoot: false\|^ *add:'; then
   fail "cache-agent: root or an added capability rendered: '$got'"
 fi
+
+# The helm.sh/chart label is a valid label value (at most 63 characters,
+# alphanumeric at both ends) for any chart version: the cut of a long dev
+# version can land on ".", on "_" (from "+") or on a run like "--.". The
+# version is set by packaging, since `helm template --version` does not apply
+# to a chart directory.
+pkg=$(mktemp -d)
+trap 'rm -rf "$pkg"' EXIT
+label_re='^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
+for v in 0.1.0 \
+  0.2.11-dev.renovate-golang-x.2026-09-22.14-54-24.h1a2b3c4 \
+  0.2.11-dev.renovate-golang-x.2026-09-22.14-54-24+h1a2b3c4 \
+  0.2.11-dev.renovate-golang-x.2026-09-22.14-54---.h1a2b3c4; do
+  helm package "$CHART" --version "$v" -d "$pkg" >/dev/null
+  labels=$(helm template mm "$pkg/model-manager-$v.tgz" | sed -n 's/^ *helm\.sh\/chart: *//p' | sort -u)
+  [ -n "$labels" ] || fail "version $v renders no helm.sh/chart label"
+  while IFS= read -r l; do
+    [[ ${#l} -le 63 && $l =~ $label_re ]] || fail "version $v renders helm.sh/chart '$l', not a valid label value"
+  done <<<"$labels"
+done
 
 echo "verify-chart: ok"
