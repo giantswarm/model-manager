@@ -131,16 +131,22 @@ func (c *Client) Delete(ctx context.Context, name string) error {
 }
 
 // SetKeepAlive loads (positive keep-alive) or unloads (0) a model by issuing
-// an empty generate request. Embedding-only models reject /api/generate, so
-// the call falls back to /api/embed with the same keep_alive.
-func (c *Client) SetKeepAlive(ctx context.Context, name string, keepAlive any) error {
-	err := c.do(ctx, http.MethodPost, "/api/generate", map[string]any{keyModel: name, "keep_alive": keepAlive}, nil)
+// an empty generate request, loading it at numCtx tokens of context when
+// positive. Embedding-only models reject /api/generate, so the call falls
+// back to /api/embed with the same keep_alive and options.
+func (c *Client) SetKeepAlive(ctx context.Context, name string, keepAlive any, numCtx int64) error {
+	req := map[string]any{keyModel: name, "keep_alive": keepAlive}
+	if numCtx > 0 {
+		req["options"] = map[string]any{"num_ctx": numCtx}
+	}
+	err := c.do(ctx, http.MethodPost, "/api/generate", req, nil)
 	if err == nil {
 		return nil
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Message), "embed") {
-		return c.do(ctx, http.MethodPost, "/api/embed", map[string]any{keyModel: name, "input": "", "keep_alive": keepAlive}, nil)
+		req["input"] = ""
+		return c.do(ctx, http.MethodPost, "/api/embed", req, nil)
 	}
 	return err
 }

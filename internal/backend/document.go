@@ -462,12 +462,13 @@ func (d *Document) ConfigMap(namespace string) (*corev1.ConfigMap, error) {
 
 // Options applies the document onto a copy of base: the driver block of the
 // document's kind is replaced by what the document says, every other field
-// (images, timeouts, the Kubernetes clients) keeps base's value.
+// (images, timeouts, Ollama's context length, the Kubernetes clients) keeps
+// base's value.
 func (d *Document) Options(base Options) Options {
 	s := d.Spec
 	switch s.Kind {
 	case NameOllama:
-		base.Ollama = OllamaOptions{Endpoint: s.Endpoint, AgentHost: s.AgentEndpoint, Timeout: base.Ollama.Timeout}
+		base.Ollama = OllamaOptions{Endpoint: s.Endpoint, AgentHost: s.AgentEndpoint, Timeout: base.Ollama.Timeout, ContextLength: base.Ollama.ContextLength}
 	case NameLMStudio:
 		base.LMStudio = LMStudioOptions{Endpoint: s.Endpoint, AgentHost: s.AgentEndpoint, Timeout: base.LMStudio.Timeout, LoadTimeout: base.LMStudio.LoadTimeout}
 	case NameLemonade:

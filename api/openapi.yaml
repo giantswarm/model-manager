@@ -909,7 +909,7 @@ components:
         family: { type: string, example: llama }
         parameterSize: { type: string, example: 134.52M }
         quantization: { type: string, example: Q8_0 }
-        contextLength: { type: integer, format: int64 }
+        contextLength: { type: integer, format: int64, description: "the model's own context length, what its weights allow; the window agents run it at is modelConfig.contextLength" }
         runtime: { type: string, example: flm, description: "what the backend runs the model with, on backends that have several (lemonade: the recipe — flm is FastFlowLM on the NPU, llamacpp, ryzenai-llm, ...); absent on ollama and kserve (one runtime)" }
         capabilities:
           type: array
@@ -972,6 +972,7 @@ components:
         endpoint: { type: string, description: openAI.baseUrl or ollama.host }
         apiKeyPassthrough: { type: boolean, description: "spec.apiKeyPassthrough — the agent forwards the caller's Bearer token to the endpoint as the API key (kserve models routed on the models Gateway); absent when a Secret supplies the key" }
         apiKeySecret: { type: string, description: "spec.apiKeySecret — the Secret the static key is read from: model-manager's placeholder <name>-api-key, or the caller's own; absent with apiKeyPassthrough" }
+        contextLength: { type: integer, format: int64, example: 32768, description: "spec.ollama.options.num_ctx — the context window in tokens agents run the model at: the chart value ollama.contextLength capped at the model's own context length. Absent when the ModelConfig sets none, and the server's default applies (Ollama's depends on the host's VRAM: 4096 tokens below 24 GiB)" }
         managed: { type: boolean, description: created by model-manager (only these are updated or deleted) }
         ready: { type: boolean, description: "kagent's Accepted condition is True and, whenever the controller reports it, its ResolvedRefs condition (the referenced API-key Secret exists and holds the key) is True too — kagent API v2 reports a missing Secret there while Accepted stays True; a status without ResolvedRefs (kagent 0.x) is judged by Accepted alone" }
         message: { type: string, description: the message of the condition holding ready back, or the Accepted message once ready }

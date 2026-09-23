@@ -196,6 +196,26 @@ and restart Ollama. `keepAliveDefault` is model-manager's default for its own
 load requests; the host's `OLLAMA_KEEP_ALIVE` is not observable through the
 API, which is why the block does not claim to report it.
 
+The context window is the other thing agents feel on Ollama, and
+model-manager sets it. A request without `num_ctx` runs at a default Ollama
+derives from the host's VRAM: 4,096 tokens below 24 GiB (every CPU-only
+host), 32,768 up to 48 GiB, 262,144 above. A longer prompt is not refused.
+Ollama keeps its first tokens and its tail and drops the middle, so an agent
+turn loses its system prompt and tool schemas, and the only trace is a
+`truncating input prompt` warning in the server's log. Every Ollama
+ModelConfig model-manager creates or re-wires therefore carries
+`spec.ollama.options.num_ctx`. The value is the chart value
+`ollama.contextLength` (`--ollama-context-length`,
+`MODEL_MANAGER_OLLAMA_CONTEXT_LENGTH`, default 32768), capped at the model's
+own context length. It is reported as `modelConfig.contextLength`, next to
+the model's own `contextLength`. Loads pre-warm at the same value, since
+Ollama reloads a model when a request's `num_ctx` differs. With auto-wiring,
+the reconciler brings a ModelConfig written under another value, or before
+the setting existed, to the configured one. The window costs host memory:
+Ollama reserves the KV cache for all of it when it loads the model. A
+ModelConfig written by hand gets none of this and depends on the host's
+`OLLAMA_CONTEXT_LENGTH`.
+
 ## Backends registered at runtime
 
 model-manager starts with **no backend** (chart default `backend: ""`, `backends: []`) and gets its

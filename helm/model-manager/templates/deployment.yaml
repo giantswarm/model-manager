@@ -75,6 +75,7 @@ spec:
             {{- if .Values.ollama.memoryBudgetGiB }}
             - --ollama-memory-budget-gib={{ .Values.ollama.memoryBudgetGiB }}
             {{- end }}
+            - --ollama-context-length={{ int64 .Values.ollama.contextLength }}
             {{- end }}
             {{- if include "model-manager.hasBackend" (dict "root" . "name" "lemonade") }}
             - --lemonade-endpoint={{ required "lemonade.endpoint is required for the lemonade backend" .Values.lemonade.endpoint }}

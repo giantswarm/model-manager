@@ -23,6 +23,9 @@ type fakeOllama struct {
 	models    map[string]apiModel
 	loaded    map[string]bool
 	keepAlive map[string]any
+	// numCtx is the options.num_ctx of the last keep-alive request per model;
+	// absent when the request carried none.
+	numCtx    map[string]any
 	pullError string
 	embedOnly map[string]bool
 	// cpuOnly makes /api/ps report size_vram 0 (no accelerator in use).
@@ -36,6 +39,7 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 		models:    map[string]apiModel{},
 		loaded:    map[string]bool{},
 		keepAlive: map[string]any{},
+		numCtx:    map[string]any{},
 		embedOnly: map[string]bool{},
 	}
 	mux := http.NewServeMux()
@@ -112,8 +116,9 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 	keepAliveHandler := func(embed bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			var req struct {
-				Model     string `json:"model"`
-				KeepAlive any    `json:"keep_alive"`
+				Model     string         `json:"model"`
+				KeepAlive any            `json:"keep_alive"`
+				Options   map[string]any `json:"options"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			f.mu.Lock()
@@ -130,6 +135,11 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 				return
 			}
 			f.keepAlive[name] = req.KeepAlive
+			if n, ok := req.Options["num_ctx"]; ok {
+				f.numCtx[name] = n
+			} else {
+				delete(f.numCtx, name)
+			}
 			if n, ok := req.KeepAlive.(float64); ok && n == 0 {
 				delete(f.loaded, name)
 				_ = json.NewEncoder(w).Encode(map[string]any{"model": name, "done": true, "done_reason": "unload"})
@@ -171,6 +181,12 @@ func TestNewValidatesEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "http://172.21.0.1:11434", b.AgentEndpoint("x").Host, "agent host defaults to the endpoint")
 	assert.Equal(t, "Ollama", b.AgentEndpoint("x").Provider)
+	assert.Zero(t, b.AgentEndpoint("x").ContextLength, "no window configured: none is written")
+	_, err = New(backend.OllamaOptions{Endpoint: "http://172.21.0.1:11434", ContextLength: -1})
+	require.Error(t, err, "a negative context length is refused, not ignored")
+	b, err = New(backend.OllamaOptions{Endpoint: "http://172.21.0.1:11434", ContextLength: 32768})
+	require.NoError(t, err)
+	assert.Equal(t, int64(32768), b.AgentEndpoint("x").ContextLength, "the agents' window is the configured one")
 }
 
 func TestInfoAndCapabilities(t *testing.T) {
@@ -300,8 +316,28 @@ func TestLoadEmbeddingModelFallsBackToEmbed(t *testing.T) {
 	f, b := newTestBackend(t)
 	f.add("nomic-embed-text:latest", 10)
 	f.embedOnly["nomic-embed-text:latest"] = true
-	require.NoError(t, b.Load(context.Background(), backend.LoadRequest{Name: "nomic-embed-text"}))
+	require.NoError(t, b.Load(context.Background(), backend.LoadRequest{Name: "nomic-embed-text", ContextLength: 8192}))
 	assert.True(t, f.loaded["nomic-embed-text:latest"])
+	assert.EqualValues(t, 8192, f.numCtx["nomic-embed-text:latest"], "the embed fallback loads at the same window")
+}
+
+// TestLoadAtTheAgentsContextLength: a pre-warm loads the model at the
+// num_ctx agents send, so their first turn does not reload it; without one
+// the request leaves the window to the server, and an unload carries none.
+func TestLoadAtTheAgentsContextLength(t *testing.T) {
+	f, b := newTestBackend(t)
+	f.add("qwen3:0.6b", 10)
+	ctx := context.Background()
+
+	require.NoError(t, b.Load(ctx, backend.LoadRequest{Name: "qwen3:0.6b", ContextLength: 32768}))
+	assert.EqualValues(t, 32768, f.numCtx["qwen3:0.6b"])
+
+	require.NoError(t, b.Load(ctx, backend.LoadRequest{Name: "qwen3:0.6b"}))
+	assert.NotContains(t, f.numCtx, "qwen3:0.6b", "no window: none is sent")
+
+	require.NoError(t, b.Load(ctx, backend.LoadRequest{Name: "qwen3:0.6b", ContextLength: 32768}))
+	require.NoError(t, b.Unload(ctx, "qwen3:0.6b"))
+	assert.NotContains(t, f.numCtx, "qwen3:0.6b", "an unload carries no window")
 }
 
 func TestDelete(t *testing.T) {

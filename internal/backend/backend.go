@@ -336,6 +336,11 @@ type LoadRequest struct {
 	Preset string `json:"preset,omitempty"`
 	// Node pins the predictor to one node (kserve).
 	Node string `json:"node,omitempty"`
+	// ContextLength is the context window to load the model at (ollama:
+	// options.num_ctx). The service sets the one agents run the model at
+	// (AgentEndpoint.ContextLength), so an agent's first turn does not
+	// reload the model at another size. 0: the server's default.
+	ContextLength int64 `json:"contextLength,omitempty"`
 }
 
 // Preset is a curated serving recipe (kserve: a published ServingPreset).
@@ -643,6 +648,22 @@ type AgentEndpoint struct {
 	// LLMInferenceService name, the same rule the portal applies). Empty derives
 	// the name from the model reference.
 	Name string `json:"name,omitempty"`
+	// ContextLength is the context window in tokens agents run the model at
+	// (provider Ollama: spec.ollama.options.num_ctx, sent with every request).
+	// 0 sets none: the server's default applies, which Ollama derives from the
+	// host's VRAM (4,096 tokens below 24 GiB) and fills by dropping the front
+	// of a longer prompt — the system prompt and the tool schemas.
+	ContextLength int64 `json:"contextLength,omitempty"`
+}
+
+// WithinContext caps ContextLength at maxContext, the model's own context
+// length: a window beyond what the model was trained on is one the server
+// shrinks anyway. maxContext 0 (not reported) leaves it as it is.
+func (ep AgentEndpoint) WithinContext(maxContext int64) AgentEndpoint {
+	if maxContext > 0 && ep.ContextLength > maxContext {
+		ep.ContextLength = maxContext
+	}
+	return ep
 }
 
 // Validate refuses an endpoint whose API-key shape the ModelConfig cannot
