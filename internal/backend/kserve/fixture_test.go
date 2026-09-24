@@ -223,6 +223,9 @@ type discoveryOpts struct {
 	// cacheDisabled renders spec.cache.enabled: false — the serving layer
 	// without a cache claim.
 	cacheDisabled bool
+	// llmEndpoint renders spec.llmEndpoint with the platform's LLM route and
+	// this listener URL; absent when empty.
+	llmEndpoint string
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -271,11 +274,20 @@ spec:
     claimName: hf-cache
     mountPath: /mnt/models
     redirectPolicy: %t
-%s  presets:
+%s%s  presets:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway)
+`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway, llmEndpointYAML(o.llmEndpoint))
+}
+
+// llmEndpointYAML is the spec.llmEndpoint block for a listener URL: the LLM
+// route in the platform namespace; nothing without a URL.
+func llmEndpointYAML(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	return fmt.Sprintf("  llmEndpoint:\n    enabled: true\n    parentRefs:\n      - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: agent-platform-connectivity-llm, namespace: %s}\n    endpoint: %s\n", testPlatformNS, endpoint)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings
@@ -593,7 +605,7 @@ func (f *fixture) finishJob(ctx context.Context, name string, logs string, cond 
 // llmisvcListKinds registers the list kinds the fake dynamic client needs for
 // the serving.kserve.io resources the driver lists.
 func llmisvcListKinds() map[schema.GroupVersionResource]string {
-	return map[schema.GroupVersionResource]string{llmisvcGVR: "LLMInferenceServiceList", llmisvcConfigGVR: "LLMInferenceServiceConfigList"}
+	return map[schema.GroupVersionResource]string{llmisvcGVR: "LLMInferenceServiceList", llmisvcConfigGVR: "LLMInferenceServiceConfigList", agentgatewayModelGVR: "AgentgatewayModelList"}
 }
 
 // llmisvc reads the LLMInferenceService of the name from the serving namespace.

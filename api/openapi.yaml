@@ -935,7 +935,7 @@ components:
         vramBytes: { type: integer, format: int64 }
         contextLength: { type: integer, format: int64 }
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
-        endpoint: { type: string, description: inference URL (kserve — the predictor's in-cluster URL) }
+        endpoint: { type: string, description: "inference URL (kserve — the model's address: its route on the models Gateway or its in-cluster Service; the platform's LLM endpoint when `publicName` is set). `interfaces[].path` is relative to it." }
         node: { type: string }
         status:
           type: string
@@ -963,6 +963,17 @@ components:
             vLLM before 0.16) or could not be read. A preset states no interfaces.
           items: { $ref: "#/components/schemas/Interface" }
         interfacesReason: { type: string, description: "kserve — why `interfaces` is empty on a Ready model" }
+        publicName:
+          type: string
+          example: qwen3-5-4b
+          description: |
+            kserve, on an installation with the platform's LLM endpoint (discovery `spec.llmEndpoint`) —
+            the model's name on the endpoint, what a client sends as `model` there: the preset's name.
+            The model is on the endpoint as one `AgentgatewayModel` (provider Custom on the workload
+            Service, the formats its `interfaces`, the request's `model` rewritten to the Hugging Face id
+            vLLM serves) while its serving object exists, from the first Ready with interfaces on;
+            `endpoint` is then the endpoint's URL, and the model's ModelConfig reaches it there.
+        publicNameReason: { type: string, description: "kserve, on an installation with the LLM endpoint — why a served model is not on it (not Ready yet, no interfaces reported, not created from a preset, the object could not be written)" }
     Runtime:
       type: object
       description: kserve — the runtime serving a Ready model, as its server reports it

@@ -211,6 +211,48 @@ Whether a registered interface serves a given request is the preset's business: 
 needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
 `--reasoning-parser`.
 
+### Served models on the LLM endpoint
+
+On an installation whose discovery document carries `spec.llmEndpoint` (the agent-platform
+chart's `llmRouting` with model-manager on: `parentRefs`, the LLM route; `endpoint`, the
+listener's in-cluster URL), every Ready model created from a preset whose server registered at
+least one interface is put on the endpoint as one `AgentgatewayModel`, in the route's namespace,
+written with model-manager's own ServiceAccount (the chart grants it `agentgatewaymodels` there):
+
+```yaml
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: <preset>                  # the public name: what a client sends as `model`
+  labels: {app.kubernetes.io/managed-by: model-manager, model-manager.giantswarm.io/backend: kserve, agent-platform.giantswarm.io/preset: <preset>}
+spec:
+  parentRefs: [<spec.llmEndpoint.parentRefs>]
+  provider: Custom
+  baseURL: http://<name>-kserve-workload-svc.<namespace>.svc.cluster.local:8000/v1
+  custom:
+    formats: [<the interfaces the server registered>]
+  policies:
+    finalTransformations:
+      - {field: model, expression: '"<Hugging Face id>"'}
+```
+
+The baseURL ends in `/v1`: the gateway's upstream path is the baseURL's path plus the format's
+suffix. A concrete `AgentgatewayModel` forwards the request's `model` unchanged, and vLLM serves
+the model under its Hugging Face id (the llm-d template's `--served-model-name`), so the object
+sets `model` to that id after any format conversion; the formats are the ones the server
+registered, so the gateway converts only what the model does not speak. The object stays while
+its serving object exists (a model restarting keeps it), is removed by `unload_model` in the same
+call and when the serving object is deleted elsewhere, and is rewritten when its spec changes;
+the objects are compared with the served models on every list and at least every five minutes.
+
+`list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL; a served
+model that is not on it carries `publicNameReason` (not Ready yet, no interfaces, not created from
+a preset, the object could not be written). The model's ModelConfig rides the endpoint: `openAI.
+baseUrl` the listener plus `/v1`, `model` the public name, the placeholder key (the in-cluster
+listener checks none), so an agent's turns on a local model are metered by the same data plane as
+its provider turns. A hand-written `LLMInferenceService` has no preset and stays off the endpoint.
+Without `spec.llmEndpoint` nothing is written and the ModelConfig keeps the model's own address.
+
 ### The ModelConfig's API key
 
 A served model is wired into kagent as a `ModelConfig` on the OpenAI provider — by `load_model`

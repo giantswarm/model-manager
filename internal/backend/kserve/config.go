@@ -153,6 +153,15 @@ type discoveryDoc struct {
 			Endpoint       string `json:"endpoint"`
 			PathConvention string `json:"pathConvention"`
 		} `json:"gateway"`
+		// LLMEndpoint is the platform's LLM endpoint (the chart's
+		// llmRouting): the route(s) a served model's AgentgatewayModel
+		// attaches to (ParentRefs, Gateway API parent references) and the
+		// listener's in-cluster URL (Endpoint).
+		LLMEndpoint struct {
+			Enabled    bool             `json:"enabled"`
+			ParentRefs []map[string]any `json:"parentRefs"`
+			Endpoint   string           `json:"endpoint"`
+		} `json:"llmEndpoint"`
 	} `json:"spec"`
 }
 
@@ -177,7 +186,11 @@ type settings struct {
 	// at <origin>/<namespace>/<name>, so the address a served model gets is
 	// known the moment the object is composed — before KServe publishes it in
 	// status.addresses (giantswarm/model-manager#115).
-	GatewayEndpoint     string
+	GatewayEndpoint string
+	// LLMEndpoint puts every served model on the platform's LLM endpoint
+	// (gatewaymodel.go): discovery's spec.llmEndpoint when enabled with a
+	// route and a URL, nil otherwise.
+	LLMEndpoint         *llmEndpoint
 	CacheEnabled        bool
 	CacheClaim          string
 	CacheMountPath      string
@@ -458,6 +471,13 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		setIf(&s.PresetSelector, sp.Presets.LabelSelector)
 		if sp.Gateway.Enabled {
 			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
+		}
+		if le := sp.LLMEndpoint; le.Enabled {
+			ep, err := newLLMEndpoint(le.ParentRefs, le.Endpoint, o.DiscoveryNamespace)
+			if err != nil {
+				c.log.Warn("discovery's spec.llmEndpoint is unusable; served models stay off the LLM endpoint", "error", err)
+			}
+			s.LLMEndpoint = ep
 		}
 	}
 	// Explicit options win over discovery.
