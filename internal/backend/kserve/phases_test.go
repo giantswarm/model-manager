@@ -165,6 +165,30 @@ INFO 09-18 00:35:13 [launcher.py:60] Shutting down FastAPI HTTP server.
 
 const crashLine = "runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'"
 
+// b12xMemlockCrashLog is the tail of the B12X runtime that died at engine
+// start on a unified-memory GPU node whose containerd ran with the default
+// LimitMEMLOCK of 8 MB (giantswarm/agent-platform#564): its weight pool
+// mlock()s every allocation, the refusal becomes a CUDA out-of-memory at
+// 20 MiB with the GPU idle, and the API server's own error is the last line.
+const b12xMemlockCrashLog = `INFO 09-18 14:12:03 [core.py:93] Initializing a V1 LLM engine (v0.26.1rc1.dev1188+gd9fbe526c) with config: model='/mnt/models'
+(EngineCore_DP0 pid=212) INFO 09-18 14:12:39 [gpu_model_runner.py:2841] Starting to load model /mnt/models...
+b12x could not lock final weight storage: Cannot allocate memory
+b12x could not lock final weight storage: Cannot allocate memory
+(EngineCore_DP0 pid=212) ERROR 09-18 14:12:41 [core.py:866] EngineCore failed to start.
+(EngineCore_DP0 pid=212) ERROR 09-18 14:12:41 [core.py:866] Traceback (most recent call last):
+(EngineCore_DP0 pid=212) ERROR 09-18 14:12:41 [core.py:866]   File "/usr/local/lib/python3.12/dist-packages/b12x/loader/_pool.py", line 118, in allocate
+(EngineCore_DP0 pid=212) ERROR 09-18 14:12:41 [core.py:866]     return torch.empty(shape, dtype=dtype, device="cuda")
+(EngineCore_DP0 pid=212) ERROR 09-18 14:12:41 [core.py:866] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 121.69 GiB of which 1.42 GiB is free. Including non-PyTorch memory, this process has 346.98 MiB memory in use.
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+`
+
+// cudaOutOfMemoryCrashLog is a runtime whose weights do not fit the card: a
+// CUDA out-of-memory without a lock refusal.
+const cudaOutOfMemoryCrashLog = `(EngineCore_DP0 pid=94) ERROR 09-19 07:12:41 [core.py:866] EngineCore failed to start.
+(EngineCore_DP0 pid=94) ERROR 09-19 07:12:41 [core.py:866] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.02 GiB. GPU 0 has a total capacity of 22.03 GiB of which 311.06 MiB is free. Including non-PyTorch memory, this process has 21.72 GiB memory in use.
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+`
+
 func facts(p *corev1.Pod, events []corev1.Event, nodeGPUs int64) podFacts {
 	return podFacts{Pod: p, Events: events, NodeKnown: p.Spec.NodeName != "", NodeGPUs: nodeGPUs, GPUResource: DefaultGPUResourceName, Now: tNow}
 }
@@ -687,6 +711,55 @@ func TestServePhaseNamesACrashLoopingRuntime(t *testing.T) {
 		assert.Equal(t, backend.StepFailed, s.State)
 		assert.Equal(t, "Error", s.Reason)
 		assert.Contains(t, s.Message, "runtime crashed 1× (exit 2): PermissionError")
+	})
+}
+
+// giantswarm/model-manager#135: a runtime whose CUDA out-of-memory is a
+// refused mlock() is named as the node's locked-memory limit, with the
+// containerd drop-in that lifts it; any other out-of-memory keeps its words.
+func TestServePhaseNamesTheLockedMemoryLimit(t *testing.T) {
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	const oomLine = "RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}"
+
+	t.Run("a CUDA out-of-memory after a lock refusal: the limit and the drop-in", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		restarted(p, 1, 1, "Error")
+		f := facts(p, pulledEvents(p), 1)
+		f.Crash = readCrashLog(b12xMemlockCrashLog)
+		_, steps := servePhase(sv, f)
+		s := stepByName(steps, backend.PhaseLoading)
+		assert.Equal(t, reasonCrashLoop, s.Reason)
+		assert.Equal(t, "runtime crashed 1× (exit 1): "+oomLine+"; "+memlockHint, s.Message)
+		assert.Contains(t, s.Message, "LimitMEMLOCK=infinity")
+	})
+
+	t.Run("backed off: the failed step keeps the limit before the kubelet's words", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		backedOff(p, 2, 1, "Error")
+		f := facts(p, pulledEvents(p), 1)
+		f.Crash = readCrashLog(b12xMemlockCrashLog)
+		phase, steps := servePhase(sv, f)
+		assert.Equal(t, backend.PhaseFailed, phase)
+		s := stepByName(steps, backend.PhaseLoading)
+		assert.Equal(t, "CrashLoopBackOff", s.Reason)
+		assert.Equal(t, "runtime crashed 3× (exit 1): "+oomLine+"; "+memlockHint+"; back-off 5m0s restarting failed container=main pod=tiny-kserve-workload-7d9f8_serving(uid-tiny)", s.Message)
+	})
+
+	t.Run("a CUDA out-of-memory without a lock refusal: today's wording", func(t *testing.T) {
+		p := predictorFixture("tiny")
+		restarted(p, 1, 1, "Error")
+		f := facts(p, pulledEvents(p), 1)
+		f.Crash = readCrashLog(cudaOutOfMemoryCrashLog)
+		_, steps := servePhase(sv, f)
+		assert.Equal(t, "runtime crashed 1× (exit 1): "+oomLine, stepByName(steps, backend.PhaseLoading).Message)
+	})
+
+	t.Run("the read: both lines are needed", func(t *testing.T) {
+		assert.True(t, readCrashLog(b12xMemlockCrashLog).Memlock)
+		assert.False(t, readCrashLog(cudaOutOfMemoryCrashLog).Memlock, "an out-of-memory alone")
+		assert.False(t, readCrashLog(vllmCrashLog).Memlock, "neither")
+		assert.False(t, readCrashLog("b12x could not lock final weight storage: Cannot allocate memory\nINFO recovered\n").Memlock, "a lock refusal alone")
+		assert.True(t, readCrashLog("mlock(0x7f00, 67108864): Cannot allocate memory\ntorch.OutOfMemoryError: CUDA out of memory.\n").Memlock, "a bare mlock() refusal")
 	})
 }
 

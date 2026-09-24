@@ -81,6 +81,7 @@ data:
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
 | `spec.kserve.router.scheduler` | no | `true` composes the llm-d endpoint picker (`router.scheduler`) beside the route on every `LLMInferenceService` the backend composes; default `false`, the route alone — KServe routes the models Gateway to the workload Service (see below). A preset's `spec.router.scheduler` overrides it for that preset |
 | `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
+| `spec.kserve.gpuPools.<pool>.instances[]` | no | The cluster's GPU pools by name — the value of their nodes' `giantswarm.io/machine-pool` label — each with its sizes in the `instances[]` shape above, which cluster-manager writes while the cluster has two or more pools and so no `gpuPool` selector pins every predictor. The fit check places a model on the chosen node's pool, or, when no node hosts it, on the pool with no node yet whose smallest hosting size is the smallest; `load_model` pins the predictor to that pool (`giantswarm.io/machine-pool=<pool>` with the pools' taint) and `list_loaded_models` names it as `pool` |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
@@ -194,6 +195,34 @@ preset, `spec.router.scheduler: true|false` on a preset for that preset alone (t
 wins). A shape that switches it on needs the Inference Extension enabled on the models Gateway
 (giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
 keeps its shape until it is unloaded and loaded again.
+
+### The API interfaces of a served model
+
+Which APIs a served model answers is read from its running server, never declared: once each time
+an `LLMInferenceService` turns Ready the backend asks its workload Service
+(`<name>-kserve-workload-svc:8000`) for `GET /version` and `GET /openapi.json`, and reports
+`runtime {name: vllm, version}` and `interfaces [{type, path}]` on the loaded model
+(`list_loaded_models`, `GET /api/v1/loaded`, and `running` of `list_models`). Since vLLM 0.16 the
+OpenAI-compatible server registers a family of routes only when the model's task includes it, so
+the route list is the interface list: a generate model answers `Completions`
+(`/v1/chat/completions`, the legacy `/v1/completions` with it), `Responses`, `Messages` and
+`AnthropicTokenCount` (`/v1/messages/count_tokens`), a pooling model `Embeddings` and no chat route.
+The names are agentgateway's format vocabulary, the one an `AgentgatewayModel`'s `custom.formats`
+takes. A preset states no interfaces.
+
+A server that publishes no route list (a runtime started with `--disable-fastapi-docs`, which the
+agent-platform chart refuses in a preset), one whose list names `/v1/chat/completions` and
+`/v1/embeddings` side by side (a server that registers every route whatever the model serves: vLLM
+before 0.16, whose handlers refuse the other family at request time) or a server that could not be
+read reports `interfaces: []` and `interfacesReason`. Nothing is judged by the version: the llm-d
+runtimes' vLLM is a source build that reports `0.1.dev1+g<commit>`, and the version is reported as
+the server gives it. A read that got no answer — the serving
+namespace's network policy dropping model-manager's connection, a runtime failing — is repeated
+after a minute; an answer stands until the model turns Ready anew.
+
+Whether a registered interface serves a given request is the preset's business: tool calling
+needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
+`--reasoning-parser`.
 
 ### The ModelConfig's API key
 

@@ -120,7 +120,14 @@ func (p *servingPreset) routerScheduler(s settings) bool {
 // (giantswarm/model-manager#123). A nil preset is a bare Hugging Face model
 // reference and stores in the cache.
 func (p *servingPreset) storesInCache() bool {
-	return p == nil || !strings.HasPrefix(p.Spec.Model.StorageURI, "oci://")
+	return !p.fromModelImage()
+}
+
+// fromModelImage reports whether the preset's weights are an OCI model image
+// (oci://), which KServe's modelcar serves; a nil preset is a bare Hugging
+// Face model reference.
+func (p *servingPreset) fromModelImage() bool {
+	return p != nil && strings.HasPrefix(p.Spec.Model.StorageURI, "oci://")
 }
 
 func (p *servingPreset) weightsBytes() int64 {

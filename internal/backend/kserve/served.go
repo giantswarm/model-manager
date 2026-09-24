@@ -38,6 +38,7 @@ const (
 type served struct {
 	Name      string
 	Namespace string
+	UID       string
 	Model     string
 	Preset    string
 	Managed   bool
@@ -52,10 +53,13 @@ type served struct {
 	Status         string
 	// Reason names why Status is not Ready: the Ready condition's reason, a
 	// failed load's, or the predictor pod's (Unschedulable, ImagePullBackOff).
-	Reason   string
-	Message  string
-	URL      string
-	Node     string
+	Reason  string
+	Message string
+	URL     string
+	Node    string
+	// Pool is the GPU pool the predictor is pinned to: the pool label in
+	// the object's template nodeSelector (giantswarm/model-manager#152).
+	Pool     string
 	Created  time.Time
 	Deleting bool
 	// ReadyAt is when the Ready condition last turned True; Failed says the
@@ -65,6 +69,8 @@ type served struct {
 	// Phase and Steps are where the serve is (phases.go).
 	Phase string
 	Steps []backend.Step
+	// API is what the server said about itself once Ready (interfaces.go).
+	API serverAPI
 }
 
 // manageable reports whether model-manager may operate on the
@@ -164,6 +170,7 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 		out = append(out, sv)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	b.serverAPIs(ctx, out)
 	b.rememberServed(out)
 	// While they exist, remember which repository each one fills its cache
 	// directory from (index.go).
@@ -380,6 +387,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv := served{
 		Name:           obj.GetName(),
 		Namespace:      obj.GetNamespace(),
+		UID:            string(obj.GetUID()),
 		Managed:        obj.GetLabels()[ManagedByLabel] == ManagedByValue,
 		ManagedBy:      obj.GetLabels()[ManagedByLabel],
 		Preset:         obj.GetLabels()[PresetLabel],
@@ -388,6 +396,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 		Deleting:       obj.GetDeletionTimestamp() != nil,
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
+	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
 	}

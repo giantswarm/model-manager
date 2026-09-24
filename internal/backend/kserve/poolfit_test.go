@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -399,4 +400,87 @@ func TestFitCheckTakesThePoolPathOnceTheDocumentNamesThePool(t *testing.T) {
 	assert.Equal(t, poolName, selector[poolLabel], "the predictor selects the pool the fit placed it on")
 	tols, _, _ := unstructured.NestedSlice(list.Items[0].Object, "spec", "template", "tolerations")
 	assert.Contains(t, tols, map[string]any{"key": poolTaintKey, "operator": "Exists", "effect": "NoSchedule"}, "and tolerates its taint")
+}
+
+// TestFitCheckPlacesOnThePoolThatHostsIt (giantswarm/model-manager#152): a
+// cluster with two pools, an L4 and an L40S one, lists both with their sizes
+// (spec.kserve.gpuPools) and pins no pool on every predictor. With no node
+// up, a model goes to the pool whose smallest hosting size is the smallest —
+// the L4 pool for a small preset, the L40S pool for one only its size hosts
+// — and load_model pins the predictor to that pool, which list_loaded_models
+// names. A ready node is the placement while it hosts the model, its pool the
+// pin; one that does not leaves the model to the pool with no node yet whose
+// size does.
+func TestFitCheckPlacesOnThePoolThatHostsIt(t *testing.T) {
+	ctx := context.Background()
+	oci := func(name string, weightsGiB float64, requests string) string {
+		doc := presetDoc(name, "org/"+name, weightsGiB, "")
+		doc = strings.Replace(doc, "storageUri: hf://org/"+name, "storageUri: oci://127.0.0.1:1/models/"+name+":t", 1)
+		return strings.Replace(doc, `requests: {cpu: "2", memory: 8Gi}`, requests, 1)
+	}
+	f := newFixture(t,
+		presetConfigMap("small", oci("small", 8, `requests: {cpu: "2", memory: 8Gi}`)),
+		presetConfigMap("large", oci("large", 30, `requests: {cpu: 4, memory: 32Gi}`)))
+	for _, n := range []string{testCacheNode, testGPUNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, n, metav1.DeleteOptions{}))
+	}
+	const l4, l40s = "wc1-gpu-l4", "wc1-gpu-l40s"
+	pools := map[string]backend.GPUPool{
+		l4:   {Instances: []backend.InstanceShape{shape2XLarge, shapeXLarge}},
+		l40s: {Instances: []backend.InstanceShape{shapeL40S2XLarge}},
+	}
+	f.b.opts.GPUPools, f.b.cfg.opts.GPUPools = pools, pools
+	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: &backend.GPUPool{Taint: poolInput().Taint}})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "small"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, l4, res.Pool)
+	assert.Equal(t, "g6.xlarge", res.InstanceType)
+	assert.Contains(t, res.Reason, "no node in the GPU pool yet ("+poolLabel+"="+l4+")")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "large"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, l40s, res.Pool, "only the L40S pool's size hosts it")
+	assert.Equal(t, "g6e.2xlarge", res.InstanceType)
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "small"}))
+	obj, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, "small", metav1.GetOptions{})
+	require.NoError(t, err)
+	selector, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "nodeSelector")
+	assert.Equal(t, map[string]string{poolLabel: l4}, selector, "pinned to the pool the fit chose")
+	tolerations, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "tolerations")
+	assert.NotEmpty(t, tolerations, "and tolerating the pools' taint")
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, l4, loaded[0].Pool, "list_loaded_models names the pool")
+
+	// A ready node of the L40S pool hosts the small model: it is the
+	// placement, its pool the pin.
+	l40sNode := node("l40s-1", "64Gi", map[string]string{poolLabel: l40s, labelGPUCount: "1", labelGPUMemory: "49152", labelGPUProduct: "NVIDIA-L40S"})
+	l40sNode.Spec.Taints = []corev1.Taint{{Key: poolTaintKey, Effect: corev1.TaintEffectNoSchedule}}
+	_, err = f.cs.CoreV1().Nodes().Create(ctx, withGPUs(l40sNode, 1), metav1.CreateOptions{})
+	require.NoError(t, err)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "small"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "l40s-1", res.Node)
+	assert.Equal(t, l40s, res.Pool)
+
+	// A ready L4 node that cannot host the large model leaves it to a pool
+	// with no node yet whose size does.
+	require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, "l40s-1", metav1.DeleteOptions{}))
+	l4Node := node("l4-1", "16Gi", map[string]string{poolLabel: l4, labelGPUCount: "1", labelGPUMemory: "24576", labelGPUProduct: "NVIDIA-L4"})
+	l4Node.Spec.Taints = []corev1.Taint{{Key: poolTaintKey, Effect: corev1.TaintEffectNoSchedule}}
+	_, err = f.cs.CoreV1().Nodes().Create(ctx, withGPUs(l4Node, 1), metav1.CreateOptions{})
+	require.NoError(t, err)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "large"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Equal(t, l40s, res.Pool)
+	assert.Equal(t, "g6e.2xlarge", res.InstanceType)
+	assert.Contains(t, res.Reason, "the ready node l4-1 does not host it")
 }

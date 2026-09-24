@@ -95,12 +95,7 @@ func requestedGPUs(n predictorNeeds) int { return max(n.GPUs, 1) }
 func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
 	out := make([]backend.InstanceShape, len(shapes))
 	copy(out, shapes)
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].VCPU != out[j].VCPU {
-			return out[i].VCPU < out[j].VCPU
-		}
-		return out[i].MemoryGiB < out[j].MemoryGiB
-	})
+	sort.SliceStable(out, func(i, j int) bool { return smallerShape(out[i], out[j]) })
 	return out
 }
 
