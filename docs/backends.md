@@ -147,7 +147,11 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
   weights, the Hub holds 24.6 GiB` on a fit, `…; the Hub holds 24.6 GiB, which is what does not
   fit — correct the preset` on a refusal — and a declaration that covers the Hub adds nothing;
 - a model **without a preset** is judged on its weights and the default overhead against the GPU
-  memory alone.
+  memory alone;
+- a size hosts the model only when vLLM's **KV cache** holds one sequence of the preset's
+  `--max-model-len` on one of its GPUs (`gpuMemoryGiB` is the nominal size a card is sold as, in
+  decimal GB: an L40S's 48 are 44.7 GiB), the same check as on a node (see the README's Import),
+  and the reason names the KV need and what the size leaves it.
 
 The document is what tells the fit there is a pool at all. Settings resolved while the discovery
 ConfigMap was not published yet — the serving slice publishes it as its connectivity child installs —
