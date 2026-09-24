@@ -421,7 +421,9 @@ type FitResult struct {
 	DeclaredWeightsBytes int64  `json:"declaredWeightsBytes,omitempty"`
 	OverheadBytes        int64  `json:"overheadBytes"`
 	RequiredBytes        int64  `json:"requiredBytes"`
-	// DownloadBytes is what a pull would fetch (all repository files).
+	// DownloadBytes is what a pull would fetch: the repository's files, or
+	// for a preset served from a model image the image's layers (0 and a
+	// note in the reason when its registry does not answer).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
 	// budget was derived (gpu-labels, allocatable, annotation, or

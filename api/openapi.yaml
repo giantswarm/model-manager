@@ -1066,7 +1066,7 @@ components:
         weightsSource: { type: string, enum: [safetensors-index, safetensors-shards, tree, preset], description: "safetensors-shards when the index's total_size disagrees by more than one percent with the shards its weight_map names" }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64 }
-        downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }
+        downloadBytes: { type: integer, format: int64, description: "what a pull fetches: the repositorys files, or for a preset served from a model image (oci://) the images layers as its registry lists them — 0, with a note in reason, when the registry does not answer" }
         node: { type: string, description: node the check was made against }
         budgetBytes: { type: integer, format: int64 }
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
