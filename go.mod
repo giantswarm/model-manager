@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.1
 
 require (
-	github.com/giantswarm/mcp-oauth v1.4.3
+	github.com/giantswarm/mcp-oauth v1.4.5
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/mark3labs/mcp-go v1.1.0
 	github.com/spf13/cobra v1.10.2
