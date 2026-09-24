@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/openapi"
 
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -40,6 +41,7 @@ type serveOptions struct {
 	ollamaAgentHost       string
 	ollamaMemoryBudgetGiB string
 	ollamaContextLength   int
+	ollamaThink           string
 
 	lemonadeEndpoint  string
 	lemonadeAgentHost string
@@ -136,6 +138,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.ollamaEndpoint, "ollama-endpoint", envOr("OLLAMA_ENDPOINT", "http://127.0.0.1:11434"), "Ollama API base URL as reached by model-manager (OLLAMA_ENDPOINT)")
 	f.StringVar(&o.ollamaAgentHost, "ollama-agent-host", envOr("OLLAMA_AGENT_HOST", ""), "Ollama host written into kagent ModelConfigs, as reached by agent pods; defaults to --ollama-endpoint (OLLAMA_AGENT_HOST)")
 	f.IntVar(&o.ollamaContextLength, "ollama-context-length", envInt("MODEL_MANAGER_OLLAMA_CONTEXT_LENGTH", ollama.DefaultContextLength), "Context window in tokens that agents run Ollama models at: written into every Ollama ModelConfig as options.num_ctx and used by loads, capped at each model's own context length. Ollama reserves the KV cache for the whole window in the host's memory at load. 0 writes none, and Ollama's own default applies, which it derives from the host's VRAM: 4096 tokens below 24 GiB, too few for an agent's system prompt and tool schemas (MODEL_MANAGER_OLLAMA_CONTEXT_LENGTH)")
+	f.StringVar(&o.ollamaThink, "ollama-think", envSet("MODEL_MANAGER_OLLAMA_THINK", ollama.DefaultThink), "Think field that agents send to Ollama models with the thinking capability, written into their ModelConfigs as spec.ollama.think: false has them answer directly, true has them reason before every answer. Empty writes none, and Ollama's default applies, under which such a model thinks: 1.5–2k tokens per model call, minutes on a CPU, and a small model can put its whole answer into the thinking, leaving the agent's reply empty. Models without the capability get none, since Ollama refuses true for them (MODEL_MANAGER_OLLAMA_THINK; set and empty writes none)")
 	f.StringVar(&o.ollamaMemoryBudgetGiB, "ollama-memory-budget-gib", envOr("MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB", ""), "Memory budget of the proxied host in GiB (decimals allowed), reported on /api/v1/nodes as budgetSource=override instead of MemTotal of the pod's /proc/meminfo — for Docker Desktop, another VM-backed runtime or an Ollama on another machine; empty or 0: the pod's view (MODEL_MANAGER_OLLAMA_MEMORY_BUDGET_GIB)")
 	f.StringVar(&o.lemonadeEndpoint, "lemonade-endpoint", envOr("LEMONADE_ENDPOINT", lemonade.DefaultEndpoint), "Lemonade Server base URL as reached by model-manager; its API is under /api/v1 (LEMONADE_ENDPOINT)")
 	f.StringVar(&o.lemonadeAgentHost, "lemonade-agent-host", envOr("LEMONADE_AGENT_HOST", ""), "Lemonade Server base URL as reached by agent pods, written into kagent ModelConfigs as the OpenAI-compatible baseUrl with /api/v1 appended; defaults to --lemonade-endpoint (LEMONADE_AGENT_HOST)")
@@ -214,6 +217,10 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return err
 	}
 	hasKServe := slices.Contains(names, backend.NameKServe)
+	ollamaThink, err := ollama.ParseThink(o.ollamaThink)
+	if err != nil {
+		return err
+	}
 
 	// Kubernetes access: required by the kserve driver and by runtime
 	// backend registration (the documents are ConfigMaps), optional (wiring
@@ -233,7 +240,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	backend.Register(backend.NameLemonade, lemonade.Factory)
 	backend.Register(backend.NameLMStudio, lmstudio.Factory)
 	opts := backend.Options{
-		Ollama:   backend.OllamaOptions{Endpoint: o.ollamaEndpoint, AgentHost: o.ollamaAgentHost, MemoryBudgetGiB: o.ollamaMemoryBudgetGiB, ContextLength: int64(o.ollamaContextLength)},
+		Ollama:   backend.OllamaOptions{Endpoint: o.ollamaEndpoint, AgentHost: o.ollamaAgentHost, MemoryBudgetGiB: o.ollamaMemoryBudgetGiB, ContextLength: int64(o.ollamaContextLength), Think: ollamaThink},
 		KServe:   o.kserve.options(),
 		Lemonade: backend.LemonadeOptions{Endpoint: o.lemonadeEndpoint, AgentHost: o.lemonadeAgentHost},
 		LMStudio: backend.LMStudioOptions{Endpoint: o.lmstudioEndpoint, AgentHost: o.lmstudioAgentHost},
@@ -276,7 +283,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 				apiVersion = wiring.DefaultAPIVersion
 			}
 		}
-		k := wiring.NewKagent(clients.Dynamic, o.kagentNamespace, apiVersion, o.modelConfigPrefix).
+		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix).
 			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
 		wirer = k
 		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion()}
@@ -415,6 +422,15 @@ func splitList(s string) []string {
 
 func envOr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// envSet is like envOr but takes a variable that is set to the empty string
+// at its word, for a setting whose empty value means none.
+func envSet(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

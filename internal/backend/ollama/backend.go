@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +28,29 @@ const (
 	// every tool schema (6–9k tokens) and grows past 24k once a large tool
 	// result lands, while Ollama's own default below 24 GiB of VRAM is 4,096.
 	DefaultContextLength = 32768
-	latestTag            = ":latest"
+	// DefaultThink is the think agents send to thinking models when the
+	// operator sets none (ParseThink): off, since a thinking model spends
+	// 1.5–2k tokens reasoning before every answer — minutes per model call on
+	// a CPU — and a small one such as qwen3.5:2b can put its whole answer
+	// into the thinking, which the agent runtime does not read, and reply
+	// with nothing.
+	DefaultThink = "false"
+	latestTag    = ":latest"
 )
+
+// ParseThink reads the operator's think setting: true or false, or empty
+// for none (Ollama's default applies).
+func ParseThink(v string) (*bool, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, nil
+	}
+	think, err := strconv.ParseBool(v)
+	if err != nil {
+		return nil, fmt.Errorf("ollama think %q must be true, false or empty (empty leaves it to the server)", v)
+	}
+	return &think, nil
+}
 
 // loading is how Ollama manages memory: a model is loaded by the first
 // /api/chat or /api/generate that names it, and evicted when its keep-alive
@@ -55,6 +77,9 @@ type Backend struct {
 	// contextLength is the num_ctx agents run models at
 	// (OllamaOptions.ContextLength); 0 leaves it to the server.
 	contextLength int64
+	// think is the think field agents send to thinking models
+	// (OllamaOptions.Think); nil leaves it to the server.
+	think *bool
 }
 
 // Factory builds the driver from backend.Options.
@@ -84,7 +109,7 @@ func New(opts backend.OllamaOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo, memoryBudgetGiB: opts.MemoryBudgetGiB, contextLength: opts.ContextLength}, nil
+	return &Backend{client: NewClient(endpoint, hc), endpoint: endpoint, agentHost: agentHost, meminfoPath: procMeminfo, memoryBudgetGiB: opts.MemoryBudgetGiB, contextLength: opts.ContextLength, think: opts.Think}, nil
 }
 
 // NewWithClient builds the driver around an existing client (tests).
@@ -264,9 +289,11 @@ func (b *Backend) Unload(ctx context.Context, name string) error {
 
 // AgentEndpoint implements backend.Backend: kagent's native keyless Ollama
 // provider pointed at the host as agent pods reach it, at the configured
-// context window (the service caps it at the model's own).
+// context window and think (the service fits both to the model: the window
+// capped at the model's own, think only for a model with the thinking
+// capability).
 func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Provider: "Ollama", Host: b.agentHost, Model: model, ContextLength: b.contextLength}
+	return backend.AgentEndpoint{Provider: "Ollama", Host: b.agentHost, Model: model, ContextLength: b.contextLength, Think: b.think}
 }
 
 func toModel(t apiModel) backend.Model {

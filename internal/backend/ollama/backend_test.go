@@ -187,6 +187,29 @@ func TestNewValidatesEndpoint(t *testing.T) {
 	b, err = New(backend.OllamaOptions{Endpoint: "http://172.21.0.1:11434", ContextLength: 32768})
 	require.NoError(t, err)
 	assert.Equal(t, int64(32768), b.AgentEndpoint("x").ContextLength, "the agents' window is the configured one")
+	assert.Nil(t, b.AgentEndpoint("x").Think, "no think configured: none is written")
+	off := false
+	b, err = New(backend.OllamaOptions{Endpoint: "http://172.21.0.1:11434", Think: &off})
+	require.NoError(t, err)
+	require.NotNil(t, b.AgentEndpoint("x").Think)
+	assert.False(t, *b.AgentEndpoint("x").Think, "the agents' think is the configured one")
+}
+
+// TestParseThink: the operator's think is true, false or empty for none; the
+// default is off; anything else is refused, not ignored.
+func TestParseThink(t *testing.T) {
+	off, on := false, true
+	for v, want := range map[string]*bool{"false": &off, "true": &on, " false ": &off, "": nil, "  ": nil} {
+		got, err := ParseThink(v)
+		require.NoError(t, err, "%q", v)
+		assert.Equal(t, want, got, "%q", v)
+	}
+	def, err := ParseThink(DefaultThink)
+	require.NoError(t, err)
+	require.NotNil(t, def)
+	assert.False(t, *def, "thinking is off unless the operator turns it on")
+	_, err = ParseThink("off")
+	require.ErrorContains(t, err, "must be true, false or empty")
 }
 
 func TestInfoAndCapabilities(t *testing.T) {

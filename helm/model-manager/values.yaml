@@ -88,6 +88,19 @@ ollama:
   # keeps 80 KiB per token; lower it on a host short of memory. 0 writes none
   # and leaves the window to the server (`OLLAMA_CONTEXT_LENGTH` on the host).
   contextLength: 32768  # @schema type: integer; minimum: 0
+  # -- Think field that agents send to Ollama models with the thinking
+  # capability (Qwen3.5, Qwen3, DeepSeek-R1, Granite 4.2, ...): written into
+  # their ModelConfigs as `spec.ollama.think` whenever model-manager creates or
+  # re-wires them, and reported as `modelConfig.think`. `false` has them answer
+  # directly. `true` has them reason before every answer. `""` writes none and
+  # leaves Ollama's default, under which such a model thinks. Thinking costs
+  # 1.5–2k tokens per model call, minutes on a CPU, and a small model such as
+  # `qwen3.5:2b` can put its whole answer into the thinking, which the agent
+  # runtime does not read, so the agent replies with nothing. Models without the
+  # capability get none, since Ollama refuses `true` for them. Needs kagent
+  # 1.0.3 or newer; on an older kagent, whose ModelConfig has no `think`, none is
+  # written.
+  think: false  # @schema type: [boolean, string]; enum: [true, false, ""]
 
 lemonade:
   # -- Lemonade Server base URL as reached from pods (its API is under

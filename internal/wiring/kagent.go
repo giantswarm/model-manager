@@ -22,7 +22,11 @@
 // (spec.ollama.options.num_ctx, AgentEndpoint.ContextLength): without it
 // every request runs at the server's default, which Ollama derives from the
 // host's VRAM — 4,096 tokens below 24 GiB — and a longer agent prompt loses
-// its front, the system prompt and the tool schemas, without an error.
+// its front, the system prompt and the tool schemas, without an error. The
+// ModelConfig of a model with the thinking capability also carries the chat
+// request's think field (spec.ollama.think, AgentEndpoint.Think), when the
+// served ModelConfig schema has it (kagent 1.0.3 and later; servedSchema):
+// the apiserver prunes a field its CRD lacks.
 package wiring
 
 import (
@@ -31,6 +35,7 @@ import (
 	"hash/fnv"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/openapi"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -68,6 +74,8 @@ const (
 	// ollamaNumCtx is the spec.ollama.options key of the context window. The
 	// CRD's options are strings; the ADK sends num_ctx as an integer.
 	ollamaNumCtx = "num_ctx"
+	// ollamaThink is the spec.ollama field of the chat request's think.
+	ollamaThink = "think"
 )
 
 var secretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
@@ -112,6 +120,17 @@ type ModelConfigRef struct {
 	// spec.ollama.options.num_ctx. 0 when the ModelConfig sets none, and the
 	// server's default applies.
 	ContextLength int64 `json:"contextLength,omitempty"`
+	// Think is the chat request's think field agents send: spec.ollama.think.
+	// Nil when the ModelConfig sets none, and the server's default applies.
+	Think *bool `json:"think,omitempty"`
+}
+
+// Carries reports whether the ModelConfig reads back with the settings ep
+// has agents run the model at: its context window and think. The rest of the
+// endpoint (provider, host, API-key shape) is not compared.
+func (r ModelConfigRef) Carries(ep backend.AgentEndpoint) bool {
+	sameThink := (r.Think == nil) == (ep.Think == nil) && (r.Think == nil || *r.Think == *ep.Think)
+	return r.ContextLength == ep.ContextLength && sameThink
 }
 
 // Wirer manages the agent-facing configuration for models. A ModelConfig is
@@ -133,6 +152,11 @@ type Wirer interface {
 	// ListAll returns every ModelConfig in the namespace, whoever created it,
 	// so callers can recognise a model that is already wired by someone else.
 	ListAll(ctx context.Context) ([]ModelConfigRef, error)
+	// Writable returns ep as Ensure writes it: without the settings the
+	// served ModelConfig schema lacks, which the apiserver would prune — so
+	// a comparison with what a ModelConfig reads back (Carries) holds once
+	// it is written.
+	Writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error)
 }
 
 // Kagent is the Wirer over the kagent.dev ModelConfig CRD.
@@ -142,12 +166,14 @@ type Kagent struct {
 	gvr       schema.GroupVersionResource
 	namespace string
 	prefix    string
+	schema    *servedSchema
 }
 
 // NewKagent builds a Wirer writing into namespace with the given API version.
 // The backend a ModelConfig belongs to comes with every AgentEndpoint, so one
-// wirer serves every backend of the process.
-func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string) *Kagent {
+// wirer serves every backend of the process. openAPI is the apiserver's
+// OpenAPI v3, which tells the ModelConfig fields it serves.
+func NewKagent(client dynamic.Interface, openAPI openapi.ClientWithContext, namespace, apiVersion, prefix string) *Kagent {
 	if apiVersion == "" {
 		apiVersion = DefaultAPIVersion
 	}
@@ -156,6 +182,7 @@ func NewKagent(client dynamic.Interface, namespace, apiVersion, prefix string) *
 		gvr:       schema.GroupVersionResource{Group: KagentGroup, Version: apiVersion, Resource: ModelConfigResource},
 		namespace: namespace,
 		prefix:    prefix,
+		schema:    &servedSchema{client: openAPI, version: apiVersion, now: time.Now},
 	}
 }
 
@@ -226,6 +253,10 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
 	if err := ep.Validate(); err != nil {
+		return nil, err
+	}
+	ep, err := k.Writable(ctx, ep)
+	if err != nil {
 		return nil, err
 	}
 	target := ModelConfigName(k.prefix, model)
@@ -315,6 +346,22 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 		updated.Object["status"] = existing.Object["status"]
 	}
 	return toRef(updated), nil
+}
+
+// Writable implements Wirer. Only a setting that needs the served schema
+// consults it: think, which kagent's ModelConfig has from 1.0.3 on.
+func (k *Kagent) Writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {
+	if ep.Provider != "Ollama" || ep.Think == nil {
+		return ep, nil
+	}
+	fields, err := k.schema.ollamaFields(ctx)
+	if err != nil {
+		return ep, fmt.Errorf("read the served ModelConfig schema: %w", err)
+	}
+	if !fields[ollamaThink] {
+		ep.Think = nil
+	}
+	return ep, nil
 }
 
 // Remove implements Wirer.
@@ -472,6 +519,9 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 		if ep.ContextLength > 0 {
 			ollama["options"] = map[string]any{ollamaNumCtx: strconv.FormatInt(ep.ContextLength, 10)}
 		}
+		if ep.Think != nil {
+			ollama[ollamaThink] = *ep.Think
+		}
 		spec["ollama"] = ollama
 	case "OpenAI":
 		spec["openAI"] = map[string]any{"baseUrl": ep.BaseURL}
@@ -574,6 +624,9 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	ref.APIKeySecret, _, _ = unstructured.NestedString(obj.Object, "spec", "apiKeySecret")
 	if n, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "options", ollamaNumCtx); n != "" {
 		ref.ContextLength, _ = strconv.ParseInt(n, 10, 64)
+	}
+	if think, found, _ := unstructured.NestedBool(obj.Object, "spec", "ollama", ollamaThink); found {
+		ref.Think = &think
 	}
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	ref.Ready, ref.Message = readiness(conds)

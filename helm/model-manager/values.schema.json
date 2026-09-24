@@ -716,6 +716,18 @@
                     ],
                     "description": "Memory budget of the proxied host in GiB (a number; decimals allowed, `GET /api/v1/nodes` with `budgetSource: override` instead of `MemTotal` of the pod's `/proc/meminfo` (`host-meminfo`). Set it where the pod's view is not the host's: Docker Desktop or another VM-backed runtime (the pod sees the VM's memory), an Ollama on another machine. 0 is off; a value that is not a positive number of GiB is ignored and named in the node's `message`. The ollama counterpart of the kserve node annotation `model-manager.giantswarm.io/memory-budget-gib`.",
                     "minimum": 0
+                },
+                "think": {
+                    "type": [
+                        "boolean",
+                        "string"
+                    ],
+                    "description": "Think field that agents send to Ollama models with the thinking capability (Qwen3.5, Qwen3, DeepSeek-R1, Granite 4.2, ...): written into their ModelConfigs as `spec.ollama.think` whenever model-manager creates or re-wires them, and reported as `modelConfig.think`. `false` has them answer directly. `true` has them reason before every answer. `\"\"` writes none and leaves Ollama's default, under which such a model thinks. Thinking costs 1.5–2k tokens per model call, minutes on a CPU, and a small model such as `qwen3.5:2b` can put its whole answer into the thinking, which the agent runtime does not read, so the agent replies with nothing. Models without the capability get none, since Ollama refuses `true` for them. Needs kagent 1.0.3 or newer; on an older kagent, whose ModelConfig has no `think`, none is written.",
+                    "enum": [
+                        true,
+                        false,
+                        ""
+                    ]
                 }
             }
         },

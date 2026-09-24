@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -736,7 +737,7 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
 	// Loaded at the context window agents will ask for, so their first turn
 	// does not reload the model at another size.
-	req.ContextLength = b.AgentEndpoint(m.Name).WithinContext(m.ContextLength).ContextLength
+	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
 	if req.Preset == "" && m.Preset != "" {
 		req.Preset = m.Preset
 	}
@@ -1180,9 +1181,9 @@ func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(
 // survived a restart (PullAdopter backends); on ServeLifecycle backends,
 // wiring served models that became ready without a load job watching them
 // (model-manager restarted, or the LLMInferenceService was created by someone
-// else with the preset label); on the others, bringing the context window of
-// the ModelConfigs model-manager owns to the configured one
-// (refreshContextLengths).
+// else with the preset label); on the others, bringing the context window and
+// think of the ModelConfigs model-manager owns to the configured ones
+// (refreshModelConfigs).
 func (s *Service) Run(ctx context.Context) {
 	if s.cfg.CallerOnly {
 		s.log.Info("caller-only mode: no download adoption and no wiring reconciler (every Kubernetes call carries the caller's token; the ServiceAccount holds no permissions); a restart loses the in-memory jobs and nothing else — a served model's ModelConfig is written by the load itself and, when missing, by the caller's next read, a running download Job is joined by the next pull")
@@ -1202,7 +1203,7 @@ func (s *Service) Run(ctx context.Context) {
 			if _, ok := serveLifecycle(b); ok {
 				s.reconcileWiring(ctx, b)
 			} else {
-				s.refreshContextLengths(ctx, b)
+				s.refreshModelConfigs(ctx, b)
 			}
 		}
 		select {
@@ -1259,15 +1260,18 @@ func (s *Service) reconcileWiring(ctx context.Context, b backend.Backend) {
 	}
 }
 
-// refreshContextLengths re-wires every ModelConfig model-manager owns on b
-// whose context window is not the one a wiring writes now — one written
-// before the setting existed, or under another value — so a changed
-// ollama.contextLength reaches the agents of models wired long ago, which on
-// Ollama are loaded by the agents' own requests and never by a load that
-// would re-wire them. The re-wire is the one a load does: the backend's own
-// endpoint. Up-to-date ModelConfigs are not touched; one whose model is gone
+// refreshModelConfigs re-wires every ModelConfig model-manager owns on b
+// whose agent settings — the context window and think — are not the ones a
+// wiring writes now: one written before a setting existed, under another
+// value, or edited by hand. So a changed ollama.contextLength or ollama.think
+// reaches the agents of models wired long ago, which on Ollama are loaded by
+// the agents' own requests and never by a load that would re-wire them. The
+// re-wire is the one a load does: the backend's own endpoint, fitted to the
+// model. The comparison is against what the served ModelConfig schema can
+// carry (Wirer.Writable), so a field the apiserver prunes never re-wires on
+// every pass. Up-to-date ModelConfigs are not touched; one whose model is gone
 // from b is left to unwire.
-func (s *Service) refreshContextLengths(ctx context.Context, b backend.Backend) {
+func (s *Service) refreshModelConfigs(ctx context.Context, b backend.Backend) {
 	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	refs, err := s.wirer.List(rctx)
@@ -1279,23 +1283,36 @@ func (s *Service) refreshContextLengths(ctx context.Context, b backend.Backend) 
 		if r.Backend != "" && r.Backend != b.Name() {
 			continue
 		}
-		if b.AgentEndpoint(r.Model).ContextLength == 0 && r.ContextLength == 0 {
+		if ep := b.AgentEndpoint(r.Model); ep.ContextLength == 0 && ep.Think == nil && r.ContextLength == 0 && r.Think == nil {
 			continue // nothing to write, nothing written
 		}
 		m, err := b.GetModel(rctx, r.Model)
 		if err != nil {
 			continue
 		}
-		want := b.AgentEndpoint(m.Name).WithinContext(m.ContextLength).ContextLength
-		if want == r.ContextLength {
+		want, err := s.wirer.Writable(rctx, b.AgentEndpoint(m.Name).FitTo(*m))
+		if err != nil {
+			s.log.Warn("refresh: reading what a ModelConfig carries failed", "backend", b.Name(), "error", err)
+			return
+		}
+		if r.Carries(want) {
 			continue
 		}
 		if _, err := s.wireModel(rctx, b, m.Name, backend.WireOptions{}); err != nil {
-			s.log.Warn("refresh: re-wiring for the context length failed", "backend", b.Name(), "model", m.Name, "modelConfig", r.Namespace+"/"+r.Name, "error", err)
+			s.log.Warn("refresh: re-wiring for the agent settings failed", "backend", b.Name(), "model", m.Name, "modelConfig", r.Namespace+"/"+r.Name, "error", err)
 			continue
 		}
-		s.log.Info("ModelConfig context length refreshed", "backend", b.Name(), "model", m.Name, "modelConfig", r.Namespace+"/"+r.Name, "from", r.ContextLength, "to", want)
+		s.log.Info("ModelConfig agent settings refreshed", "backend", b.Name(), "model", m.Name, "modelConfig", r.Namespace+"/"+r.Name,
+			"contextLength", fmt.Sprintf("%d → %d", r.ContextLength, want.ContextLength), "think", thinkString(r.Think)+" → "+thinkString(want.Think))
 	}
+}
+
+// thinkString renders a think setting for the log: true, false or unset.
+func thinkString(think *bool) string {
+	if think == nil {
+		return "unset"
+	}
+	return strconv.FormatBool(*think)
 }
 
 func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
@@ -1312,13 +1329,15 @@ func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
 // written when the shape is not one the ModelConfig can carry.
 func (s *Service) wireModel(ctx context.Context, b backend.Backend, model string, opts backend.WireOptions) (*wiring.ModelConfigRef, error) {
 	// Resolve the canonical name so "smollm2:135m" and "smollm2:135m" pulled
-	// as "smollm2" end up in one ModelConfig, and the model's own context
-	// length, which caps the window the ModelConfig asks for.
-	var maxContext int64
+	// as "smollm2" end up in one ModelConfig, and the model the endpoint is
+	// fitted to: its own context length caps the window the ModelConfig asks
+	// for, and think is written only for a model with the thinking
+	// capability.
+	var fit backend.Model
 	if m, err := b.GetModel(ctx, model); err == nil {
-		model, maxContext = m.Name, m.ContextLength
+		model, fit = m.Name, *m
 	}
-	ep := opts.Apply(b.AgentEndpoint(model)).WithinContext(maxContext)
+	ep := opts.Apply(b.AgentEndpoint(model)).FitTo(fit)
 	ep.Backend = b.Name()
 	if err := ep.Validate(); err != nil {
 		return nil, err

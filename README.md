@@ -216,6 +216,24 @@ Ollama reserves the KV cache for all of it when it loads the model. A
 ModelConfig written by hand gets none of this and depends on the host's
 `OLLAMA_CONTEXT_LENGTH`.
 
+Thinking is the third. A model with Ollama's `thinking` capability (Qwen3.5,
+Qwen3, DeepSeek-R1, Granite 4.2, ...) reasons before every answer unless the
+chat request says `think: false`: 1.5–2k tokens per model call, minutes on a
+CPU. A small one such as `qwen3.5:2b` can put its whole answer into the
+thinking, which the agent runtime does not read, so the agent replies with
+nothing. The ModelConfig of such a model therefore carries
+`spec.ollama.think`, the chart value `ollama.think` (`--ollama-think`,
+`MODEL_MANAGER_OLLAMA_THINK`): `false` by default, `true` to have the model
+reason first, or empty to write none and leave Ollama's default. A model
+without the capability gets none, since Ollama answers `true` for it with a
+400. The value is reported as `modelConfig.think`. kagent's ModelConfig has
+the field from kagent 1.0.3 on; model-manager reads the ModelConfig schema the
+apiserver serves (its OpenAPI v3, refreshed every minute) and writes `think`
+only where it is there, since the apiserver prunes a field its CRD lacks. With
+auto-wiring, the reconciler brings a ModelConfig whose `think` differs from
+the configured one to it, in the same comparison that covers the context
+window.
+
 ## Backends registered at runtime
 
 model-manager starts with **no backend** (chart default `backend: ""`, `backends: []`) and gets its
