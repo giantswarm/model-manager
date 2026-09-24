@@ -950,6 +950,40 @@ components:
         managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the LLMInferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
         device: { type: string, example: npu, description: "lemonade — where the model runs as Lemonade reports it: npu, gpu, cpu, or several such as `gpu npu`" }
         pinned: { type: boolean, description: lemonade — exempt from slot eviction (loaded with keepAlive -1) }
+        runtime: { $ref: "#/components/schemas/Runtime" }
+        interfaces:
+          type: array
+          description: |
+            kserve — the API interfaces the model's running server registered, read from its
+            `GET /openapi.json` once each time the model turns Ready (vLLM registers a family of
+            routes only when the model's task includes it: a generate model answers `Completions`,
+            `Responses`, `Messages` and `AnthropicTokenCount`, a pooling model `Embeddings`).
+            Absent before the model is Ready; `[]` with `interfacesReason` when the server publishes
+            no route list (a runtime started with `--disable-fastapi-docs`), names chat completions and
+            embeddings side by side (a server that registers every route whatever the model serves,
+            vLLM before 0.16) or could not be read. A preset states no interfaces.
+          items: { $ref: "#/components/schemas/Interface" }
+        interfacesReason: { type: string, description: "kserve — why `interfaces` is empty on a Ready model" }
+    Runtime:
+      type: object
+      description: kserve — the runtime serving a Ready model, as its server reports it
+      required: [name]
+      properties:
+        name: { type: string, example: vllm, description: the runtime the llm-d template starts }
+        version: { type: string, example: 0.23.0, description: "the server's `GET /version` as it answers (a source build reports `0.1.dev<n>+g<commit>`); absent when it did not answer. Nothing is judged by it." }
+    Interface:
+      type: object
+      required: [type, path]
+      properties:
+        type:
+          type: string
+          enum: [Completions, Responses, Messages, AnthropicTokenCount, Embeddings]
+          description: |
+            agentgateway's format name (an `AgentgatewayModel`'s `custom.formats`): `Completions` is
+            OpenAI chat completions (`/v1/chat/completions`, the legacy `/v1/completions` with it),
+            `Responses` the OpenAI Responses API, `Messages` Anthropic Messages,
+            `AnthropicTokenCount` Anthropic's `count_tokens`, `Embeddings` OpenAI embeddings
+        path: { type: string, example: /v1/chat/completions, description: the registered route, relative to `endpoint` }
     ModelConfigRef:
       type: object
       description: |
@@ -1067,7 +1101,7 @@ components:
         weightsSource: { type: string, enum: [safetensors-index, safetensors-shards, tree, preset], description: "safetensors-shards when the index's total_size disagrees by more than one percent with the shards its weight_map names" }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64 }
-        downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }
+        downloadBytes: { type: integer, format: int64, description: "what a pull fetches: the repositorys files, or for a preset served from a model image (oci://) the images layers as its registry lists them — 0, with a note in reason, when the registry does not answer" }
         node: { type: string, description: node the check was made against }
         pool: { type: string, description: "kserve, with several GPU pools and none pinning every predictor: the pool the model is placed on — the chosen node's giantswarm.io/machine-pool, or the pool with no node yet whose smallest hosting size is the smallest; load_model pins the predictor to it" }
         budgetBytes: { type: integer, format: int64 }

@@ -117,8 +117,10 @@ func (b *Backend) resolveFit(ctx context.Context, req backend.FitRequest) (*fitP
 // the safetensors index (its total_size, or the shards it names when they
 // contradict it), else the file tree — within the hub lookup timeout,
 // and from the preset's requirements when the hub cannot tell (gated without
-// a token, unreachable, not answering in time). It returns the note the
-// answer carries when the preset stood in for the hub.
+// a token, unreachable, not answering in time). What a preset served from a
+// model image downloads is the image's layers, read from its registry and
+// nowhere else. It returns the note the answer carries when the preset stood
+// in for the hub or the image's size could not be read.
 func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) {
 	res, p, repo := &plan.Result, plan.Preset, plan.Repo
 	// Bounded on the caller's context: a hub whose packets an egress policy
@@ -167,6 +169,16 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 	}
 	if res.WeightsBytes <= 0 {
 		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
+	}
+	if p != nil && !p.storesInCache() {
+		res.DownloadBytes = 0
+		size, err := modelImageBytes(hctx, p.Spec.Model.StorageURI)
+		if err != nil {
+			b.log.Warn("reading the model image's size failed", "model", repo, "image", p.Spec.Model.StorageURI, "error", err)
+			note = joinNotes(note, "the download size is unknown: "+err.Error())
+		} else {
+			res.DownloadBytes = size
+		}
 	}
 	if p != nil {
 		res.DeclaredWeightsBytes = p.weightsBytes()
@@ -592,4 +604,15 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// joinNotes joins the notes a fit answer carries, skipping empty ones.
+func joinNotes(notes ...string) string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return strings.Join(out, "; ")
 }
