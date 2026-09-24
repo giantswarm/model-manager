@@ -72,11 +72,9 @@ func (a authExplainer) RoundTrip(req *http.Request) (*http.Response, error) {
 	_ = resp.Body.Close()
 	var status metav1.Status
 	if json.Unmarshal(body, &status) != nil || status.Kind != "Status" {
-		status = metav1.Status{Status: metav1.StatusFailure, Code: int32(resp.StatusCode), Message: strings.TrimSpace(string(body))}
+		status = metav1.Status{Status: metav1.StatusFailure, Code: http.StatusForbidden, Reason: metav1.StatusReasonForbidden, Message: strings.TrimSpace(string(body))}
 		if resp.StatusCode == http.StatusUnauthorized {
-			status.Reason = metav1.StatusReasonUnauthorized
-		} else {
-			status.Reason = metav1.StatusReasonForbidden
+			status.Code, status.Reason = http.StatusUnauthorized, metav1.StatusReasonUnauthorized
 		}
 	}
 	status.TypeMeta = metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}
