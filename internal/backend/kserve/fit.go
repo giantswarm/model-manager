@@ -243,9 +243,10 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
-		// The discovery document appeared since the settings were cached
-		// (giantswarm/model-manager#127): the nodes and their eligibility
-		// are judged again on what it says — the GPU pool above all.
+		// The discovery document appeared, or named the GPU pool, since the
+		// settings were cached (giantswarm/model-manager#127): the nodes and
+		// their eligibility are judged again on what it says — the pool
+		// above all.
 		if nodes, err = b.nodes(ctx, loc, p); err != nil {
 			return err
 		}
@@ -271,10 +272,11 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		}
 		res.Fits = false
 		res.Reason = why
-		// Without the discovery document the driver knows no pool: the
-		// answer names the document that is missing and says to retry —
-		// "no accelerator node" is the verdict for a document that names
-		// no pool. The nodes' own reasons stay when there are nodes.
+		// Without the discovery document, or with one that does not name
+		// the pool whose shapes are known yet, the driver knows no pool: the
+		// answer names what the document lacks and says to retry — "no
+		// accelerator node" is the verdict for a document that names no
+		// pool. The nodes' own reasons stay when there are nodes.
 		if missing := b.cfg.discoveryMissing(s); req.Node == "" && missing != "" {
 			res.Reason = missing
 			if len(nodes) > 0 {
