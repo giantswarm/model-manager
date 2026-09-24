@@ -57,8 +57,10 @@ type Backend struct {
 	// cache-agent daemonset), so a list call may read a filling directory.
 	liveCache bool
 	logs      logReader
-	// agentHTTP talks to the cache-agent pods (daemonset inventory mode).
-	agentHTTP *http.Client
+	// agentHTTP talks to the cache-agent pods (daemonset inventory mode);
+	// serverHTTP to the served models' runtimes (interfaces.go).
+	agentHTTP  *http.Client
+	serverHTTP *http.Client
 
 	// index is the driver's copy of the cache index ConfigMap (index.go).
 	index cacheIndex
@@ -68,6 +70,10 @@ type Backend struct {
 	presetCache []*servingPreset
 	token       string
 	tokenAt     time.Time
+
+	// apiMu guards apiCache: what each Ready transition's server read found.
+	apiMu    sync.Mutex
+	apiCache map[string]serverAPI
 }
 
 // k8s returns the typed client a call should use: the caller's own when ctx
@@ -130,6 +136,7 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	// context, so a hub that does not answer cannot outlive the caller.
 	b.hub = newHubClient(opts.HFEndpoint, &http.Client{Timeout: 30 * time.Second}, b.hubToken)
 	b.agentHTTP = &http.Client{Timeout: opts.InventoryTimeout}
+	b.serverHTTP = &http.Client{Timeout: serverReadTimeout}
 	b.scan = b.scanNode
 	if opts.InventoryMode == InventoryModeDaemonSet {
 		b.scan = b.scanAgent
@@ -443,6 +450,9 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Phase:     sv.Phase,
 			Steps:     sv.Steps,
 		}
+		if sv.API.read() {
+			lm.Runtime, lm.Interfaces, lm.InterfacesReason = sv.API.Runtime, sv.API.Interfaces, sv.API.Reason
+		}
 		if sv.Deleting {
 			lm.Status = statusTerminating
 		}
@@ -569,9 +579,14 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	fit := plan.Result
 	fit.Backend = b.Name()
 	res := &backend.LoadResult{Fit: &fit}
-	// A CPU preset is composed without the GPU pool's scheduling and the
-	// accelerator RuntimeClass (settings.forPreset).
-	s = s.forPreset(plan.Preset)
+	// The object is composed with the settings the fit was judged on: a fit
+	// that found no node re-reads a discovery document that was absent or
+	// did not name the GPU pool yet (config.recheckDiscovery), and the pool
+	// it placed the model on is the one the predictor has to be scheduled
+	// onto (giantswarm/model-manager#127). A CPU preset is composed without
+	// the GPU pool's scheduling and the accelerator RuntimeClass
+	// (settings.forPreset).
+	s = b.cfg.settings(ctx).forPreset(plan.Preset)
 	existing, err := b.getServing(ctx, s.Namespace, plan.Preset.name())
 	if err != nil {
 		return nil, err

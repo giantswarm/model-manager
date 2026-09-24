@@ -175,7 +175,15 @@ candidate node while its settings lack the document re-reads it once before answ
 named, the scale-from-zero verdict above; still without it, `fits: false`, `retryable: true` and
 `reason: the serving layer's discovery document <namespace>/<name> is not published yet — the slice
 is still installing; retry in a moment`, which `load_model` / `pull_model` echo in their refusal.
-`no accelerator node` is the verdict for a document that names no pool.
+A document that names no pool while the pool's instance shapes are known — cluster-manager registers
+them with a new pool, and the slice names the pool in the document when its connectivity child renders
+it again, moments later — is treated the same way: its settings stand for five seconds, a fit that
+finds no candidate node re-reads it once, and while it still names no pool the answer is `fits: false`,
+`retryable: true` and `reason: the serving layer's discovery document <namespace>/<name> names no GPU
+pool yet (no spec.gpuPool.nodeSelector) though the pool's instance shapes are known — the slice is
+still publishing the new pool; retry in a moment`. A load composes its predictor with the settings the
+fit was judged on, the pool's taint and label included.
+`no accelerator node` is the verdict for a document that names no pool while no pool shapes are known.
 
 A list with an invalid entry is refused on the document (the document is reported and not loaded)
 and ignored from discovery (the answer is the unverified one). Once a node of the pool exists the
@@ -202,6 +210,34 @@ preset, `spec.router.scheduler: true|false` on a preset for that preset alone (t
 wins). A shape that switches it on needs the Inference Extension enabled on the models Gateway
 (giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
 keeps its shape until it is unloaded and loaded again.
+
+### The API interfaces of a served model
+
+Which APIs a served model answers is read from its running server, never declared: once each time
+an `LLMInferenceService` turns Ready the backend asks its workload Service
+(`<name>-kserve-workload-svc:8000`) for `GET /version` and `GET /openapi.json`, and reports
+`runtime {name: vllm, version}` and `interfaces [{type, path}]` on the loaded model
+(`list_loaded_models`, `GET /api/v1/loaded`, and `running` of `list_models`). Since vLLM 0.16 the
+OpenAI-compatible server registers a family of routes only when the model's task includes it, so
+the route list is the interface list: a generate model answers `Completions`
+(`/v1/chat/completions`, the legacy `/v1/completions` with it), `Responses`, `Messages` and
+`AnthropicTokenCount` (`/v1/messages/count_tokens`), a pooling model `Embeddings` and no chat route.
+The names are agentgateway's format vocabulary, the one an `AgentgatewayModel`'s `custom.formats`
+takes. A preset states no interfaces.
+
+A server that publishes no route list (a runtime started with `--disable-fastapi-docs`, which the
+agent-platform chart refuses in a preset), one whose list names `/v1/chat/completions` and
+`/v1/embeddings` side by side (a server that registers every route whatever the model serves: vLLM
+before 0.16, whose handlers refuse the other family at request time) or a server that could not be
+read reports `interfaces: []` and `interfacesReason`. Nothing is judged by the version: the llm-d
+runtimes' vLLM is a source build that reports `0.1.dev1+g<commit>`, and the version is reported as
+the server gives it. A read that got no answer — the serving
+namespace's network policy dropping model-manager's connection, a runtime failing — is repeated
+after a minute; an answer stands until the model turns Ready anew.
+
+Whether a registered interface serves a given request is the preset's business: tool calling
+needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
+`--reasoning-parser`.
 
 ### The ModelConfig's API key
 

@@ -50,6 +50,21 @@ spec:
         - ipBlock:
             cidr: {{ . }}
     {{- end }}
+    {{- if include "model-manager.hasBackend" (dict "root" . "name" "kserve") }}
+    # The served models' runtimes, in the serving namespace: GET /version and
+    # GET /openapi.json of a Ready LLMInferenceService's workload, the API
+    # interfaces it answers.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "model-manager.kserveNamespace" . }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: llminferenceservice
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- end }}
     {{- if and (include "model-manager.hasBackend" (dict "root" . "name" "kserve")) (eq .Values.kserve.inventory.mode "daemonset") }}
     # The cache-agent pods of the DaemonSet inventory, in the serving namespace.
     - to:

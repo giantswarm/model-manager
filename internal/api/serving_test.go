@@ -130,7 +130,11 @@ func (f *fakeServing) ListLoaded(ctx context.Context) ([]backend.LoadedModel, er
 		loaded[i].ExpiresAt = nil // kserve knows no keep-alive
 		loaded[i].Status = "Pending"
 		if f.ready[loaded[i].Name] {
+			// Like the kserve driver, a Ready model reports what its server
+			// registered.
 			loaded[i].Status = "Ready"
+			loaded[i].Runtime = &backend.Runtime{Name: "vllm", Version: "0.23.0"}
+			loaded[i].Interfaces = []backend.Interface{{Type: backend.InterfaceCompletions, Path: "/v1/chat/completions"}, {Type: backend.InterfaceMessages, Path: "/v1/messages"}}
 		}
 		loaded[i].Resource = strings.ReplaceAll(loaded[i].Name, "/", "-")
 		loaded[i].Endpoint = f.endpoint(loaded[i].Resource)
@@ -307,6 +311,38 @@ func TestServingBackendCapabilitiesAndReads(t *testing.T) {
 	other := nodes[1].(map[string]any)
 	assert.Equal(t, false, other["eligible"])
 	assert.Equal(t, "cache claim hf-cache is pinned to n1", other["eligibilityReason"])
+}
+
+// A Ready model's runtime and interfaces are on its loaded entry and on the
+// model's running entry; a preset states no interfaces.
+func TestServingReportsTheInterfacesOfAReadyModel(t *testing.T) {
+	f := newServingFixture(t)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	status, body = f.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status)
+	pending := body["loaded"].([]any)[0].(map[string]any)
+	assert.NotContains(t, pending, "interfaces", "a model that is not Ready was not read")
+	assert.NotContains(t, pending, "runtime")
+
+	f.backend.setReady("org/tiny")
+	status, body = f.do(t, http.MethodGet, Prefix+"/loaded", nil)
+	require.Equal(t, http.StatusOK, status)
+	lm := body["loaded"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{"name": "vllm", "version": "0.23.0"}, lm["runtime"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "Completions", "path": "/v1/chat/completions"},
+		map[string]any{"type": "Messages", "path": "/v1/messages"},
+	}, lm["interfaces"])
+
+	status, body = f.do(t, http.MethodGet, Prefix+"/models", nil)
+	require.Equal(t, http.StatusOK, status)
+	running := body["models"].([]any)[0].(map[string]any)["running"].(map[string]any)
+	assert.Equal(t, lm["interfaces"], running["interfaces"], "list_models shows a loaded model's interfaces")
+
+	status, body = f.do(t, http.MethodGet, Prefix+"/presets", nil)
+	require.Equal(t, http.StatusOK, status)
+	assert.NotContains(t, body["presets"].([]any)[0].(map[string]any), "interfaces", "a preset states no interfaces")
 }
 
 func TestServingReadsAreUnsupportedOnOllama(t *testing.T) {

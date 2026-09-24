@@ -67,7 +67,16 @@ const (
 	// on settings cached in between was refused for the full DiscoveryTTL
 	// with a hint to turn on components that were on
 	// (giantswarm/model-manager#148).
-	ControlPlaneAbsentTTL   = DiscoveryAbsentTTL
+	ControlPlaneAbsentTTL = DiscoveryAbsentTTL
+	// PoolUnnamedTTL bounds how long settings stand whose discovery document
+	// names no GPU pool while the pool's instance shapes are known
+	// (settings.poolUnnamed): cluster-manager registers the shapes with the
+	// pool, and the document gains the pool's node selector only when the
+	// serving slice's connectivity child renders it again, moments later. A
+	// fit judged on settings cached in between knows no pool and refused one
+	// that scales from zero with "no accelerator node"
+	// (giantswarm/model-manager#127).
+	PoolUnnamedTTL          = DiscoveryAbsentTTL
 	DefaultInventoryTTL     = 2 * time.Minute
 	DefaultInventoryTimeout = 2 * time.Minute
 	// InventoryModePod (default) scans a node's cache with a short-lived pod;
@@ -241,6 +250,14 @@ func (s settings) controlPlaneAbsent() bool {
 	return s.ServingError == "" && (!s.LLMServed || s.ControlPlane == "")
 }
 
+// poolUnnamed reports whether s was resolved from a discovery document that
+// names no GPU pool while the pool's instance shapes are known — a pool
+// registered, its node selector not published yet. Without the shapes a
+// document naming no pool is the verdict: no pool, nothing scales from zero.
+func (s settings) poolUnnamed() bool {
+	return s.DiscoveryFound && len(s.GPUPool.NodeSelector) == 0 && len(s.GPUPool.Instances) > 0
+}
+
 // controlPlaneHint is what to do about the missing llm-d control plane,
 // naming the platform components that install it. With the serving layer's
 // discovery document published, the slice that publishes it is most likely
@@ -299,13 +316,15 @@ func (c *config) settings(ctx context.Context) settings {
 
 // fresh reports whether the cached settings still stand: for DiscoveryTTL —
 // or for DiscoveryAbsentTTL when they were resolved without the configured
-// discovery ConfigMap, and for ControlPlaneAbsentTTL when without the llm-d
-// control plane. The serving slice publishes that document as it installs,
-// and settings cached a moment before it appeared know no GPU pool: a fit
-// judged on them for the full TTL refused a pool that scales from zero with
-// "no accelerator node" (giantswarm/model-manager#127). The slice's CRDs and
-// runtime configs follow the document by seconds, and a load judged on
-// settings cached in between was refused as if the components were off
+// discovery ConfigMap, for PoolUnnamedTTL when its document names no GPU pool
+// yet (settings.poolUnnamed), and for ControlPlaneAbsentTTL when without the
+// llm-d control plane. The serving slice publishes that document as it
+// installs and names a new pool in it moments after the pool is registered,
+// and settings cached in between know no GPU pool: a fit judged on them for
+// the full TTL refused a pool that scales from zero with "no accelerator
+// node" (giantswarm/model-manager#127). The slice's CRDs and runtime configs
+// follow the document by seconds, and a load judged on settings cached in
+// between was refused as if the components were off
 // (giantswarm/model-manager#148).
 func (c *config) fresh() bool {
 	if c.cached == nil {
@@ -314,6 +333,9 @@ func (c *config) fresh() bool {
 	ttl := c.opts.DiscoveryTTL
 	if c.discoveryAbsent(*c.cached) {
 		ttl = min(ttl, DiscoveryAbsentTTL)
+	}
+	if c.cached.poolUnnamed() {
+		ttl = min(ttl, PoolUnnamedTTL)
 	}
 	if c.cached.controlPlaneAbsent() {
 		ttl = min(ttl, ControlPlaneAbsentTTL)
@@ -353,19 +375,28 @@ func (c *config) refresh(ctx context.Context) (settings, error) {
 }
 
 // recheckDiscovery re-resolves the settings once, bypassing the cache, when
-// they were resolved without the configured discovery ConfigMap, and reports
-// whether the document is there now. A fit that found no node asks before it
-// refuses: the document, and with it the GPU pool the fit is judged against,
-// may have appeared since the settings were cached
-// (giantswarm/model-manager#127).
+// they were resolved without the configured discovery ConfigMap or from one
+// that names no GPU pool yet (discoveryPending), and reports whether the
+// re-read says more: the document is there now, or it names the pool now. A
+// fit that found no node asks before it refuses: the document, and with it
+// the GPU pool the fit is judged against, may have appeared since the
+// settings were cached (giantswarm/model-manager#127).
 func (c *config) recheckDiscovery(ctx context.Context) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.discoveryConfigured() || (c.cached != nil && c.cached.DiscoveryFound) {
+	if !c.discoveryConfigured() || (c.cached != nil && !c.discoveryPending(*c.cached)) {
 		return false
 	}
+	wasFound := c.cached != nil && c.cached.DiscoveryFound
 	s, err := c.refresh(ctx)
-	return err == nil && s.DiscoveryFound
+	return err == nil && s.DiscoveryFound && (!wasFound || !s.poolUnnamed())
+}
+
+// discoveryPending reports whether s lacks what the discovery document is
+// about to say: the document itself (discoveryAbsent) or the GPU pool it
+// will name (settings.poolUnnamed).
+func (c *config) discoveryPending(s settings) bool {
+	return c.discoveryAbsent(s) || s.poolUnnamed()
 }
 
 // discoveryConfigured reports whether a discovery ConfigMap is named at all.
@@ -381,10 +412,13 @@ func (c *config) discoveryAbsent(s settings) bool {
 
 // discoveryMissing is the clause a refusal carries when the settings it was
 // judged on lack the configured discovery document — not published yet, or
-// unreadable — and says to retry; empty when the document was read or none
-// is configured.
+// unreadable — or the GPU pool it is about to name, and says to retry; empty
+// when the document was read and says what it will say, or none is
+// configured.
 func (c *config) discoveryMissing(s settings) string {
 	switch {
+	case s.poolUnnamed():
+		return fmt.Sprintf("the serving layer's discovery document %s/%s names no GPU pool yet (no spec.gpuPool.nodeSelector) though the pool's instance shapes are known — the slice is still publishing the new pool; retry in a moment", c.opts.DiscoveryNamespace, c.opts.DiscoveryConfigMap)
 	case !c.discoveryConfigured() || s.DiscoveryFound:
 		return ""
 	case s.DiscoveryError != "":
