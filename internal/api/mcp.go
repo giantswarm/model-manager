@@ -266,8 +266,9 @@ func (t *tools) getBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) listBackends(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	out := map[string]any{"backends": t.svc.Backends(ctx)}
-	if invalid := t.svc.InvalidDocuments(); len(invalid) > 0 {
+	backends, invalid := t.svc.Backends(ctx)
+	out := map[string]any{"backends": backends}
+	if len(invalid) > 0 {
 		out["invalid"] = invalid
 	}
 	return jsonResult(out)

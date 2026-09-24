@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -260,9 +261,12 @@ func TestRegisterDocumentClearsTheReportAtomically(t *testing.T) {
 	assert.Len(t, svc.InvalidDocuments(), 1, "the refused document stays reported")
 }
 
-// The invariant through the real registry: while a sampler reads the service
-// between every informer event, a document that goes invalid → fixed →
-// deleted repeatedly is never seen registered with its own report standing.
+// The invariant through the real registry: while a sampler reads what
+// list_backends answers between every informer event, a document that goes
+// invalid → fixed → deleted repeatedly is never seen registered with its own
+// report standing. The sampler reads both facts at one moment: read one after
+// the other, they can pair one iteration's registration with the next one's
+// report, a state the service never held.
 func TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
 	f := newRegistrationFixture(t)
 	ctx := context.Background()
@@ -275,13 +279,15 @@ func TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
 				return
 			default:
 			}
-			if _, has := f.svc.Has(backend.NameOllama); has {
-				for _, d := range f.svc.InvalidDocuments() {
-					if d.ConfigMap == "model-backend-ollama" {
-						select {
-						case violations <- d.Error:
-						default:
-						}
+			backends, invalid := f.svc.Backends(ctx)
+			if !slices.ContainsFunc(backends, func(b service.BackendResponse) bool { return b.Backend == backend.NameOllama }) {
+				continue
+			}
+			for _, d := range invalid {
+				if d.ConfigMap == "model-backend-ollama" {
+					select {
+					case violations <- d.Error:
+					default:
 					}
 				}
 			}
