@@ -216,34 +216,48 @@ needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
 On an installation whose discovery document carries `spec.llmEndpoint` (the agent-platform
 chart's `llmRouting` with model-manager on: `parentRefs`, the LLM route; `endpoint`, the
 listener's in-cluster URL), every Ready model created from a preset whose server registered at
-least one interface is put on the endpoint as one `AgentgatewayModel`, in the route's namespace,
+least one interface is put on the endpoint as two `AgentgatewayModel`s, in the route's namespace,
 written with model-manager's own ServiceAccount (the chart grants it `agentgatewaymodels` there):
 
 ```yaml
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayModel
 metadata:
-  name: <preset>                  # the public name: what a client sends as `model`
+  name: <preset>-workload         # the concrete model: the served workload
   labels: {app.kubernetes.io/managed-by: model-manager, model-manager.giantswarm.io/backend: kserve, agent-platform.giantswarm.io/preset: <preset>}
 spec:
   parentRefs: [<spec.llmEndpoint.parentRefs>]
+  match: {model: <Hugging Face id>}
+  visibility: Internal
   provider: Custom
   baseURL: http://<name>-kserve-workload-svc.<namespace>.svc.cluster.local:8000/v1
   custom:
     formats: [<the interfaces the server registered>]
-  policies:
-    finalTransformations:
-      - {field: model, expression: '"<Hugging Face id>"'}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: <preset>                  # the public name: what a client sends as `model`
+  labels: {…the same…}
+spec:
+  parentRefs: [<spec.llmEndpoint.parentRefs>]
+  virtualModel:
+    weighted:
+      targets: [{modelRef: {name: <preset>-workload}}]
 ```
 
 The baseURL ends in `/v1`: the gateway's upstream path is the baseURL's path plus the format's
-suffix. A concrete `AgentgatewayModel` forwards the request's `model` unchanged, and vLLM serves
-the model under its Hugging Face id (the llm-d template's `--served-model-name`), so the object
-sets `model` to that id after any format conversion; the formats are the ones the server
-registered, so the gateway converts only what the model does not speak. The object stays while
-its serving object exists (a model restarting keeps it), is removed by `unload_model` in the same
-call and when the serving object is deleted elsewhere, and is rewritten when its spec changes;
-the objects are compared with the served models on every list and at least every five minutes.
+suffix. vLLM serves the model under its Hugging Face id (the llm-d template's
+`--served-model-name`), and on agentgateway 2.1 a concrete `AgentgatewayModel` forwards the
+request's `model` unchanged — its Custom settings carry no model override, and a transformation of
+the field does not reach the provider —, while a virtual model rewrites `model` to its target's.
+So the public name is a virtual model over an Internal concrete one matched on the id, which
+`GET /v1/models` does not list. The formats are the ones the server registered, so the gateway
+converts only what the model does not speak. Both objects stay while their serving object exists
+(a model restarting keeps them), are removed by `unload_model` in the same call and when the
+serving object is deleted elsewhere, and are rewritten when their spec changes; they are compared
+with the served models on every list and at least every five minutes. Two served objects of one
+Hugging Face id would share the concrete match, so the router picks the first by name for both.
 
 `list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL — its public
 one (`spec.llmEndpoint.externalEndpoint`, the chart's `llmRouting.external`) when the installation

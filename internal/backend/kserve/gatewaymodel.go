@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,18 +18,20 @@ import (
 )
 
 // A served model on the platform's LLM endpoint (the agent-platform chart's
-// llmRouting, discovery spec.llmEndpoint): one AgentgatewayModel per Ready
-// LLMInferenceService created from a preset, attached to the endpoint's route
-// under the preset's name — the public name a client sends as `model` —, a
-// Custom provider on the workload Service whose formats are the API
-// interfaces the server registered (interfaces.go), so the gateway converts
-// only what the model does not speak. A concrete AgentgatewayModel forwards
-// the request's `model` unchanged, and vLLM serves the model under its
-// Hugging Face id (the llm-d template's --served-model-name), so the object
-// sets `model` to that id after any format conversion
-// (policies.finalTransformations). The objects are the driver's own, written
-// with its ServiceAccount: they follow the serving object's readiness, not a
-// caller's request.
+// llmRouting, discovery spec.llmEndpoint): per Ready LLMInferenceService
+// created from a preset, two AgentgatewayModels attached to the endpoint's
+// routes. The concrete one, <preset>-workload, is a Custom provider on the
+// workload Service whose formats are the API interfaces the server registered
+// (interfaces.go), so the gateway converts only what the model does not
+// speak; it matches the Hugging Face id vLLM serves the model under (the
+// llm-d template's --served-model-name) and is Internal. The public one,
+// named after the preset — the name a client sends as `model` —, is a
+// virtual model targeting it: agentgateway 2.1 forwards a concrete model's
+// `model` unchanged (its Custom settings carry no model override, and a
+// transformation of the field does not reach the provider), while a virtual
+// model rewrites it to its target's. The objects are the driver's own,
+// written with its ServiceAccount: they follow the serving object's
+// readiness, not a caller's request.
 
 var agentgatewayModelGVR = schema.GroupVersionResource{Group: "agentgateway.dev", Version: "v1alpha1", Resource: "agentgatewaymodels"}
 
@@ -103,8 +104,13 @@ func (sv served) onEndpointName() string {
 	return sv.Preset
 }
 
-// composeGatewayModel builds sv's AgentgatewayModel.
-func composeGatewayModel(sv served, ep *llmEndpoint) *unstructured.Unstructured {
+// workloadModelName names the concrete, Internal model of a public name.
+func workloadModelName(public string) string { return public + "-workload" }
+
+// composeGatewayModels builds sv's pair: the Internal concrete model on the
+// workload Service, matched on the Hugging Face id, and the public virtual
+// model of the preset's name targeting it.
+func composeGatewayModels(sv served, ep *llmEndpoint) []*unstructured.Unstructured {
 	formats := make([]any, 0, len(sv.API.Interfaces))
 	for _, i := range sv.API.Interfaces {
 		formats = append(formats, map[string]any{"type": i.Type})
@@ -113,22 +119,35 @@ func composeGatewayModel(sv served, ep *llmEndpoint) *unstructured.Unstructured 
 	for _, ref := range ep.ParentRefs {
 		parents = append(parents, ref)
 	}
-	spec := map[string]any{
+	concrete := map[string]any{
 		"parentRefs": parents,
+		"match":      map[string]any{"model": sv.Model},
+		"visibility": "Internal",
 		"provider":   "Custom",
 		// The upstream path is the baseURL's path plus the format's suffix:
 		// /v1 makes /v1/chat/completions, /v1/messages, ...
 		"baseURL": workloadURL(sv.Name, sv.Namespace) + "/v1",
 		"custom":  map[string]any{"formats": formats},
-		"policies": map[string]any{"finalTransformations": []any{
-			map[string]any{"field": "model", "expression": strconv.Quote(sv.Model)},
-		}},
 	}
+	virtual := map[string]any{
+		"parentRefs": parents,
+		"virtualModel": map[string]any{"weighted": map[string]any{"targets": []any{
+			map[string]any{"modelRef": map[string]any{"name": workloadModelName(sv.Preset)}},
+		}}},
+	}
+	return []*unstructured.Unstructured{
+		gatewayModelObject(sv, ep, sv.Preset, virtual),
+		gatewayModelObject(sv, ep, workloadModelName(sv.Preset), concrete),
+	}
+}
+
+// gatewayModelObject wraps a spec as one of sv's AgentgatewayModels.
+func gatewayModelObject(sv served, ep *llmEndpoint, name string, spec map[string]any) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": agentgatewayModelGVR.GroupVersion().String(),
 		"kind":       kindAgentgatewayModel,
 		"metadata": map[string]any{
-			"name":      sv.Preset,
+			"name":      name,
 			"namespace": ep.Namespace,
 			"labels": map[string]any{
 				ManagedByLabel: ManagedByValue,
@@ -167,7 +186,7 @@ func (b *Backend) syncGatewayModels(ctx context.Context, s settings, list []serv
 	if ep == nil {
 		return
 	}
-	desired := map[string]*unstructured.Unstructured{}
+	desired := map[string][]*unstructured.Unstructured{}
 	present := map[string]bool{}
 	for i := range list {
 		sv := &list[i]
@@ -188,7 +207,7 @@ func (b *Backend) syncGatewayModels(ctx context.Context, s settings, list []serv
 		case len(sv.API.Interfaces) == 0:
 			sv.EndpointReason = "not on the LLM endpoint: the server reports no API interfaces (" + sv.API.Reason + ")"
 		default:
-			desired[name] = composeGatewayModel(*sv, ep)
+			desired[name] = composeGatewayModels(*sv, ep)
 		}
 	}
 	fingerprint := gatewayFingerprint(ep, desired, present)
@@ -232,8 +251,9 @@ type gatewayState struct {
 
 // applyGatewayModels creates, updates and deletes the driver's
 // AgentgatewayModels so they are desired, plus the existing ones whose
-// serving object is still present.
-func (b *Backend) applyGatewayModels(ctx context.Context, ep *llmEndpoint, desired map[string]*unstructured.Unstructured, present map[string]bool) gatewayState {
+// serving object is still present. desired and present are keyed by public
+// name (the preset); an object belongs to the public name of its preset label.
+func (b *Backend) applyGatewayModels(ctx context.Context, ep *llmEndpoint, desired map[string][]*unstructured.Unstructured, present map[string]bool) gatewayState {
 	state := gatewayState{names: map[string]bool{}, failed: map[string]string{}}
 	res := b.dyn.Resource(agentgatewayModelGVR).Namespace(ep.Namespace)
 	existing, err := res.List(ctx, metav1.ListOptions{LabelSelector: gatewayModelSelector})
@@ -249,51 +269,71 @@ func (b *Backend) applyGatewayModels(ctx context.Context, ep *llmEndpoint, desir
 	for i := range existing.Items {
 		have[existing.Items[i].GetName()] = &existing.Items[i]
 	}
-	for name, obj := range desired {
-		cur, ok := have[name]
-		switch {
-		case !ok:
-			_, err = res.Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue})
-		case cur.GetAnnotations()[specHashAnnotation] != obj.GetAnnotations()[specHashAnnotation]:
-			obj.SetResourceVersion(cur.GetResourceVersion())
-			_, err = res.Update(ctx, obj, metav1.UpdateOptions{FieldManager: ManagedByValue})
-		default:
-			err = nil
+	wanted := map[string]bool{}
+	for public, objs := range desired {
+		created := false
+		for _, obj := range objs {
+			name := obj.GetName()
+			wanted[name] = true
+			cur, ok := have[name]
+			switch {
+			case !ok:
+				_, err = res.Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue})
+				created = true
+			case cur.GetAnnotations()[specHashAnnotation] != obj.GetAnnotations()[specHashAnnotation]:
+				obj.SetResourceVersion(cur.GetResourceVersion())
+				_, err = res.Update(ctx, obj, metav1.UpdateOptions{FieldManager: ManagedByValue})
+			default:
+				err = nil
+			}
+			if err != nil {
+				state.failed[public] = fmt.Sprintf("not on the LLM endpoint: writing %s %s/%s failed: %v", kindAgentgatewayModel, ep.Namespace, name, err)
+				b.log.Warn("writing a served model's AgentgatewayModel failed", "name", name, "namespace", ep.Namespace, "error", err)
+				break
+			}
 		}
-		if err != nil {
-			state.failed[name] = fmt.Sprintf("not on the LLM endpoint: writing %s %s/%s failed: %v", kindAgentgatewayModel, ep.Namespace, name, err)
-			b.log.Warn("writing a served model's AgentgatewayModel failed", "name", name, "namespace", ep.Namespace, "error", err)
+		if _, failed := state.failed[public]; failed {
 			continue
 		}
-		state.names[name] = true
-		if !ok {
-			b.log.Info("served model put on the LLM endpoint", "name", name, "namespace", ep.Namespace, "model", obj.GetAnnotations()[ModelAnnotation])
+		state.names[public] = true
+		if created {
+			b.log.Info("served model put on the LLM endpoint", "name", public, "namespace", ep.Namespace, "model", objs[0].GetAnnotations()[ModelAnnotation])
 		}
 	}
-	for name := range have {
-		if desired[name] != nil {
-			continue
-		}
-		if present[name] {
-			state.names[name] = true // restarting: the object stays
-			continue
-		}
-		if err := b.deleteGatewayModel(ctx, ep, name); err != nil {
-			b.log.Warn("deleting an AgentgatewayModel whose serving object is gone failed", "name", name, "namespace", ep.Namespace, "error", err)
+	for name, cur := range have {
+		public := cur.GetLabels()[PresetLabel]
+		switch {
+		case wanted[name]:
+		case present[public] && desired[public] == nil:
+			state.names[public] = true // restarting: its objects stay
+		default:
+			if err := b.deleteGatewayModelObject(ctx, ep, name); err != nil {
+				b.log.Warn("deleting an AgentgatewayModel whose serving object is gone failed", "name", name, "namespace", ep.Namespace, "error", err)
+			}
 		}
 	}
 	return state
 }
 
-// deleteGatewayModel removes the driver's AgentgatewayModel of a public name;
-// one that is not there is no error.
-func (b *Backend) deleteGatewayModel(ctx context.Context, ep *llmEndpoint, name string) error {
+// deleteGatewayModel takes a public name off the endpoint: its virtual and its
+// concrete model; one that is not there is no error.
+func (b *Backend) deleteGatewayModel(ctx context.Context, ep *llmEndpoint, public string) error {
+	for _, name := range []string{public, workloadModelName(public)} {
+		if err := b.deleteGatewayModelObject(ctx, ep, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteGatewayModelObject removes one of the driver's AgentgatewayModels.
+func (b *Backend) deleteGatewayModelObject(ctx context.Context, ep *llmEndpoint, name string) error {
 	err := b.dyn.Resource(agentgatewayModelGVR).Namespace(ep.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete %s %s/%s: %w", kindAgentgatewayModel, ep.Namespace, name, err)
 	}
 	if err == nil {
-		b.log.Info("served model taken off the LLM endpoint", "name", name, "namespace", ep.Namespace)
+		b.log.Info("AgentgatewayModel taken off the LLM endpoint", "name", name, "namespace", ep.Namespace)
 	}
 	b.gwMu.Lock()
 	b.gwFingerprint = ""
@@ -303,7 +343,7 @@ func (b *Backend) deleteGatewayModel(ctx context.Context, ep *llmEndpoint, name 
 
 // gatewayFingerprint digests what a sync would write: the endpoint, the
 // desired objects' specs and the public names still served.
-func gatewayFingerprint(ep *llmEndpoint, desired map[string]*unstructured.Unstructured, present map[string]bool) string {
+func gatewayFingerprint(ep *llmEndpoint, desired map[string][]*unstructured.Unstructured, present map[string]bool) string {
 	names := make([]string, 0, len(present))
 	for name := range present {
 		names = append(names, name)
@@ -312,11 +352,11 @@ func gatewayFingerprint(ep *llmEndpoint, desired map[string]*unstructured.Unstru
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s|%s|", ep.Namespace, ep.Endpoint)
 	for _, name := range names {
-		hash := ""
-		if obj := desired[name]; obj != nil {
-			hash = obj.GetAnnotations()[specHashAnnotation]
+		fmt.Fprintf(&b, "%s=", name)
+		for _, obj := range desired[name] {
+			fmt.Fprintf(&b, "%s,", obj.GetAnnotations()[specHashAnnotation])
 		}
-		fmt.Fprintf(&b, "%s=%s;", name, hash)
+		b.WriteString(";")
 	}
 	return b.String()
 }

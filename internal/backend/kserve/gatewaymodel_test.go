@@ -35,9 +35,11 @@ func (f *fixture) gatewayModel(ctx context.Context, name string) *unstructured.U
 }
 
 // A Ready model created from a preset is put on the LLM endpoint under the
-// preset's name: a Custom provider on the workload Service's /v1, the
-// formats its server registered, the model rewritten to the Hugging Face id
-// vLLM serves; list_loaded_models names the public name and the endpoint.
+// preset's name: an Internal concrete model — a Custom provider on the
+// workload Service's /v1 with the formats its server registered, matched on
+// the Hugging Face id vLLM serves — and the public virtual model targeting
+// it, which rewrites the request's model; list_loaded_models names the public
+// name and the endpoint.
 func TestReadyModelIsPutOnTheLLMEndpoint(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -50,22 +52,32 @@ func TestReadyModelIsPutOnTheLLMEndpoint(t *testing.T) {
 	assert.Equal(t, testLLMEndpoint, lm.Endpoint, "the endpoint a client reaches the public name at")
 	assert.Empty(t, lm.PublicNameReason)
 
-	obj := f.gatewayModel(ctx, "tiny")
-	require.NotNil(t, obj, "the AgentgatewayModel exists")
-	assert.Equal(t, map[string]string{ManagedByLabel: ManagedByValue, BackendLabel: "kserve", PresetLabel: "tiny"}, obj.GetLabels())
-	assert.Equal(t, testServingNS+"/tiny", obj.GetAnnotations()[servingAnnotation])
-	spec := obj.Object["spec"].(map[string]any)
-	assert.Equal(t, "Custom", spec["provider"])
-	assert.Equal(t, workloadURL("tiny", testServingNS)+"/v1", spec["baseURL"], "/v1: the upstream path is the baseURL's plus the format's suffix")
-	assert.Equal(t, []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "agent-platform-connectivity-llm", "namespace": testPlatformNS}}, spec["parentRefs"])
-	assert.Equal(t, map[string]any{"formats": []any{
-		map[string]any{"type": backend.InterfaceCompletions},
-		map[string]any{"type": backend.InterfaceResponses},
-		map[string]any{"type": backend.InterfaceMessages},
-		map[string]any{"type": backend.InterfaceAnthropicTokenCount},
-	}}, spec["custom"], "exactly the interfaces the model reports")
-	assert.Equal(t, map[string]any{"finalTransformations": []any{map[string]any{"field": "model", "expression": `"` + tinyRepo + `"`}}}, spec["policies"],
-		"the request's model becomes the id vLLM serves under")
+	parents := []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "agent-platform-connectivity-llm", "namespace": testPlatformNS}}
+	public := f.gatewayModel(ctx, "tiny")
+	require.NotNil(t, public, "the public virtual model exists")
+	assert.Equal(t, map[string]string{ManagedByLabel: ManagedByValue, BackendLabel: "kserve", PresetLabel: "tiny"}, public.GetLabels())
+	assert.Equal(t, testServingNS+"/tiny", public.GetAnnotations()[servingAnnotation])
+	assert.Equal(t, map[string]any{
+		"parentRefs":   parents,
+		"virtualModel": map[string]any{"weighted": map[string]any{"targets": []any{map[string]any{"modelRef": map[string]any{"name": "tiny-workload"}}}}},
+	}, public.Object["spec"], "the public name rewrites the request's model to its target's")
+
+	concrete := f.gatewayModel(ctx, "tiny-workload")
+	require.NotNil(t, concrete, "the concrete model exists")
+	assert.Equal(t, "tiny", concrete.GetLabels()[PresetLabel])
+	assert.Equal(t, map[string]any{
+		"parentRefs": parents,
+		"match":      map[string]any{"model": tinyRepo},
+		"visibility": "Internal",
+		"provider":   "Custom",
+		"baseURL":    workloadURL("tiny", testServingNS) + "/v1",
+		"custom": map[string]any{"formats": []any{
+			map[string]any{"type": backend.InterfaceCompletions},
+			map[string]any{"type": backend.InterfaceResponses},
+			map[string]any{"type": backend.InterfaceMessages},
+			map[string]any{"type": backend.InterfaceAnthropicTokenCount},
+		}},
+	}, concrete.Object["spec"], "Internal, matched on the id vLLM serves, the formats exactly the interfaces the model reports, /v1 on the baseURL")
 
 	// The agents ride the endpoint under the public name, keyless.
 	ep := f.b.AgentEndpoint(tinyRepo)
@@ -84,6 +96,7 @@ func TestUnloadTakesTheModelOffTheLLMEndpoint(t *testing.T) {
 
 	require.NoError(t, f.b.Unload(ctx, "tiny"))
 	assert.Nil(t, f.gatewayModel(ctx, "tiny"), "gone with the serving object")
+	assert.Nil(t, f.gatewayModel(ctx, "tiny-workload"), "the concrete model too")
 }
 
 // A model whose server reports no interfaces gets no object, and the list
@@ -132,18 +145,19 @@ func TestGatewayModelsFollowTheServingObjects(t *testing.T) {
 
 	f.setReady(ctx, "tiny", time.Now())
 	loadedOne(t, f.b)
-	require.NoError(t, f.dyn.Resource(agentgatewayModelGVR).Namespace(testPlatformNS).Delete(ctx, "tiny", metav1.DeleteOptions{}))
+	require.NoError(t, f.dyn.Resource(agentgatewayModelGVR).Namespace(testPlatformNS).Delete(ctx, "tiny-workload", metav1.DeleteOptions{}))
 	f.b.gwMu.Lock()
 	f.b.gwSyncedAt = time.Now().Add(-gatewayResync)
 	f.b.gwMu.Unlock()
 	loadedOne(t, f.b)
-	assert.NotNil(t, f.gatewayModel(ctx, "tiny"), "an object deleted by hand is back after the resync")
+	assert.NotNil(t, f.gatewayModel(ctx, "tiny-workload"), "an object deleted by hand is back after the resync")
 
 	require.NoError(t, llmisvcs.Delete(ctx, "tiny", metav1.DeleteOptions{}))
 	loaded, err := f.b.ListLoaded(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, loaded)
-	assert.Nil(t, f.gatewayModel(ctx, "tiny"), "the object of a serving object deleted elsewhere goes")
+	assert.Nil(t, f.gatewayModel(ctx, "tiny"), "the objects of a serving object deleted elsewhere go")
+	assert.Nil(t, f.gatewayModel(ctx, "tiny-workload"))
 }
 
 // A hand-written LLMInferenceService has no preset and so no public name.
