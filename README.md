@@ -586,7 +586,12 @@ scheduling by the registered backend document (`docs/backends.md`).
   `spec.router.scheduler`, and its `InferencePool` needs the Gateway API
   Inference Extension on the gateway — `docs/backends.md`),
   `template.containers[main]` with the preset's `args`, `env` and
-  `resources` (GPU count under the discovery's resource name), `scheduling`
+  `resources` (GPU count under the discovery's resource name; for an `oci://`
+  preset the env ends with the modelcar environment — `HOME=/tmp`,
+  `HF_HOME=/tmp/hf`, `VLLM_CACHE_ROOT=/tmp/vllm-cache`,
+  `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor`, `USER=vllm`, `LOGNAME=vllm`,
+  each only where the preset sets no value of its own —, since the modelcar
+  uid the runtime runs as has no passwd entry and a read-only image), `scheduling`
   as the template's `nodeSelector`/`tolerations` (merged with the discovery
   selector, the GPU pool's label and toleration, and the node pin), the chat
   template mounted, and **`template.runtimeClassName` from the discovery
