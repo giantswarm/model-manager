@@ -182,12 +182,16 @@ func TestWithoutLLMEndpointNothingIsWritten(t *testing.T) {
 }
 
 func TestNewLLMEndpoint(t *testing.T) {
-	ep, err := newLLMEndpoint([]map[string]any{{"kind": "HTTPRoute", "name": "llm"}}, "http://gw:8081/", "platform")
+	ep, err := newLLMEndpoint([]map[string]any{{"kind": "HTTPRoute", "name": "llm"}}, "http://gw:8081/", "", "platform")
 	require.NoError(t, err)
 	assert.Equal(t, "platform", ep.Namespace, "a parent without a namespace is in discovery's")
 	assert.Equal(t, "http://gw:8081", ep.Endpoint)
-	_, err = newLLMEndpoint(nil, "http://gw:8081", "platform")
+	assert.Equal(t, "http://gw:8081", ep.clientURL(), "the listener while nothing is published")
+	ep, err = newLLMEndpoint([]map[string]any{{"name": "llm"}}, "http://gw:8081", "https://llm.example.test/", "platform")
+	require.NoError(t, err)
+	assert.Equal(t, "https://llm.example.test", ep.clientURL(), "a client is given the public URL")
+	_, err = newLLMEndpoint(nil, "http://gw:8081", "", "platform")
 	assert.Error(t, err)
-	_, err = newLLMEndpoint([]map[string]any{{"name": "a", "namespace": "x"}, {"name": "b", "namespace": "y"}}, "http://gw:8081", "platform")
+	_, err = newLLMEndpoint([]map[string]any{{"name": "a", "namespace": "x"}, {"name": "b", "namespace": "y"}}, "http://gw:8081", "", "platform")
 	assert.ErrorContains(t, err, "its own namespace")
 }

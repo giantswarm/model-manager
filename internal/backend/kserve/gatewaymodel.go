@@ -49,22 +49,32 @@ const (
 
 // llmEndpoint is discovery's spec.llmEndpoint: the parent references a served
 // model's AgentgatewayModel carries, the namespace the objects live in (the
-// first parent's: a model attaches to routes of its own namespace) and the
-// listener's in-cluster URL.
+// first parent's: a model attaches to routes of its own namespace), the
+// listener's in-cluster URL and, when published, the endpoint's public one.
 type llmEndpoint struct {
 	ParentRefs []map[string]any
 	Namespace  string
 	Endpoint   string
+	External   string
+}
+
+// clientURL is the URL a client of the endpoint is given: the public one
+// when the installation publishes it, else the in-cluster listener.
+func (ep *llmEndpoint) clientURL() string {
+	if ep.External != "" {
+		return ep.External
+	}
+	return ep.Endpoint
 }
 
 // newLLMEndpoint validates spec.llmEndpoint; a parent without a namespace is
 // in the discovery ConfigMap's.
-func newLLMEndpoint(parentRefs []map[string]any, endpoint, defaultNamespace string) (*llmEndpoint, error) {
+func newLLMEndpoint(parentRefs []map[string]any, endpoint, external, defaultNamespace string) (*llmEndpoint, error) {
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	if len(parentRefs) == 0 || endpoint == "" {
 		return nil, errors.New("enabled without parentRefs or without an endpoint")
 	}
-	ep := &llmEndpoint{Endpoint: endpoint}
+	ep := &llmEndpoint{Endpoint: endpoint, External: strings.TrimRight(strings.TrimSpace(external), "/")}
 	for i, ref := range parentRefs {
 		name, _ := ref["name"].(string)
 		if name == "" {

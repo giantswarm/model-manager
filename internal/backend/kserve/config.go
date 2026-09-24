@@ -161,6 +161,9 @@ type discoveryDoc struct {
 			Enabled    bool             `json:"enabled"`
 			ParentRefs []map[string]any `json:"parentRefs"`
 			Endpoint   string           `json:"endpoint"`
+			// ExternalEndpoint is the endpoint's public URL, when the
+			// installation publishes it (llmRouting.external).
+			ExternalEndpoint string `json:"externalEndpoint"`
 		} `json:"llmEndpoint"`
 	} `json:"spec"`
 }
@@ -473,7 +476,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
 		}
 		if le := sp.LLMEndpoint; le.Enabled {
-			ep, err := newLLMEndpoint(le.ParentRefs, le.Endpoint, o.DiscoveryNamespace)
+			ep, err := newLLMEndpoint(le.ParentRefs, le.Endpoint, le.ExternalEndpoint, o.DiscoveryNamespace)
 			if err != nil {
 				c.log.Warn("discovery's spec.llmEndpoint is unusable; served models stay off the LLM endpoint", "error", err)
 			}

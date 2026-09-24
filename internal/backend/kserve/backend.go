@@ -447,7 +447,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 		}
 		if sv.LLM != nil && !sv.Deleting {
 			if sv.OnEndpoint {
-				lm.PublicName, lm.Endpoint = sv.onEndpointName(), sv.LLM.Endpoint
+				lm.PublicName, lm.Endpoint = sv.onEndpointName(), sv.LLM.clientURL()
 			} else {
 				lm.PublicNameReason = sv.EndpointReason
 			}

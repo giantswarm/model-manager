@@ -972,7 +972,8 @@ components:
             The model is on the endpoint as one `AgentgatewayModel` (provider Custom on the workload
             Service, the formats its `interfaces`, the request's `model` rewritten to the Hugging Face id
             vLLM serves) while its serving object exists, from the first Ready with interfaces on;
-            `endpoint` is then the endpoint's URL, and the model's ModelConfig reaches it there.
+            `endpoint` is then the endpoint's URL (its public one when the installation publishes it),
+            and the model's ModelConfig reaches it at the in-cluster listener.
         publicNameReason: { type: string, description: "kserve, on an installation with the LLM endpoint — why a served model is not on it (not Ready yet, no interfaces reported, not created from a preset, the object could not be written)" }
     Runtime:
       type: object

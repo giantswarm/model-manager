@@ -245,7 +245,9 @@ its serving object exists (a model restarting keeps it), is removed by `unload_m
 call and when the serving object is deleted elsewhere, and is rewritten when its spec changes;
 the objects are compared with the served models on every list and at least every five minutes.
 
-`list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL; a served
+`list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL — its public
+one (`spec.llmEndpoint.externalEndpoint`, the chart's `llmRouting.external`) when the installation
+publishes it, else the listener's; a served
 model that is not on it carries `publicNameReason` (not Ready yet, no interfaces, not created from
 a preset, the object could not be written). The model's ModelConfig rides the endpoint: `openAI.
 baseUrl` the listener plus `/v1`, `model` the public name, the placeholder key (the in-cluster
