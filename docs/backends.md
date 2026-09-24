@@ -198,9 +198,12 @@ The names are agentgateway's format vocabulary, the one an `AgentgatewayModel`'s
 takes. A preset states no interfaces.
 
 A server that publishes no route list (a runtime started with `--disable-fastapi-docs`, which the
-agent-platform chart refuses in a preset), a vLLM before 0.16 (it registers every route whatever
-the model serves) or a server that could not be read reports `interfaces: []` and
-`interfacesReason`; nothing is inferred from a version. A read that got no answer — the serving
+agent-platform chart refuses in a preset), one whose list names `/v1/chat/completions` and
+`/v1/embeddings` side by side (a server that registers every route whatever the model serves: vLLM
+before 0.16, whose handlers refuse the other family at request time) or a server that could not be
+read reports `interfaces: []` and `interfacesReason`. Nothing is judged by the version: the llm-d
+runtimes' vLLM is a source build that reports `0.1.dev1+g<commit>`, and the version is reported as
+the server gives it. A read that got no answer — the serving
 namespace's network policy dropping model-manager's connection, a runtime failing — is repeated
 after a minute; an answer stands until the model turns Ready anew.
 

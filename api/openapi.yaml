@@ -958,9 +958,9 @@ components:
             routes only when the model's task includes it: a generate model answers `Completions`,
             `Responses`, `Messages` and `AnthropicTokenCount`, a pooling model `Embeddings`).
             Absent before the model is Ready; `[]` with `interfacesReason` when the server publishes
-            no route list (a runtime started with `--disable-fastapi-docs`), is a vLLM before 0.16
-            (every route registered whatever the model serves) or could not be read. A preset states
-            no interfaces.
+            no route list (a runtime started with `--disable-fastapi-docs`), names chat completions and
+            embeddings side by side (a server that registers every route whatever the model serves,
+            vLLM before 0.16) or could not be read. A preset states no interfaces.
           items: { $ref: "#/components/schemas/Interface" }
         interfacesReason: { type: string, description: "kserve — why `interfaces` is empty on a Ready model" }
     Runtime:
@@ -969,7 +969,7 @@ components:
       required: [name]
       properties:
         name: { type: string, example: vllm, description: the runtime the llm-d template starts }
-        version: { type: string, example: 0.23.0, description: "the server's `GET /version`; absent when it did not answer" }
+        version: { type: string, example: 0.23.0, description: "the server's `GET /version` as it answers (a source build reports `0.1.dev<n>+g<commit>`); absent when it did not answer. Nothing is judged by it." }
     Interface:
       type: object
       required: [type, path]
