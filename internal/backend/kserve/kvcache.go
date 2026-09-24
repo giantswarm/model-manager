@@ -42,7 +42,7 @@ const (
 	vllmBatchedTokensLargeGPU     = 8192
 	vllmBatchedTokensDefault      = 2048
 	flagMaxModelLen               = "--max-model-len"
-	flagMaxNumBatchedTokens       = "--max-num-batched-tokens"
+	flagMaxNumBatched             = "--max-num-batched-tokens"
 	flagGPUMemoryUtilization      = "--gpu-memory-utilization"
 	flagKVCacheDType              = "--kv-cache-dtype"
 	flagDType                     = "--dtype"
@@ -306,7 +306,7 @@ func parseVLLMArgs(args []string) (vllmArgs, error) {
 	if a.MaxModelLen, err = humanReadableInt(raw); err != nil || a.MaxModelLen <= 0 {
 		return a, fmt.Errorf("%s=%s is not a token count the check judges (vLLM fits auto to the memory itself)", flagMaxModelLen, raw)
 	}
-	for flag, dst := range map[string]*int64{flagMaxNumBatchedTokens: &a.BatchedTokens, flagBlockSize: &a.BlockSize, flagTensorParallelSize: &a.TensorParallel} {
+	for flag, dst := range map[string]*int64{flagMaxNumBatched: &a.BatchedTokens, flagBlockSize: &a.BlockSize, flagTensorParallelSize: &a.TensorParallel} {
 		if v, ok := values[flag]; ok {
 			if *dst, err = humanReadableInt(v); err != nil || *dst <= 0 {
 				return a, fmt.Errorf("%s=%s does not parse", flag, v)
