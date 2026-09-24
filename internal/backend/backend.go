@@ -204,6 +204,9 @@ type LoadedModel struct {
 	// Endpoint is where inference is served (kserve: the LLMInferenceService's address).
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
+	// Pool is the GPU pool the model is pinned to (kserve: the pool label
+	// its predictor selects), when it is pinned to one.
+	Pool string `json:"pool,omitempty"`
 	// Status is a backend-specific state: "loaded" (ollama); "Ready",
 	// "NotReady", "Pending" or "Terminating" (kserve: the serving object's
 	// readiness — Pending while its predictor pod waits for a node or an
@@ -465,7 +468,9 @@ type FitResult struct {
 	DeclaredWeightsBytes int64  `json:"declaredWeightsBytes,omitempty"`
 	OverheadBytes        int64  `json:"overheadBytes"`
 	RequiredBytes        int64  `json:"requiredBytes"`
-	// DownloadBytes is what a pull would fetch (all repository files).
+	// DownloadBytes is what a pull would fetch: the repository's files, or
+	// for a preset served from a model image the image's layers (0 and a
+	// note in the reason when its registry does not answer).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
 	// budget was derived (gpu-labels, allocatable, annotation, or
@@ -473,12 +478,29 @@ type FitResult struct {
 	// is then the size of the pool the node will come as (g6.xlarge), when
 	// the pool's instance shapes are known and one of them hosts the model,
 	// and BudgetBytes the memory of the GPUs the predictor requests on it.
-	Node          string `json:"node,omitempty"`
-	InstanceType  string `json:"instanceType,omitempty"`
+	Node         string `json:"node,omitempty"`
+	InstanceType string `json:"instanceType,omitempty"`
+	// Pool is the GPU pool the model is placed on — the chosen node's
+	// giantswarm.io/machine-pool, or the pool with no node yet whose size
+	// hosts it — when no single pool pins every predictor; load_model pins
+	// the predictor to it (giantswarm/model-manager#152).
+	Pool          string `json:"pool,omitempty"`
 	BudgetBytes   int64  `json:"budgetBytes"`
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`
 	FreeBytes     int64  `json:"freeBytes"`
+	// MaxModelLen is the preset's --max-model-len and KVCacheBytes the KV
+	// cache vLLM needs on each GPU for one sequence of that length, from the
+	// checkpoint's config.json; KVCacheAvailableBytes is what vLLM leaves the
+	// KV cache there (--gpu-memory-utilization of the GPU's memory, less the
+	// weights and vLLM's reserve), and EstimatedMaxModelLen, on a refusal,
+	// the longest sequence that fits, as vLLM estimates it. Zero when the KV
+	// cache was not checked — Reason then says why, and the flat overhead is
+	// all the fit judged.
+	MaxModelLen           int64 `json:"maxModelLen,omitempty"`
+	KVCacheBytes          int64 `json:"kvCacheBytes,omitempty"`
+	KVCacheAvailableBytes int64 `json:"kvCacheAvailableBytes,omitempty"`
+	EstimatedMaxModelLen  int64 `json:"estimatedMaxModelLen,omitempty"`
 	// Gated / Private describe the hub repository; TokenConfigured says
 	// whether a hub token is available for gated downloads.
 	Gated           bool `json:"gated"`

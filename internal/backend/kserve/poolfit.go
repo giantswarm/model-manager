@@ -20,19 +20,21 @@ import (
 
 // predictorNeeds is what the predictor composed for a model asks of the
 // node: the preset's CPU and memory requests (zero without a preset or a
-// request), its GPUs, and the GPU memory its weights and overhead need.
+// request), its GPUs, the GPU memory its weights and overhead need, and the
+// KV cache of one sequence (KV, judged per GPU).
 type predictorNeeds struct {
 	VCPU         float64
 	MemoryGiB    float64
 	GPUs         int
 	GPUMemoryGiB float64
+	KV           *kvCheck
 }
 
 // needsOf reads the predictor's needs from the plan: the preset's requests
 // when a preset serves the model, the sized weights and overhead in any
 // case. An unparsable request is the preset's error, not the pool's.
 func needsOf(plan *fitPlan) (predictorNeeds, error) {
-	n := predictorNeeds{GPUs: 1, GPUMemoryGiB: float64(plan.Result.RequiredBytes) / float64(gib)}
+	n := predictorNeeds{GPUs: 1, GPUMemoryGiB: float64(plan.Result.RequiredBytes) / float64(gib), KV: plan.KV}
 	p := plan.Preset
 	if p == nil {
 		return n, nil
@@ -62,10 +64,19 @@ func requestOf(p *servingPreset, name string, as func(resource.Quantity) float64
 	return as(q), nil
 }
 
-// hosts reports whether a node of shape s can run a predictor with needs n.
+// hosts reports whether a node of shape s can run a predictor with needs n:
+// its requests, its GPU memory, and one sequence of its KV cache on a GPU of
+// the size (unless the KV cache is not checked).
 func hosts(s backend.InstanceShape, n predictorNeeds) bool {
+	kv := n.KV.judge(shapeGPUMemory(s), "")
 	return n.VCPU <= s.UsableVCPU && n.MemoryGiB <= s.UsableMemoryGiB &&
-		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= gpuBudgetGiB(s, n)
+		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= gpuBudgetGiB(s, n) && (kv.Skip != "" || kv.Fits)
+}
+
+// shapeGPUMemory is the memory of one GPU of a size in bytes: gpuMemoryGiB
+// is the nominal size a card is sold as (48 for an L40S), in decimal GB.
+func shapeGPUMemory(s backend.InstanceShape) int64 {
+	return int64(s.GPUMemoryGiB) * 1e9
 }
 
 // gpuBudgetGiB is the GPU memory a predictor with needs n has on a node of
@@ -84,12 +95,7 @@ func requestedGPUs(n predictorNeeds) int { return max(n.GPUs, 1) }
 func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
 	out := make([]backend.InstanceShape, len(shapes))
 	copy(out, shapes)
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].VCPU != out[j].VCPU {
-			return out[i].VCPU < out[j].VCPU
-		}
-		return out[i].MemoryGiB < out[j].MemoryGiB
-	})
+	sort.SliceStable(out, func(i, j int) bool { return smallerShape(out[i], out[j]) })
 	return out
 }
 
@@ -126,6 +132,7 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 		res.Reason = fmt.Sprintf("%s — the node comes as %s (%s: %s vCPU / %s GiB for the predictor, %d × %d GiB GPU); %s fit within %s on the %d GPU the predictor requests, and %s hosts %s%s",
 			where, s.SizeName(), s.InstanceType, trimFloat(s.UsableVCPU), trimFloat(s.UsableMemoryGiB), s.GPUs, s.GPUMemoryGiB,
 			need, humanBytes(res.BudgetBytes), requestedGPUs(needs), s.SizeName(), describeNeeds(needs, plan.Preset), declarationNote(plan))
+		applyKV(res, plan.KV.judge(shapeGPUMemory(s), ""))
 		return nil
 	}
 	largest := shapes[len(shapes)-1]
@@ -135,6 +142,7 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 		where, sizeNames(shapes), presetOrModel(plan), describeNeeds(needs, plan.Preset),
 		largest.SizeName(), trimFloat(largest.UsableVCPU), trimFloat(largest.UsableMemoryGiB), largest.GPUs, largest.GPUMemoryGiB,
 		humanBytes(res.BudgetBytes), requestedGPUs(needs), need, declarationNote(plan))
+	applyKV(res, plan.KV.judge(shapeGPUMemory(largest), ""))
 	return nil
 }
 

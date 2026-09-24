@@ -81,6 +81,7 @@ data:
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
 | `spec.kserve.router.scheduler` | no | `true` composes the llm-d endpoint picker (`router.scheduler`) beside the route on every `LLMInferenceService` the backend composes; default `false`, the route alone — KServe routes the models Gateway to the workload Service (see below). A preset's `spec.router.scheduler` overrides it for that preset |
 | `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
+| `spec.kserve.gpuPools.<pool>.instances[]` | no | The cluster's GPU pools by name — the value of their nodes' `giantswarm.io/machine-pool` label — each with its sizes in the `instances[]` shape above, which cluster-manager writes while the cluster has two or more pools and so no `gpuPool` selector pins every predictor. The fit check places a model on the chosen node's pool, or, when no node hosts it, on the pool with no node yet whose smallest hosting size is the smallest; `load_model` pins the predictor to that pool (`giantswarm.io/machine-pool=<pool>` with the pools' taint) and `list_loaded_models` names it as `pool` |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
@@ -149,7 +150,11 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
   weights, the Hub holds 24.6 GiB` on a fit, `…; the Hub holds 24.6 GiB, which is what does not
   fit — correct the preset` on a refusal — and a declaration that covers the Hub adds nothing;
 - a model **without a preset** is judged on its weights and the default overhead against the GPU
-  memory alone.
+  memory alone;
+- a size hosts the model only when vLLM's **KV cache** holds one sequence of the preset's
+  `--max-model-len` on one of its GPUs (`gpuMemoryGiB` is the nominal size a card is sold as, in
+  decimal GB: an L40S's 48 are 44.7 GiB), the same check as on a node (see the README's Import),
+  and the reason names the KV need and what the size leaves it.
 
 The document is what tells the fit there is a pool at all. Settings resolved while the discovery
 ConfigMap was not published yet — the serving slice publishes it as its connectivity child installs —

@@ -600,15 +600,23 @@ func TestListNodes(t *testing.T) {
 
 	// The reservation shrinks the free budget a load fit-check uses; a load of
 	// the same preset does not count against itself.
-	res, err := f.b.fitCheck(ctx, backend.FitRequest{Model: bigRepo, Node: testCacheNode}, true)
+	res, err := f.b.fitCheck(ctx, backend.FitRequest{Model: bigRepo, Node: testCacheNode})
 	require.NoError(t, err)
 	assert.Equal(t, cache.ReservedBytes, res.Result.ReservedBytes)
 	assert.Equal(t, cache.FreeBytes, res.Result.FreeBytes)
 	assert.False(t, res.Result.Fits)
-	res, err = f.b.fitCheck(ctx, backend.FitRequest{Model: tinyRepo, Node: testCacheNode}, true)
+	res, err = f.b.fitCheck(ctx, backend.FitRequest{Model: tinyRepo, Node: testCacheNode})
 	require.NoError(t, err)
 	assert.EqualValues(t, 0, res.Result.ReservedBytes)
 	assert.True(t, res.Result.Fits)
+	// check_fit reads the reservation the load reads, and judges the same
+	// (giantswarm/model-manager#149).
+	fit, err := f.b.FitCheck(ctx, backend.FitRequest{Model: bigRepo, Node: testCacheNode})
+	require.NoError(t, err)
+	assert.Equal(t, cache.ReservedBytes, fit.ReservedBytes, "the served tiny model on the node")
+	assert.Equal(t, cache.FreeBytes, fit.FreeBytes)
+	assert.False(t, fit.Fits)
+	assert.Contains(t, fit.Reason, reservedNote(cache.ReservedBytes))
 }
 
 func TestSharedCacheAndMissingClaim(t *testing.T) {
