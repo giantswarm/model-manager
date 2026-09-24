@@ -67,6 +67,10 @@ type KServeOptions struct {
 	// composed predictors. A registered document's spec.kserve.gpuPool
 	// lands here.
 	GPUPool GPUPool
+	// GPUPools are the cluster's pools by name with their sizes, a
+	// registered document's spec.kserve.gpuPools (several pools, no pool
+	// pinning every predictor).
+	GPUPools map[string]GPUPool
 	// Router is the router shape of the composed LLMInferenceServices: the
 	// route alone by default, the llm-d endpoint picker beside it when
 	// Scheduler is set. A registered document's spec.kserve.router lands

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -231,7 +232,11 @@ func describeHubFailure(err error, timeout time.Duration) string {
 // placeModel picks the node the model is checked against and writes the
 // verdict into the plan: the explicit node, else the eligible node with the
 // most free budget, cache nodes first; a GPU pool at scale-to-zero answers
-// without a node. The cache claim has a say for a preset that stores in it
+// without a node. With several pools and none pinning every predictor
+// (settings.GPUPools), the verdict names the pool the model goes to — the
+// chosen node's, or a pool with no node yet whose size hosts the model when
+// no node does — and load_model pins the predictor there
+// (giantswarm/model-manager#152). The cache claim has a say for a preset that stores in it
 // (storesInCache) only: an oci:// preset is judged without the claim's
 // location — no node pin, no cache-node preference, no scan — and its cache
 // verdict is the oci-image one (giantswarm/model-manager#123).
@@ -280,6 +285,14 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+			return b.placeOnPool(plan, pool)
+		}
+		if name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node); err != nil || ok {
+			if err != nil {
+				return err
+			}
+			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+			res.Pool = name
 			return b.placeOnPool(plan, pool)
 		}
 		res.Fits = false
@@ -333,7 +346,85 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
 	res.Cached, res.CacheSource = b.cacheVerdict(ctx, best.Name, plan, loc)
+	s := b.cfg.settings(ctx).forPreset(p)
+	if len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
+		return nil
+	}
+	res.Pool = best.Labels[labelMachinePool]
+	if res.Fits {
+		return nil
+	}
+	// The best node does not fit; a pool that has no node yet may.
+	name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node)
+	if err != nil || !ok {
+		return err
+	}
+	node, why := res.Node, res.Reason
+	res.Node, res.ReservedBytes = "", 0
+	res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+	res.Pool = name
+	if err := b.placeOnPool(plan, pool); err != nil {
+		return err
+	}
+	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
 	return nil
+}
+
+// labelMachinePool is the node label a GPU pool stamps on its nodes: the
+// pool's release name, giantswarm.io/machine-pool=<cluster>-<pool>.
+const labelMachinePool = "giantswarm.io/machine-pool"
+
+// emptyPoolFor picks, among the cluster's pools (settings.GPUPools) that
+// have no node yet, the one the model goes to: the pool whose smallest
+// hosting size is the smallest (by vCPU, then memory), the pool named by
+// name order on a tie. ok is false with an explicit node, while a pool
+// selector pins every predictor, or when no such pool has a size that hosts
+// the model — the caller's verdict then stands. The pool comes back with
+// its label as the selector and the slice's taint.
+func emptyPoolFor(plan *fitPlan, s settings, nodes []nodeBudget, explicit string) (string, backend.GPUPool, bool, error) {
+	if explicit != "" || len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
+		return "", backend.GPUPool{}, false, nil
+	}
+	needs, err := needsOf(plan)
+	if err != nil {
+		return "", backend.GPUPool{}, false, err
+	}
+	names := make([]string, 0, len(s.GPUPools))
+	for name := range s.GPUPools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var bestName string
+	var bestShape *backend.InstanceShape
+	for _, name := range names {
+		if anyNodeMatches(nodes, map[string]string{labelMachinePool: name}) {
+			continue
+		}
+		for _, shape := range sortedShapes(s.GPUPools[name].Instances) {
+			if !hosts(shape, needs) {
+				continue
+			}
+			if bestShape == nil || smallerShape(shape, *bestShape) {
+				bestName, bestShape = name, &shape
+			}
+			break
+		}
+	}
+	if bestShape == nil {
+		return "", backend.GPUPool{}, false, nil
+	}
+	pool := s.GPUPools[bestName]
+	pool.NodeSelector = map[string]string{labelMachinePool: bestName}
+	pool.Taint = s.GPUPool.Taint
+	return bestName, pool, true, nil
+}
+
+// smallerShape orders sizes smallest first: by vCPU, then memory.
+func smallerShape(a, b backend.InstanceShape) bool {
+	if a.VCPU != b.VCPU {
+		return a.VCPU < b.VCPU
+	}
+	return a.MemoryGiB < b.MemoryGiB
 }
 
 // cacheVerdict is the fit answer's Cached / CacheSource pair: what the cache

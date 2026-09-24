@@ -204,6 +204,9 @@ type LoadedModel struct {
 	// Endpoint is where inference is served (kserve: the LLMInferenceService's address).
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
+	// Pool is the GPU pool the model is pinned to (kserve: the pool label
+	// its predictor selects), when it is pinned to one.
+	Pool string `json:"pool,omitempty"`
 	// Status is a backend-specific state: "loaded" (ollama); "Ready",
 	// "NotReady", "Pending" or "Terminating" (kserve: the serving object's
 	// readiness — Pending while its predictor pod waits for a node or an
@@ -475,8 +478,13 @@ type FitResult struct {
 	// is then the size of the pool the node will come as (g6.xlarge), when
 	// the pool's instance shapes are known and one of them hosts the model,
 	// and BudgetBytes the memory of the GPUs the predictor requests on it.
-	Node          string `json:"node,omitempty"`
-	InstanceType  string `json:"instanceType,omitempty"`
+	Node         string `json:"node,omitempty"`
+	InstanceType string `json:"instanceType,omitempty"`
+	// Pool is the GPU pool the model is placed on — the chosen node's
+	// giantswarm.io/machine-pool, or the pool with no node yet whose size
+	// hosts it — when no single pool pins every predictor; load_model pins
+	// the predictor to it (giantswarm/model-manager#152).
+	Pool          string `json:"pool,omitempty"`
 	BudgetBytes   int64  `json:"budgetBytes"`
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`

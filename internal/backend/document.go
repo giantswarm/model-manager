@@ -111,6 +111,13 @@ type KServeSpec struct {
 	// the pool taint model-manager tolerates and the pool label it selects
 	// on everything it schedules onto the pool.
 	GPUPool *GPUPool `json:"gpuPool,omitempty"`
+	// GPUPools are the cluster's GPU pools by name — the value of their
+	// nodes' giantswarm.io/machine-pool label — each with the sizes it
+	// launches, written by cluster-manager while the cluster has two or more
+	// pools and so no gpuPool pins every predictor (giantswarm/cluster-manager#89).
+	// The fit check judges a model against the pool whose size hosts it and
+	// the predictor is pinned to that pool (giantswarm/model-manager#152).
+	GPUPools map[string]GPUPool `json:"gpuPools,omitempty"`
 	// Router, when set, is the router shape of every LLMInferenceService
 	// the backend composes; see Router.
 	Router *Router `json:"router,omitempty"`
@@ -409,6 +416,14 @@ func (s *DocumentSpec) validateKServe() error {
 	if err := s.KServe.GPUPool.Validate(); err != nil {
 		return fmt.Errorf("spec.kserve.gpuPool.%w", err)
 	}
+	for name, pool := range s.KServe.GPUPools {
+		if name == "" {
+			return errors.New("spec.kserve.gpuPools: a pool without a name")
+		}
+		if err := ValidateInstances(pool.Instances); err != nil {
+			return fmt.Errorf("spec.kserve.gpuPools.%s.%w", name, err)
+		}
+	}
 	if t.Local() {
 		if t.APIServer != "" || t.CABundle != "" {
 			return errors.New("spec.kserve.target.apiServer: not accepted for the local cluster")
@@ -485,6 +500,7 @@ func (d *Document) Options(base Options) Options {
 		if k.GPUPool != nil {
 			base.KServe.GPUPool = *k.GPUPool
 		}
+		base.KServe.GPUPools = k.GPUPools
 		if k.Router != nil {
 			base.KServe.Router = *k.Router
 		}
