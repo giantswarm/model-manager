@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,13 +32,18 @@ const (
 	// the model turns Ready anew.
 	serverReadRetry = time.Minute
 	// serverDocLimit caps what is read of an answer (vLLM's openapi.json is
-	// some 300 KiB).
+	// some 200 KiB).
 	serverDocLimit = 8 << 20
 )
 
-// routeListSince is the first vLLM release that registers routes by the
-// model's task; an older one registers every route whatever the model does.
-var routeListSince = [2]int{0, 16}
+// generateRoute and poolingRoute head the two families of routes a server
+// registers by the model's task: one server runs one runner, so a list that
+// names both comes from a server that registers every route (vLLM before
+// 0.16).
+const (
+	generateRoute = "/v1/chat/completions"
+	poolingRoute  = "/v1/embeddings"
+)
 
 // interfaceRoutes maps a registered route onto the interface it serves, in
 // the order interfaces are reported. The legacy /v1/completions comes with
@@ -128,13 +131,17 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 
 // readServerAPI reads the runtime version and the route list of the server
 // at origin. The interfaces are the known routes the list names; a server
-// that publishes no list, one older than the route-by-task release, or one
-// that could not be read reports none, with the reason — nothing is inferred.
+// that publishes no list, one that registers every route whatever the model
+// serves, or one that could not be read reports none, with the reason —
+// nothing is inferred.
 func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
 	ctx, cancel := context.WithTimeout(ctx, serverReadTimeout)
 	defer cancel()
 	api := serverAPI{Runtime: &backend.Runtime{Name: runtimeVLLM}, Interfaces: []backend.Interface{}}
 
+	// The version is reported as the server gives it; a build from source
+	// answers setuptools-scm's 0.1.dev<n>+g<commit>, so nothing is judged by
+	// it.
 	var version struct {
 		Version string `json:"version"`
 	}
@@ -142,15 +149,7 @@ func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
 	if unreachable(status, err) {
 		return api.retry(fmt.Sprintf("the model server did not answer GET /version (%v); read again after %s", err, serverReadRetry))
 	}
-	if err != nil {
-		api.Reason = fmt.Sprintf("the model server reports no version (GET /version: %v), so its route list cannot be told from a vLLM before %d.%d, which registers every route whatever the model serves", err, routeListSince[0], routeListSince[1])
-		return api
-	}
 	api.Runtime.Version = version.Version
-	if !atLeast(version.Version, routeListSince) {
-		api.Reason = fmt.Sprintf("vLLM %s registers every route whatever the model serves (routes follow the model's task since %d.%d), so its route list does not say which interfaces the model answers", version.Version, routeListSince[0], routeListSince[1])
-		return api
-	}
 
 	var doc struct {
 		Paths map[string]json.RawMessage `json:"paths"`
@@ -164,6 +163,12 @@ func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
 		return api
 	case err != nil:
 		api.Reason = fmt.Sprintf("the model server's route list is unreadable (GET /openapi.json: %v)", err)
+		return api
+	}
+	_, generate := doc.Paths[generateRoute]
+	_, pooling := doc.Paths[poolingRoute]
+	if generate && pooling {
+		api.Reason = fmt.Sprintf("the model server's route list names both %s and %s: a server that registers every route whatever the model serves (vLLM before 0.16), so the list does not say which interfaces the model answers", generateRoute, poolingRoute)
 		return api
 	}
 	for _, i := range interfaceRoutes {
@@ -213,29 +218,4 @@ func (b *Backend) getServerJSON(ctx context.Context, url string, out any) (statu
 // one: worth reading again, unlike an answer that says what the server is.
 func unreachable(status int, err error) bool {
 	return err != nil && (status == 0 || status >= 500)
-}
-
-// atLeast reports whether a vLLM version string ("0.23.0",
-// "0.11.1rc2.dev45+gabc") is at least major.minor.
-func atLeast(version string, min [2]int) bool {
-	parts := strings.SplitN(version, ".", 3)
-	if len(parts) < 2 {
-		return false
-	}
-	major, err1 := strconv.Atoi(parts[0])
-	minor, err2 := strconv.Atoi(leadingDigits(parts[1]))
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return major > min[0] || (major == min[0] && minor >= min[1])
-}
-
-// leadingDigits is the run of digits s starts with ("16rc1" → "16").
-func leadingDigits(s string) string {
-	for i, r := range s {
-		if r < '0' || r > '9' {
-			return s[:i]
-		}
-	}
-	return s
 }
