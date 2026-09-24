@@ -89,9 +89,29 @@ Fixing the ConfigMap loads it; deleting it clears the report.
 
 The target **never carries credentials**: every Kubernetes call the kserve backend makes presents
 the caller's own token (`--downstream-oauth`, the platform default), so the target apiserver must
-trust the installation's Dex (the cluster chart's OIDC / `structuredAuthentication` values). A call
-without a caller — no token in the request — is anonymous there and refused. A `local` target uses
-model-manager's in-cluster address and CA.
+trust the installation's Dex (the cluster chart's OIDC / `structuredAuthentication` values). A `local`
+target uses model-manager's in-cluster address and CA. For a remote target:
+
+- **Refused when read** — the document is reported under `invalid` and not loaded, and `add_backend`
+  answers `registered: false` with the `error` — when `--downstream-oauth` is off (every call there
+  would be anonymous) and with `--kserve-inventory-mode=daemonset` (it dials the cache agents' pod
+  IPs, which the installation cannot reach; the `pod` mode reads its scan pod through the target
+  apiserver).
+- **A refusal names its precondition.** A 401 from the target says the target apiserver must trust
+  the installation's Dex as an OIDC issuer, naming the issuer and audience of the caller's token — or
+  that the token expired; a 403 names the caller's RBAC on the target, or a call that carried no
+  caller's token. The code and reason stay the apiserver's.
+- **Detached work runs as the caller.** A background cache rescan and the cleanup of a cancelled
+  download present the token of the call that caused them; with no caller they are skipped (logged
+  once, and the answer's `inventory.reason` says why), never made anonymously. A caller the target
+  refuses is not retried without the token.
+- **Agents reach a model on the target's models Gateway.** The backend's `agentEndpoint` is the
+  gateway origin from the target's discovery ConfigMap (`spec.gateway.endpoint`,
+  `https://models.<cluster>.<domain>`); every ModelConfig names
+  `<origin>/<namespace>/<model>/v1` with `apiKeyPassthrough: true` and no placeholder Secret. A target
+  whose discovery document enables no Gateway says so in the backend's `message`: a model served on
+  its cluster-local address is out of the installation's reach. The kagent wiring itself stays on the
+  installation's cluster.
 
 Everything the document does not name — images, timeouts, inventory mode, the cache claim — keeps
 the value of the chart's `kserve.*` values (the flags), which double as defaults for a registered

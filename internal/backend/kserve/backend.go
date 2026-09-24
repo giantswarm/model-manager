@@ -47,6 +47,10 @@ type Backend struct {
 	inv  *inventory
 	log  *slog.Logger
 
+	// callerlessLog: the first detached work skipped for want of a caller
+	// on a remote target is logged (target.go).
+	callerlessLog sync.Once
+
 	// scan and logs are the node-touching primitives; tests replace them.
 	scan scanner
 	// liveCache says scans reach the cache without creating a pod (the
@@ -104,7 +108,11 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		return nil, fmt.Errorf("kserve budget source %q: want auto, gpu-labels or allocatable", opts.BudgetSource)
 	}
 	switch opts.InventoryMode {
-	case InventoryModePod, InventoryModeDaemonSet:
+	case InventoryModePod:
+	case InventoryModeDaemonSet:
+		if !opts.Target.Local() {
+			return nil, errDaemonSetRemote(opts.Target)
+		}
 	default:
 		return nil, fmt.Errorf("kserve inventory mode %q: want %s or %s", opts.InventoryMode, InventoryModePod, InventoryModeDaemonSet)
 	}
@@ -165,6 +173,10 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		Loading: backend.Loading{OnDemand: false, IdleEviction: false},
 		Target:  b.Target(),
 		GPUPool: s.gpuPoolReport(),
+		// The models Gateway's origin is the host every ModelConfig names
+		// when the discovery document enables it — on a remote target the
+		// one way agents on the installation reach a model served there.
+		AgentEndpoint: s.GatewayEndpoint,
 	}
 	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		info.Message = fmt.Sprintf("%s API not available in %s: %v", kindLLMInferenceService, s.Namespace, err)
@@ -178,6 +190,8 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		info.Message = "discovery: " + s.DiscoveryError
 	case !s.DiscoveryFound:
 		info.Message = fmt.Sprintf("no discovery ConfigMap %s/%s; using flags and defaults", b.opts.DiscoveryNamespace, b.opts.DiscoveryConfigMap)
+	case s.GatewayEndpoint == "" && !b.opts.Target.Local():
+		info.Message = fmt.Sprintf("the discovery document on %s enables no models Gateway (spec.gateway): a model served there gets a cluster-local address that agents on the installation cannot reach", b.opts.Target.Cluster)
 	}
 	return info
 }

@@ -835,9 +835,11 @@ components:
             `endpoint`; lemonade: `--lemonade-agent-host` plus `/api/v1`, the
             OpenAI-compatible base URL; lmstudio: `--lmstudio-agent-host` plus
             `/v1`, likewise OpenAI-compatible). Clients that match ModelConfigs to models by hostname
-            compare against this, not `endpoint`. Absent when the backend has
-            no single agent-facing endpoint (kserve: every served model has its
-            own predictor URL in `running.endpoint` / `modelConfig.endpoint`).
+            compare against this, not `endpoint`. kserve: the models Gateway's
+            origin (`https://models.<cluster>.<domain>` for a workload-cluster
+            target) every served model is routed under; absent without the
+            Gateway, when every served model has its own Service in
+            `running.endpoint` / `modelConfig.endpoint`.
           example: http://172.21.0.1:11434
         healthy: { type: boolean }
         message: { type: string }

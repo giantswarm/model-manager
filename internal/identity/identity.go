@@ -109,24 +109,46 @@ func TokenFromContext(ctx context.Context) (string, bool) {
 // was validated when the request came in; this only decides whether a
 // background continuation may still present it. Zero when the token is not a
 // JWT or carries no exp.
-func TokenExpiry(token string) time.Time {
+func TokenExpiry(token string) time.Time { return TokenClaims(token).Expires }
+
+// Claims are the registered claims of a caller's token that explain what
+// another party makes of it: who issued it, for whom, until when.
+type Claims struct {
+	Issuer   string
+	Audience []string
+	Expires  time.Time
+}
+
+// TokenClaims reads iss, aud and exp of a JWT without verifying it (the token
+// was validated when the request came in), for messages and expiry checks.
+// The zero Claims when the token is not a JWT.
+func TokenClaims(token string) Claims {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return time.Time{}
+		return Claims{}
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return time.Time{}
+		return Claims{}
 	}
-	var claims struct {
-		Exp json.Number `json:"exp"`
+	var raw struct {
+		Iss string          `json:"iss"`
+		Aud json.RawMessage `json:"aud"`
+		Exp json.Number     `json:"exp"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return time.Time{}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return Claims{}
 	}
-	exp, err := claims.Exp.Int64()
-	if err != nil || exp <= 0 {
-		return time.Time{}
+	c := Claims{Issuer: raw.Iss}
+	// aud is a string or an array of strings (RFC 7519 4.1.3).
+	var one string
+	if json.Unmarshal(raw.Aud, &one) == nil && one != "" {
+		c.Audience = []string{one}
+	} else {
+		_ = json.Unmarshal(raw.Aud, &c.Audience)
 	}
-	return time.Unix(exp, 0)
+	if exp, err := raw.Exp.Int64(); err == nil && exp > 0 {
+		c.Expires = time.Unix(exp, 0)
+	}
+	return c
 }
