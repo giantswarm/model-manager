@@ -435,6 +435,18 @@ type FitResult struct {
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`
 	FreeBytes     int64  `json:"freeBytes"`
+	// MaxModelLen is the preset's --max-model-len and KVCacheBytes the KV
+	// cache vLLM needs on each GPU for one sequence of that length, from the
+	// checkpoint's config.json; KVCacheAvailableBytes is what vLLM leaves the
+	// KV cache there (--gpu-memory-utilization of the GPU's memory, less the
+	// weights and vLLM's reserve), and EstimatedMaxModelLen, on a refusal,
+	// the longest sequence that fits, as vLLM estimates it. Zero when the KV
+	// cache was not checked — Reason then says why, and the flat overhead is
+	// all the fit judged.
+	MaxModelLen           int64 `json:"maxModelLen,omitempty"`
+	KVCacheBytes          int64 `json:"kvCacheBytes,omitempty"`
+	KVCacheAvailableBytes int64 `json:"kvCacheAvailableBytes,omitempty"`
+	EstimatedMaxModelLen  int64 `json:"estimatedMaxModelLen,omitempty"`
 	// Gated / Private describe the hub repository; TokenConfigured says
 	// whether a hub token is available for gated downloads.
 	Gated           bool `json:"gated"`

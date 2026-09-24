@@ -515,12 +515,15 @@ scheduling by the registered backend document (`docs/backends.md`).
   weight size (`model.safetensors.index.json` — its `total_size`, or the shards
   its `weight_map` names when they disagree with it by more than one percent —
   else the file tree, else the preset), adds the preset's `overheadGiB` (default 30) and compares with the
-  node budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
+  node's free budget: the budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
   allocatable memory — unified-memory nodes; a node annotation
   `model-manager.giantswarm.io/memory-budget-gib: "96"` overrides that node's
   budget in GiB whatever `kserve.budget.source` says, reported as
   `budgetSource: annotation` — for unified-memory nodes whose allocatable
-  memory overstates what a model may use); `pull` refuses what cannot be
+  memory overstates what a model may use) less what the models already served
+  on the node reserve (`reservedBytes`, the one reading `load` and `nodes` make
+  too; the preset being loaded is not counted against itself), so `fit-check`
+  and `load` reach one verdict; `pull` judges against the whole budget and refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's LLMInferenceService
   mounts — reporting bytes on disk against the repository size. The Job
@@ -550,8 +553,29 @@ scheduling by the registered backend document (`docs/backends.md`).
   (`…; the preset declares 15.0 GiB of weights, the Hub holds 24.6 GiB` on a
   fit; `…; the preset declares 15.0 GiB of weights; the Hub holds 24.6 GiB,
   which is what does not fit — correct the preset` on a refusal).
+  The fit also checks vLLM's own admission, which a flat overhead cannot: vLLM starts only
+  when its KV cache holds one sequence of `--max-model-len` tokens beside the weights, and
+  crash-loops otherwise. From the checkpoint's `config.json` (its `text_config` when nested)
+  and the preset's `--max-model-len`, `--gpu-memory-utilization` (default 0.9),
+  `--kv-cache-dtype` (default: the checkpoint's KV quantization, else the model's dtype),
+  `--max-num-batched-tokens` (default 2048, 8192 on a GPU of 70 GiB or more that is no A100),
+  `--block-size` (16) and `--tensor-parallel-size`, the check computes vLLM v0.23's figure per
+  GPU: a full-attention layer holds the sequence (`2 × KV heads × head dim × dtype bytes` per
+  token; Gemma 4's global layers with their own heads), a sliding-window layer its window and
+  one prefill chunk, an MLA layer its latent (`kv_lora_rank + qk_rope_head_dim`), a
+  linear-attention or Mamba layer none, in 16-token blocks. The GPU leaves the KV cache
+  `--gpu-memory-utilization × its memory` (a node's `nvidia.com/gpu.memory`; a pool size's
+  `gpuMemoryGiB` in decimal GB) less the weights and a 3.15 GiB reserve — the activations, CUDA
+  graphs and runtime vLLM profiles and what loading adds to the checkpoint, measured with
+  Gemma 4 31B on one L40S. When one sequence does not fit, `fits` is false and `reason` names
+  the KV need, what is left and vLLM's estimated maximum model length (`kvCacheBytes`,
+  `kvCacheAvailableBytes`, `estimatedMaxModelLen`): `gemma-4-31b` at 65536 tokens on a 48 GB
+  card at 0.92 needs 12.0 GiB of KV cache beside 31.0 GiB of weights where 7.3 GiB are left,
+  and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
+  `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
+  named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
 - **Serve / stop** — `load` composes the serving object from the preset
-  after a fit check against the node's free budget; `unload` deletes it and
+  after the fit check `fit-check` answers (the node's free budget, the KV cache); `unload` deletes it and
   unwires within the caller's deadline — the object is found by repository,
   object or preset name, never through the cache inventory, so a scan pod
   that cannot start never delays the deletion — and rescans the cache in the

@@ -1070,8 +1070,12 @@ components:
         node: { type: string, description: node the check was made against }
         budgetBytes: { type: integer, format: int64 }
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
-        reservedBytes: { type: integer, format: int64, description: needed by the models already served on the node }
+        reservedBytes: { type: integer, format: int64, description: "needed by the models already served on the node (the preset being loaded not counted); check_fit and load judge against freeBytes, pull against budgetBytes" }
         freeBytes: { type: integer, format: int64 }
+        maxModelLen: { type: integer, format: int64, description: "the preset's --max-model-len; absent when the KV cache was not checked (reason says why)" }
+        kvCacheBytes: { type: integer, format: int64, description: "the KV cache vLLM needs on each GPU for one sequence of maxModelLen tokens, from the checkpoint's config.json (per layer: full attention holds the sequence, sliding attention its window and one prefill chunk, MLA its latent; linear-attention and Mamba layers none)" }
+        kvCacheAvailableBytes: { type: integer, format: int64, description: "what vLLM leaves the KV cache on each GPU: --gpu-memory-utilization of its memory less the weights and vLLM's reserve" }
+        estimatedMaxModelLen: { type: integer, format: int64, description: "on a refusal for the KV cache, the longest sequence that fits, as vLLM estimates it" }
         gated: { type: boolean }
         private: { type: boolean }
         tokenConfigured: { type: boolean, description: a hub token Secret is configured }

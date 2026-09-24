@@ -35,31 +35,38 @@ type fitPlan struct {
 	Dir string
 	// CacheLocal is true when the cache claim is pinned to nodes.
 	CacheLocal bool
+	// KV is the KV cache check the placement runs on each GPU it judges.
+	KV *kvCheck
 }
 
 // fitCheck sizes a model (hub, falling back to the preset) and compares
-// weights + overhead with the budget of the target node. forServe subtracts
-// what the node's running LLMInferenceServices already need; a pull only asks
-// whether the model can ever be served there.
-func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe bool) (*fitPlan, error) {
+// weights + overhead with the free budget of the target node — what the
+// node's running LLMInferenceServices already need subtracted — and its KV
+// cache with the GPU: the answer of check_fit and the check of load_model,
+// one verdict for both.
+func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest) (*fitPlan, error) {
 	plan, idx, err := b.resolveFit(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.judgeFit(ctx, plan, idx, req, forServe); err != nil {
+	if err := b.judgeFit(ctx, plan, idx, req, true); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-// judgeFit completes a resolved plan: sizes the model, places it, and notes
-// in the answer when the preset stood in for the hub. Split from fitCheck so
-// a caller can look at the resolved preset before the hub is asked (Pull).
+// judgeFit completes a resolved plan: sizes the model, reads its KV cache
+// layout, places it, and notes in the answer when the preset stood in for
+// the hub. Split from fitCheck so a caller can look at the resolved preset
+// before the hub is asked (Pull). forServe judges against the node's free
+// budget; a pull only asks whether the model can ever be served there. The
+// reservation is answered either way.
 func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
 	note, err := b.sizeModel(ctx, plan)
 	if err != nil {
 		return err
 	}
+	plan.KV = b.kvCheckFor(ctx, plan)
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
 		return err
 	}
@@ -237,10 +244,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved := map[string]int64{}
-	if forServe {
-		reserved = b.reservedByNode(ctx, idx, p)
-	}
+	reserved := b.reservedByNode(ctx, idx, p)
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
 		// The discovery document appeared, or named the GPU pool, since the
@@ -317,6 +321,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
 			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
 	}
+	applyKV(res, plan.KV.judge(best.GPUMemory, best.GPUProduct))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}

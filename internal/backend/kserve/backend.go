@@ -545,7 +545,7 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if reason := s.servingUnavailable(); reason != "" {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
 	}
-	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node}, true)
+	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node})
 	if err != nil {
 		return nil, err
 	}
@@ -766,7 +766,7 @@ func (b *Backend) Search(ctx context.Context, query string, limit int) ([]backen
 
 // FitCheck implements backend.FitChecker.
 func (b *Backend) FitCheck(ctx context.Context, req backend.FitRequest) (*backend.FitResult, error) {
-	plan, err := b.fitCheck(ctx, req, false)
+	plan, err := b.fitCheck(ctx, req)
 	if err != nil {
 		return nil, err
 	}
