@@ -11,6 +11,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
 
@@ -70,9 +71,16 @@ func (a authExplainer) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
 	_ = resp.Body.Close()
+	// The Status comes as JSON or, to a typed client, as protobuf; a body
+	// that decodes as neither is not quoted (it may be binary).
 	var status metav1.Status
-	if json.Unmarshal(body, &status) != nil || status.Kind != "Status" {
-		status = metav1.Status{Status: metav1.StatusFailure, Code: http.StatusForbidden, Reason: metav1.StatusReasonForbidden, Message: strings.TrimSpace(string(body))}
+	if obj, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, nil); err == nil {
+		if s, ok := obj.(*metav1.Status); ok {
+			status = *s
+		}
+	}
+	if status.Code == 0 {
+		status = metav1.Status{Status: metav1.StatusFailure, Code: http.StatusForbidden, Reason: metav1.StatusReasonForbidden}
 		if resp.StatusCode == http.StatusUnauthorized {
 			status.Code, status.Reason = http.StatusUnauthorized, metav1.StatusReasonUnauthorized
 		}

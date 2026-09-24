@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
+	"k8s.io/client-go/kubernetes/scheme"
 
 	"github.com/giantswarm/model-manager/internal/identity"
 )
@@ -35,8 +38,17 @@ func fakeTargetAPIServer(t *testing.T) (*httptest.Server, []byte) {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"configmaps \"x\" is forbidden: User \"jane@example.com\" cannot get resource \"configmaps\"","reason":"Forbidden","code":403}`))
 		default:
+			// A typed client asks for protobuf, and the apiserver answers
+			// its 401 in kind.
+			status := &metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure, Message: "Unauthorized", Reason: metav1.StatusReasonUnauthorized, Code: http.StatusUnauthorized}
+			if strings.Contains(r.Header.Get("Accept"), "protobuf") {
+				w.Header().Set("Content-Type", "application/vnd.kubernetes.protobuf")
+				w.WriteHeader(http.StatusUnauthorized)
+				require.NoError(t, protobuf.NewSerializer(scheme.Scheme, scheme.Scheme).Encode(status, w))
+				return
+			}
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"Unauthorized","reason":"Unauthorized","code":401}`))
+			require.NoError(t, json.NewEncoder(w).Encode(status))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -70,6 +82,11 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 		assert.Contains(t, err.Error(), "must trust the installation's Dex as an OIDC issuer")
 		assert.Contains(t, err.Error(), "structuredAuthentication jwt issuer https://dex.installation.example, audience muster")
 		assert.Contains(t, err.Error(), srv.URL)
+		assert.True(t, strings.HasPrefix(err.Error(), "Unauthorized — "), "the apiserver's own message, decoded: %q", err.Error())
+
+		_, err = tc.For(identity.ContextWithToken(context.Background(), tok)).Dynamic.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("ns").Get(context.Background(), "x", metav1.GetOptions{})
+		assert.True(t, apierrors.IsUnauthorized(err), "the dynamic client (JSON) too: %v", err)
+		assert.True(t, strings.HasPrefix(err.Error(), "Unauthorized — "), "%q", err.Error())
 	})
 	t.Run("an expired token says so instead", func(t *testing.T) {
 		tok := testJWT(t, map[string]any{"iss": "https://dex.installation.example", "aud": "muster", "exp": time.Now().Add(-time.Minute).Unix()})
