@@ -167,7 +167,7 @@ type Service struct {
 
 // New builds a Service over the static backends, in the operator's order:
 // the first is the default backend. The list may be empty — backends are
-// then registered at runtime (Register) and every backend-scoped call
+// then registered at runtime (RegisterDocument) and every backend-scoped call
 // answers backend.ErrNoBackend until one is. wirer may be nil (wiring
 // disabled).
 func New(backends []backend.Backend, jm *jobs.Manager, wirer wiring.Wirer, info *WiringInfo, cfg Config, log *slog.Logger) *Service {
@@ -193,32 +193,17 @@ func New(backends []backend.Backend, jm *jobs.Manager, wirer wiring.Wirer, info 
 // ErrStaticBackend: a document names a kind --backends already configures.
 var ErrStaticBackend = errors.New("configured statically by --backends; remove it from the chart values to register it at runtime")
 
-// Register adds a backend registered at runtime (source person or
-// cluster-manager); a registered backend of the same name is replaced, a
-// static one is refused with ErrStaticBackend.
-func (s *Service) Register(b backend.Backend, source string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.registerLocked(b, source)
-}
-
-// RegisterDocument registers the backend a document builds and clears the
-// document's report in the same step, so no reader sees the backend
-// registered while its ConfigMap is still listed as invalid — the window in
-// which list_backends answered both for a document that had just been fixed
-// (giantswarm/model-manager#101). A refused registration leaves the report
-// untouched; the caller records the refusal.
+// RegisterDocument adds the backend a document builds at runtime (source
+// person or cluster-manager) and clears the document's report in the same
+// step, so no reader sees the backend registered while its ConfigMap is still
+// listed as invalid — the window in which list_backends answered both for a
+// document that had just been fixed (giantswarm/model-manager#101). A
+// registered backend of the same name is replaced, a static one is refused
+// with ErrStaticBackend; a refused registration leaves the report untouched,
+// the caller records the refusal.
 func (s *Service) RegisterDocument(b backend.Backend, source, configMap string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.registerLocked(b, source); err != nil {
-		return err
-	}
-	delete(s.problems, configMap)
-	return nil
-}
-
-func (s *Service) registerLocked(b backend.Backend, source string) error {
 	name := b.Name()
 	if s.sources[name] == backend.SourceStatic {
 		return fmt.Errorf("%w: backend %s is %w", backend.ErrConflict, name, ErrStaticBackend)
@@ -226,14 +211,25 @@ func (s *Service) registerLocked(b backend.Backend, source string) error {
 	s.byName[name] = b
 	s.sources[name] = source
 	s.rebuildLocked()
+	delete(s.problems, configMap)
 	return nil
 }
 
-// Deregister drops a registered backend; a static or unknown name is a no-op
-// returning false.
-func (s *Service) Deregister(name backend.Name) bool {
+// DeregisterDocument drops the backend a document registered and records the
+// document's problem (with an empty problem, clears its report) in the same
+// step, the mirror of RegisterDocument: no reader sees the backend still
+// registered while its broken document is already listed as invalid
+// (giantswarm/model-manager#101). list_backends lists the reports as
+// invalid. An empty, static or unknown name drops nothing; it reports whether
+// a backend was dropped.
+func (s *Service) DeregisterDocument(name backend.Name, configMap, problem string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if problem == "" {
+		delete(s.problems, configMap)
+	} else {
+		s.problems[configMap] = problem
+	}
 	if src, ok := s.sources[name]; !ok || src == backend.SourceStatic {
 		return false
 	}
@@ -257,18 +253,6 @@ func (s *Service) rebuildLocked() {
 	s.backends = append(static[:len(static):len(static)], registered...)
 }
 
-// ReportDocument records (or, with an empty problem, clears) an invalid
-// backend document by ConfigMap name; list_backends reports them.
-func (s *Service) ReportDocument(configMap, problem string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if problem == "" {
-		delete(s.problems, configMap)
-		return
-	}
-	s.problems[configMap] = problem
-}
-
 // InvalidDocument is a backend document that failed the read-time schema.
 type InvalidDocument struct {
 	ConfigMap string `json:"configMap"`
@@ -279,6 +263,10 @@ type InvalidDocument struct {
 func (s *Service) InvalidDocuments() []InvalidDocument {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.invalidLocked()
+}
+
+func (s *Service) invalidLocked() []InvalidDocument {
 	out := make([]InvalidDocument, 0, len(s.problems))
 	for cm, p := range s.problems {
 		out = append(out, InvalidDocument{ConfigMap: cm, Error: p})
@@ -408,8 +396,8 @@ func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 	return caps
 }
 
-func (s *Service) describe(ctx context.Context, b backend.Backend) BackendResponse {
-	resp := BackendResponse{Info: b.Info(ctx), Source: s.Source(b.Name()), Capabilities: s.capabilities(b)}
+func (s *Service) describe(ctx context.Context, b backend.Backend, source string) BackendResponse {
+	resp := BackendResponse{Info: b.Info(ctx), Source: source, Capabilities: s.capabilities(b)}
 	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
 	// that is the default a client should report — not the driver's fallback.
 	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
@@ -421,14 +409,25 @@ func (s *Service) describe(ctx context.Context, b backend.Backend) BackendRespon
 	return resp
 }
 
-// Backends describes every configured backend, in order.
-func (s *Service) Backends(ctx context.Context) []BackendResponse {
-	all := s.all()
-	out := make([]BackendResponse, 0, len(all))
-	for _, b := range all {
-		out = append(out, s.describe(ctx, b))
+// Backends describes every configured backend, in order, and lists the
+// documents reported invalid, both read under one lock: the answer is a state
+// the service held, never a registration paired with a report made after it
+// (giantswarm/model-manager#101). The backends are described after the lock
+// is released, since describing one asks the backend itself.
+func (s *Service) Backends(ctx context.Context) ([]BackendResponse, []InvalidDocument) {
+	s.mu.RLock()
+	all := s.backends
+	sources := make([]string, len(all))
+	for i, b := range all {
+		sources[i] = s.sources[b.Name()]
 	}
-	return out
+	invalid := s.invalidLocked()
+	s.mu.RUnlock()
+	out := make([]BackendResponse, 0, len(all))
+	for i, b := range all {
+		out = append(out, s.describe(ctx, b, sources[i]))
+	}
+	return out, invalid
 }
 
 // Backend describes one backend — the named one, else the default — and names
@@ -438,7 +437,7 @@ func (s *Service) Backend(ctx context.Context, name string) (BackendResponse, er
 	if err != nil {
 		return BackendResponse{}, err
 	}
-	resp := s.describe(ctx, b)
+	resp := s.describe(ctx, b, s.Source(b.Name()))
 	resp.Backends = s.Names()
 	return resp, nil
 }

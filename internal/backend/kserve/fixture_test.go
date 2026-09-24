@@ -38,7 +38,14 @@ const (
 	repackRepo     = "org/repack"
 	gatedRepo      = "org/gated"
 	presetlessRepo = "other/tiny-clone"
+	// gemmaRepo is Gemma 4 31B FP8 as the Hub holds it: its two shards and
+	// the index's BF16 total_size, and its config.json
+	// (testdata/kvcache).
+	gemmaRepo = "org/gemma-4-31b"
 )
+
+// tinyConfig is the config.json of tinyRepo: two layers of full attention.
+const tinyConfig = `{"model_type":"llama","num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":16,"torch_dtype":"bfloat16"}`
 
 // fakeHub is an httptest Hugging Face Hub with a few repositories.
 type fakeHub struct {
@@ -76,7 +83,7 @@ func newFakeHub(t *testing.T) *fakeHub {
 		switch id {
 		case tinyRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "abc", "gated": false, "private": false, "siblings": []map[string]string{{"rfilename": "config.json"}, {"rfilename": "model.safetensors"}}, "safetensors": map[string]any{"total": 111968}})
-		case bigRepo, repackRepo:
+		case bigRepo, repackRepo, gemmaRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "def", "gated": false, "private": false, "siblings": []map[string]string{{"rfilename": "model.safetensors.index.json"}}})
 		case presetlessRepo:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "sha": "ghi", "gated": false, "private": false})
@@ -117,6 +124,13 @@ func newFakeHub(t *testing.T) *fakeHub {
 				{"type": "file", "path": "model-00001-of-00002.safetensors", "size": 16 * gib, "lfs": map[string]any{"size": 16 * gib}},
 				{"type": "file", "path": "model-00002-of-00002.safetensors", "size": 15 * gib, "lfs": map[string]any{"size": 15 * gib}},
 			})
+		case gemmaRepo:
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"type": "file", "path": "config.json", "size": 5971},
+				{"type": "file", "path": "model.safetensors.index.json", "size": 120246},
+				{"type": "file", "path": "model-00001-of-00002.safetensors", "size": 26885346708, "lfs": map[string]any{"size": 26885346708}},
+				{"type": "file", "path": "model-00002-of-00002.safetensors", "size": 6382775828, "lfs": map[string]any{"size": 6382775828}},
+			})
 		case gatedRepo, presetlessRepo:
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"type": "file", "path": "model.safetensors", "size": 10 * gib, "lfs": map[string]any{"size": 10 * gib}}})
 		default:
@@ -126,7 +140,15 @@ func newFakeHub(t *testing.T) *fakeHub {
 	// safetensors index.
 	mux.HandleFunc("GET /{owner}/{name}/resolve/{rev}/model.safetensors.index.json", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		if id := r.PathValue("owner") + "/" + r.PathValue("name"); id != bigRepo && id != repackRepo {
+		id := r.PathValue("owner") + "/" + r.PathValue("name")
+		if id == gemmaRepo {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":   map[string]any{"total_size": 62546177752},
+				"weight_map": map[string]string{"model.language_model.embed_tokens.weight": "model-00001-of-00002.safetensors", "lm_head.weight": "model-00002-of-00002.safetensors"},
+			})
+			return
+		}
+		if id != bigRepo && id != repackRepo {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -136,6 +158,23 @@ func newFakeHub(t *testing.T) *fakeHub {
 			"metadata":   map[string]any{"total_size": 100 * gib},
 			"weight_map": map[string]string{"model.embed_tokens.weight": "model-00001-of-00002.safetensors", "model.layers.0.mlp.weight": "model-00001-of-00002.safetensors", "lm_head.weight": "model-00002-of-00002.safetensors"},
 		})
+	})
+	// config.json.
+	mux.HandleFunc("GET /{owner}/{name}/resolve/{rev}/config.json", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		switch r.PathValue("owner") + "/" + r.PathValue("name") {
+		case tinyRepo:
+			_, _ = w.Write([]byte(tinyConfig))
+		case gemmaRepo:
+			raw, err := kvConfig("gemma-4-31b-it-fp8-dynamic.json")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write(raw)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

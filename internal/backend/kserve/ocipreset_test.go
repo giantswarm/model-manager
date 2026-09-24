@@ -2,8 +2,14 @@ package kserve
 
 import (
 	"context"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +21,9 @@ import (
 
 // ociImage is the storage URI of the modelcar preset: the weights are an OCI
 // image containerd pulls onto the node, not a download into the cache claim.
-const ociImage = "oci://registry.example/models/tiny-clone:abc123"
+// Its registry is a closed loopback port, so the image's size is never read
+// here (TestOCIPresetDownloadIsTheImage serves one).
+const ociImage = "oci://127.0.0.1:1/models/tiny-clone:abc123"
 
 // ociPresetDoc is a preset for presetlessRepo whose storageUri is an OCI
 // model image. The hub still knows the repository (a 10 GiB tree), so the
@@ -172,4 +180,102 @@ func TestPullRefusesAnOCIPreset(t *testing.T) {
 	jobList, err = f.cs.BatchV1().Jobs(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, jobList.Items)
+}
+
+// TestComposeOCIPresetCarriesTheModelcarEnvironment: a preset served from a
+// model image gets the modelcar environment on its main container without
+// declaring it (giantswarm/model-manager#146); a name the preset sets keeps
+// the preset's value and place, and an hf:// preset gets none of it.
+func TestComposeOCIPresetCarriesTheModelcarEnvironment(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.serveLLMAPI()
+	s := f.b.cfg.settings(ctx)
+	schema := loadLLMISVCSchema(t)
+	modelcar := []any{
+		map[string]any{"name": "HOME", "value": "/tmp"},
+		map[string]any{"name": "HF_HOME", "value": "/tmp/hf"},
+		map[string]any{"name": "VLLM_CACHE_ROOT", "value": "/tmp/vllm-cache"},
+		map[string]any{"name": "TORCHINDUCTOR_CACHE_DIR", "value": "/tmp/torchinductor"},
+		map[string]any{"name": "USER", "value": "vllm"},
+		map[string]any{"name": "LOGNAME", "value": "vllm"},
+	}
+
+	t.Run("an oci:// preset with no env: the modelcar environment", func(t *testing.T) {
+		p, err := parsePreset([]byte(ociPresetDoc()), "shipped")
+		require.NoError(t, err)
+		obj := f.b.composeLLM(p, s, "")
+		schema.assertValid(t, obj)
+		assert.Equal(t, modelcar, mainContainer(obj)["env"])
+	})
+
+	t.Run("the preset's own value wins, in its place", func(t *testing.T) {
+		doc := ociPresetDoc() + `  env:
+    - {name: USER, value: runtime}
+    - {name: VLLM_LOGGING_LEVEL, value: DEBUG}
+`
+		p, err := parsePreset([]byte(doc), "shipped")
+		require.NoError(t, err)
+		obj := f.b.composeLLM(p, s, "")
+		schema.assertValid(t, obj)
+		env := mainContainer(obj)["env"].([]any)
+		assert.Equal(t, map[string]any{"name": "USER", "value": "runtime"}, env[0])
+		assert.Equal(t, map[string]any{"name": "VLLM_LOGGING_LEVEL", "value": "DEBUG"}, env[1])
+		names := map[string]int{}
+		for _, e := range env {
+			names[e.(map[string]any)["name"].(string)]++
+		}
+		assert.Equal(t, 1, names["USER"], "one USER: the preset's")
+		assert.Len(t, env, 7, "the preset's two, then the five modelcar names it does not set")
+		assert.Equal(t, map[string]any{"name": "LOGNAME", "value": "vllm"}, env[6])
+	})
+
+	t.Run("an hf:// preset: its env as written", func(t *testing.T) {
+		p, err := parsePreset([]byte(presetDoc("tiny", tinyRepo, 1, "")), "shipped")
+		require.NoError(t, err)
+		_, hasEnv := mainContainer(f.b.composeLLM(p, s, ""))["env"]
+		assert.False(t, hasEnv)
+	})
+}
+
+// TestOCIPresetDownloadIsTheImage: check_fit's downloadBytes for a preset
+// served from a model image is the image's layers as its registry lists them
+// (giantswarm/model-manager#150), not the Hub tree the weights are sized from;
+// a registry that does not answer leaves it unknown and says so, and an
+// hf:// preset still counts the repository's files.
+func TestOCIPresetDownloadIsTheImage(t *testing.T) {
+	ctx := context.Background()
+	reg := httptest.NewServer(registry.New())
+	t.Cleanup(reg.Close)
+	host := strings.TrimPrefix(reg.URL, "http://")
+	img, err := random.Image(4096, 3)
+	require.NoError(t, err)
+	ref, err := name.ParseReference(host + "/models/tiny-clone:abc123")
+	require.NoError(t, err)
+	require.NoError(t, remote.Write(ref, img))
+	manifest, err := img.Manifest()
+	require.NoError(t, err)
+	var layers int64
+	for _, l := range manifest.Layers {
+		layers += l.Size
+	}
+
+	served := strings.Replace(ociPresetDoc(), ociImage, "oci://"+ref.String(), 1)
+	f := newFixture(t, presetConfigMap("modelcar", served), presetConfigMap("offline", strings.Replace(ociPresetDoc(), "name: modelcar", "name: offline", 1)))
+	f.setDiscovery(ctx, nil, true)
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "modelcar", Node: testGPUNode})
+	require.NoError(t, err)
+	assert.Equal(t, layers, res.DownloadBytes, "the image's layers")
+	assert.Equal(t, int64(10)*gib, res.WeightsBytes, "the weights are still sized from the hub")
+	assert.NotContains(t, res.Reason, "download size is unknown")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "offline", Node: testGPUNode})
+	require.NoError(t, err)
+	assert.Zero(t, res.DownloadBytes, "never the hub tree")
+	assert.Contains(t, res.Reason, "the download size is unknown: read the manifest of 127.0.0.1:1/models/tiny-clone:abc123")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.Positive(t, res.DownloadBytes, "an hf:// preset counts the repository's files")
 }

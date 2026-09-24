@@ -81,22 +81,30 @@ data:
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
 | `spec.kserve.router.scheduler` | no | `true` composes the llm-d endpoint picker (`router.scheduler`) beside the route on every `LLMInferenceService` the backend composes; default `false`, the route alone — KServe routes the models Gateway to the workload Service (see below). A preset's `spec.router.scheduler` overrides it for that preset |
 | `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
+| `spec.kserve.gpuPools.<pool>.instances[]` | no | The cluster's GPU pools by name — the value of their nodes' `giantswarm.io/machine-pool` label — each with its sizes in the `instances[]` shape above, which cluster-manager writes while the cluster has two or more pools and so no `gpuPool` selector pins every predictor. The fit check places a model on the chosen node's pool, or, when no node hosts it, on the pool with no node yet whose smallest hosting size is the smallest; `load_model` pins the predictor to that pool (`giantswarm.io/machine-pool=<pool>` with the pools' taint) and `list_loaded_models` names it as `pool` |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
 (`spec.endpoint: required for ollama`), and the process keeps running with the backends it has.
-Fixing the ConfigMap loads it; deleting it clears the report.
+A loaded document that breaks — it fails the schema, or its backend fails to build — drops its
+backend in the same step that reports it: what serves is always what the ConfigMap holds, never
+the last good document beside the report. Fixing the ConfigMap loads it; deleting it clears the
+report.
 
 The target **never carries credentials**: every Kubernetes call the kserve backend makes presents
 the caller's own token (`--downstream-oauth`, the platform default), so the target apiserver must
 trust the installation's Dex (the cluster chart's OIDC / `structuredAuthentication` values). A `local`
 target uses model-manager's in-cluster address and CA. For a remote target:
 
-- **Refused when read** — the document is reported under `invalid` and not loaded, and `add_backend`
-  answers `registered: false` with the `error` — when `--downstream-oauth` is off (every call there
-  would be anonymous) and with `--kserve-inventory-mode=daemonset` (it dials the cache agents' pod
-  IPs, which the installation cannot reach; the `pod` mode reads its scan pod through the target
-  apiserver).
+- **Refused when read** when `--downstream-oauth` is off (every call there would be anonymous) and
+  with `--kserve-inventory-mode=daemonset` (it dials the cache agents' pod IPs, which the
+  installation cannot reach; the `pod` mode reads its scan pod through the target apiserver). A new
+  document is reported under `invalid` and not loaded, and `add_backend` answers `registered: false`
+  with the `error`. A registered kserve document edited into a refusal — pointed at a remote target
+  while `--downstream-oauth` is off, or given the `daemonset` inventory — is a document whose
+  backend fails to build: its backend is dropped in the same step that reports it, so
+  `list_backends` shows the document under `invalid` and no kserve backend, never the last good
+  target beside the report.
 - **A refusal names its precondition.** A 401 from the target says the target apiserver must trust
   the installation's Dex as an OIDC issuer, naming the issuer and audience of the caller's token — or
   that the token expired; a 403 names the caller's RBAC on the target, or a call that carried no
@@ -166,7 +174,11 @@ discovery ConfigMap, the document's replacing discovery's — the check judges t
   weights, the Hub holds 24.6 GiB` on a fit, `…; the Hub holds 24.6 GiB, which is what does not
   fit — correct the preset` on a refusal — and a declaration that covers the Hub adds nothing;
 - a model **without a preset** is judged on its weights and the default overhead against the GPU
-  memory alone.
+  memory alone;
+- a size hosts the model only when vLLM's **KV cache** holds one sequence of the preset's
+  `--max-model-len` on one of its GPUs (`gpuMemoryGiB` is the nominal size a card is sold as, in
+  decimal GB: an L40S's 48 are 44.7 GiB), the same check as on a node (see the README's Import),
+  and the reason names the KV need and what the size leaves it.
 
 The document is what tells the fit there is a pool at all. Settings resolved while the discovery
 ConfigMap was not published yet — the serving slice publishes it as its connectivity child installs —

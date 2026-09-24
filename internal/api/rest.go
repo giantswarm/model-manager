@@ -119,7 +119,8 @@ func (h *REST) getBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) listBackends(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"backends": h.svc.Backends(r.Context())})
+	backends, _ := h.svc.Backends(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"backends": backends})
 }
 
 func (h *REST) getOpenAPI(w http.ResponseWriter, _ *http.Request) {

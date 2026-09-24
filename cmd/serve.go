@@ -489,7 +489,9 @@ func envFloat(key string, def float64) float64 {
 // kserve document with a remote target, clients toward that apiserver that
 // present the caller's token. A remote target needs callerOnly
 // (--downstream-oauth): model-manager holds no credential for it, so without
-// the caller's token every call there would be anonymous.
+// the caller's token every call there would be anonymous. A refusal is the
+// document's build error: a new document is reported and not loaded, a
+// registered one edited into it is dropped and reported in one step.
 func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) registry.Builder {
 	return func(doc *backend.Document) (backend.Backend, error) {
 		opts := doc.Options(base)

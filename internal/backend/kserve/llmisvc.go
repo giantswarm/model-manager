@@ -43,7 +43,8 @@ func workloadURL(name, namespace string) string {
 // workload Service as its backend — router.scheduler beside it only when the
 // preset or the backend asks for the llm-d endpoint picker, whose
 // InferencePool the gateway resolves only with the Inference Extension —, the
-// preset's args, env and resources on the template's main container,
+// preset's args, env (with the modelcar environment for a model image) and
+// resources on the template's main container,
 // scheduling as
 // nodeSelector/tolerations, the chat template mounted, and
 // template.runtimeClassName from discovery when set. No baseRefs — KServe's
@@ -57,8 +58,8 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	if len(p.Spec.Args) > 0 {
 		main["args"] = toAnySlice(p.Spec.Args)
 	}
-	if len(p.Spec.Env) > 0 {
-		main["env"] = mapsToAny(p.Spec.Env)
+	if env := p.env(); len(env) > 0 {
+		main["env"] = mapsToAny(env)
 	}
 	if res := p.resources(s); len(res) > 0 {
 		main["resources"] = res
@@ -96,6 +97,44 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	obj := newServingObject(p, s.Namespace)
 	obj.Object["spec"] = spec
 	return obj
+}
+
+// modelcarEnv is the environment of a predictor served from a model image
+// (giantswarm/model-manager#146). KServe's modelcar path runs the runtime as
+// its modelcar uid on a read-only image, a uid the runtime image's passwd does
+// not know: vLLM's import dies in torch's inductor cache-dir lookup
+// (getpass.getuser → getpwuid: KeyError) unless the user name comes from the
+// environment, and the home, the Hub cache and the compile caches must be
+// writable, so they live under /tmp.
+var modelcarEnv = [][2]string{
+	{"HOME", "/tmp"},
+	{"HF_HOME", "/tmp/hf"},
+	{"VLLM_CACHE_ROOT", "/tmp/vllm-cache"},
+	{"TORCHINDUCTOR_CACHE_DIR", "/tmp/torchinductor"},
+	{"USER", "vllm"},
+	{"LOGNAME", "vllm"},
+}
+
+// env is the main container's environment: the preset's own, and for a
+// preset served from a model image the modelcar environment after it, for
+// every name the preset does not set itself.
+func (p *servingPreset) env() []map[string]any {
+	if !p.fromModelImage() {
+		return p.Spec.Env
+	}
+	out := append([]map[string]any{}, p.Spec.Env...)
+	set := make(map[string]bool, len(p.Spec.Env))
+	for _, e := range p.Spec.Env {
+		if name, ok := e["name"].(string); ok {
+			set[name] = true
+		}
+	}
+	for _, e := range modelcarEnv {
+		if !set[e[0]] {
+			out = append(out, map[string]any{"name": e[0], "value": e[1]})
+		}
+	}
+	return out
 }
 
 // newServingObject is the LLMInferenceService's metadata: the preset's name,

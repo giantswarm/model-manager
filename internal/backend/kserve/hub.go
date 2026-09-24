@@ -333,3 +333,20 @@ func escapeRepo(repo string) string {
 	}
 	return strings.Join(parts, "/")
 }
+
+// ModelConfig reads the checkpoint's config.json; nil and no error when the
+// repository has none (a Mistral-format checkpoint ships params.json).
+func (c *hubClient) ModelConfig(ctx context.Context, repo, revision string, files []hubFile) (json.RawMessage, error) {
+	const config = "config.json"
+	if !slices.ContainsFunc(files, func(f hubFile) bool { return f.Path == config }) {
+		return nil, nil
+	}
+	if revision == "" {
+		revision = "main"
+	}
+	var doc json.RawMessage
+	if err := c.getJSON(ctx, "/"+escapeRepo(repo)+"/resolve/"+url.PathEscape(revision)+"/"+config, &doc); err != nil {
+		return nil, mapHubErr(err, repo)
+	}
+	return doc, nil
+}

@@ -3,7 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,6 +25,16 @@ import (
 
 const testNamespace = "agent-platform"
 
+// The ollama documents the registry tests move between: valid, failing the
+// schema (no endpoint; the kind is never known), and valid but refused by the
+// fixture's builder (unbuildableEndpoint), a broken document of the same kind.
+const (
+	unbuildableEndpoint = "http://unbuildable:11434"
+	goodOllamaDocument  = "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama, endpoint: http://ollama:11434}\n"
+	badOllamaDocument   = "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama}\n"
+	unbuildableDocument = "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama, endpoint: " + unbuildableEndpoint + "}\n"
+)
+
 // registrationFixture runs the real Registry over a fake clientset with the
 // MCP tools writing through a Store — the add_backend → watch → list_backends
 // chain, minus the apiserver.
@@ -38,6 +49,9 @@ type registrationFixture struct {
 func newRegistrationFixture(t *testing.T, static ...backend.Backend) *registrationFixture {
 	t.Helper()
 	return newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
+		if doc.Spec.Endpoint == unbuildableEndpoint {
+			return nil, errors.New("unbuildable endpoint")
+		}
 		fb := newFakeBackend()
 		fb.name = doc.Spec.Kind
 		return fb, nil
@@ -136,17 +150,48 @@ func TestAddBackendDryRunAndApply(t *testing.T) {
 
 // TestAddBackendNamesAReadTimeRefusal: a document the registry refuses to
 // build (a remote kserve target without downstream OAuth) is answered with
-// the reason, not a bare registered: false.
+// the reason, not a bare registered: false; a registered document edited
+// into the refusal drops its backend in the same step that reports it.
 func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
+	const refusedEndpoint = "http://remote-target:11434"
+	const refusal = "build ollama backend: kserve target wc1: --downstream-oauth is off"
 	f := newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
-		return nil, fmt.Errorf("kserve target wc1: --downstream-oauth is off")
+		if doc.Spec.Endpoint == refusedEndpoint {
+			return nil, errors.New("kserve target wc1: --downstream-oauth is off")
+		}
+		fb := newFakeBackend()
+		fb.name = doc.Spec.Kind
+		return fb, nil
 	})
-	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://ollama:11434"})
+
+	// A new document: not loaded, and the answer names the refusal.
+	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: refusedEndpoint})
 	require.False(t, isErr, text)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal([]byte(text), &out))
 	assert.Equal(t, false, out["registered"])
-	assert.Equal(t, "build ollama backend: kserve target wc1: --downstream-oauth is off", out["error"])
+	assert.Equal(t, refusal, out["error"])
+
+	// Registered, then edited into the refusal: dropped and reported.
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://ollama:11434"})
+	require.False(t, isErr, text)
+	out = nil
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	require.Equal(t, true, out["registered"])
+	assert.Nil(t, out["error"])
+
+	stop := sampleRegisteredAndReported(t, f.svc)
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: refusedEndpoint})
+	require.False(t, isErr, text)
+	require.Eventually(t, func() bool {
+		_, has := f.svc.Has(backend.NameOllama)
+		return !has
+	}, 5*time.Second, 20*time.Millisecond, "the refused edit drops the registered backend")
+	stop()
+	invalid := f.backends(t)["invalid"].([]any)
+	require.Len(t, invalid, 1)
+	assert.Equal(t, "model-backend-ollama", invalid[0].(map[string]any)["configMap"])
+	assert.Equal(t, refusal, invalid[0].(map[string]any)["error"])
 }
 
 func TestAddBackendRefusals(t *testing.T) {
@@ -216,7 +261,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 	f := newRegistrationFixture(t)
 	bad := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "model-backend-ollama", Namespace: testNamespace, Labels: map[string]string{backend.DocumentLabel: "true"}},
-		Data:       map[string]string{backend.DocumentKey: "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama}\n"},
+		Data:       map[string]string{backend.DocumentKey: badOllamaDocument},
 	}
 	_, err := f.client.CoreV1().ConfigMaps(testNamespace).Create(context.Background(), bad, metav1.CreateOptions{})
 	require.NoError(t, err)
@@ -229,7 +274,24 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 	assert.Equal(t, "spec.endpoint: required for ollama", invalid["error"])
 
 	// Fixing the document loads it and clears the report.
-	bad.Data[backend.DocumentKey] = "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama, endpoint: http://ollama:11434}\n"
+	bad.Data[backend.DocumentKey] = goodOllamaDocument
+	_, err = f.client.CoreV1().ConfigMaps(testNamespace).Update(context.Background(), bad, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return ok }, 5*time.Second, 20*time.Millisecond)
+	assert.Empty(t, f.svc.InvalidDocuments())
+
+	// Breaking the loaded document drops its backend, also when the document
+	// still names ollama: the last good backend is not left serving beside
+	// the report.
+	bad.Data[backend.DocumentKey] = unbuildableDocument
+	_, err = f.client.CoreV1().ConfigMaps(testNamespace).Update(context.Background(), bad, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(f.svc.InvalidDocuments()) == 1 }, 5*time.Second, 20*time.Millisecond)
+	out = f.backends(t)
+	assert.Empty(t, out["backends"])
+	assert.Equal(t, "build ollama backend: unbuildable endpoint", out["invalid"].([]any)[0].(map[string]any)["error"])
+
+	bad.Data[backend.DocumentKey] = goodOllamaDocument
 	_, err = f.client.CoreV1().ConfigMaps(testNamespace).Update(context.Background(), bad, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return ok }, 5*time.Second, 20*time.Millisecond)
@@ -264,8 +326,8 @@ func TestRegisterDocumentClearsTheReportAtomically(t *testing.T) {
 	static := newFakeBackend()
 	static.name = backend.NameLMStudio
 	svc := service.New([]backend.Backend{static}, jobs.NewManager(), nil, nil, service.Config{}, nil)
-	svc.ReportDocument("model-backend-ollama", "spec.endpoint: required for ollama")
-	svc.ReportDocument("model-backend-lmstudio", "spec.endpoint: required for lmstudio")
+	svc.DeregisterDocument("", "model-backend-ollama", "spec.endpoint: required for ollama")
+	svc.DeregisterDocument("", "model-backend-lmstudio", "spec.endpoint: required for lmstudio")
 
 	ollama := newFakeBackend()
 	ollama.name = backend.NameOllama
@@ -282,45 +344,95 @@ func TestRegisterDocumentClearsTheReportAtomically(t *testing.T) {
 	assert.Len(t, svc.InvalidDocuments(), 1, "the refused document stays reported")
 }
 
-// The invariant through the real registry: while a sampler reads the service
-// between every informer event, a document that goes invalid → fixed →
-// deleted repeatedly is never seen registered with its own report standing.
-func TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
-	f := newRegistrationFixture(t)
+// The mirror: a broken document is reported and its backend dropped in one
+// step, so no reader sees the backend and the fresh report at once.
+func TestDeregisterDocumentReportsAtomically(t *testing.T) {
+	static := newFakeBackend()
+	static.name = backend.NameLMStudio
+	svc := service.New([]backend.Backend{static}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	ollama := newFakeBackend()
+	ollama.name = backend.NameOllama
+	require.NoError(t, svc.RegisterDocument(ollama, backend.SourcePerson, "model-backend-ollama"))
+
+	assert.True(t, svc.DeregisterDocument(backend.NameOllama, "model-backend-ollama", "spec.endpoint: required for ollama"))
+	_, has := svc.Has(backend.NameOllama)
+	assert.False(t, has)
+	assert.Equal(t, []service.InvalidDocument{{ConfigMap: "model-backend-ollama", Error: "spec.endpoint: required for ollama"}}, svc.InvalidDocuments())
+
+	// A static kind is never dropped; the report stands.
+	assert.False(t, svc.DeregisterDocument(backend.NameLMStudio, "model-backend-lmstudio", "spec.endpoint: required for lmstudio"))
+	_, has = svc.Has(backend.NameLMStudio)
+	assert.True(t, has)
+	assert.Len(t, svc.InvalidDocuments(), 2)
+
+	// An empty problem clears the report (the document was deleted).
+	assert.False(t, svc.DeregisterDocument(backend.NameOllama, "model-backend-ollama", ""))
+	assert.Equal(t, []service.InvalidDocument{{ConfigMap: "model-backend-lmstudio", Error: "spec.endpoint: required for lmstudio"}}, svc.InvalidDocuments())
+}
+
+// sampleRegisteredAndReported starts a sampler that reads what list_backends
+// answers, at one moment, until the returned stop is called; stop fails the
+// test if the sampler ever saw the ollama backend registered while its own
+// document was reported. Read one after the other, the two facts could pair
+// one event's registration with a later one's report, a state the service
+// never held.
+func sampleRegisteredAndReported(t *testing.T, svc *service.Service) (stop func()) {
+	t.Helper()
 	ctx := context.Background()
-	stop := make(chan struct{})
+	done := make(chan struct{})
+	finished := make(chan struct{})
 	violations := make(chan string, 1)
 	go func() {
+		defer close(finished)
 		for {
 			select {
-			case <-stop:
+			case <-done:
 				return
 			default:
 			}
-			if _, has := f.svc.Has(backend.NameOllama); has {
-				for _, d := range f.svc.InvalidDocuments() {
-					if d.ConfigMap == "model-backend-ollama" {
-						select {
-						case violations <- d.Error:
-						default:
-						}
+			backends, invalid := svc.Backends(ctx)
+			if !slices.ContainsFunc(backends, func(b service.BackendResponse) bool { return b.Backend == backend.NameOllama }) {
+				continue
+			}
+			for _, d := range invalid {
+				if d.ConfigMap == "model-backend-ollama" {
+					select {
+					case violations <- d.Error:
+					default:
 					}
 				}
 			}
 		}
 	}()
-	bad := "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama}\n"
-	good := "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nspec: {kind: ollama, endpoint: http://ollama:11434}\n"
+	return func() {
+		t.Helper()
+		close(done)
+		<-finished
+		select {
+		case v := <-violations:
+			t.Fatalf("the ollama backend was registered while its document was reported: %s", v)
+		default:
+		}
+	}
+}
+
+// The invariant through the real registry, on the fix: a document that goes
+// invalid → fixed → deleted repeatedly is never seen registered with its old
+// report standing (giantswarm/model-manager#101).
+func TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
+	f := newRegistrationFixture(t)
+	ctx := context.Background()
+	stop := sampleRegisteredAndReported(t, f.svc)
 	cms := f.client.CoreV1().ConfigMaps(testNamespace)
 	for i := 0; i < 25; i++ {
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "model-backend-ollama", Namespace: testNamespace, Labels: map[string]string{backend.DocumentLabel: "true"}},
-			Data:       map[string]string{backend.DocumentKey: bad},
+			Data:       map[string]string{backend.DocumentKey: badOllamaDocument},
 		}
 		created, err := cms.Create(ctx, cm, metav1.CreateOptions{})
 		require.NoError(t, err)
 		require.Eventually(t, func() bool { return len(f.svc.InvalidDocuments()) == 1 }, 5*time.Second, time.Millisecond)
-		created.Data[backend.DocumentKey] = good
+		created.Data[backend.DocumentKey] = goodOllamaDocument
 		_, err = cms.Update(ctx, created, metav1.UpdateOptions{})
 		require.NoError(t, err)
 		require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return ok }, 5*time.Second, time.Millisecond)
@@ -328,10 +440,38 @@ func TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
 		require.NoError(t, cms.Delete(ctx, "model-backend-ollama", metav1.DeleteOptions{}))
 		require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return !ok }, 5*time.Second, time.Millisecond)
 	}
-	close(stop)
-	select {
-	case v := <-violations:
-		t.Fatalf("the ollama backend was registered while its document was still reported: %s", v)
-	default:
+	stop()
+}
+
+// The invariant through the real registry, on the break: a registered
+// document updated good → bad and back repeatedly — failing the schema, and
+// failing its build while it still names ollama — is never seen registered
+// with its new report standing, and once reported its backend is gone.
+func TestBrokenDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
+	f := newRegistrationFixture(t)
+	ctx := context.Background()
+	stop := sampleRegisteredAndReported(t, f.svc)
+	cms := f.client.CoreV1().ConfigMaps(testNamespace)
+	cm, err := cms.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "model-backend-ollama", Namespace: testNamespace, Labels: map[string]string{backend.DocumentLabel: "true"}},
+		Data:       map[string]string{backend.DocumentKey: goodOllamaDocument},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return ok }, 5*time.Second, time.Millisecond)
+	for i := 0; i < 25; i++ {
+		for _, broken := range []string{badOllamaDocument, unbuildableDocument} {
+			cm.Data[backend.DocumentKey] = broken
+			cm, err = cms.Update(ctx, cm, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool { return len(f.svc.InvalidDocuments()) == 1 }, 5*time.Second, time.Millisecond)
+			_, has := f.svc.Has(backend.NameOllama)
+			assert.False(t, has, "reported implies not registered")
+			cm.Data[backend.DocumentKey] = goodOllamaDocument
+			cm, err = cms.Update(ctx, cm, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool { _, ok := f.svc.Has(backend.NameOllama); return ok }, 5*time.Second, time.Millisecond)
+			assert.Empty(t, f.svc.InvalidDocuments(), "registered implies not reported")
+		}
 	}
+	stop()
 }

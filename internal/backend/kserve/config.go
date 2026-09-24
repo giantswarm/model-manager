@@ -176,6 +176,11 @@ type settings struct {
 	// composed workload gets (scheduling.go): discovery's spec.gpuPool,
 	// the option's taint and selector replacing each when set.
 	GPUPool backend.GPUPool
+	// GPUPools are the cluster's pools by name with their sizes (the
+	// option's, from the backend document) while no GPUPool selector pins
+	// every workload: the fit places a model on one of them and the load
+	// pins its predictor there (giantswarm/model-manager#152).
+	GPUPools map[string]backend.GPUPool
 	// RouterScheduler composes the llm-d endpoint picker (router.scheduler)
 	// beside the route on every LLMInferenceService whose preset does not
 	// decide for itself (llmisvc.go): the option's; discovery has no say.
@@ -218,6 +223,7 @@ func (s settings) forPreset(p *servingPreset) settings {
 		return s
 	}
 	s.GPUPool = backend.GPUPool{}
+	s.GPUPools = nil
 	s.RuntimeClassName = ""
 	return s
 }
@@ -513,6 +519,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	if len(o.GPUPool.Instances) > 0 {
 		s.GPUPool.Instances = o.GPUPool.Instances
 	}
+	s.GPUPools = o.GPUPools
 	s.RouterScheduler = o.Router.Scheduler
 	// The document's shapes were validated when it was read; discovery's
 	// come from chart values nothing has checked. A list with a bad shape
