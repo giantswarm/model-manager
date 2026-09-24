@@ -2,10 +2,13 @@ package wiring
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	discoveryfake "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/openapi"
+	"k8s.io/client-go/openapi/openapitest"
 	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
@@ -34,11 +39,48 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 		testGVR:   "ModelConfigList",
 		secretGVR: "SecretList",
 	}, objs...)
-	return NewKagent(client, "kagent", DefaultAPIVersion, ""), client
+	return NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, ""), client
 }
 
+// kagentOllamaFields are the spec.ollama fields of the ModelConfig kagent
+// 1.0.3 serves; kagent 1.0.2 serves them without think.
+var kagentOllamaFields = []string{"host", "options", "think"}
+
+// servedOpenAPI is the apiserver's OpenAPI v3 for kagent.dev/<version>, in
+// the shape it publishes a CRD in: a component per kind, marked with its
+// group, version and kind, the structural schema inlined.
+func servedOpenAPI(version string, ollamaFields ...string) openapi.ClientWithContext {
+	ollama := map[string]any{}
+	for _, f := range ollamaFields {
+		ollama[f] = map[string]any{"type": "string"}
+	}
+	component := func(kind string) map[string]any {
+		return map[string]any{
+			"type":                            "object",
+			"x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": kind}},
+			"properties": map[string]any{
+				"metadata": map[string]any{"allOf": []any{map[string]any{"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}}},
+				"spec":     map[string]any{"type": "object", "properties": map[string]any{"ollama": map[string]any{"type": "object", "properties": ollama}}},
+			},
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"openapi": "3.0.0", "components": map[string]any{"schemas": map[string]any{
+		"dev.kagent." + version + ".Agent":           map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": "Agent"}}},
+		"dev.kagent." + version + ".ModelConfig":     component("ModelConfig"),
+		"dev.kagent." + version + ".ModelConfigList": map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": "ModelConfigList"}}},
+	}}})
+	if err != nil {
+		panic(err)
+	}
+	return openapi.ToClientWithContext(&openapitest.FakeClient{PathsMap: map[string]openapi.GroupVersion{
+		"apis/" + KagentGroup + "/" + version: openapitest.FakeGroupVersion{GVSpec: raw},
+	}})
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func ollamaEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: 32768}
+	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: 32768, Think: ptr(false)}
 }
 
 func lemonadeEndpoint(model string) backend.AgentEndpoint {
@@ -83,6 +125,11 @@ func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	numCtx, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "options", "num_ctx")
 	assert.Equal(t, "32768", numCtx, "the context window rides on every request, not the server's VRAM-tiered default")
 	assert.Equal(t, int64(32768), ref.ContextLength, "the ref reports the window agents run at")
+	think, found, _ := unstructured.NestedBool(obj.Object, "spec", "ollama", "think")
+	assert.True(t, found, "think rides on every request of a thinking model")
+	assert.False(t, think)
+	require.NotNil(t, ref.Think, "the ref reports think")
+	assert.False(t, *ref.Think)
 
 	// No placeholder secret for Ollama.
 	secrets, err := client.Resource(secretGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
@@ -160,6 +207,130 @@ func TestEnsureOllamaContextLength(t *testing.T) {
 	assert.Zero(t, ref.ContextLength)
 	_, found := numCtx()
 	assert.False(t, found, "no window: the server's default applies")
+}
+
+// TestEnsureOllamaThink: the ModelConfig carries the endpoint's think and
+// follows it on a re-wire — a think set by hand is replaced — and an endpoint
+// without one leaves the field out.
+func TestEnsureOllamaThink(t *testing.T) {
+	k, client := newFakeKagent(t)
+	ctx := context.Background()
+	think := func() (bool, bool) {
+		t.Helper()
+		obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-5-2b", metav1.GetOptions{})
+		require.NoError(t, err)
+		v, found, _ := unstructured.NestedBool(obj.Object, "spec", "ollama", "think")
+		return v, found
+	}
+
+	_, err := k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
+	require.NoError(t, err)
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-5-2b", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, unstructured.SetNestedField(obj.Object, true, "spec", "ollama", "think"))
+	_, err = client.Resource(testGVR).Namespace("kagent").Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	ref, err := k.Lookup(ctx, backend.NameOllama, "qwen3.5:2b")
+	require.NoError(t, err)
+	require.NotNil(t, ref.Think)
+	assert.True(t, *ref.Think, "Lookup reports what the ModelConfig says")
+	assert.False(t, ref.Carries(ollamaEndpoint("qwen3.5:2b")), "a hand-set think is not what the endpoint asks for")
+
+	ref, err = k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
+	require.NoError(t, err)
+	v, found := think()
+	assert.True(t, found)
+	assert.False(t, v, "a re-wire writes the endpoint's think over the hand-set one")
+	assert.True(t, ref.Carries(ollamaEndpoint("qwen3.5:2b")))
+
+	ep := ollamaEndpoint("qwen3.5:2b")
+	ep.Think = nil
+	ref, err = k.Ensure(ctx, "qwen3.5:2b", ep)
+	require.NoError(t, err)
+	assert.Nil(t, ref.Think)
+	_, found = think()
+	assert.False(t, found, "no think: the server's default applies")
+	assert.True(t, ref.Carries(ep))
+}
+
+// TestThinkIsLeftOutWhereTheServedSchemaLacksIt: on a kagent whose
+// ModelConfig has no spec.ollama.think (before 1.0.3) the apiserver would
+// prune the field, so the wirer never writes it, Writable says so, and what a
+// ModelConfig reads back carries the writable endpoint — no re-wire on every
+// pass. Once the served schema has the field (after schemaTTL), think is
+// written.
+func TestThinkIsLeftOutWhereTheServedSchemaLacksIt(t *testing.T) {
+	k, client := newFakeKagent(t)
+	now := time.Now()
+	k.schema = &servedSchema{client: servedOpenAPI(DefaultAPIVersion, "host", "options"), version: DefaultAPIVersion, now: func() time.Time { return now }}
+	ctx := context.Background()
+
+	ep := ollamaEndpoint("qwen3.5:2b")
+	want, err := k.Writable(ctx, ep)
+	require.NoError(t, err)
+	assert.Nil(t, want.Think, "the served schema has no think")
+	assert.Equal(t, ep.ContextLength, want.ContextLength, "the rest of the endpoint is written as it is")
+	ref, err := k.Ensure(ctx, "qwen3.5:2b", ep)
+	require.NoError(t, err)
+	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-5-2b", metav1.GetOptions{})
+	require.NoError(t, err)
+	_, found, _ := unstructured.NestedBool(obj.Object, "spec", "ollama", "think")
+	assert.False(t, found, "a field the CRD lacks is not written")
+	assert.True(t, ref.Carries(want), "the written ModelConfig carries what is writable: nothing to re-wire")
+	assert.False(t, ref.Carries(ep), "compared with the unfitted endpoint it would re-wire on every pass")
+
+	// kagent upgraded: the schema serves think from the next check on.
+	k.schema.client = servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...)
+	want, err = k.Writable(ctx, ep)
+	require.NoError(t, err)
+	assert.Nil(t, want.Think, "the answer holds for schemaTTL")
+	now = now.Add(schemaTTL)
+	want, err = k.Writable(ctx, ep)
+	require.NoError(t, err)
+	require.NotNil(t, want.Think, "after schemaTTL the served schema is read again")
+	ref, err = k.Ensure(ctx, "qwen3.5:2b", ep)
+	require.NoError(t, err)
+	require.NotNil(t, ref.Think)
+	assert.False(t, *ref.Think)
+}
+
+// TestWritableConsultsTheSchemaOnlyForThink: an endpoint without think never
+// reads the served schema, so wiring without the setting works whatever the
+// schema says; one with think fails with the reason when the schema cannot
+// be read, instead of writing a field the apiserver may prune.
+func TestWritableConsultsTheSchemaOnlyForThink(t *testing.T) {
+	k, _ := newFakeKagent(t)
+	k.schema = &servedSchema{client: openapi.ToClientWithContext(&openapitest.FakeClient{ForcedErr: errors.New("openapi down")}), version: DefaultAPIVersion, now: time.Now}
+	ctx := context.Background()
+
+	for _, ep := range []backend.AgentEndpoint{lemonadeEndpoint("qwen3-4b-FLM"), func() backend.AgentEndpoint { ep := ollamaEndpoint("smollm2:135m"); ep.Think = nil; return ep }()} {
+		_, err := k.Ensure(ctx, ep.Model, ep)
+		require.NoError(t, err, "%s: no think, no schema read", ep.Model)
+	}
+	_, err := k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
+	require.ErrorContains(t, err, "openapi down")
+
+	k.schema = &servedSchema{client: openapi.ToClientWithContext(openapitest.NewFakeClient()), version: DefaultAPIVersion, now: time.Now}
+	_, err = k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
+	require.ErrorContains(t, err, "publishes no OpenAPI v3 schema for kagent.dev/v1alpha3")
+}
+
+func TestCarriesComparesTheAgentSettings(t *testing.T) {
+	ep := ollamaEndpoint("qwen3.5:2b")
+	cases := map[string]struct {
+		ref  ModelConfigRef
+		want bool
+	}{
+		"same window, same think": {ModelConfigRef{ContextLength: 32768, Think: ptr(false)}, true},
+		"another window":          {ModelConfigRef{ContextLength: 4096, Think: ptr(false)}, false},
+		"think unset":             {ModelConfigRef{ContextLength: 32768}, false},
+		"think on":                {ModelConfigRef{ContextLength: 32768, Think: ptr(true)}, false},
+		"host and shape ignored":  {ModelConfigRef{ContextLength: 32768, Think: ptr(false), Endpoint: "http://elsewhere:11434", APIKeySecret: "x"}, true},
+	}
+	for name, tc := range cases {
+		assert.Equal(t, tc.want, tc.ref.Carries(ep), name)
+	}
+	assert.True(t, ModelConfigRef{}.Carries(backend.AgentEndpoint{}), "nothing asked, nothing written")
 }
 
 func TestEnsureRefusesForeignModelConfig(t *testing.T) {
@@ -385,7 +556,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	assert.Empty(t, list.Items)
 
 	// A prefix still applies to backend-chosen names.
-	kp := NewKagent(client, "kagent", DefaultAPIVersion, "mm")
+	kp := NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "mm")
 	pref, err := kp.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "mm-qwen3-8-27b", pref.Name)
@@ -562,7 +733,7 @@ func TestDiscoverAPIVersionFollowsWhatTheClusterServes(t *testing.T) {
 // fails (cmd/serve falls back to DefaultAPIVersion) or is bypassed.
 func TestDefaultAPIVersionIsTheV2One(t *testing.T) {
 	assert.Equal(t, "v1alpha3", DefaultAPIVersion)
-	k := NewKagent(nil, "kagent", "", "")
+	k := NewKagent(nil, nil, "kagent", "", "")
 	assert.Equal(t, DefaultAPIVersion, k.APIVersion())
 }
 

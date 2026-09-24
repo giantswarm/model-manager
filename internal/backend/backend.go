@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -654,14 +655,30 @@ type AgentEndpoint struct {
 	// host's VRAM (4,096 tokens below 24 GiB) and fills by dropping the front
 	// of a longer prompt — the system prompt and the tool schemas.
 	ContextLength int64 `json:"contextLength,omitempty"`
+	// Think is the chat request's think field agents send (provider Ollama:
+	// spec.ollama.think): false has a thinking model answer directly, true has
+	// it reason first. Nil sets none and leaves the server's default, under
+	// which a model with the thinking capability thinks before every answer.
+	Think *bool `json:"think,omitempty"`
 }
 
-// WithinContext caps ContextLength at maxContext, the model's own context
-// length: a window beyond what the model was trained on is one the server
-// shrinks anyway. maxContext 0 (not reported) leaves it as it is.
-func (ep AgentEndpoint) WithinContext(maxContext int64) AgentEndpoint {
-	if maxContext > 0 && ep.ContextLength > maxContext {
-		ep.ContextLength = maxContext
+// CapabilityThinking is the model capability (Model.Capabilities) of a model
+// that reasons before it answers and takes the chat request's think field.
+const CapabilityThinking = "thinking"
+
+// FitTo fits the endpoint to the model agents run on it: ContextLength is
+// capped at the model's own context length, since a window beyond what the
+// model was trained on is one the server shrinks anyway (0, not reported,
+// caps nothing), and Think is dropped unless the model has the thinking
+// capability — Ollama refuses think true for any other model, and false
+// means nothing there. A zero Model (the backend does not know it) keeps the
+// window and drops Think.
+func (ep AgentEndpoint) FitTo(m Model) AgentEndpoint {
+	if m.ContextLength > 0 && ep.ContextLength > m.ContextLength {
+		ep.ContextLength = m.ContextLength
+	}
+	if !slices.Contains(m.Capabilities, CapabilityThinking) {
+		ep.Think = nil
 	}
 	return ep
 }

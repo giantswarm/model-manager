@@ -154,6 +154,12 @@ type OllamaOptions struct {
 	// window in the host's memory when it loads the model. 0 writes none:
 	// Ollama's own default applies, which depends on the host's VRAM.
 	ContextLength int64
+	// Think is the chat request's think field written into the ModelConfigs
+	// of models with the thinking capability (spec.ollama.think): false has
+	// them answer directly, true has them reason first. Nil writes none and
+	// leaves Ollama's default, under which such a model thinks before every
+	// answer.
+	Think *bool
 }
 
 // LemonadeOptions configures the lemonade driver.

@@ -107,6 +107,20 @@ if echo "$got" | grep -q -- '^--lemonade-\|^--lmstudio-'; then
   fail "ollama backend renders lemonade or lmstudio flags: '$got'"
 fi
 
+# ollama.think renders as --ollama-think: false by default, true, and an
+# empty value (a "" or a null ollama.think) for none; the schema refuses
+# anything else, the string "false" included.
+think() { args --set backend=ollama "$@" | sed -n 's/^--ollama-think=//;T;s/^$/<empty>/;p'; }
+[ "$(think)" = false ] || fail "ollama.think: default --ollama-think=false expected, got '$(think)'"
+[ "$(think --set ollama.think=true)" = true ] || fail "ollama.think=true: --ollama-think=true expected"
+[ "$(think --set-string ollama.think=)" = '<empty>' ] || fail "ollama.think \"\": an empty --ollama-think= expected, got '$(think --set-string ollama.think=)'"
+[ "$(think --set ollama.think=null)" = '<empty>' ] || fail "ollama.think null: an empty --ollama-think= expected"
+for bad in yes false; do
+  if helm template mm "$CHART" --set backend=ollama --set-string ollama.think=$bad >/dev/null 2>&1; then
+    fail "ollama.think: the string '$bad' must be refused by the schema"
+  fi
+done
+
 # The lmstudio backend renders its own flags and none of the others'.
 got=$(args --set backend=lmstudio --set lmstudio.endpoint=http://172.21.0.1:1234 \
   --set lmstudio.agentHost=http://172.21.0.1:1234)

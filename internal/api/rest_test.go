@@ -41,6 +41,9 @@ type fakeBackend struct {
 	// configured num_ctx); loadContext records each load's ContextLength.
 	contextLength int64
 	loadContext   map[string]int64
+	// think is the think its AgentEndpoint carries (ollama's configured
+	// think).
+	think *bool
 }
 
 func newFakeBackend() *fakeBackend {
@@ -151,7 +154,7 @@ func (f *fakeBackend) Unload(_ context.Context, name string) error {
 	return nil
 }
 func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: f.contextLength}
+	return backend.AgentEndpoint{Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: f.contextLength, Think: f.think}
 }
 
 // fakeWirer records ModelConfigs in memory: refs holds model-manager's own
@@ -161,6 +164,11 @@ type fakeWirer struct {
 	mu      sync.Mutex
 	refs    map[string]wiring.ModelConfigRef
 	foreign []wiring.ModelConfigRef
+	// noThink stands for a kagent whose ModelConfig has no spec.ollama.think:
+	// Writable drops it and the apiserver prunes it from every write.
+	noThink bool
+	// ensures counts the writes.
+	ensures int
 }
 
 func newFakeWirer() *fakeWirer { return &fakeWirer{refs: map[string]wiring.ModelConfigRef{}} }
@@ -194,9 +202,22 @@ func (w *fakeWirer) Ensure(_ context.Context, model string, ep backend.AgentEndp
 	if endpoint == "" {
 		endpoint = ep.Host
 	}
-	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend, APIKeyPassthrough: ep.APIKeyPassthrough, APIKeySecret: ep.APIKeySecret, ContextLength: ep.ContextLength}
+	think := ep.Think
+	if w.noThink {
+		think = nil
+	}
+	ref := wiring.ModelConfigRef{Name: name, Namespace: "kagent", Provider: ep.Provider, Model: model, ProviderModel: ep.Model, Endpoint: endpoint, Ready: true, Managed: true, Backend: ep.Backend, APIKeyPassthrough: ep.APIKeyPassthrough, APIKeySecret: ep.APIKeySecret, ContextLength: ep.ContextLength, Think: think}
 	w.refs[refKey(ep.Backend, model)] = ref
+	w.ensures++
 	return &ref, nil
+}
+func (w *fakeWirer) Writable(_ context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.noThink {
+		ep.Think = nil
+	}
+	return ep, nil
 }
 func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string) error {
 	w.mu.Lock()
