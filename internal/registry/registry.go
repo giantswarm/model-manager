@@ -27,8 +27,9 @@ type Builder func(doc *backend.Document) (backend.Backend, error)
 // Registry watches the documents of one namespace with the ServiceAccount —
 // the one background read model-manager keeps under downstream OAuth, since
 // its own configuration is not per-caller data — and keeps the service's
-// backend set in step. Documents failing the schema are reported through
-// service.ReportDocument and never loaded; the process keeps running.
+// backend set in step. A document failing the schema is reported and not
+// loaded, and a loaded one that breaks drops its backend in the same step
+// (service.DeregisterDocument); the process keeps running.
 type Registry struct {
 	client    kubernetes.Interface
 	namespace string
@@ -85,7 +86,7 @@ func (r *Registry) upsert(obj any) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	kind, b, source, err := r.load(cm)
+	b, source, err := r.load(cm)
 	if err == nil {
 		// Registered and no longer reported in one step: a reader that finds
 		// the backend must not find its document listed as invalid too
@@ -93,43 +94,40 @@ func (r *Registry) upsert(obj any) {
 		err = r.svc.RegisterDocument(b, source, cm.Name)
 	}
 	if err != nil {
-		r.svc.ReportDocument(cm.Name, err.Error())
 		r.log.Warn("backend document not loaded", "configMap", cm.Name, "error", err)
-		// The ConfigMap may have registered another kind before it went bad.
-		if old, had := r.kinds[cm.Name]; had && old != kind {
-			r.forgetLocked(cm.Name, old)
-		}
+		// Reported and no longer registered in one step, the mirror: a broken
+		// document drops what its ConfigMap registered, whichever way it
+		// broke, rather than leaving the last good backend serving beside the
+		// report.
+		r.forgetLocked(cm.Name, err.Error())
 		return
 	}
-	r.log.Info("backend registered", "backend", kind, "source", source, "configMap", cm.Name)
-	if old, had := r.kinds[cm.Name]; had && old != kind {
-		r.forgetLocked(cm.Name, old)
-	}
-	r.kinds[cm.Name] = kind
+	// A ConfigMap's name fixes its kind (load refuses any other), so what it
+	// registered before is the backend just replaced.
+	r.kinds[cm.Name] = b.Name()
+	r.log.Info("backend registered", "backend", b.Name(), "source", source, "configMap", cm.Name)
 }
 
 // load parses and builds cm's document without registering it; it returns
-// the kind the document names as soon as that is known, so the caller can
-// retire what the ConfigMap registered before, and the built backend with its
-// source for the caller to register.
-func (r *Registry) load(cm *corev1.ConfigMap) (kind backend.Name, b backend.Backend, source string, err error) {
+// the built backend with its source for the caller to register.
+func (r *Registry) load(cm *corev1.ConfigMap) (b backend.Backend, source string, err error) {
 	raw, ok := cm.Data[backend.DocumentKey]
 	if !ok {
-		return "", nil, "", fmt.Errorf("no %s key", backend.DocumentKey)
+		return nil, "", fmt.Errorf("no %s key", backend.DocumentKey)
 	}
 	doc, err := backend.ParseDocument([]byte(raw))
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
-	kind = doc.Spec.Kind
+	kind := doc.Spec.Kind
 	if cm.Name != backend.DocumentName(kind) {
-		return kind, nil, "", fmt.Errorf("metadata.name: the ConfigMap of a %s document is named %s", kind, backend.DocumentName(kind))
+		return nil, "", fmt.Errorf("metadata.name: the ConfigMap of a %s document is named %s", kind, backend.DocumentName(kind))
 	}
 	b, err = r.build(doc)
 	if err != nil {
-		return kind, nil, "", fmt.Errorf("build %s backend: %w", kind, err)
+		return nil, "", fmt.Errorf("build %s backend: %w", kind, err)
 	}
-	return kind, b, doc.Spec.Source, nil
+	return b, doc.Spec.Source, nil
 }
 
 func (r *Registry) delete(obj any) {
@@ -144,15 +142,15 @@ func (r *Registry) delete(obj any) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.svc.ReportDocument(cm.Name, "")
-	if kind, had := r.kinds[cm.Name]; had {
-		r.forgetLocked(cm.Name, kind)
-	}
+	r.forgetLocked(cm.Name, "")
 }
 
-func (r *Registry) forgetLocked(configMap string, kind backend.Name) {
+// forgetLocked drops the backend configMap registered, if any, and records
+// problem as its report (an empty problem clears it) in one step.
+func (r *Registry) forgetLocked(configMap, problem string) {
+	kind := r.kinds[configMap]
 	delete(r.kinds, configMap)
-	if r.svc.Deregister(kind) {
+	if r.svc.DeregisterDocument(kind, configMap, problem) {
 		r.log.Info("backend removed", "backend", kind, "configMap", configMap)
 	}
 }
