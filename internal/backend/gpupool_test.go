@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,4 +122,37 @@ spec:
 `))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec.kserve.gpuPool.instances[1].gpus: must be positive", "the failing entry is named")
+}
+
+// The cluster's pools by name (giantswarm/cluster-manager#89,
+// giantswarm/model-manager#152): the form cluster-manager writes with two or
+// more pools, read strictly and handed to the kserve backend as the option;
+// a pool's bad shape is refused naming the pool.
+func TestKServeDocumentGPUPools(t *testing.T) {
+	raw := `apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: ModelBackend
+spec:
+  kind: kserve
+  source: cluster-manager
+  kserve:
+    target: {cluster: local, servingNamespace: model-serving}
+    gpuPools:
+      c1-gpu-l4:
+        instances:
+          - {instanceType: g6.xlarge, size: xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}
+      c1-gpu-l40s:
+        instances:
+          - {instanceType: g6e.2xlarge, size: 2xlarge, vcpu: 8, memoryGiB: 64, gpus: 1, gpuMemoryGiB: 48, usableVcpu: 7, usableMemoryGiB: 57.5}
+`
+	d, err := ParseDocument([]byte(raw))
+	require.NoError(t, err)
+	require.Len(t, d.Spec.KServe.GPUPools, 2)
+	assert.Nil(t, d.Spec.KServe.GPUPool, "no pool pins every predictor")
+	pools := d.Options(Options{}).KServe.GPUPools
+	require.Contains(t, pools, "c1-gpu-l40s")
+	assert.Equal(t, "g6e.2xlarge", pools["c1-gpu-l40s"].Instances[0].InstanceType)
+
+	_, err = ParseDocument([]byte(strings.Replace(raw, "gpus: 1, gpuMemoryGiB: 48", "gpus: 0, gpuMemoryGiB: 48", 1)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.kserve.gpuPools.c1-gpu-l40s.instances[0].")
 }

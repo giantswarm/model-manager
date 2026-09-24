@@ -52,10 +52,13 @@ type served struct {
 	Status         string
 	// Reason names why Status is not Ready: the Ready condition's reason, a
 	// failed load's, or the predictor pod's (Unschedulable, ImagePullBackOff).
-	Reason   string
-	Message  string
-	URL      string
-	Node     string
+	Reason  string
+	Message string
+	URL     string
+	Node    string
+	// Pool is the GPU pool the predictor is pinned to: the pool label in
+	// the object's template nodeSelector (giantswarm/model-manager#152).
+	Pool     string
 	Created  time.Time
 	Deleting bool
 	// ReadyAt is when the Ready condition last turned True; Failed says the
@@ -388,6 +391,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 		Deleting:       obj.GetDeletionTimestamp() != nil,
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
+	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
 	}

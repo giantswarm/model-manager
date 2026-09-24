@@ -418,6 +418,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Name:      sv.Model,
 			Endpoint:  sv.URL,
 			Node:      sv.Node,
+			Pool:      sv.Pool,
 			Status:    sv.Status,
 			Reason:    sv.Reason,
 			Message:   sv.Message,
@@ -563,6 +564,11 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	// the GPU pool's scheduling and the accelerator RuntimeClass
 	// (settings.forPreset).
 	s = b.cfg.settings(ctx).forPreset(plan.Preset)
+	if fit.Pool != "" && len(s.GPUPool.NodeSelector) == 0 {
+		// Several pools and none pinning every predictor: this one is pinned
+		// to the pool the fit placed the model on (giantswarm/model-manager#152).
+		s.GPUPool.NodeSelector = map[string]string{labelMachinePool: fit.Pool}
+	}
 	existing, err := b.getServing(ctx, s.Namespace, plan.Preset.name())
 	if err != nil {
 		return nil, err
