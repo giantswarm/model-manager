@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -168,7 +166,7 @@ func newFakeHub(t *testing.T) *fakeHub {
 		case tinyRepo:
 			_, _ = w.Write([]byte(tinyConfig))
 		case gemmaRepo:
-			raw, err := os.ReadFile(filepath.Join("testdata", "kvcache", "gemma-4-31b-it-fp8-dynamic.json"))
+			raw, err := kvConfig("gemma-4-31b-it-fp8-dynamic.json")
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

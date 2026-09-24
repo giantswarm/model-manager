@@ -2,9 +2,8 @@ package kserve
 
 import (
 	"context"
+	"embed"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,9 +18,15 @@ import (
 // DeepSeek-V3 (MLA), Qwen3.5 9B (linear and full attention) and Nemotron 3
 // Super (Mamba, MoE and attention in a pattern, a ModelOpt FP8 KV cache;
 // trimmed to the fields read).
+//
+//go:embed testdata/kvcache/*.json
+var kvConfigs embed.FS
+
+func kvConfig(name string) ([]byte, error) { return kvConfigs.ReadFile("testdata/kvcache/" + name) }
+
 func readKVLayout(t *testing.T, name string) kvLayout {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "kvcache", name))
+	raw, err := kvConfig(name)
 	require.NoError(t, err)
 	layout, err := parseKVLayout(raw)
 	require.NoError(t, err)
