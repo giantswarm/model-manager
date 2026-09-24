@@ -937,6 +937,7 @@ components:
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
         endpoint: { type: string, description: "inference URL (kserve — the model's address: its route on the models Gateway or its in-cluster Service; the platform's LLM endpoint when `publicName` is set). `interfaces[].path` is relative to it." }
         node: { type: string }
+        pool: { type: string, description: "kserve: the GPU pool the predictor is pinned to (its giantswarm.io/machine-pool selector), when it is pinned to one" }
         status:
           type: string
           description: "ollama, lemonade and lmstudio `loaded` (lemonade reports its own state, e.g. `loading`, until the model's backend process answers; lmstudio lists an instance only once it is resident); kserve LLMInferenceService readiness `Ready`, `NotReady`, `Pending` or `Terminating`"
@@ -1114,12 +1115,17 @@ components:
         weightsSource: { type: string, enum: [safetensors-index, safetensors-shards, tree, preset], description: "safetensors-shards when the index's total_size disagrees by more than one percent with the shards its weight_map names" }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64 }
-        downloadBytes: { type: integer, format: int64, description: what a pull fetches (all repository files) }
+        downloadBytes: { type: integer, format: int64, description: "what a pull fetches: the repositorys files, or for a preset served from a model image (oci://) the images layers as its registry lists them — 0, with a note in reason, when the registry does not answer" }
         node: { type: string, description: node the check was made against }
+        pool: { type: string, description: "kserve, with several GPU pools and none pinning every predictor: the pool the model is placed on — the chosen node's giantswarm.io/machine-pool, or the pool with no node yet whose smallest hosting size is the smallest; load_model pins the predictor to it" }
         budgetBytes: { type: integer, format: int64 }
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
-        reservedBytes: { type: integer, format: int64, description: needed by the models already served on the node }
+        reservedBytes: { type: integer, format: int64, description: "needed by the models already served on the node (the preset being loaded not counted); check_fit and load judge against freeBytes, pull against budgetBytes" }
         freeBytes: { type: integer, format: int64 }
+        maxModelLen: { type: integer, format: int64, description: "the preset's --max-model-len; absent when the KV cache was not checked (reason says why)" }
+        kvCacheBytes: { type: integer, format: int64, description: "the KV cache vLLM needs on each GPU for one sequence of maxModelLen tokens, from the checkpoint's config.json (per layer: full attention holds the sequence, sliding attention its window and one prefill chunk, MLA its latent; linear-attention and Mamba layers none)" }
+        kvCacheAvailableBytes: { type: integer, format: int64, description: "what vLLM leaves the KV cache on each GPU: --gpu-memory-utilization of its memory less the weights and vLLM's reserve" }
+        estimatedMaxModelLen: { type: integer, format: int64, description: "on a refusal for the KV cache, the longest sequence that fits, as vLLM estimates it" }
         gated: { type: boolean }
         private: { type: boolean }
         tokenConfigured: { type: boolean, description: a hub token Secret is configured }

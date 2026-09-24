@@ -515,12 +515,15 @@ scheduling by the registered backend document (`docs/backends.md`).
   weight size (`model.safetensors.index.json` — its `total_size`, or the shards
   its `weight_map` names when they disagree with it by more than one percent —
   else the file tree, else the preset), adds the preset's `overheadGiB` (default 30) and compares with the
-  node budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
+  node's free budget: the budget (`nvidia.com/gpu.memory` x `gpu.count` labels when present, else
   allocatable memory — unified-memory nodes; a node annotation
   `model-manager.giantswarm.io/memory-budget-gib: "96"` overrides that node's
   budget in GiB whatever `kserve.budget.source` says, reported as
   `budgetSource: annotation` — for unified-memory nodes whose allocatable
-  memory overstates what a model may use); `pull` refuses what cannot be
+  memory overstates what a model may use) less what the models already served
+  on the node reserve (`reservedBytes`, the one reading `load` and `nodes` make
+  too; the preset being loaded is not counted against itself), so `fit-check`
+  and `load` reach one verdict; `pull` judges against the whole budget and refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's LLMInferenceService
   mounts — reporting bytes on disk against the repository size. The Job
@@ -550,8 +553,29 @@ scheduling by the registered backend document (`docs/backends.md`).
   (`…; the preset declares 15.0 GiB of weights, the Hub holds 24.6 GiB` on a
   fit; `…; the preset declares 15.0 GiB of weights; the Hub holds 24.6 GiB,
   which is what does not fit — correct the preset` on a refusal).
+  The fit also checks vLLM's own admission, which a flat overhead cannot: vLLM starts only
+  when its KV cache holds one sequence of `--max-model-len` tokens beside the weights, and
+  crash-loops otherwise. From the checkpoint's `config.json` (its `text_config` when nested)
+  and the preset's `--max-model-len`, `--gpu-memory-utilization` (default 0.9),
+  `--kv-cache-dtype` (default: the checkpoint's KV quantization, else the model's dtype),
+  `--max-num-batched-tokens` (default 2048, 8192 on a GPU of 70 GiB or more that is no A100),
+  `--block-size` (16) and `--tensor-parallel-size`, the check computes vLLM v0.23's figure per
+  GPU: a full-attention layer holds the sequence (`2 × KV heads × head dim × dtype bytes` per
+  token; Gemma 4's global layers with their own heads), a sliding-window layer its window and
+  one prefill chunk, an MLA layer its latent (`kv_lora_rank + qk_rope_head_dim`), a
+  linear-attention or Mamba layer none, in 16-token blocks. The GPU leaves the KV cache
+  `--gpu-memory-utilization × its memory` (a node's `nvidia.com/gpu.memory`; a pool size's
+  `gpuMemoryGiB` in decimal GB) less the weights and a 3.15 GiB reserve — the activations, CUDA
+  graphs and runtime vLLM profiles and what loading adds to the checkpoint, measured with
+  Gemma 4 31B on one L40S. When one sequence does not fit, `fits` is false and `reason` names
+  the KV need, what is left and vLLM's estimated maximum model length (`kvCacheBytes`,
+  `kvCacheAvailableBytes`, `estimatedMaxModelLen`): `gemma-4-31b` at 65536 tokens on a 48 GB
+  card at 0.92 needs 12.0 GiB of KV cache beside 31.0 GiB of weights where 7.3 GiB are left,
+  and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
+  `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
+  named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
 - **Serve / stop** — `load` composes the serving object from the preset
-  after a fit check against the node's free budget; `unload` deletes it and
+  after the fit check `fit-check` answers (the node's free budget, the KV cache); `unload` deletes it and
   unwires within the caller's deadline — the object is found by repository,
   object or preset name, never through the cache inventory, so a scan pod
   that cannot start never delays the deletion — and rescans the cache in the
@@ -586,7 +610,12 @@ scheduling by the registered backend document (`docs/backends.md`).
   `spec.router.scheduler`, and its `InferencePool` needs the Gateway API
   Inference Extension on the gateway — `docs/backends.md`),
   `template.containers[main]` with the preset's `args`, `env` and
-  `resources` (GPU count under the discovery's resource name), `scheduling`
+  `resources` (GPU count under the discovery's resource name; for an `oci://`
+  preset the env ends with the modelcar environment — `HOME=/tmp`,
+  `HF_HOME=/tmp/hf`, `VLLM_CACHE_ROOT=/tmp/vllm-cache`,
+  `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor`, `USER=vllm`, `LOGNAME=vllm`,
+  each only where the preset sets no value of its own —, since the modelcar
+  uid the runtime runs as has no passwd entry and a read-only image), `scheduling`
   as the template's `nodeSelector`/`tolerations` (merged with the discovery
   selector, the GPU pool's label and toleration, and the node pin), the chat
   template mounted, and **`template.runtimeClassName` from the discovery
@@ -655,7 +684,7 @@ scheduling by the registered backend document (`docs/backends.md`).
   | `nodeStarting` | the node exists — an instance launched — and its GPU is not allocatable yet | the NodeClaim's `Launched=True` (`since` = its transition; the message names the node once the claim registered it), a `nominatedNodeName`, the pod bound; the node's allocatable `nvidia.com/gpu`; ≈ 3.5 min until the node registers, ≈ 1 min more for the GPU |
   | `downloadingWeights` | the `storage-initializer` fills the cache directory | the init container; `bytesTotal` (the preset's weights), `bytesCompleted` (a bounded cache-agent scan while filling, cache-agent mode only), `cached: true` when it finished within 15 s — the claim held the weights (72 s for 8 GB, else 0.3 s) |
   | `pullingImage` | the kubelet pulls the runtime image | the container `Waiting` (`ContainerCreating`), `Pulling`/`Pulled` events (the message carries the duration); ≈ 4 min |
-  | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min. A runtime that died and is restarted by the kubelet keeps the step under way with `reason: CrashLoop` and a message naming the crash count, the exit code and the last error line of the crashed container's log (`kubectl logs --previous`, read as the caller): `runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'`; a caller who may not read `pods/log` gets the message with the reason the line is missing |
+  | `loading` | vLLM loads the weights until the startup probe passes | the container `Running`, not `Ready`; `Unhealthy` events say what the probe saw; ≈ 1 min. A runtime that died and is restarted by the kubelet keeps the step under way with `reason: CrashLoop` and a message naming the crash count, the exit code and the last error line of the crashed container's log (`kubectl logs --previous`, read as the caller): `runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'`; a runtime that died on a CUDA out-of-memory after `mlock()` refused it (`could not lock … Cannot allocate memory` in the same log) gets the node's locked-memory limit named instead of an out-of-memory, with the fix: a `containerd.service` drop-in `LimitMEMLOCK=infinity`, `systemctl daemon-reload`, restart containerd; a caller who may not read `pods/log` gets the message with the reason the line is missing |
   | `routing` | the pod is ready, KServe resolves the route | `Ready=False` `HTTPRoutesNotReady` |
   | `ready` | the endpoint answers | `Ready=True` (`since` = its `lastTransitionTime`) |
   | `failed` | a step failed — the step says why | a capacity refusal standing when the GPU pool's scale-up budget is spent — `--kserve-scale-up-timeout` / `KSERVE_SCALE_UP_TIMEOUT` / chart value `kserve.scaleUpTimeout`, default `10m`, counted from the pod's creation: the `scheduling` step fails with `CapacityUnavailable`, its message plus `; no node came within the scale-up budget of 10m0s`, and the model's `reason`/`message` carry it (a nominated claim still launching without a refusal never fails the step); `ImagePullBackOff`/`ErrImagePull`; `CrashLoopBackOff` (the kubelet backed off from restarting a runtime that keeps dying: the `loading` step fails with the crash message and the back-off, and the model's `reason`/`message` carry it); an initializer that exited non-zero, restarted or ran longer than 30 min (`DownloadStalled`); `modelStatus.lastFailureInfo` |

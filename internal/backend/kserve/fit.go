@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,31 +36,38 @@ type fitPlan struct {
 	Dir string
 	// CacheLocal is true when the cache claim is pinned to nodes.
 	CacheLocal bool
+	// KV is the KV cache check the placement runs on each GPU it judges.
+	KV *kvCheck
 }
 
 // fitCheck sizes a model (hub, falling back to the preset) and compares
-// weights + overhead with the budget of the target node. forServe subtracts
-// what the node's running LLMInferenceServices already need; a pull only asks
-// whether the model can ever be served there.
-func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest, forServe bool) (*fitPlan, error) {
+// weights + overhead with the free budget of the target node — what the
+// node's running LLMInferenceServices already need subtracted — and its KV
+// cache with the GPU: the answer of check_fit and the check of load_model,
+// one verdict for both.
+func (b *Backend) fitCheck(ctx context.Context, req backend.FitRequest) (*fitPlan, error) {
 	plan, idx, err := b.resolveFit(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.judgeFit(ctx, plan, idx, req, forServe); err != nil {
+	if err := b.judgeFit(ctx, plan, idx, req, true); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-// judgeFit completes a resolved plan: sizes the model, places it, and notes
-// in the answer when the preset stood in for the hub. Split from fitCheck so
-// a caller can look at the resolved preset before the hub is asked (Pull).
+// judgeFit completes a resolved plan: sizes the model, reads its KV cache
+// layout, places it, and notes in the answer when the preset stood in for
+// the hub. Split from fitCheck so a caller can look at the resolved preset
+// before the hub is asked (Pull). forServe judges against the node's free
+// budget; a pull only asks whether the model can ever be served there. The
+// reservation is answered either way.
 func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
 	note, err := b.sizeModel(ctx, plan)
 	if err != nil {
 		return err
 	}
+	plan.KV = b.kvCheckFor(ctx, plan)
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
 		return err
 	}
@@ -116,8 +124,10 @@ func (b *Backend) resolveFit(ctx context.Context, req backend.FitRequest) (*fitP
 // the safetensors index (its total_size, or the shards it names when they
 // contradict it), else the file tree — within the hub lookup timeout,
 // and from the preset's requirements when the hub cannot tell (gated without
-// a token, unreachable, not answering in time). It returns the note the
-// answer carries when the preset stood in for the hub.
+// a token, unreachable, not answering in time). What a preset served from a
+// model image downloads is the image's layers, read from its registry and
+// nowhere else. It returns the note the answer carries when the preset stood
+// in for the hub or the image's size could not be read.
 func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) {
 	res, p, repo := &plan.Result, plan.Preset, plan.Repo
 	// Bounded on the caller's context: a hub whose packets an egress policy
@@ -166,6 +176,16 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 	}
 	if res.WeightsBytes <= 0 {
 		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
+	}
+	if p != nil && !p.storesInCache() {
+		res.DownloadBytes = 0
+		size, err := modelImageBytes(hctx, p.Spec.Model.StorageURI)
+		if err != nil {
+			b.log.Warn("reading the model image's size failed", "model", repo, "image", p.Spec.Model.StorageURI, "error", err)
+			note = joinNotes(note, "the download size is unknown: "+err.Error())
+		} else {
+			res.DownloadBytes = size
+		}
 	}
 	if p != nil {
 		res.DeclaredWeightsBytes = p.weightsBytes()
@@ -219,7 +239,11 @@ func describeHubFailure(err error, timeout time.Duration) string {
 // placeModel picks the node the model is checked against and writes the
 // verdict into the plan: the explicit node, else the eligible node with the
 // most free budget, cache nodes first; a GPU pool at scale-to-zero answers
-// without a node. The cache claim has a say for a preset that stores in it
+// without a node. With several pools and none pinning every predictor
+// (settings.GPUPools), the verdict names the pool the model goes to — the
+// chosen node's, or a pool with no node yet whose size hosts the model when
+// no node does — and load_model pins the predictor there
+// (giantswarm/model-manager#152). The cache claim has a say for a preset that stores in it
 // (storesInCache) only: an oci:// preset is judged without the claim's
 // location — no node pin, no cache-node preference, no scan — and its cache
 // verdict is the oci-image one (giantswarm/model-manager#123).
@@ -237,10 +261,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved := map[string]int64{}
-	if forServe {
-		reserved = b.reservedByNode(ctx, idx, p)
-	}
+	reserved := b.reservedByNode(ctx, idx, p)
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
 		// The discovery document appeared, or named the GPU pool, since the
@@ -268,6 +289,14 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+			return b.placeOnPool(plan, pool)
+		}
+		if name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node); err != nil || ok {
+			if err != nil {
+				return err
+			}
+			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+			res.Pool = name
 			return b.placeOnPool(plan, pool)
 		}
 		res.Fits = false
@@ -317,11 +346,90 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
 			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
 	}
+	applyKV(res, plan.KV.judge(best.GPUMemory, best.GPUProduct))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
 	res.Cached, res.CacheSource = b.cacheVerdict(ctx, best.Name, plan, loc)
+	s := b.cfg.settings(ctx).forPreset(p)
+	if len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
+		return nil
+	}
+	res.Pool = best.Labels[labelMachinePool]
+	if res.Fits {
+		return nil
+	}
+	// The best node does not fit; a pool that has no node yet may.
+	name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node)
+	if err != nil || !ok {
+		return err
+	}
+	node, why := res.Node, res.Reason
+	res.Node, res.ReservedBytes = "", 0
+	res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+	res.Pool = name
+	if err := b.placeOnPool(plan, pool); err != nil {
+		return err
+	}
+	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
 	return nil
+}
+
+// labelMachinePool is the node label a GPU pool stamps on its nodes: the
+// pool's release name, giantswarm.io/machine-pool=<cluster>-<pool>.
+const labelMachinePool = "giantswarm.io/machine-pool"
+
+// emptyPoolFor picks, among the cluster's pools (settings.GPUPools) that
+// have no node yet, the one the model goes to: the pool whose smallest
+// hosting size is the smallest (by vCPU, then memory), the pool named by
+// name order on a tie. ok is false with an explicit node, while a pool
+// selector pins every predictor, or when no such pool has a size that hosts
+// the model — the caller's verdict then stands. The pool comes back with
+// its label as the selector and the slice's taint.
+func emptyPoolFor(plan *fitPlan, s settings, nodes []nodeBudget, explicit string) (string, backend.GPUPool, bool, error) {
+	if explicit != "" || len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
+		return "", backend.GPUPool{}, false, nil
+	}
+	needs, err := needsOf(plan)
+	if err != nil {
+		return "", backend.GPUPool{}, false, err
+	}
+	names := make([]string, 0, len(s.GPUPools))
+	for name := range s.GPUPools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var bestName string
+	var bestShape *backend.InstanceShape
+	for _, name := range names {
+		if anyNodeMatches(nodes, map[string]string{labelMachinePool: name}) {
+			continue
+		}
+		for _, shape := range sortedShapes(s.GPUPools[name].Instances) {
+			if !hosts(shape, needs) {
+				continue
+			}
+			if bestShape == nil || smallerShape(shape, *bestShape) {
+				bestName, bestShape = name, &shape
+			}
+			break
+		}
+	}
+	if bestShape == nil {
+		return "", backend.GPUPool{}, false, nil
+	}
+	pool := s.GPUPools[bestName]
+	pool.NodeSelector = map[string]string{labelMachinePool: bestName}
+	pool.Taint = s.GPUPool.Taint
+	return bestName, pool, true, nil
+}
+
+// smallerShape orders sizes smallest first: by vCPU, then memory.
+func smallerShape(a, b backend.InstanceShape) bool {
+	if a.VCPU != b.VCPU {
+		return a.VCPU < b.VCPU
+	}
+	return a.MemoryGiB < b.MemoryGiB
 }
 
 // cacheVerdict is the fit answer's Cached / CacheSource pair: what the cache
@@ -501,4 +609,15 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// joinNotes joins the notes a fit answer carries, skipping empty ones.
+func joinNotes(notes ...string) string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return strings.Join(out, "; ")
 }
