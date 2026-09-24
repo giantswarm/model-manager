@@ -86,7 +86,10 @@ data:
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
 (`spec.endpoint: required for ollama`), and the process keeps running with the backends it has.
-Fixing the ConfigMap loads it; deleting it clears the report.
+A loaded document that breaks — it fails the schema, or its backend fails to build — drops its
+backend in the same step that reports it: what serves is always what the ConfigMap holds, never
+the last good document beside the report. Fixing the ConfigMap loads it; deleting it clears the
+report.
 
 The target **never carries credentials**: every Kubernetes call the kserve backend makes presents
 the caller's own token (`--downstream-oauth`, the platform default), so the target apiserver must
