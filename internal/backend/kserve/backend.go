@@ -687,6 +687,13 @@ func (b *Backend) WaitReady(ctx context.Context, model string) error {
 					return nil
 				}
 			}
+			// A first request that failed stays failed until the model turns
+			// Ready anew: waiting on would report the same until the timeout.
+			for _, sv := range matches {
+				if failure := sv.answerFailure(); failure != "" {
+					return fmt.Errorf("%s is not ready: %s", model, failure)
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():

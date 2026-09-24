@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- kserve: a served model is Ready only once it has answered a request
+  ([#177](https://github.com/giantswarm/model-manager/issues/177)). The `LLMInferenceService`'s
+  Ready condition follows vLLM's `GET /health`, which a runtime can pass and then fail every request:
+  the gpt-oss presets turned Ready and answered 500 to every chat completion, their harmony renderer
+  loading its tokenizer encodings only at the first request, while `load_model` and
+  `list_loaded_models` said `ready`. Once each time the object turns Ready, the backend now asks the
+  model one request on its workload Service beside the interface reads: a chat completion of one
+  token (a pooling model: one embedding). An answer finishes the `ready` step (`finishedAt`, the
+  route in its message). An error answer fails it with `FirstRequestFailed`, the status and the first
+  line of the runtime's error, the phase is `failed` and `status` `NotReady`, and `load_model`
+  returns that error instead of waiting for its timeout. No answer keeps the serve `routing`
+  (`AwaitingFirstAnswer`) and asks again after a minute. A server whose route list names nothing to
+  ask is not asked, and its `ready` step says why.
+
 - kserve: the fit check judges vLLM's KV cache, not a flat overhead alone (giantswarm/model-manager#149). vLLM starts a model only when its KV cache holds one sequence of `--max-model-len` tokens beside the weights; `gemma-4-31b` at 65536 tokens passed `check_fit` on a 48 GB card and crash-looped. From the checkpoint's `config.json` (full-attention, sliding-window, MLA, linear-attention and Mamba layers; Gemma 4's global heads) and the preset's `--max-model-len`, `--gpu-memory-utilization`, `--kv-cache-dtype`, `--max-num-batched-tokens`, `--block-size` and `--tensor-parallel-size`, `check_fit`, `load_model` and `pull_model` compute vLLM v0.23's KV need per GPU on the node (its `nvidia.com/gpu.memory`) or the pool size (`gpuMemoryGiB`, decimal GB) against `--gpu-memory-utilization` of the GPU less the weights and a 3.15 GiB reserve, and refuse a context that does not fit, naming the KV need, what is left and vLLM's estimated maximum model length (new `maxModelLen`, `kvCacheBytes`, `kvCacheAvailableBytes`, `estimatedMaxModelLen`). An architecture, argument or node the check cannot read is named in the reason and judged on the flat overhead as before.
 - kserve: `check_fit` counts what the models served on a node reserve, as `load_model` does — `reservedBytes` read 0 on a node serving a model while the load three seconds later refused on the same node — and judges against the free budget; `pull_model` still judges against the whole budget and now reports the reservation too.
 - kserve: the `loading` step names the node's locked-memory limit when a runtime dies on a CUDA out-of-memory because `mlock()` refused it (giantswarm/model-manager#135). A runtime that locks its weights in memory (B12X's weight pool: `could not lock final weight storage: Cannot allocate memory`) dies at engine start on a GPU node whose containerd runs with the default `LimitMEMLOCK` of 8 MB, since a container inherits that limit and has no `CAP_IPC_LOCK` to raise it, root included, and the crash read as an out-of-memory at a few MiB with the GPU idle. When the crashed container's log tail carries both a lock refusal and a CUDA out-of-memory, the crash message adds the cause and the fix (a `containerd.service` drop-in with `LimitMEMLOCK=infinity`, `systemctl daemon-reload`, restart containerd); any other out-of-memory keeps its wording.

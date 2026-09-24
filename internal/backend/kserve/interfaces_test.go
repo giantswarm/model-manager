@@ -24,12 +24,24 @@ import (
 // modelServer is a served model's runtime as the fixture answers it: the
 // version GET /version reports and the document GET /openapi.json returns
 // (either empty: 404 — the runtime's docs off, a server without the route);
-// failing answers 503 to both.
+// failing answers 503 to both. The first request (answer.go) is answered 200,
+// or answerStatus with answerBody; silent drops it unanswered. asked records
+// each request's path and body.
 type modelServer struct {
-	version string
-	openapi string
-	failing bool
-	reads   int
+	version      string
+	openapi      string
+	failing      bool
+	answerStatus int
+	answerBody   string
+	silent       bool
+	reads        int
+	asked        []askedRequest
+}
+
+// askedRequest is one first request the fixture's runtime received.
+type askedRequest struct {
+	Path string
+	Body map[string]any
 }
 
 // The openapi.json documents of testdata/openapi: generateDoc recorded from
@@ -96,6 +108,23 @@ func (f *fixture) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("dial tcp %s: i/o timeout", req.URL.Host)
 	}
 	rec := httptest.NewRecorder()
+	if req.Method == http.MethodPost {
+		var body map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		f.mu.Lock()
+		s.asked = append(s.asked, askedRequest{Path: req.URL.Path, Body: body})
+		f.mu.Unlock()
+		switch {
+		case s.silent:
+			return nil, fmt.Errorf("read tcp %s: connection reset by peer", req.URL.Host)
+		case s.answerStatus != 0:
+			rec.WriteHeader(s.answerStatus)
+			_, _ = io.WriteString(rec, s.answerBody)
+		default:
+			_, _ = io.WriteString(rec, `{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"}}]}`)
+		}
+		return rec.Result(), nil
+	}
 	switch {
 	case s.failing:
 		rec.WriteHeader(http.StatusServiceUnavailable)
@@ -185,12 +214,12 @@ func TestServerIsReadOncePerReadyTransition(t *testing.T) {
 	loadedOne(t, f.b)
 	_, err := f.b.ListModels(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 2, server.reads, "one read of /version and /openapi.json for the transition")
+	assert.Equal(t, 3, server.reads, "one read of /version and /openapi.json and one first request for the transition")
 
 	f.setReady(ctx, "tiny", first.Add(30*time.Minute))
 	server.version = "0.24.1"
 	lm := loadedOne(t, f.b)
-	assert.Equal(t, 4, server.reads, "a new Ready transition reads the server again")
+	assert.Equal(t, 6, server.reads, "a new Ready transition reads the server and asks it again")
 	assert.Equal(t, "0.24.1", lm.Runtime.Version)
 }
 

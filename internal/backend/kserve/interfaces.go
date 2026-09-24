@@ -64,6 +64,8 @@ type serverAPI struct {
 	// none.
 	Interfaces []backend.Interface
 	Reason     string
+	// Answer is what the model said to its first request (answer.go).
+	Answer firstAnswer
 	// retryAt is set when the read did not reach the server or the server
 	// failed; the next list after it reads again.
 	retryAt time.Time
@@ -76,7 +78,8 @@ func (sv served) apiKey() string {
 	return sv.Namespace + "/" + sv.Name + "/" + sv.UID + "/" + sv.ReadyAt.UTC().Format(time.RFC3339Nano)
 }
 
-// serverAPIs fills in what each Ready model's server says about itself: from
+// serverAPIs fills in what each Ready model's server says about itself, and
+// what the model said to its first request (answer.go): from
 // the driver's memory for a transition already read, else by reading the
 // servers concurrently. Entries of objects no longer listed are forgotten.
 func (b *Backend) serverAPIs(ctx context.Context, list []served) {
@@ -115,7 +118,15 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 		wg.Add(1)
 		go func(sv *served) {
 			defer wg.Done()
-			sv.API = b.readServerAPI(ctx, workloadURL(sv.Name, sv.Namespace))
+			origin := workloadURL(sv.Name, sv.Namespace)
+			sv.API = b.readServerAPI(ctx, origin)
+			sv.API.Answer = b.askFirst(ctx, origin, sv.Model, sv.API)
+			if sv.API.Answer.Waiting != "" && sv.API.retryAt.IsZero() {
+				sv.API.retryAt = time.Now().Add(serverReadRetry)
+			}
+			if sv.API.Answer.Failure != "" {
+				b.log.Info("served model failed its first request", "llminferenceservice", sv.Namespace+"/"+sv.Name, "path", sv.API.Answer.Path, "answer", sv.API.Answer.Failure)
+			}
 			if sv.API.Reason != "" {
 				b.log.Info("served model reports no API interfaces", "llminferenceservice", sv.Namespace+"/"+sv.Name, "reason", sv.API.Reason)
 			}

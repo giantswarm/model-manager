@@ -171,6 +171,9 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	b.serverAPIs(ctx, out)
+	for i := range out {
+		out[i].applyAnswer()
+	}
 	b.rememberServed(out)
 	// While they exist, remember which repository each one fills its cache
 	// directory from (index.go).

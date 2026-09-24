@@ -296,6 +296,7 @@ func TestWiringFollowsThePublishedAddress(t *testing.T) {
 	// KServe publishes the route it rendered on its ingress Gateway. Without a
 	// models Gateway in discovery that address is nobody's endpoint: agents keep
 	// the workload Service.
+	f.serve("tiny", vllmServer(t, devVersion, generateDoc))
 	obj, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
 	require.NoError(t, err)
 	obj.Object["status"] = map[string]any{
