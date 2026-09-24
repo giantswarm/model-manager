@@ -299,12 +299,20 @@ func (f *fixture) setDiscovery(ctx context.Context, nodeSelector map[string]stri
 
 func (f *fixture) setDiscoveryOpts(ctx context.Context, o discoveryOpts) {
 	f.t.Helper()
+	f.renderDiscovery(ctx, o)
+	f.resetSettings()
+}
+
+// renderDiscovery rewrites the discovery document and leaves the cached
+// settings as they are — the serving slice's connectivity child rendering it
+// again while model-manager holds settings resolved before.
+func (f *fixture) renderDiscovery(ctx context.Context, o discoveryOpts) {
+	f.t.Helper()
 	cm, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Get(ctx, DefaultDiscoveryConfigMap, metav1.GetOptions{})
 	require.NoError(f.t, err)
 	cm.Data[discoveryConfigKey] = discoveryDocYAML(o)
 	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Update(ctx, cm, metav1.UpdateOptions{})
 	require.NoError(f.t, err)
-	f.resetSettings()
 }
 
 // serveLLMAPI makes the fake API server serve the LLMInferenceService API,

@@ -155,7 +155,15 @@ candidate node while its settings lack the document re-reads it once before answ
 named, the scale-from-zero verdict above; still without it, `fits: false`, `retryable: true` and
 `reason: the serving layer's discovery document <namespace>/<name> is not published yet — the slice
 is still installing; retry in a moment`, which `load_model` / `pull_model` echo in their refusal.
-`no accelerator node` is the verdict for a document that names no pool.
+A document that names no pool while the pool's instance shapes are known — cluster-manager registers
+them with a new pool, and the slice names the pool in the document when its connectivity child renders
+it again, moments later — is treated the same way: its settings stand for five seconds, a fit that
+finds no candidate node re-reads it once, and while it still names no pool the answer is `fits: false`,
+`retryable: true` and `reason: the serving layer's discovery document <namespace>/<name> names no GPU
+pool yet (no spec.gpuPool.nodeSelector) though the pool's instance shapes are known — the slice is
+still publishing the new pool; retry in a moment`. A load composes its predictor with the settings the
+fit was judged on, the pool's taint and label included.
+`no accelerator node` is the verdict for a document that names no pool while no pool shapes are known.
 
 A list with an invalid entry is refused on the document (the document is reported and not loaded)
 and ignored from discovery (the answer is the unverified one). Once a node of the pool exists the
