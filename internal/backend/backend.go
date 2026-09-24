@@ -282,7 +282,7 @@ const (
 	InterfaceMessages = "Messages"
 	// InterfaceAnthropicTokenCount is Anthropic's count_tokens
 	// (/v1/messages/count_tokens).
-	InterfaceAnthropicTokenCount = "AnthropicTokenCount"
+	InterfaceAnthropicTokenCount = "AnthropicTokenCount" // #nosec G101 -- an interface name, not a credential
 	// InterfaceEmbeddings is OpenAI embeddings (/v1/embeddings).
 	InterfaceEmbeddings = "Embeddings"
 )
