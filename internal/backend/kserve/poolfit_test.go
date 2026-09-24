@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -344,4 +345,58 @@ func TestFitCheckTakesThePoolPathOnceTheDiscoveryDocumentAppears(t *testing.T) {
 	assert.False(t, res.Fits)
 	assert.False(t, res.Retryable)
 	assert.Contains(t, res.Reason, "no accelerator node: no node advertises "+DefaultGPUResourceName)
+}
+
+// TestFitCheckTakesThePoolPathOnceTheDocumentNamesThePool
+// (giantswarm/model-manager#127): cluster-manager registered a pool's shapes,
+// no node advertises a GPU, and the discovery document is published but
+// names the pool only once the serving slice's connectivity child renders it
+// again — a moment after the settings were cached. The first fit says the
+// document names no pool yet and to retry, not "no accelerator node"; the
+// next, a second later and well within DiscoveryTTL, takes the pool path. A
+// load judged in such a moment places the model on the pool and composes its
+// predictor onto the pool's taint and label.
+func TestFitCheckTakesThePoolPathOnceTheDocumentNamesThePool(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	now := time.Now()
+	f.b.cfg.now = func() time.Time { return now }
+	for _, n := range []string{testCacheNode, testGPUNode, testCPUNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, n, metav1.DeleteOptions{}))
+	}
+	registered := backend.GPUPool{Instances: []backend.InstanceShape{shapeXLarge}}
+	f.b.opts.GPUPool, f.b.cfg.opts.GPUPool = registered, registered
+	f.setDiscoveryOpts(ctx, discoveryOpts{})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.False(t, res.Fits)
+	assert.True(t, res.Retryable)
+	assert.Equal(t, "the serving layer's discovery document "+testPlatformNS+"/"+DefaultDiscoveryConfigMap+" names no GPU pool yet (no spec.gpuPool.nodeSelector) though the pool's instance shapes are known — the slice is still publishing the new pool; retry in a moment", res.Reason)
+	assert.Empty(t, res.BudgetSource)
+
+	f.renderDiscovery(ctx, discoveryOpts{gpuPool: poolInput()})
+	now = now.Add(time.Second)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.False(t, res.Retryable)
+	assert.Equal(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+	assert.Equal(t, "g6.xlarge", res.InstanceType)
+
+	// The same moment on a load: the settings Serve starts from name no
+	// pool, the fit re-reads the document and places the model on the pool,
+	// and the predictor is composed with what the fit was judged on.
+	f.setDiscoveryOpts(ctx, discoveryOpts{})
+	require.True(t, f.b.cfg.settings(ctx).poolUnnamed())
+	f.renderDiscovery(ctx, discoveryOpts{gpuPool: poolInput()})
+	now = now.Add(time.Second)
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	list, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	selector, _, _ := unstructured.NestedMap(list.Items[0].Object, "spec", "template", "nodeSelector")
+	assert.Equal(t, poolName, selector[poolLabel], "the predictor selects the pool the fit placed it on")
+	tols, _, _ := unstructured.NestedSlice(list.Items[0].Object, "spec", "template", "tolerations")
+	assert.Contains(t, tols, map[string]any{"key": poolTaintKey, "operator": "Exists", "effect": "NoSchedule"}, "and tolerates its taint")
 }
