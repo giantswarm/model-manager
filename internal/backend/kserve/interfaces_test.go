@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,13 +43,19 @@ const (
 	devVersion  = "0.1.dev1+g51f799c1a"
 )
 
+// openapiDoc reads an openapi.json document of testdata/openapi.
+func openapiDoc(t *testing.T, doc string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "openapi", doc)) //nolint:gosec // a recorded document under testdata, named by the test
+	require.NoError(t, err)
+	return raw
+}
+
 // vllmServer is a vLLM of the version answering the openapi.json document of
 // testdata/openapi.
 func vllmServer(t *testing.T, version, doc string) *modelServer {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/openapi/" + doc)
-	require.NoError(t, err)
-	return &modelServer{version: version, openapi: string(raw)}
+	return &modelServer{version: version, openapi: string(openapiDoc(t, doc))}
 }
 
 // allRoutesServer answers the union of the generate and the pooling route
@@ -57,10 +64,8 @@ func allRoutesServer(t *testing.T) *modelServer {
 	t.Helper()
 	merged := map[string]any{}
 	for _, doc := range []string{generateDoc, poolingDoc} {
-		raw, err := os.ReadFile("testdata/openapi/" + doc)
-		require.NoError(t, err)
 		var d map[string]any
-		require.NoError(t, json.Unmarshal(raw, &d))
+		require.NoError(t, json.Unmarshal(openapiDoc(t, doc), &d))
 		for k, v := range d["paths"].(map[string]any) {
 			merged[k] = v
 		}
