@@ -153,6 +153,9 @@ type fixture struct {
 	entries map[string][]cacheEntry // node -> entries
 	scans   int
 	logs    map[string]string // pod name -> logs
+	// servers are the served models' runtimes by workload Service host
+	// (interfaces_test.go); a host without one answers no connection.
+	servers map[string]*modelServer
 }
 
 func presetDoc(name, model string, weightsGiB float64, extra string) string {
@@ -441,8 +444,9 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	require.NoError(t, err)
 	b.log = slog.New(slog.DiscardHandler)
 	b.cfg.log = b.log
-	f := &fixture{t: t, b: b, cs: cs, dyn: dyn, hub: hub, entries: map[string][]cacheEntry{}, logs: map[string]string{}}
+	f := &fixture{t: t, b: b, cs: cs, dyn: dyn, hub: hub, entries: map[string][]cacheEntry{}, logs: map[string]string{}, servers: map[string]*modelServer{}}
 	f.serveLLMAPI()
+	b.serverHTTP = &http.Client{Transport: f}
 	b.scan = func(_ context.Context, node string) ([]cacheEntry, string, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()

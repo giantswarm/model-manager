@@ -1,0 +1,216 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "FastAPI",
+  "version": "0.1.0"
+ },
+ "paths": {
+  "/load": {
+   "get": {
+    "summary": "Load",
+    "operationId": "load_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/ping": {
+   "get": {
+    "summary": "Ping",
+    "operationId": "ping_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   },
+   "post": {
+    "summary": "Ping",
+    "operationId": "ping_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/health": {
+   "get": {
+    "summary": "Health",
+    "operationId": "health_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/tokenize": {
+   "post": {
+    "summary": "Tokenize",
+    "operationId": "tokenize_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/detokenize": {
+   "post": {
+    "summary": "Detokenize",
+    "operationId": "detokenize_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/v1/models": {
+   "get": {
+    "summary": "V1 Models",
+    "operationId": "v1_models_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/version": {
+   "get": {
+    "summary": "Version",
+    "operationId": "version_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/invocations": {
+   "post": {
+    "summary": "Invocations",
+    "operationId": "invocations_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/scale_elastic_ep": {
+   "post": {
+    "summary": "Scale_Elastic_Ep",
+    "operationId": "scale_elastic_ep_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/is_scaling_elastic_ep": {
+   "post": {
+    "summary": "Is_Scaling_Elastic_Ep",
+    "operationId": "is_scaling_elastic_ep_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/pooling": {
+   "post": {
+    "summary": "Pooling",
+    "operationId": "pooling_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/v1/embeddings": {
+   "post": {
+    "summary": "V1 Embeddings",
+    "operationId": "v1_embeddings_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/classify": {
+   "post": {
+    "summary": "Classify",
+    "operationId": "classify_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/score": {
+   "post": {
+    "summary": "Score",
+    "operationId": "score_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/v1/score": {
+   "post": {
+    "summary": "V1 Score",
+    "operationId": "v1_score_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/rerank": {
+   "post": {
+    "summary": "Rerank",
+    "operationId": "rerank_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/v1/rerank": {
+   "post": {
+    "summary": "V1 Rerank",
+    "operationId": "v1_rerank_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  },
+  "/v2/rerank": {
+   "post": {
+    "summary": "V2 Rerank",
+    "operationId": "v2_rerank_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response"
+     }
+    }
+   }
+  }
+ }
+}

@@ -241,7 +241,51 @@ type LoadedModel struct {
 	// neither.
 	Phase string `json:"phase,omitempty"`
 	Steps []Step `json:"steps,omitempty"`
+	// Runtime and Interfaces are what the running server says about itself
+	// (kserve: read once each time the model turns Ready). Interfaces is
+	// absent before the server was read; an empty list says the read found
+	// none and InterfacesReason says why. Backends that do not read their
+	// server answer neither.
+	Runtime          *Runtime    `json:"runtime,omitempty"`
+	Interfaces       []Interface `json:"interfaces,omitzero"`
+	InterfacesReason string      `json:"interfacesReason,omitempty"`
 }
+
+// Runtime is the software serving a model, as the running server reports it.
+type Runtime struct {
+	// Name is the runtime (kserve: vllm, what the llm-d template runs).
+	Name string `json:"name"`
+	// Version is the version the server reports (vLLM: GET /version); empty
+	// when it did not answer.
+	Version string `json:"version,omitempty"`
+}
+
+// Interface is one API a served model answers: a route the running server
+// registered, named in agentgateway's format vocabulary (the formats an
+// AgentgatewayModel declares in custom.formats).
+type Interface struct {
+	// Type is one of the Interface* values.
+	Type string `json:"type"`
+	// Path is the registered route, relative to the model's endpoint.
+	Path string `json:"path"`
+}
+
+// The API interfaces, in agentgateway's format vocabulary and in the order a
+// model reports them.
+const (
+	// InterfaceCompletions is OpenAI chat completions (/v1/chat/completions;
+	// the legacy /v1/completions comes with it).
+	InterfaceCompletions = "Completions"
+	// InterfaceResponses is the OpenAI Responses API (/v1/responses).
+	InterfaceResponses = "Responses"
+	// InterfaceMessages is Anthropic Messages (/v1/messages).
+	InterfaceMessages = "Messages"
+	// InterfaceAnthropicTokenCount is Anthropic's count_tokens
+	// (/v1/messages/count_tokens).
+	InterfaceAnthropicTokenCount = "AnthropicTokenCount"
+	// InterfaceEmbeddings is OpenAI embeddings (/v1/embeddings).
+	InterfaceEmbeddings = "Embeddings"
+)
 
 // The phases of a serve, in order; Phase names the current one. Failed and
 // Terminating are terminal phases outside the sequence: the step that failed
