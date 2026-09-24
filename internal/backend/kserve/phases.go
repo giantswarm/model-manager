@@ -30,7 +30,9 @@ import (
 // budget runs out (launch.go, giantswarm/model-manager#121). A runtime that
 // dies while loading is named by its container status — how often it
 // crashed, the exit code — and by the last error line of the crashed
-// instance's log (giantswarm/model-manager#117).
+// instance's log (giantswarm/model-manager#117); a runtime that could not
+// lock its memory is named as such, since its CUDA out-of-memory is the
+// node's locked-memory limit, not the GPU (giantswarm/model-manager#135).
 const (
 	initContainerName = "storage-initializer"
 
@@ -67,10 +69,25 @@ const (
 // traceback and its exception line, a Go error, a permission refused.
 // exceptionAt finds the exception itself in such a line (`PermissionError:
 // [Errno 13] …`), so a logger's prefix in front of it is dropped.
+//
+// memlockLine matches a runtime's report that mlock() refused it — B12X's
+// weight pool says `could not lock final weight storage: Cannot allocate
+// memory` — and cudaOutOfMemory the out-of-memory the runtime turns that
+// refusal into.
 var (
-	errorLine   = regexp.MustCompile(`Error|Traceback|Exception|denied`)
-	exceptionAt = regexp.MustCompile(`\b[A-Z]\w*(?:Error|Exception)\b: `)
+	errorLine       = regexp.MustCompile(`Error|Traceback|Exception|denied`)
+	exceptionAt     = regexp.MustCompile(`\b[A-Z]\w*(?:Error|Exception)\b: `)
+	memlockLine     = regexp.MustCompile(`could not lock|mlock.*Cannot allocate memory`)
+	cudaOutOfMemory = regexp.MustCompile(`OutOfMemoryError|CUDA out of memory|cudaErrorMemoryAllocation`)
 )
+
+// memlockHint is what a crash message adds for a runtime that died on the
+// node's locked-memory limit: a container inherits containerd's
+// RLIMIT_MEMLOCK (8 MB by default) and has no CAP_IPC_LOCK to raise it, root
+// included, so a bigger node would die the same way.
+const memlockHint = "the runtime could not lock its memory, so the out-of-memory is the node's locked-memory limit, not the GPU: " +
+	"containers inherit containerd's LimitMEMLOCK — give containerd.service a drop-in with LimitMEMLOCK=infinity, " +
+	"then systemctl daemon-reload and restart containerd"
 
 // podFacts is what the phase computation reads besides the pod.
 type podFacts struct {
@@ -94,9 +111,20 @@ type podFacts struct {
 
 // crashLog is what a crashed runtime container's log says: its last error
 // line, or why the log could not be read (a caller without pods/log).
+// Memlock says the runtime died on a CUDA out-of-memory after mlock()
+// refused it.
 type crashLog struct {
-	Line string
-	Err  error
+	Line    string
+	Memlock bool
+	Err     error
+}
+
+// readCrashLog reads a crashed instance's log tail.
+func readCrashLog(log string) crashLog {
+	return crashLog{
+		Line:    lastErrorLine(log),
+		Memlock: memlockLine.MatchString(log) && cudaOutOfMemory.MatchString(log),
+	}
 }
 
 // timeline is the steps of a serve while they are computed.
@@ -544,7 +572,8 @@ func crashed(cs *corev1.ContainerStatus) bool {
 // crashMessage names a runtime's crashes: how often it died, the exit code
 // (and the reason unless the plain Error) of the last death, the last error
 // line of the crashed instance's log — or why that line is missing, never
-// silently — and the kubelet's own words when given (its back-off).
+// silently —, the locked-memory limit when that is the cause, and the
+// kubelet's own words when given (its back-off).
 func crashMessage(cs *corev1.ContainerStatus, log crashLog, kubelet string) string {
 	crashes := cs.RestartCount
 	if cs.State.Running == nil {
@@ -570,6 +599,9 @@ func crashMessage(cs *corev1.ContainerStatus, log crashLog, kubelet string) stri
 		fmt.Fprintf(&b, "; no error line in the last %d lines of the crashed container's log", crashLogTail)
 	default:
 		b.WriteString(": " + log.Line)
+	}
+	if log.Memlock {
+		b.WriteString("; " + memlockHint)
 	}
 	if kubelet = strings.TrimSpace(kubelet); kubelet != "" {
 		b.WriteString("; " + kubelet)
@@ -733,7 +765,7 @@ func (b *Backend) crashLog(ctx context.Context, p *corev1.Pod, cs *corev1.Contai
 	if err != nil {
 		return crashLog{Err: err}
 	}
-	return crashLog{Line: lastErrorLine(out)}
+	return readCrashLog(out)
 }
 
 // nodeGPUs maps every node to its allocatable accelerator count; nil when

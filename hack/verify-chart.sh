@@ -225,6 +225,18 @@ if echo "$got" | grep -q -- 'runAsUser: 0\|runAsNonRoot: false\|^ *add:'; then
   fail "cache-agent: root or an added capability rendered: '$got'"
 fi
 
+# With the kserve backend the pod may reach the served models' runtimes on the
+# workload port (the API interfaces a Ready model answers), and only then.
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true --set backend=kserve)
+echo "$got" | grep -A12 -- "The served models' runtimes" | grep -q -- 'app.kubernetes.io/part-of: llminferenceservice' \
+  || fail "networkpolicy: no egress to the served models' workload pods with the kserve backend"
+echo "$got" | grep -A14 -- "The served models' runtimes" | grep -q -- 'port: 8000$' \
+  || fail "networkpolicy: the egress to the served models' runtimes is not port 8000"
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true --set backend=ollama)
+if echo "$got" | grep -q -- 'llminferenceservice'; then
+  fail "networkpolicy: egress to served models rendered without the kserve backend"
+fi
+
 # The helm.sh/chart label is a valid label value (at most 63 characters,
 # alphanumeric at both ends) for any chart version: the cut of a long dev
 # version can land on ".", on "_" (from "+") or on a run like "--.". The

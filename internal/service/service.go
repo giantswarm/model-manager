@@ -279,6 +279,10 @@ type InvalidDocument struct {
 func (s *Service) InvalidDocuments() []InvalidDocument {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.invalidLocked()
+}
+
+func (s *Service) invalidLocked() []InvalidDocument {
 	out := make([]InvalidDocument, 0, len(s.problems))
 	for cm, p := range s.problems {
 		out = append(out, InvalidDocument{ConfigMap: cm, Error: p})
@@ -408,8 +412,8 @@ func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 	return caps
 }
 
-func (s *Service) describe(ctx context.Context, b backend.Backend) BackendResponse {
-	resp := BackendResponse{Info: b.Info(ctx), Source: s.Source(b.Name()), Capabilities: s.capabilities(b)}
+func (s *Service) describe(ctx context.Context, b backend.Backend, source string) BackendResponse {
+	resp := BackendResponse{Info: b.Info(ctx), Source: source, Capabilities: s.capabilities(b)}
 	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
 	// that is the default a client should report — not the driver's fallback.
 	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
@@ -421,14 +425,25 @@ func (s *Service) describe(ctx context.Context, b backend.Backend) BackendRespon
 	return resp
 }
 
-// Backends describes every configured backend, in order.
-func (s *Service) Backends(ctx context.Context) []BackendResponse {
-	all := s.all()
-	out := make([]BackendResponse, 0, len(all))
-	for _, b := range all {
-		out = append(out, s.describe(ctx, b))
+// Backends describes every configured backend, in order, and lists the
+// documents reported invalid, both read under one lock: the answer is a state
+// the service held, never a registration paired with a report made after it
+// (giantswarm/model-manager#101). The backends are described after the lock
+// is released, since describing one asks the backend itself.
+func (s *Service) Backends(ctx context.Context) ([]BackendResponse, []InvalidDocument) {
+	s.mu.RLock()
+	all := s.backends
+	sources := make([]string, len(all))
+	for i, b := range all {
+		sources[i] = s.sources[b.Name()]
 	}
-	return out
+	invalid := s.invalidLocked()
+	s.mu.RUnlock()
+	out := make([]BackendResponse, 0, len(all))
+	for i, b := range all {
+		out = append(out, s.describe(ctx, b, sources[i]))
+	}
+	return out, invalid
 }
 
 // Backend describes one backend — the named one, else the default — and names
@@ -438,7 +453,7 @@ func (s *Service) Backend(ctx context.Context, name string) (BackendResponse, er
 	if err != nil {
 		return BackendResponse{}, err
 	}
-	resp := s.describe(ctx, b)
+	resp := s.describe(ctx, b, s.Source(b.Name()))
 	resp.Backends = s.Names()
 	return resp, nil
 }
