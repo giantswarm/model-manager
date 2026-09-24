@@ -120,7 +120,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.listBackends)
 
 	s.AddTool(mcp.NewTool(ToolListModels,
-		mcp.WithDescription("List downloaded models with their backend, size, family/parameters, whether each is loaded, and its kagent ModelConfig if wired. Without a backend every backend is listed; a backend that fails to answer is reported under errors while the others' models are returned."),
+		mcp.WithDescription("List downloaded models with their backend, size, family/parameters, whether each is loaded, and its kagent ModelConfig if wired. A loaded model carries running: its list_loaded_models entry, the runtime and interfaces of a Ready kserve model included. Without a backend every backend is listed; a backend that fails to answer is reported under errors while the others' models are returned."),
 		backendArg("to list"),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listModels)
@@ -133,7 +133,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.getModel)
 
 	s.AddTool(mcp.NewTool(ToolListLoadedModels,
-		mcp.WithDescription("List models currently loaded in memory / serving, with their backend, memory use and expiry. On kserve every entry carries its phase and steps[] and, when one exists, its kagent ModelConfig (modelConfig); a served model model-manager manages (managedBy model-manager) that has no ModelConfig is wired by this read as the caller, and the entry says so (wiring: {wired: true, reason: \"wired on read\", modelConfig}) — the mend for a model-manager restart during a cold start, since no reconciler runs without a caller."),
+		mcp.WithDescription("List models currently loaded in memory / serving, with their backend, memory use and expiry. On kserve every entry carries its phase and steps[] and, when one exists, its kagent ModelConfig (modelConfig); a served model model-manager manages (managedBy model-manager) that has no ModelConfig is wired by this read as the caller, and the entry says so (wiring: {wired: true, reason: \"wired on read\", modelConfig}) — the mend for a model-manager restart during a cold start, since no reconciler runs without a caller. A Ready kserve model carries runtime {name, version} and interfaces [{type, path}] — the API interfaces its running server registered, read from the server's GET /version and GET /openapi.json once each time the model turns Ready; type is agentgateway's format name: Completions (OpenAI chat completions, the legacy /v1/completions with it), Responses (OpenAI Responses), Messages (Anthropic Messages), AnthropicTokenCount (Anthropic count_tokens), Embeddings (OpenAI embeddings); path is relative to endpoint. runtime.version is what the server reports (a source build answers 0.1.dev<n>+g<commit>). A server that publishes no route list (--disable-fastapi-docs), one whose list names chat completions and embeddings side by side (a server that registers every route whatever the model serves, vLLM before 0.16) or one that could not be read reports interfaces [] and interfacesReason."),
 		backendArg("to list"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.listLoaded)
@@ -158,7 +158,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.load)
 
 	s.AddTool(mcp.NewTool(ToolListPresets,
-		mcp.WithDescription("List the curated serving presets (kserve): model, runtime, GPUs, weights and overhead requirements, arguments. Presets are the only way to serve a model on kserve."),
+		mcp.WithDescription("List the curated serving presets (kserve): model, runtime, GPUs, weights and overhead requirements, arguments. Presets are the only way to serve a model on kserve. A preset states no API interfaces: the ones a served model answers are read from its running server (list_loaded_models interfaces)."),
 		backendArg("to list presets of"),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listPresets)
