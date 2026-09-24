@@ -2,11 +2,13 @@ package kserve
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -16,10 +18,27 @@ import (
 
 const testLLMEndpoint = "http://agentgateway.agent-platform.svc:8081"
 
-// withLLMEndpoint publishes spec.llmEndpoint in discovery.
+// withLLMEndpoint renders the platform's LLM endpoint document in
+// model-manager's namespace, as the agent-platform chart does with llmRouting on.
 func (f *fixture) withLLMEndpoint(ctx context.Context) {
 	f.t.Helper()
-	f.setDiscoveryOpts(ctx, discoveryOpts{llmEndpoint: testLLMEndpoint})
+	f.addLLMEndpointDocument(ctx, "agent-platform-connectivity-llm-endpoint")
+}
+
+func (f *fixture) addLLMEndpointDocument(ctx context.Context, name string) {
+	f.t.Helper()
+	_, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testPlatformNS, Labels: map[string]string{LLMEndpointLabel: "true"}},
+		Data: map[string]string{llmEndpointKey: fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: LLMEndpoint
+spec:
+  parentRefs:
+    - {group: gateway.networking.k8s.io, kind: Gateway, name: agentgateway, sectionName: llm}
+  endpoint: %s
+`, testLLMEndpoint)},
+	}, metav1.CreateOptions{})
+	require.NoError(f.t, err)
+	f.resetSettings()
 }
 
 // gatewayModel reads the driver's AgentgatewayModel of a public name; nil when
@@ -52,7 +71,8 @@ func TestReadyModelIsPutOnTheLLMEndpoint(t *testing.T) {
 	assert.Equal(t, testLLMEndpoint, lm.Endpoint, "the endpoint a client reaches the public name at")
 	assert.Empty(t, lm.PublicNameReason)
 
-	parents := []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "agent-platform-connectivity-llm", "namespace": testPlatformNS}}
+	// The document's parent names no namespace: it is the document's.
+	parents := []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "agentgateway", "sectionName": "llm"}}
 	public := f.gatewayModel(ctx, "tiny")
 	require.NotNil(t, public, "the public virtual model exists")
 	assert.Equal(t, map[string]string{ManagedByLabel: ManagedByValue, BackendLabel: "kserve", PresetLabel: "tiny"}, public.GetLabels())
@@ -178,8 +198,39 @@ func TestForeignServingObjectIsNotPutOnTheLLMEndpoint(t *testing.T) {
 	assert.Nil(t, f.gatewayModel(ctx, "embed"))
 }
 
-// Without spec.llmEndpoint nothing changes: no object, the model's own
-// address, the agents on it as before.
+// Two LLM endpoint documents are one too many: nothing goes on the endpoint.
+func TestTwoLLMEndpointDocumentsPutNothingOnTheEndpoint(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.withLLMEndpoint(ctx)
+	f.addLLMEndpointDocument(ctx, "another-llm-endpoint")
+	f.serve("tiny", vllmServer(t, devVersion, generateDoc))
+	f.readyLLMISVC(ctx, "tiny", time.Now())
+
+	lm := loadedOne(t, f.b)
+	assert.Empty(t, lm.PublicName)
+	assert.Nil(t, f.gatewayModel(ctx, "tiny"))
+	assert.Equal(t, workloadURL("tiny", testServingNS)+"/v1", f.b.AgentEndpoint(tinyRepo).BaseURL)
+}
+
+// A backend serving another cluster reads no LLM endpoint document: the
+// endpoint's data plane reaches the models of its own cluster only.
+func TestRemoteTargetStaysOffTheLLMEndpoint(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.withLLMEndpoint(ctx)
+	f.b.cfg.opts.Target = backend.Target{Cluster: "wc1", APIServer: "https://wc1.example.test", ServingNamespace: testServingNS}
+	f.resetSettings()
+	f.serve("tiny", vllmServer(t, devVersion, generateDoc))
+	f.readyLLMISVC(ctx, "tiny", time.Now())
+
+	lm := loadedOne(t, f.b)
+	assert.Empty(t, lm.PublicName)
+	assert.Nil(t, f.gatewayModel(ctx, "tiny"))
+}
+
+// Without the LLM endpoint document nothing changes: no object, the model's
+// own address, the agents on it as before.
 func TestWithoutLLMEndpointNothingIsWritten(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

@@ -221,11 +221,30 @@ needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
 
 ### Served models on the LLM endpoint
 
-On an installation whose discovery document carries `spec.llmEndpoint` (the agent-platform
-chart's `llmRouting` with model-manager on: `parentRefs`, the LLM route; `endpoint`, the
-listener's in-cluster URL), every Ready model created from a preset whose server registered at
-least one interface is put on the endpoint as two `AgentgatewayModel`s, in the route's namespace,
-written with model-manager's own ServiceAccount (the chart grants it `agentgatewaymodels` there):
+The platform's LLM endpoint is described by an **LLM endpoint document**: a ConfigMap in
+model-manager's own namespace (`--namespace`, the backend documents' namespace) labelled
+`agent-platform.giantswarm.io/llm-endpoint=true`, whose key `llm-endpoint.yaml` holds
+
+```yaml
+apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: LLMEndpoint
+spec:
+  parentRefs:                 # Gateway API parents every served model attaches to
+    - {group: gateway.networking.k8s.io, kind: Gateway, name: agentgateway, sectionName: llm}
+  endpoint: http://agentgateway.agent-platform.svc:8081   # the listener's in-cluster URL
+  externalEndpoint: https://llm.example.io                # optional: the endpoint's public URL
+```
+
+The agent-platform chart renders it in the platform release with `llmRouting` on and
+model-manager serving. It is the platform's and not a serving slice's: a GPU node pool's slice is
+a release of its own, and the endpoint's data plane reaches the models of its own cluster only.
+model-manager reads it with its ServiceAccount, every time it resolves its serving settings, for a
+kserve backend serving model-manager's own cluster: a backend with a remote target reads none. A
+parent without a namespace is in the document's. With exactly one document, every Ready model
+created from a preset whose server registered at least one interface goes on the endpoint as two
+`AgentgatewayModel`s. Two or more documents, or one that does not parse, put nothing on it, and
+the log says why. The objects live in the parents' namespace and are written with model-manager's
+own ServiceAccount (the chart grants it `agentgatewaymodels` there):
 
 ```yaml
 apiVersion: agentgateway.dev/v1alpha1
@@ -234,7 +253,7 @@ metadata:
   name: <preset>-workload         # the concrete model: the served workload
   labels: {app.kubernetes.io/managed-by: model-manager, model-manager.giantswarm.io/backend: kserve, agent-platform.giantswarm.io/preset: <preset>}
 spec:
-  parentRefs: [<spec.llmEndpoint.parentRefs>]
+  parentRefs: [<the document's parentRefs>]
   match: {model: <Hugging Face id>}
   visibility: Internal
   provider: Custom
@@ -248,7 +267,7 @@ metadata:
   name: <preset>                  # the public name: what a client sends as `model`
   labels: {…the same…}
 spec:
-  parentRefs: [<spec.llmEndpoint.parentRefs>]
+  parentRefs: [<the document's parentRefs>]
   virtualModel:
     weighted:
       targets: [{modelRef: {name: <preset>-workload}}]
@@ -268,14 +287,14 @@ with the served models on every list and at least every five minutes. Two served
 Hugging Face id would share the concrete match, so the router picks the first by name for both.
 
 `list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL — its public
-one (`spec.llmEndpoint.externalEndpoint`, the chart's `llmRouting.external`) when the installation
+one (the document's `externalEndpoint`, the chart's `llmRouting.external`) when the installation
 publishes it, else the listener's; a served
 model that is not on it carries `publicNameReason` (not Ready yet, no interfaces, not created from
 a preset, the object could not be written). The model's ModelConfig rides the endpoint: `openAI.
 baseUrl` the listener plus `/v1`, `model` the public name, the placeholder key (the in-cluster
 listener checks none), so an agent's turns on a local model are metered by the same data plane as
 its provider turns. A hand-written `LLMInferenceService` has no preset and stays off the endpoint.
-Without `spec.llmEndpoint` nothing is written and the ModelConfig keeps the model's own address.
+Without the document nothing is written and the ModelConfig keeps the model's own address.
 
 ### The ModelConfig's API key
 

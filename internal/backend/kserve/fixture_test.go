@@ -223,9 +223,6 @@ type discoveryOpts struct {
 	// cacheDisabled renders spec.cache.enabled: false — the serving layer
 	// without a cache claim.
 	cacheDisabled bool
-	// llmEndpoint renders spec.llmEndpoint with the platform's LLM route and
-	// this listener URL; absent when empty.
-	llmEndpoint string
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -274,20 +271,11 @@ spec:
     claimName: hf-cache
     mountPath: /mnt/models
     redirectPolicy: %t
-%s%s  presets:
+%s  presets:
     namespace: agent-platform
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway, llmEndpointYAML(o.llmEndpoint))
-}
-
-// llmEndpointYAML is the spec.llmEndpoint block for a listener URL: the LLM
-// route in the platform namespace; nothing without a URL.
-func llmEndpointYAML(endpoint string) string {
-	if endpoint == "" {
-		return ""
-	}
-	return fmt.Sprintf("  llmEndpoint:\n    enabled: true\n    parentRefs:\n      - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: agent-platform-connectivity-llm, namespace: %s}\n    endpoint: %s\n", testPlatformNS, endpoint)
+`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings
@@ -452,14 +440,15 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	cs := kubefake.NewSimpleClientset(append(base, objs...)...)
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), llmisvcListKinds(), wellKnownConfig())
 	b, err := New(backend.KServeOptions{
-		Dynamic:            dyn,
-		Clientset:          cs,
-		DiscoveryNamespace: testPlatformNS,
-		HFEndpoint:         hub.srv.URL,
-		HFTokenSecret:      "hf-token",
-		PollInterval:       10 * time.Millisecond,
-		ReadyTimeout:       2 * time.Second,
-		InventoryTimeout:   time.Second,
+		Dynamic:              dyn,
+		Clientset:            cs,
+		DiscoveryNamespace:   testPlatformNS,
+		LLMEndpointNamespace: testPlatformNS,
+		HFEndpoint:           hub.srv.URL,
+		HFTokenSecret:        "hf-token",
+		PollInterval:         10 * time.Millisecond,
+		ReadyTimeout:         2 * time.Second,
+		InventoryTimeout:     time.Second,
 	})
 	require.NoError(t, err)
 	b.log = slog.New(slog.DiscardHandler)

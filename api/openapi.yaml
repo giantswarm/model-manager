@@ -967,7 +967,7 @@ components:
           type: string
           example: qwen3-5-4b
           description: |
-            kserve, on an installation with the platform's LLM endpoint (discovery `spec.llmEndpoint`) —
+            kserve, on an installation with the platform's LLM endpoint (its LLM endpoint document) —
             the model's name on the endpoint, what a client sends as `model` there: the preset's name.
             The model is on the endpoint as two `AgentgatewayModel`s — `<preset>-workload`, Internal,
             provider Custom on the workload Service with its `interfaces` as formats, matched on the

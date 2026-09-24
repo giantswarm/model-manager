@@ -58,6 +58,11 @@ type KServeOptions struct {
 	// Target is the cluster the backend acts on (a registered document names
 	// it; empty: the local cluster, reported without a target).
 	Target Target
+	// LLMEndpointNamespace is model-manager's own namespace, where the
+	// platform's LLM endpoint document lives (a ConfigMap labelled
+	// agent-platform.giantswarm.io/llm-endpoint=true); empty: served models
+	// stay off the endpoint.
+	LLMEndpointNamespace string
 	// PresetNamespace / PresetSelector locate the ServingPreset ConfigMaps.
 	PresetNamespace string
 	PresetSelector  string

@@ -162,18 +162,6 @@ type discoveryDoc struct {
 			Endpoint       string `json:"endpoint"`
 			PathConvention string `json:"pathConvention"`
 		} `json:"gateway"`
-		// LLMEndpoint is the platform's LLM endpoint (the chart's
-		// llmRouting): the route(s) a served model's AgentgatewayModel
-		// attaches to (ParentRefs, Gateway API parent references) and the
-		// listener's in-cluster URL (Endpoint).
-		LLMEndpoint struct {
-			Enabled    bool             `json:"enabled"`
-			ParentRefs []map[string]any `json:"parentRefs"`
-			Endpoint   string           `json:"endpoint"`
-			// ExternalEndpoint is the endpoint's public URL, when the
-			// installation publishes it (llmRouting.external).
-			ExternalEndpoint string `json:"externalEndpoint"`
-		} `json:"llmEndpoint"`
 	} `json:"spec"`
 }
 
@@ -200,8 +188,8 @@ type settings struct {
 	// status.addresses (giantswarm/model-manager#115).
 	GatewayEndpoint string
 	// LLMEndpoint puts every served model on the platform's LLM endpoint
-	// (gatewaymodel.go): discovery's spec.llmEndpoint when enabled with a
-	// route and a URL, nil otherwise.
+	// (gatewaymodel.go): the LLM endpoint document of model-manager's own
+	// namespace, for a backend serving its own cluster; nil otherwise.
 	LLMEndpoint         *llmEndpoint
 	CacheEnabled        bool
 	CacheClaim          string
@@ -509,13 +497,11 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		if sp.Gateway.Enabled {
 			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
 		}
-		if le := sp.LLMEndpoint; le.Enabled {
-			ep, err := newLLMEndpoint(le.ParentRefs, le.Endpoint, le.ExternalEndpoint, o.DiscoveryNamespace)
-			if err != nil {
-				c.log.Warn("discovery's spec.llmEndpoint is unusable; served models stay off the LLM endpoint", "error", err)
-			}
-			s.LLMEndpoint = ep
-		}
+	}
+	if ep, err := c.readLLMEndpoint(ctx); err != nil {
+		c.log.Warn("the LLM endpoint document is unusable; served models stay off the LLM endpoint", "error", err)
+	} else {
+		s.LLMEndpoint = ep
 	}
 	// Explicit options win over discovery.
 	setIf(&s.Namespace, o.Namespace)
