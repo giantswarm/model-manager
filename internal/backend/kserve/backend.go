@@ -555,9 +555,14 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	fit := plan.Result
 	fit.Backend = b.Name()
 	res := &backend.LoadResult{Fit: &fit}
-	// A CPU preset is composed without the GPU pool's scheduling and the
-	// accelerator RuntimeClass (settings.forPreset).
-	s = s.forPreset(plan.Preset)
+	// The object is composed with the settings the fit was judged on: a fit
+	// that found no node re-reads a discovery document that was absent or
+	// did not name the GPU pool yet (config.recheckDiscovery), and the pool
+	// it placed the model on is the one the predictor has to be scheduled
+	// onto (giantswarm/model-manager#127). A CPU preset is composed without
+	// the GPU pool's scheduling and the accelerator RuntimeClass
+	// (settings.forPreset).
+	s = b.cfg.settings(ctx).forPreset(plan.Preset)
 	existing, err := b.getServing(ctx, s.Namespace, plan.Preset.name())
 	if err != nil {
 		return nil, err
