@@ -182,6 +182,62 @@ func TestPullRefusesAnOCIPreset(t *testing.T) {
 	assert.Empty(t, jobList.Items)
 }
 
+// TestComposeOCIPresetCarriesTheModelcarEnvironment: a preset served from a
+// model image gets the modelcar environment on its main container without
+// declaring it (giantswarm/model-manager#146); a name the preset sets keeps
+// the preset's value and place, and an hf:// preset gets none of it.
+func TestComposeOCIPresetCarriesTheModelcarEnvironment(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.serveLLMAPI()
+	s := f.b.cfg.settings(ctx)
+	schema := loadLLMISVCSchema(t)
+	modelcar := []any{
+		map[string]any{"name": "HOME", "value": "/tmp"},
+		map[string]any{"name": "HF_HOME", "value": "/tmp/hf"},
+		map[string]any{"name": "VLLM_CACHE_ROOT", "value": "/tmp/vllm-cache"},
+		map[string]any{"name": "TORCHINDUCTOR_CACHE_DIR", "value": "/tmp/torchinductor"},
+		map[string]any{"name": "USER", "value": "vllm"},
+		map[string]any{"name": "LOGNAME", "value": "vllm"},
+	}
+
+	t.Run("an oci:// preset with no env: the modelcar environment", func(t *testing.T) {
+		p, err := parsePreset([]byte(ociPresetDoc()), "shipped")
+		require.NoError(t, err)
+		obj := f.b.composeLLM(p, s, "")
+		schema.assertValid(t, obj)
+		assert.Equal(t, modelcar, mainContainer(obj)["env"])
+	})
+
+	t.Run("the preset's own value wins, in its place", func(t *testing.T) {
+		doc := ociPresetDoc() + `  env:
+    - {name: USER, value: runtime}
+    - {name: VLLM_LOGGING_LEVEL, value: DEBUG}
+`
+		p, err := parsePreset([]byte(doc), "shipped")
+		require.NoError(t, err)
+		obj := f.b.composeLLM(p, s, "")
+		schema.assertValid(t, obj)
+		env := mainContainer(obj)["env"].([]any)
+		assert.Equal(t, map[string]any{"name": "USER", "value": "runtime"}, env[0])
+		assert.Equal(t, map[string]any{"name": "VLLM_LOGGING_LEVEL", "value": "DEBUG"}, env[1])
+		names := map[string]int{}
+		for _, e := range env {
+			names[e.(map[string]any)["name"].(string)]++
+		}
+		assert.Equal(t, 1, names["USER"], "one USER: the preset's")
+		assert.Len(t, env, 7, "the preset's two, then the five modelcar names it does not set")
+		assert.Equal(t, map[string]any{"name": "LOGNAME", "value": "vllm"}, env[6])
+	})
+
+	t.Run("an hf:// preset: its env as written", func(t *testing.T) {
+		p, err := parsePreset([]byte(presetDoc("tiny", tinyRepo, 1, "")), "shipped")
+		require.NoError(t, err)
+		_, hasEnv := mainContainer(f.b.composeLLM(p, s, ""))["env"]
+		assert.False(t, hasEnv)
+	})
+}
+
 // TestOCIPresetDownloadIsTheImage: check_fit's downloadBytes for a preset
 // served from a model image is the image's layers as its registry lists them
 // (giantswarm/model-manager#150), not the Hub tree the weights are sized from;

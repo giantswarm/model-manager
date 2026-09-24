@@ -38,6 +38,7 @@ const (
 type served struct {
 	Name      string
 	Namespace string
+	UID       string
 	Model     string
 	Preset    string
 	Managed   bool
@@ -65,6 +66,8 @@ type served struct {
 	// Phase and Steps are where the serve is (phases.go).
 	Phase string
 	Steps []backend.Step
+	// API is what the server said about itself once Ready (interfaces.go).
+	API serverAPI
 }
 
 // manageable reports whether model-manager may operate on the
@@ -164,6 +167,7 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 		out = append(out, sv)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	b.serverAPIs(ctx, out)
 	b.rememberServed(out)
 	// While they exist, remember which repository each one fills its cache
 	// directory from (index.go).
@@ -380,6 +384,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv := served{
 		Name:           obj.GetName(),
 		Namespace:      obj.GetNamespace(),
+		UID:            string(obj.GetUID()),
 		Managed:        obj.GetLabels()[ManagedByLabel] == ManagedByValue,
 		ManagedBy:      obj.GetLabels()[ManagedByLabel],
 		Preset:         obj.GetLabels()[PresetLabel],
