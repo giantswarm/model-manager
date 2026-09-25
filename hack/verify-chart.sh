@@ -237,6 +237,38 @@ if echo "$got" | grep -q -- 'llminferenceservice'; then
   fail "networkpolicy: egress to served models rendered without the kserve backend"
 fi
 
+# OTLP: no exporter env and no collector egress without an endpoint; with one,
+# the env and an egress rule on the collector's namespace and port, the
+# cluster-external form for a host that is not an in-cluster Service.
+got=$(helm template mm "$CHART" --show-only templates/deployment.yaml)
+if echo "$got" | grep -q -- 'OTEL_'; then
+  fail "deployment: OTEL_ env rendered without observability.otel.endpoint"
+fi
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
+if echo "$got" | grep -q -- 'OTLP collector'; then
+  fail "networkpolicy: OTLP egress rendered without observability.otel.endpoint"
+fi
+OTLP=(--set networkPolicy.enabled=true
+      --set observability.otel.endpoint=http://otel-collector.customer-otel.svc:14317
+      --set observability.otel.headers=X-Scope-OrgID=acme)
+got=$(helm template mm "$CHART" --show-only templates/deployment.yaml "${OTLP[@]}")
+for want in 'OTEL_EXPORTER_OTLP_ENDPOINT' 'value: "http://otel-collector.customer-otel.svc:14317"' \
+            'value: "X-Scope-OrgID=acme"' 'value: "parentbased_traceidratio"' 'value: "0.1"' \
+            'value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(K8S_POD_NAME),k8s.node.name=$(K8S_NODE_NAME)"'; do
+  echo "$got" | grep -qF -- "$want" || fail "deployment: OTLP env lacks '$want'"
+done
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml "${OTLP[@]}")
+echo "$got" | grep -A6 -- 'OTLP collector' | grep -q -- 'kubernetes.io/metadata.name: customer-otel$' \
+  || fail "networkpolicy: the OTLP egress does not select the collector's namespace"
+echo "$got" | grep -A9 -- 'OTLP collector' | grep -q -- 'port: 14317$' \
+  || fail "networkpolicy: the OTLP egress is not on the collector's port"
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true \
+  --set observability.otel.endpoint=https://otlp.example.com)
+echo "$got" | grep -A6 -- 'OTLP collector' | grep -q -- 'cidr: 0.0.0.0/0$' \
+  || fail "networkpolicy: the OTLP egress to an external collector is not an ipBlock"
+echo "$got" | grep -A9 -- 'OTLP collector' | grep -q -- 'port: 443$' \
+  || fail "networkpolicy: the OTLP egress to an https collector without a port is not 443"
+
 # The helm.sh/chart label is a valid label value (at most 63 characters,
 # alphanumeric at both ends) for any chart version: the cut of a long dev
 # version can land on ".", on "_" (from "+") or on a run like "--.". The

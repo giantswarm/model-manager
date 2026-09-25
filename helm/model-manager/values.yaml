@@ -494,6 +494,27 @@ logging:
   # -- Enable debug logging.
   verbose: false
 
+observability:
+  otel:
+    # -- OTLP endpoint traces are exported to, e.g.
+    # `http://otlp-gateway.kube-system.svc:4317`. Empty exports nothing; the
+    # W3C propagator still carries an inbound traceparent.
+    endpoint: ""
+    # -- OTLP protocol.
+    protocol: grpc  # @schema enum: [grpc, http/protobuf]
+    # -- OTEL_EXPORTER_OTLP_HEADERS, e.g. `X-Scope-OrgID=giantswarm` for a
+    # multi-tenant collector.
+    headers: ""
+    # -- Appended to the downward-API k8s.namespace.name, k8s.pod.name and
+    # k8s.node.name in OTEL_RESOURCE_ATTRIBUTES, e.g.
+    # `deployment.environment=glean`.
+    resourceAttributes: ""
+    # -- OTEL_TRACES_SAMPLER. The parent-based samplers follow the caller's
+    # sampling decision.
+    sampler: parentbased_traceidratio
+    # -- OTEL_TRACES_SAMPLER_ARG: the ratio of root traces sampled.
+    samplerArg: "0.1"
+
 # -- Extra container arguments.
 extraArgs: []
 # -- Extra environment variables.

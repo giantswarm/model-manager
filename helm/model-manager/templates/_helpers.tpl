@@ -203,3 +203,35 @@ trusts the client id alone.
 {{- end -}}
 {{- join "," $auds -}}
 {{- end }}
+
+{{/*
+The OTLP collector the traces go to, as "<namespace>:<port>" for an
+in-cluster Service host (<svc>.<namespace>[.svc[.cluster.local]]), else
+":<port>". Without a port in the endpoint: 443 for https, else the
+protocol's (4317 gRPC, 4318 HTTP). Empty without an endpoint.
+*/}}
+{{- define "model-manager.otlpTarget" -}}
+{{- $otel := .Values.observability.otel -}}
+{{- with $otel.endpoint -}}
+{{- $endpoint := . -}}
+{{- if not (contains "://" $endpoint) -}}
+{{- $endpoint = printf "http://%s" $endpoint -}}
+{{- end -}}
+{{- $url := urlParse $endpoint -}}
+{{- $hostPort := splitList ":" $url.host -}}
+{{- $port := "4317" -}}
+{{- if eq (len $hostPort) 2 -}}
+{{- $port = index $hostPort 1 -}}
+{{- else if eq $url.scheme "https" -}}
+{{- $port = "443" -}}
+{{- else if eq $otel.protocol "http/protobuf" -}}
+{{- $port = "4318" -}}
+{{- end -}}
+{{- $labels := splitList "." (first $hostPort) -}}
+{{- $namespace := "" -}}
+{{- if or (eq (len $labels) 2) (and (ge (len $labels) 3) (eq (index $labels 2) "svc")) -}}
+{{- $namespace = index $labels 1 -}}
+{{- end -}}
+{{- printf "%s:%s" $namespace $port -}}
+{{- end -}}
+{{- end }}

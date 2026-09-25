@@ -216,6 +216,12 @@ can stay empty.
 | service.port | int | `8080` | Service port (container listens on 8080). |
 | resources | object | `{"limits":{"cpu":"500m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Container resources. |
 | logging.verbose | bool | `false` | Enable debug logging. |
+| observability.otel.endpoint | string | `""` | OTLP endpoint traces are exported to, e.g. `http://otlp-gateway.kube-system.svc:4317`. Empty exports nothing; the W3C propagator still carries an inbound traceparent. |
+| observability.otel.protocol | string | `"grpc"` | OTLP protocol. |
+| observability.otel.headers | string | `""` | OTEL_EXPORTER_OTLP_HEADERS, e.g. `X-Scope-OrgID=giantswarm` for a multi-tenant collector. |
+| observability.otel.resourceAttributes | string | `""` | Appended to the downward-API k8s.namespace.name, k8s.pod.name and k8s.node.name in OTEL_RESOURCE_ATTRIBUTES, e.g. `deployment.environment=glean`. |
+| observability.otel.sampler | string | `"parentbased_traceidratio"` | OTEL_TRACES_SAMPLER. The parent-based samplers follow the caller's sampling decision. |
+| observability.otel.samplerArg | string | `"0.1"` | OTEL_TRACES_SAMPLER_ARG: the ratio of root traces sampled. |
 | extraArgs | list | `[]` | Extra container arguments. |
 | extraEnv | list | `[]` | Extra environment variables. |
 | nodeSelector | object | `{}` | Node selector. |

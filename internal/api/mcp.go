@@ -93,10 +93,10 @@ type Info struct {
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
 // build is what get_info and the MCP server identity report as the version.
 func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer("model-manager", build.Version,
+	s := mcpserver.NewMCPServer("model-manager", build.Version, append(tracingOptions(),
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet, and list_backends is then empty. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
-	)
+	)...)
 	t := &tools{svc: svc, build: build}
 	for _, o := range opts {
 		o(t)

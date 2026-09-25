@@ -692,6 +692,46 @@
                 }
             }
         },
+        "observability": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "otel": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "endpoint": {
+                            "type": "string",
+                            "description": "OTLP endpoint traces are exported to, e.g. `http://otlp-gateway.kube-system.svc:4317`. Empty exports nothing; the W3C propagator still carries an inbound traceparent."
+                        },
+                        "headers": {
+                            "type": "string",
+                            "description": "OTEL_EXPORTER_OTLP_HEADERS, e.g. `X-Scope-OrgID=giantswarm` for a multi-tenant collector."
+                        },
+                        "protocol": {
+                            "type": "string",
+                            "description": "OTLP protocol.",
+                            "enum": [
+                                "grpc",
+                                "http/protobuf"
+                            ]
+                        },
+                        "resourceAttributes": {
+                            "type": "string",
+                            "description": "Appended to the downward-API k8s.namespace.name, k8s.pod.name and k8s.node.name in OTEL_RESOURCE_ATTRIBUTES, e.g. `deployment.environment=glean`."
+                        },
+                        "sampler": {
+                            "type": "string",
+                            "description": "OTEL_TRACES_SAMPLER. The parent-based samplers follow the caller's sampling decision."
+                        },
+                        "samplerArg": {
+                            "type": "string",
+                            "description": "OTEL_TRACES_SAMPLER_ARG: the ratio of root traces sampled."
+                        }
+                    }
+                }
+            }
+        },
         "ollama": {
             "type": "object",
             "additionalProperties": false,
