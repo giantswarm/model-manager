@@ -113,6 +113,13 @@ target uses model-manager's in-cluster address and CA. For a remote target:
   download present the token of the call that caused them; with no caller they are skipped (logged
   once, and the answer's `inventory.reason` says why), never made anonymously. A caller the target
   refuses is not retried without the token.
+- **The model server is read through the target apiserver.** The workload Service's cluster-local
+  name resolves only on the target, so `GET /version`, `GET /openapi.json` and the first request of
+  each Ready transition go through the Service proxy
+  (`/api/v1/namespaces/<ns>/services/http:<name>-kserve-workload-svc:8000/proxy/<path>`) as the
+  caller, who needs `get` and `create` on `services/proxy` in the serving namespace. A refusal keeps
+  the serve in `routing` with the target's message and is read again a minute later. The local
+  cluster reads the Service directly.
 - **Agents reach a model on the target's models Gateway.** The backend's `agentEndpoint` is the
   gateway origin from the target's discovery ConfigMap (`spec.gateway.endpoint`,
   `https://models.<cluster>.<domain>`); every ModelConfig names

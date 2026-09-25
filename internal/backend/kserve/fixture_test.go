@@ -195,6 +195,12 @@ type fixture struct {
 	// servers are the served models' runtimes by workload Service host
 	// (interfaces_test.go); a host without one answers no connection.
 	servers map[string]*modelServer
+	// dialled are the hosts the driver's runtime requests dialled, in order.
+	dialled []string
+	// proxied are the requests the remote target's Service proxy received;
+	// proxyDenied has it refuse every one (target_test.go).
+	proxied     []proxiedRequest
+	proxyDenied bool
 }
 
 func presetDoc(name, model string, weightsGiB float64, extra string) string {

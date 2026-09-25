@@ -118,7 +118,12 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 		wg.Add(1)
 		go func(sv *served) {
 			defer wg.Done()
-			origin := workloadURL(sv.Name, sv.Namespace)
+			origin, why := b.serverOrigin(ctx, sv.Name, sv.Namespace)
+			if why != "" {
+				sv.API = serverAPI{}.retry(why)
+				sv.API.Answer = firstAnswer{Waiting: why}
+				return
+			}
 			sv.API = b.readServerAPI(ctx, origin)
 			sv.API.Answer = b.askFirst(ctx, origin, sv.Model, sv.API)
 			if sv.API.Answer.Waiting != "" && sv.API.retryAt.IsZero() {
@@ -145,7 +150,7 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 // that publishes no list, one that registers every route whatever the model
 // serves, or one that could not be read reports none, with the reason —
 // nothing is inferred.
-func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
+func (b *Backend) readServerAPI(ctx context.Context, origin serverOrigin) serverAPI {
 	ctx, cancel := context.WithTimeout(ctx, serverReadTimeout)
 	defer cancel()
 	api := serverAPI{Runtime: &backend.Runtime{Name: runtimeVLLM}, Interfaces: []backend.Interface{}}
@@ -156,7 +161,7 @@ func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
 	var version struct {
 		Version string `json:"version"`
 	}
-	status, err := b.getServerJSON(ctx, origin+"/version", &version)
+	status, err := origin.getJSON(ctx, "/version", &version)
 	if unreachable(status, err) {
 		return api.retry(fmt.Sprintf("the model server did not answer GET /version (%v); read again after %s", err, serverReadRetry))
 	}
@@ -165,7 +170,7 @@ func (b *Backend) readServerAPI(ctx context.Context, origin string) serverAPI {
 	var doc struct {
 		Paths map[string]json.RawMessage `json:"paths"`
 	}
-	status, err = b.getServerJSON(ctx, origin+"/openapi.json", &doc)
+	status, err = origin.getJSON(ctx, "/openapi.json", &doc)
 	switch {
 	case unreachable(status, err):
 		return api.retry(fmt.Sprintf("the model server did not answer GET /openapi.json (%v); read again after %s", err, serverReadRetry))
@@ -203,14 +208,10 @@ func (a serverAPI) retry(reason string) serverAPI {
 // errStatus is a server's answer other than 200.
 var errStatus = errors.New("unexpected status")
 
-// getServerJSON GETs url and decodes a 200 answer into out; status is the
-// answer's (0 when there was none).
-func (b *Backend) getServerJSON(ctx context.Context, url string, out any) (status int, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := b.serverHTTP.Do(req)
+// getJSON GETs path of the server and decodes a 200 answer into out; status
+// is the answer's (0 when there was none).
+func (o serverOrigin) getJSON(ctx context.Context, path string, out any) (status int, err error) {
+	resp, err := o.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return 0, err
 	}

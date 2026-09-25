@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -61,6 +62,9 @@ type Backend struct {
 	// serverHTTP to the served models' runtimes (interfaces.go).
 	agentHTTP  *http.Client
 	serverHTTP *http.Client
+	// targetREST is the caller's REST client toward a remote target, whose
+	// Service proxy reaches the runtimes there (origin.go).
+	targetREST func(context.Context) *rest.RESTClient
 
 	// index is the driver's copy of the cache index ConfigMap (index.go).
 	index cacheIndex
@@ -143,6 +147,7 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	b.hub = newHubClient(opts.HFEndpoint, &http.Client{Timeout: 30 * time.Second}, b.hubToken)
 	b.agentHTTP = &http.Client{Timeout: opts.InventoryTimeout}
 	b.serverHTTP = &http.Client{Timeout: serverReadTimeout}
+	b.targetREST = b.callerREST
 	b.scan = b.scanNode
 	if opts.InventoryMode == InventoryModeDaemonSet {
 		b.scan = b.scanAgent

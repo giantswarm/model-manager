@@ -2,7 +2,13 @@ package kserve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +24,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -59,6 +66,7 @@ func newRemoteFixture(t *testing.T) *remoteFixture {
 		o.Clientset, o.Dynamic, o.ClientsFor, o.Target = anonCS, anonDyn, clientsFor, testTarget
 	}
 	f.b.cs, f.b.dyn = anonCS, anonDyn
+	f.b.targetREST = f.callerTargetREST
 	f.setDiscoveryOpts(context.Background(), discoveryOpts{gateway: testModelsHost})
 	return &remoteFixture{fixture: f, anonCS: anonCS, anonDyn: anonDyn}
 }
@@ -267,4 +275,164 @@ func TestNewRefusesDaemonSetInventoryForARemoteTarget(t *testing.T) {
 	opts.Target = backend.Target{Cluster: backend.TargetLocal}
 	_, err = New(opts)
 	assert.NoError(t, err, "the daemonset inventory stays for the local cluster")
+}
+
+// testTargetHost is the host of testTarget's apiserver.
+const testTargetHost = "api.gpu01.example:6443"
+
+// proxiedRequest is one request the remote target's Service proxy received:
+// its path and the token it carried.
+type proxiedRequest struct {
+	Path  string
+	Token string
+}
+
+// proxyRoundTrip is the remote target's apiserver answering its Service
+// proxy: a request carrying the caller's token to
+// /api/v1/namespaces/<ns>/services/http:<service>:<port>/proxy/<path> is
+// answered by the runtime behind that Service; any other is refused as the
+// apiserver refuses it, and every one when proxyDenied.
+func (f *fixture) proxyRoundTrip(req *http.Request) (*http.Response, error) {
+	token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	f.mu.Lock()
+	f.proxied = append(f.proxied, proxiedRequest{Path: req.URL.Path, Token: token})
+	denied := f.proxyDenied
+	f.mu.Unlock()
+	parts := strings.SplitN(strings.TrimPrefix(req.URL.Path, "/api/v1/namespaces/"), "/", 5)
+	if len(parts) < 4 || parts[1] != "services" || parts[3] != "proxy" || !strings.HasPrefix(parts[2], "http:") {
+		return statusAnswer(http.StatusNotFound, "the server could not find the requested resource"), nil
+	}
+	if token != "caller-token" || denied {
+		return statusAnswer(http.StatusForbidden, fmt.Sprintf(`services "%s" is forbidden: User "caller" cannot get resource "services/proxy" in API group "" in the namespace %q`, strings.Split(parts[2], ":")[1], parts[0])), nil
+	}
+	svc := strings.Split(strings.TrimPrefix(parts[2], "http:"), ":")
+	inner := req.Clone(req.Context())
+	inner.URL = &url.URL{Scheme: "http", Host: svc[0] + "." + parts[0] + ".svc.cluster.local:" + svc[1], Path: "/"}
+	if len(parts) == 5 {
+		inner.URL.Path += parts[4]
+	}
+	return f.answer(inner)
+}
+
+// statusAnswer is an apiserver's metav1.Status answer.
+func statusAnswer(code int, message string) *http.Response {
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/json")
+	rec.WriteHeader(code)
+	_ = json.NewEncoder(rec).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure, Code: int32(code), Message: message})
+	return rec.Result()
+}
+
+// callerTargetREST is the target's core/v1 REST client as kube.NewForTarget
+// builds it for a call: the caller's token when ctx carries one, the
+// fixture's transport underneath.
+func (f *fixture) callerTargetREST(ctx context.Context) *rest.RESTClient {
+	cfg := &rest.Config{Host: testTarget.APIServer, Transport: f}
+	if token, ok := identity.TokenFromContext(ctx); ok {
+		cfg.BearerToken = token
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	require.NoError(f.t, err)
+	rc, _ := cs.CoreV1().RESTClient().(*rest.RESTClient)
+	return rc
+}
+
+// readyTiny loads the tiny preset on the target as the caller and has
+// KServe report the object Ready there.
+func (rf *remoteFixture) readyTiny(ctx context.Context) {
+	rf.t.Helper()
+	require.NoError(rf.t, rf.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	rf.setReady(ctx, "tiny", time.Now())
+}
+
+// assertNoClusterLocalDial: no runtime request dialled a cluster-local name,
+// which resolves only inside the target cluster.
+func (f *fixture) assertNoClusterLocalDial(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, h := range f.dialled {
+		assert.NotContains(t, h, ".svc.cluster.local", "a cluster-local name dialled for a remote target")
+	}
+}
+
+// TestRemoteTargetReadsTheServerThroughTheProxy: on a workload-cluster
+// target, the server reads and the first request go through the target
+// apiserver's Service proxy as the caller; the model turns Ready with its
+// runtime and interfaces, and no cluster-local name is dialled.
+func TestRemoteTargetReadsTheServerThroughTheProxy(t *testing.T) {
+	rf := newRemoteFixture(t)
+	ctx := callerContext(t)
+	server := vllmServer(t, devVersion, generateDoc)
+	rf.serve("tiny", server)
+	rf.readyTiny(ctx)
+
+	loaded, err := rf.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	lm := loaded[0]
+	assert.Equal(t, statusReady, lm.Status, lm.Message)
+	assert.Equal(t, &backend.Runtime{Name: "vllm", Version: devVersion}, lm.Runtime)
+	assert.Len(t, lm.Interfaces, 4)
+	require.Len(t, server.asked, 1)
+	assert.Equal(t, "/v1/chat/completions", server.asked[0].Path)
+
+	proxy := "/api/v1/namespaces/" + testServingNS + "/services/http:tiny-kserve-workload-svc:8000/proxy"
+	assert.Equal(t, []proxiedRequest{
+		{Path: proxy + "/version", Token: "caller-token"},
+		{Path: proxy + "/openapi.json", Token: "caller-token"},
+		{Path: proxy + "/v1/chat/completions", Token: "caller-token"},
+	}, rf.proxied)
+	rf.assertNoClusterLocalDial(t)
+	rf.assertNothingAnonymous(t)
+}
+
+// TestRemoteTargetProxyRefusal: a caller the target does not allow
+// services/proxy is refused there; the serve keeps routing with the target's
+// refusal, nothing is dialled around the proxy, and the model is not Ready.
+func TestRemoteTargetProxyRefusal(t *testing.T) {
+	rf := newRemoteFixture(t)
+	ctx := callerContext(t)
+	server := vllmServer(t, devVersion, generateDoc)
+	rf.serve("tiny", server)
+	rf.proxyDenied = true
+	rf.readyTiny(ctx)
+
+	loaded, err := rf.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	lm := loaded[0]
+	assert.Equal(t, statusNotReady, lm.Status)
+	assert.Equal(t, backend.PhaseRouting, lm.Phase)
+	assert.Contains(t, lm.Message, "the target gpu01 refused the caller 403 Forbidden")
+	assert.Contains(t, lm.Message, `cannot get resource "services/proxy"`)
+	assert.Zero(t, server.reads, "the runtime is never reached")
+	rf.assertNoClusterLocalDial(t)
+	rf.assertNothingAnonymous(t)
+}
+
+// TestRemoteTargetServerReadWithoutACaller: a list without the caller's
+// token reads no server on the target, anonymously or otherwise.
+func TestRemoteTargetServerReadWithoutACaller(t *testing.T) {
+	rf := newRemoteFixture(t)
+	rf.serve("tiny", vllmServer(t, devVersion, generateDoc))
+	rf.readyTiny(callerContext(t))
+	list := []served{{Name: "tiny", Namespace: testServingNS, Ready: true}}
+	rf.b.serverAPIs(context.Background(), list)
+	assert.Contains(t, list[0].API.Answer.Waiting, "no model server read on the remote target gpu01 without a caller")
+	assert.Empty(t, rf.dialled)
+}
+
+// TestLocalTargetDialsTheWorkloadService: the local cluster reads its
+// runtimes at the workload Service, never through an apiserver proxy.
+func TestLocalTargetDialsTheWorkloadService(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.serve("tiny", vllmServer(t, devVersion, generateDoc))
+	f.readyLLMISVC(ctx, "tiny", time.Now())
+	lm := loadedOne(t, f.b)
+	assert.Equal(t, statusReady, lm.Status, lm.Message)
+	host := "tiny-kserve-workload-svc." + testServingNS + ".svc.cluster.local:8000"
+	assert.Equal(t, []string{host, host, host}, f.dialled)
+	assert.Empty(t, f.proxied)
 }
