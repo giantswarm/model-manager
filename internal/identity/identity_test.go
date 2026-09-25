@@ -47,6 +47,14 @@ func TestTokenExpiry(t *testing.T) {
 	assert.True(t, TokenExpiry("a.!!!.c").IsZero())
 }
 
+func TestTokenClaims(t *testing.T) {
+	exp := time.Now().Add(time.Hour).Truncate(time.Second)
+	c := TokenClaims(jwt(t, map[string]any{"iss": "https://dex.example", "aud": "muster", "exp": exp.Unix()}))
+	assert.Equal(t, Claims{Issuer: "https://dex.example", Audience: []string{"muster"}, Expires: exp}, c)
+	assert.Equal(t, []string{"a", "b"}, TokenClaims(jwt(t, map[string]any{"aud": []string{"a", "b"}})).Audience, "aud as an array")
+	assert.Equal(t, Claims{}, TokenClaims("opaque-token"))
+}
+
 func jwt(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))

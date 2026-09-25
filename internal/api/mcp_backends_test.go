@@ -48,17 +48,23 @@ type registrationFixture struct {
 
 func newRegistrationFixture(t *testing.T, static ...backend.Backend) *registrationFixture {
 	t.Helper()
-	client := kubefake.NewSimpleClientset()
-	fw := newFakeWirer()
-	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
-	build := func(doc *backend.Document) (backend.Backend, error) {
+	return newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
 		if doc.Spec.Endpoint == unbuildableEndpoint {
 			return nil, errors.New("unbuildable endpoint")
 		}
 		fb := newFakeBackend()
 		fb.name = doc.Spec.Kind
 		return fb, nil
-	}
+	}, static...)
+}
+
+// newRegistrationFixtureBuilding is newRegistrationFixture with the builder
+// the registry turns a document into a backend with.
+func newRegistrationFixtureBuilding(t *testing.T, build registry.Builder, static ...backend.Backend) *registrationFixture {
+	t.Helper()
+	client := kubefake.NewSimpleClientset()
+	fw := newFakeWirer()
+	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
 	reg := registry.New(client, testNamespace, build, svc, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
@@ -140,6 +146,52 @@ func TestAddBackendDryRunAndApply(t *testing.T) {
 	text, isErr = callTool(t, f.srv, ToolGetBackend, nil)
 	require.False(t, isErr, text)
 	assert.Contains(t, text, `"source": "cluster-manager"`)
+}
+
+// TestAddBackendNamesAReadTimeRefusal: a document the registry refuses to
+// build (a remote kserve target without downstream OAuth) is answered with
+// the reason, not a bare registered: false; a registered document edited
+// into the refusal drops its backend in the same step that reports it.
+func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
+	const refusedEndpoint = "http://remote-target:11434"
+	const refusal = "build ollama backend: kserve target wc1: --downstream-oauth is off"
+	f := newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
+		if doc.Spec.Endpoint == refusedEndpoint {
+			return nil, errors.New("kserve target wc1: --downstream-oauth is off")
+		}
+		fb := newFakeBackend()
+		fb.name = doc.Spec.Kind
+		return fb, nil
+	})
+
+	// A new document: not loaded, and the answer names the refusal.
+	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: refusedEndpoint})
+	require.False(t, isErr, text)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	assert.Equal(t, false, out["registered"])
+	assert.Equal(t, refusal, out["error"])
+
+	// Registered, then edited into the refusal: dropped and reported.
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://ollama:11434"})
+	require.False(t, isErr, text)
+	out = nil
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	require.Equal(t, true, out["registered"])
+	assert.Nil(t, out["error"])
+
+	stop := sampleRegisteredAndReported(t, f.svc)
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: refusedEndpoint})
+	require.False(t, isErr, text)
+	require.Eventually(t, func() bool {
+		_, has := f.svc.Has(backend.NameOllama)
+		return !has
+	}, 5*time.Second, 20*time.Millisecond, "the refused edit drops the registered backend")
+	stop()
+	invalid := f.backends(t)["invalid"].([]any)
+	require.Len(t, invalid, 1)
+	assert.Equal(t, "model-backend-ollama", invalid[0].(map[string]any)["configMap"])
+	assert.Equal(t, refusal, invalid[0].(map[string]any)["error"])
 }
 
 func TestAddBackendRefusals(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/transport"
 
 	"github.com/giantswarm/model-manager/internal/identity"
 )
@@ -33,6 +34,9 @@ type Clients struct {
 
 	restCfg *rest.Config
 	log     *slog.Logger
+	// wrap is the transport wrapper every caller's clients keep (a remote
+	// target's: explainAuth); rest.AnonymousClientConfig drops it.
+	wrap transport.WrapperFunc
 
 	mu     sync.Mutex
 	byUser map[[32]byte]*callerEntry
@@ -110,11 +114,12 @@ func (c *Clients) ForToken(token string) (*Clients, error) {
 	cfg := rest.AnonymousClientConfig(c.restCfg)
 	cfg.BearerToken = token
 	cfg.UserAgent = c.restCfg.UserAgent
+	cfg.WrapTransport = c.wrap
 	user, err := fromRESTConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	user.log = c.log
+	user.log, user.wrap = c.log, c.wrap
 	return user, nil
 }
 
