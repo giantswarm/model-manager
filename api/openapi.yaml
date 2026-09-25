@@ -937,7 +937,7 @@ components:
         vramBytes: { type: integer, format: int64 }
         contextLength: { type: integer, format: int64 }
         expiresAt: { type: string, format: date-time, description: when the backend will evict the model (absent = forever/unknown) }
-        endpoint: { type: string, description: inference URL (kserve — the predictor's in-cluster URL) }
+        endpoint: { type: string, description: "inference URL (kserve — the model's address: its route on the models Gateway or its in-cluster Service; the platform's LLM endpoint when `publicName` is set). `interfaces[].path` is relative to it." }
         node: { type: string }
         pool: { type: string, description: "kserve: the GPU pool the predictor is pinned to (its giantswarm.io/machine-pool selector), when it is pinned to one" }
         status:
@@ -966,6 +966,20 @@ components:
             vLLM before 0.16) or could not be read. A preset states no interfaces.
           items: { $ref: "#/components/schemas/Interface" }
         interfacesReason: { type: string, description: "kserve — why `interfaces` is empty on a Ready model" }
+        publicName:
+          type: string
+          example: qwen3-5-4b
+          description: |
+            kserve, on an installation with the platform's LLM endpoint (its LLM endpoint document) —
+            the model's name on the endpoint, what a client sends as `model` there: the preset's name.
+            The model is on the endpoint as two `AgentgatewayModel`s — `<preset>-workload`, Internal,
+            provider Custom on the workload Service with its `interfaces` as formats, matched on the
+            Hugging Face id vLLM serves; and `<preset>`, the public virtual model targeting it, which
+            rewrites the request's `model` — while its serving object exists, from the first Ready with
+            interfaces on;
+            `endpoint` is then the endpoint's URL (its public one when the installation publishes it),
+            and the model's ModelConfig reaches it at the in-cluster listener.
+        publicNameReason: { type: string, description: "kserve, on an installation with the LLM endpoint — why a served model is not on it (not Ready yet, no interfaces reported, not created from a preset, the object could not be written)" }
     Runtime:
       type: object
       description: kserve — the runtime serving a Ready model, as its server reports it

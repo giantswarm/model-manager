@@ -479,14 +479,15 @@ func newFixture(t *testing.T, objs ...runtime.Object) *fixture {
 	cs := kubefake.NewSimpleClientset(append(base, objs...)...)
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), llmisvcListKinds(), wellKnownConfig())
 	b, err := New(backend.KServeOptions{
-		Dynamic:            dyn,
-		Clientset:          cs,
-		DiscoveryNamespace: testPlatformNS,
-		HFEndpoint:         hub.srv.URL,
-		HFTokenSecret:      "hf-token",
-		PollInterval:       10 * time.Millisecond,
-		ReadyTimeout:       2 * time.Second,
-		InventoryTimeout:   time.Second,
+		Dynamic:              dyn,
+		Clientset:            cs,
+		DiscoveryNamespace:   testPlatformNS,
+		LLMEndpointNamespace: testPlatformNS,
+		HFEndpoint:           hub.srv.URL,
+		HFTokenSecret:        "hf-token",
+		PollInterval:         10 * time.Millisecond,
+		ReadyTimeout:         2 * time.Second,
+		InventoryTimeout:     time.Second,
 	})
 	require.NoError(t, err)
 	b.log = slog.New(slog.DiscardHandler)
@@ -640,7 +641,7 @@ func (f *fixture) finishJob(ctx context.Context, name string, logs string, cond 
 // llmisvcListKinds registers the list kinds the fake dynamic client needs for
 // the serving.kserve.io resources the driver lists.
 func llmisvcListKinds() map[schema.GroupVersionResource]string {
-	return map[schema.GroupVersionResource]string{llmisvcGVR: "LLMInferenceServiceList", llmisvcConfigGVR: "LLMInferenceServiceConfigList"}
+	return map[schema.GroupVersionResource]string{llmisvcGVR: "LLMInferenceServiceList", llmisvcConfigGVR: "LLMInferenceServiceConfigList", agentgatewayModelGVR: "AgentgatewayModelList"}
 }
 
 // llmisvc reads the LLMInferenceService of the name from the serving namespace.

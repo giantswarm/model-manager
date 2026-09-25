@@ -191,7 +191,11 @@ type settings struct {
 	// at <origin>/<namespace>/<name>, so the address a served model gets is
 	// known the moment the object is composed — before KServe publishes it in
 	// status.addresses (giantswarm/model-manager#115).
-	GatewayEndpoint     string
+	GatewayEndpoint string
+	// LLMEndpoint puts every served model on the platform's LLM endpoint
+	// (gatewaymodel.go): the LLM endpoint document of model-manager's own
+	// namespace, for a backend serving its own cluster; nil otherwise.
+	LLMEndpoint         *llmEndpoint
 	CacheEnabled        bool
 	CacheClaim          string
 	CacheMountPath      string
@@ -499,6 +503,11 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		if sp.Gateway.Enabled {
 			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
 		}
+	}
+	if ep, err := c.readLLMEndpoint(ctx); err != nil {
+		c.log.Warn("the LLM endpoint document is unusable; served models stay off the LLM endpoint", "error", err)
+	} else {
+		s.LLMEndpoint = ep
 	}
 	// Explicit options win over discovery.
 	setIf(&s.Namespace, o.Namespace)

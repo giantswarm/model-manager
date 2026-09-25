@@ -245,6 +245,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		Lemonade: backend.LemonadeOptions{Endpoint: o.lemonadeEndpoint, AgentHost: o.lemonadeAgentHost},
 		LMStudio: backend.LMStudioOptions{Endpoint: o.lmstudioEndpoint, AgentHost: o.lmstudioAgentHost},
 	}
+	opts.KServe.LLMEndpointNamespace = o.namespace
 	if clients != nil {
 		opts.KServe.Dynamic = clients.Dynamic
 		opts.KServe.Clientset = clients.Clientset

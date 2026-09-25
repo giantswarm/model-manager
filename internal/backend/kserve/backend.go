@@ -74,6 +74,12 @@ type Backend struct {
 	// apiMu guards apiCache: what each Ready transition's server read found.
 	apiMu    sync.Mutex
 	apiCache map[string]serverAPI
+	// gwMu guards what the last write of the LLM endpoint's
+	// AgentgatewayModels found and when (gatewaymodel.go).
+	gwMu          sync.Mutex
+	gwOnEndpoint  gatewayState
+	gwFingerprint string
+	gwSyncedAt    time.Time
 }
 
 // k8s returns the typed client a call should use: the caller's own when ctx
@@ -454,6 +460,13 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 		if sv.API.read() {
 			lm.Runtime, lm.Interfaces, lm.InterfacesReason = sv.API.Runtime, sv.API.Interfaces, sv.API.Reason
 		}
+		if sv.LLM != nil && !sv.Deleting {
+			if sv.OnEndpoint {
+				lm.PublicName, lm.Endpoint = sv.onEndpointName(), sv.LLM.clientURL()
+			} else {
+				lm.PublicNameReason = sv.EndpointReason
+			}
+		}
 		if sv.Deleting {
 			lm.Status = statusTerminating
 		}
@@ -655,6 +668,13 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 			return nil, err
 		}
 		b.log.Info("serving object deleted", "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
+		// Off the LLM endpoint in the same call: a client sending the public
+		// name gets model_not_found, not a dead upstream.
+		if name := sv.onEndpointName(); sv.LLM != nil && name != "" {
+			if err := b.deleteGatewayModel(ctx, sv.LLM, name); err != nil {
+				return nil, err
+			}
+		}
 	}
 	b.forgetStale(ctx, matches)
 	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
@@ -744,9 +764,10 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	// Not served (yet): the object the preset would create, at the address
 	// it will get.
 	s := b.cfg.last()
-	sv := served{Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo}
+	sv := served{Namespace: s.Namespace, Name: dnsLabel(repo), Model: repo, LLM: s.LLMEndpoint}
 	if p, err := indexPresets(presets).resolve(repo, ""); err == nil && p != nil {
-		sv.Name, sv.Model = p.name(), p.Spec.Model.ID
+		// The object a load of the preset creates: model-manager's own.
+		sv.Name, sv.Model, sv.Preset, sv.Managed = p.name(), p.Spec.Model.ID, p.name(), true
 	}
 	sv.URL = sv.expectedURL(s.GatewayEndpoint)
 	return sv.agentEndpoint()
