@@ -224,6 +224,36 @@ spec:
                   key: dex-client-secret
             {{- end }}
             {{- end }}
+            {{- with .Values.observability.otel }}
+            {{- if .endpoint }}
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .protocol | default "grpc" | quote }}
+            {{- with .headers }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .sampler }}
+            - name: OTEL_TRACES_SAMPLER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .samplerArg }}
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(K8S_POD_NAME),k8s.node.name=$(K8S_NODE_NAME){{ with .resourceAttributes }},{{ . }}{{ end }}"
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

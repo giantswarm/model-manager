@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/service"
@@ -92,12 +93,17 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           otelhttp.NewHandler(mux, "model-manager", otelhttp.WithFilter(traced)),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: MCP streams and long pulls outlive any fixed value.
 		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil
+}
+
+// traced leaves the kubelet probes out of the traces.
+func traced(r *http.Request) bool {
+	return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 }
 
 // guard requires an authenticated caller when OAuth is on.

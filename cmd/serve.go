@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -208,6 +209,17 @@ environment variable named next to it; flags win over the environment.`,
 
 func runServe(ctx context.Context, o *serveOptions) error {
 	log := slog.Default()
+	shutdownTracing, err := tracing.Init(ctx, tracing.WithServiceName("model-manager"), tracing.WithServiceVersion(build.Version))
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			log.Warn("flushing traces", "error", err)
+		}
+	}()
 	if o.downstreamOAuth && !o.oauthEnabled {
 		return fmt.Errorf("--downstream-oauth needs --enable-oauth: without OAuth there is no caller token to present to the Kubernetes API")
 	}

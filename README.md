@@ -825,7 +825,10 @@ meta chart sets for its `model-manager` component: `backend`, `ollama.endpoint`,
 `muster.mcpServer.*`; for kserve `kserve.namespace` (the serving namespace),
 `kserve.discovery.*`, `kserve.hf.tokenSecret.*` and the `kserve.*` overrides. Optional, off by default: `muster.mcpServer.enabled`
 (renders an `mcpservers.muster.giantswarm.io` CR), `httpRoute.enabled`,
-`networkPolicy.enabled`, `oauth.enabled`.
+`networkPolicy.enabled`, `oauth.enabled`, `observability.otel.endpoint` (OTLP
+traces: HTTP server spans, an `mcp.<method>` span per MCP request and a
+`tool.<name>` span per tool call, configured by the standard `OTEL_*`
+variables the chart renders from `observability.otel.*`).
 
 ## Development
 
