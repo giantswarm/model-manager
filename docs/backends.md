@@ -237,6 +237,14 @@ the route list is the interface list: a generate model answers `Completions`
 The names are agentgateway's format vocabulary, the one an `AgentgatewayModel`'s `custom.formats`
 takes. A preset states no interfaces.
 
+The same read asks the model its first request, because a runtime can pass its readiness
+(`GET /health`) and fail every request: a chat completion of one token under the served name for
+a generate model, one embedding for a pooling model. The serve is `ready` only once that request
+was answered; an error answer fails the `ready` step with the runtime's status and first error
+line, and no answer keeps it `routing` and asks again after a minute. It is sent once per Ready
+transition, to the workload Service the interface reads use, so model-manager's reach to the
+model's port (the serving namespace's network policy) is what the reads already need.
+
 A server that publishes no route list (a runtime started with `--disable-fastapi-docs`, which the
 agent-platform chart refuses in a preset), one whose list names `/v1/chat/completions` and
 `/v1/embeddings` side by side (a server that registers every route whatever the model serves: vLLM

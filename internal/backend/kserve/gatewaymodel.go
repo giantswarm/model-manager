@@ -197,7 +197,7 @@ func composeGatewayModels(sv served, ep *llmEndpoint) []*unstructured.Unstructur
 	}
 	concrete := map[string]any{
 		"parentRefs": parents,
-		"match":      map[string]any{"model": sv.Model},
+		"match":      map[string]any{requestModelField: sv.Model},
 		"visibility": "Internal",
 		"provider":   "Custom",
 		// The upstream path is the baseURL's path plus the format's suffix:

@@ -141,6 +141,42 @@ func TestModelWithoutInterfacesStaysOffTheLLMEndpoint(t *testing.T) {
 	assert.Equal(t, workloadURL("tiny", testServingNS), lm.Endpoint, "the model's own address while it is not on the endpoint")
 }
 
+// A model that passed its readiness but has not answered its first request is
+// not Ready and stays off the endpoint; its answer puts it on. One whose
+// first request failed never goes on.
+func TestUnansweredModelStaysOffTheLLMEndpoint(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.withLLMEndpoint(ctx)
+	server := vllmServer(t, devVersion, generateDoc)
+	server.silent = true
+	f.serve("tiny", server)
+	f.readyLLMISVC(ctx, "tiny", time.Now())
+
+	lm := loadedOne(t, f.b)
+	assert.Empty(t, lm.PublicName)
+	assert.Equal(t, "not on the LLM endpoint until the model is Ready", lm.PublicNameReason)
+	assert.Nil(t, f.gatewayModel(ctx, "tiny"))
+
+	server.silent = false
+	expireServerReads(f)
+	lm = loadedOne(t, f.b)
+	assert.Equal(t, "tiny", lm.PublicName)
+	assert.NotNil(t, f.gatewayModel(ctx, "tiny"))
+
+	g := newFixture(t)
+	g.withLLMEndpoint(ctx)
+	failing := vllmServer(t, devVersion, generateDoc)
+	failing.answerStatus = 500
+	failing.answerBody = `{"error":{"message":"vocab file missing"}}`
+	g.serve("tiny", failing)
+	g.readyLLMISVC(ctx, "tiny", time.Now())
+	lm = loadedOne(t, g.b)
+	assert.Equal(t, backend.PhaseFailed, lm.Phase)
+	assert.Empty(t, lm.PublicName)
+	assert.Nil(t, g.gatewayModel(ctx, "tiny"))
+}
+
 // A model restarting (Ready → not Ready) keeps its object; the object of a
 // serving object deleted elsewhere goes; one edited by hand is rewritten at
 // the next resync, one deleted by hand comes back.

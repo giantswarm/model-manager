@@ -329,7 +329,9 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	assert.Equal(t, workloadURL("big", testServingNS)+"/v1", ep.BaseURL, "unserved models resolve through their preset")
 	assert.Equal(t, bigRepo, ep.Model)
 
-	// Readiness: patch the status like the controller would; WaitReady returns.
+	// Readiness: patch the status like the controller would; WaitReady returns
+	// once the runtime answered its first request.
+	f.serve("tiny", vllmServer(t, devVersion, generateDoc))
 	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
 	created, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
 	require.NoError(t, err)
