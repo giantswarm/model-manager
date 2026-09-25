@@ -34,8 +34,11 @@ const (
 // publishes the routed address in status, and for good where discovery names
 // no models Gateway.
 func workloadURL(name, namespace string) string {
-	return fmt.Sprintf("http://%s-kserve-workload-svc.%s.svc.cluster.local:%d", name, namespace, llmisvcWorkloadPort)
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", workloadService(name), namespace, llmisvcWorkloadPort)
 }
+
+// workloadService is the name of an LLMInferenceService's workload Service.
+func workloadService(name string) string { return name + "-kserve-workload-svc" }
 
 // composeLLM builds the LLMInferenceService for a preset by spec shape:
 // spec.model.uri and .name from the preset, one replica, router.route so

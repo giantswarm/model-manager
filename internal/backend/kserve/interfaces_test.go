@@ -96,8 +96,21 @@ func (f *fixture) serve(name string, s *modelServer) {
 	f.mu.Unlock()
 }
 
-// RoundTrip answers the driver's reads of the served models' runtimes.
+// RoundTrip answers the driver's reads of the served models' runtimes: at
+// their workload Service, or through the Service proxy of the remote target's
+// apiserver (proxyRoundTrip). dialled records each host dialled.
 func (f *fixture) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	f.dialled = append(f.dialled, req.URL.Host)
+	f.mu.Unlock()
+	if req.URL.Host == testTargetHost {
+		return f.proxyRoundTrip(req)
+	}
+	return f.answer(req)
+}
+
+// answer is the runtime behind req's workload Service host answering it.
+func (f *fixture) answer(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	s := f.servers[req.URL.Host]
 	if s != nil {
@@ -329,7 +342,9 @@ func TestGetServerJSONNamesTheStatus(t *testing.T) {
 	f := newFixture(t)
 	f.serve("tiny", &modelServer{version: "0.23.0"})
 	var out map[string]any
-	status, err := f.b.getServerJSON(context.Background(), workloadURL("tiny", testServingNS)+"/openapi.json", &out)
+	origin, why := f.b.serverOrigin(context.Background(), "tiny", testServingNS)
+	require.Empty(t, why)
+	status, err := origin.getJSON(context.Background(), "/openapi.json", &out)
 	assert.Equal(t, http.StatusNotFound, status)
 	assert.True(t, errors.Is(err, errStatus))
 }

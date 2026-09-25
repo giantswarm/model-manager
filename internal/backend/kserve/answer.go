@@ -1,7 +1,6 @@
 package kserve
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -81,7 +80,7 @@ func firstRequest(api serverAPI, model string) (path string, body any) {
 
 // askFirst sends the model its first request at origin. A server that did not
 // answer the interface reads is not asked: it is waited for.
-func (b *Backend) askFirst(ctx context.Context, origin, model string, api serverAPI) firstAnswer {
+func (b *Backend) askFirst(ctx context.Context, origin serverOrigin, model string, api serverAPI) firstAnswer {
 	if !api.retryAt.IsZero() {
 		return firstAnswer{Waiting: api.Reason}
 	}
@@ -99,12 +98,7 @@ func (b *Backend) askFirst(ctx context.Context, origin, model string, api server
 	if err != nil {
 		return firstAnswer{Path: path, Failure: fmt.Sprintf("encode the request: %v", err)}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+path, bytes.NewReader(raw))
-	if err != nil {
-		return firstAnswer{Path: path, Failure: err.Error()}
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.serverHTTP.Do(req)
+	resp, err := origin.do(ctx, http.MethodPost, path, raw)
 	if err != nil {
 		return firstAnswer{Path: path, Waiting: fmt.Sprintf("the model did not answer POST %s (%v); asked again after %s", path, err, serverReadRetry)}
 	}
