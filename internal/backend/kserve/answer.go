@@ -54,21 +54,26 @@ type firstAnswer struct {
 	Skipped string
 }
 
+// requestModelField is the field of an OpenAI request that names the model:
+// the first request sets it, and the LLM endpoint's concrete model matches
+// on it.
+const requestModelField = "model"
+
 // firstRequest is the request a model is asked first, by the interfaces its
 // server registered: empty when it registered neither.
 func firstRequest(api serverAPI, model string) (path string, body any) {
 	for _, i := range api.Interfaces {
 		if i.Type == backend.InterfaceCompletions {
 			return i.Path, map[string]any{
-				"model":      model,
-				"messages":   []map[string]string{{"role": "user", "content": "Say OK."}},
-				"max_tokens": 1,
+				requestModelField: model,
+				"messages":        []map[string]string{{"role": "user", "content": "Say OK."}},
+				"max_tokens":      1,
 			}
 		}
 	}
 	for _, i := range api.Interfaces {
 		if i.Type == backend.InterfaceEmbeddings {
-			return i.Path, map[string]any{"model": model, "input": "OK"}
+			return i.Path, map[string]any{requestModelField: model, "input": "OK"}
 		}
 	}
 	return "", nil
