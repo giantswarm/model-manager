@@ -134,8 +134,10 @@ type Info struct {
 	// AgentEndpoint is the backend as reached by agent pods — the host the
 	// driver writes into ModelConfigs (ollama: the agent host, which may
 	// differ from Endpoint; lemonade: the agent host plus /api/v1, the
-	// OpenAI-compatible base URL). Empty when the backend has no single agent-facing
-	// endpoint (kserve: every served model has its own predictor URL).
+	// OpenAI-compatible base URL; kserve: the models Gateway's origin every
+	// served model is routed under). Empty when the backend has no single
+	// agent-facing endpoint (kserve without the Gateway: every served model
+	// has its own Service).
 	// Clients that match ModelConfigs to models by hostname compare against
 	// this, not Endpoint.
 	AgentEndpoint string `json:"agentEndpoint,omitempty"`

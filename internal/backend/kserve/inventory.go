@@ -209,18 +209,22 @@ func (inv *inventory) last(node string) *cacheSnapshot {
 	return &cacheSnapshot{Node: node}
 }
 
-// refresh scans node in the background, detached from the caller (the
-// ServiceAccount's clients, a budget of its own), unless a scan is under way
-// already; snapshot de-duplicates a race between two callers.
-func (inv *inventory) refresh(node string, ttl, timeout time.Duration, scan scanner) {
+// refresh scans node in the background, unless a scan is under way already;
+// snapshot de-duplicates a race between two callers. The scan runs as the
+// caller of ctx — its values, the caller's token among them, without its
+// cancellation or deadline — on a budget of its own: with downstream OAuth
+// the ServiceAccount holds no permissions, and a remote target knows no other
+// credential (Backend.callerless decides whether there is a caller at all).
+func (inv *inventory) refresh(ctx context.Context, node string, ttl, timeout time.Duration, scan scanner) {
 	inv.mu.Lock()
 	_, busy := inv.inflight[node]
 	inv.mu.Unlock()
 	if busy {
 		return
 	}
+	detached := context.WithoutCancel(ctx)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Minute)
+		ctx, cancel := context.WithTimeout(detached, timeout+time.Minute)
 		defer cancel()
 		inv.snapshot(ctx, node, ttl, false, scan)
 	}()

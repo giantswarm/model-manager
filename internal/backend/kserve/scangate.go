@@ -82,8 +82,12 @@ func (b *Backend) cacheSnapshotFor(ctx context.Context, node string, loc cacheLo
 		return b.inv.snapshot(ctx, node, b.opts.InventoryTTL, false, b.scan)
 	}
 	if verdict.Allowed {
-		b.inv.refresh(node, b.opts.InventoryTTL, b.opts.InventoryTimeout, b.scan)
 		verdict.Reason = fmt.Sprintf("the caller's deadline leaves less than %s for a scan pod; scanning in the background", b.opts.InventoryTimeout)
+		if skip := b.callerless(ctx, "background cache scan"); skip != "" {
+			verdict.Reason = skip
+		} else {
+			b.inv.refresh(ctx, node, b.opts.InventoryTTL, b.opts.InventoryTimeout, b.scan)
+		}
 	}
 	snap := b.inv.last(node)
 	snap.Pending, snap.PendingReason = true, verdict.Reason
@@ -98,6 +102,9 @@ func (b *Backend) cacheSnapshotFor(ctx context.Context, node string, loc cacheLo
 // not the change (giantswarm/model-manager#119).
 func (b *Backend) refreshInventory(ctx context.Context) backend.InventoryRefresh {
 	b.inv.invalidate()
+	if skip := b.callerless(ctx, "background cache scan"); skip != "" {
+		return backend.InventoryRefresh{Reason: skip}
+	}
 	if !b.cfg.settings(ctx).CacheEnabled {
 		return backend.InventoryRefresh{Reason: "no cache claim is configured; there is no inventory to rescan"}
 	}
@@ -113,7 +120,7 @@ func (b *Backend) refreshInventory(ctx context.Context) backend.InventoryRefresh
 		nodes = []string{""}
 	}
 	for _, node := range nodes {
-		b.inv.refresh(node, b.opts.InventoryTTL, b.opts.InventoryTimeout, b.scan)
+		b.inv.refresh(ctx, node, b.opts.InventoryTTL, b.opts.InventoryTimeout, b.scan)
 	}
 	return backend.InventoryRefresh{Refreshing: true}
 }

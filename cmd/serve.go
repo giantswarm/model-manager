@@ -304,7 +304,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	case o.namespace == "":
 		log.Warn("runtime backend registration off: --namespace (POD_NAMESPACE) is empty")
 	default:
-		reg = registry.New(clients.Clientset, o.namespace, backendBuilder(opts, log), svc, log)
+		reg = registry.New(clients.Clientset, o.namespace, backendBuilder(opts, o.downstreamOAuth, log), svc, log)
 		store := registry.NewStore(func(ctx context.Context) kubernetes.Interface { return clients.For(ctx).Clientset }, o.namespace)
 		mcpOpts = append(mcpOpts, api.WithBackendStore(store))
 	}
@@ -488,12 +488,19 @@ func envFloat(key string, def float64) float64 {
 // backendBuilder constructs the backend a registered document describes:
 // the document's driver block over the static flags' defaults, and for a
 // kserve document with a remote target, clients toward that apiserver that
-// present the caller's token.
-func backendBuilder(base backend.Options, log *slog.Logger) registry.Builder {
+// present the caller's token. A remote target needs callerOnly
+// (--downstream-oauth): model-manager holds no credential for it, so without
+// the caller's token every call there would be anonymous. A refusal is the
+// document's build error: a new document is reported and not loaded, a
+// registered one edited into it is dropped and reported in one step.
+func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) registry.Builder {
 	return func(doc *backend.Document) (backend.Backend, error) {
 		opts := doc.Options(base)
 		if doc.Spec.Kind == backend.NameKServe {
 			if t := doc.Spec.KServe.Target; !t.Local() {
+				if !callerOnly {
+					return nil, fmt.Errorf("kserve target %s: --downstream-oauth is off, and a remote target is reached only with the caller's token (model-manager holds no credential for it): every call there would be anonymous", t.Cluster)
+				}
 				tc, err := kube.NewForTarget(t.APIServer, []byte(t.CABundle), log)
 				if err != nil {
 					return nil, err
