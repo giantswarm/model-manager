@@ -315,11 +315,11 @@ func (f *fixture) proxyRoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // statusAnswer is an apiserver's metav1.Status answer.
-func statusAnswer(code int, message string) *http.Response {
+func statusAnswer(code int32, message string) *http.Response {
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Type", "application/json")
-	rec.WriteHeader(code)
-	_ = json.NewEncoder(rec).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure, Code: int32(code), Message: message})
+	rec.WriteHeader(int(code))
+	_ = json.NewEncoder(rec).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure, Code: code, Message: message})
 	return rec.Result()
 }
 
