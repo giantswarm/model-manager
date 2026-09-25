@@ -387,7 +387,10 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 		}
 		select {
 		case <-ctx.Done():
-			dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// The cleanup outlives the cancelled call but not its caller: the
+			// Job is deleted with the caller's token (downstream OAuth, a
+			// remote target), not anonymously.
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			if err := b.deleteJob(dctx, s.Namespace, name); err != nil {
 				b.log.Warn("deleting cancelled download Job failed", "job", name, "error", err)
 			}

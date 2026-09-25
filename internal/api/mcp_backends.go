@@ -204,7 +204,19 @@ func (t *tools) addBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		return errResult(err), nil
 	}
 	out["created"] = created
-	out["registered"] = registry.WaitFor(ctx, t.svc, doc.Spec.Kind, true, registrationWait)
+	registered := registry.WaitFor(ctx, t.svc, doc.Spec.Kind, true, registrationWait)
+	out["registered"] = registered
+	if !registered {
+		// Refused when it was read (a remote target without downstream
+		// OAuth, the daemonset inventory there): the answer says why. A
+		// registered document edited into a refusal is dropped and reported
+		// by the registry in one step; list_backends shows it.
+		for _, d := range t.svc.InvalidDocuments() {
+			if d.ConfigMap == cm.Name {
+				out["error"] = d.Error
+			}
+		}
+	}
 	if b, err := t.svc.Backend(ctx, string(doc.Spec.Kind)); err == nil {
 		out["backend"] = b
 	}

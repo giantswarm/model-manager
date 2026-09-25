@@ -71,6 +71,12 @@ type served struct {
 	Steps []backend.Step
 	// API is what the server said about itself once Ready (interfaces.go).
 	API serverAPI
+	// LLM is the platform's LLM endpoint when discovery names one; OnEndpoint
+	// says the model's AgentgatewayModel exists, EndpointReason why not
+	// (gatewaymodel.go).
+	LLM            *llmEndpoint
+	OnEndpoint     bool
+	EndpointReason string
 }
 
 // manageable reports whether model-manager may operate on the
@@ -131,14 +137,21 @@ func (sv served) expectedURL(gateway string) string {
 	return workloadURL(sv.Name, sv.Namespace)
 }
 
-// agentEndpoint is how kagent reaches the served model: its OpenAI-compatible
-// API at sv.URL, the caller's token forwarded when that is the route on the
+// agentEndpoint is how kagent reaches the served model: on an installation
+// with the LLM endpoint, the endpoint under the model's public name; else its
+// OpenAI-compatible API at sv.URL, the caller's token forwarded when that is the route on the
 // models Gateway (the Gateway's JWT policy admits nothing else), kagent's
 // placeholder key when it is the keyless in-cluster Service. The served model
 // name is spec.model.name (the well-known template passes it to vLLM); the
 // ModelConfig is named after the object — the rule the portal's serve flow
 // applies.
 func (sv served) agentEndpoint() backend.AgentEndpoint {
+	if name := sv.onEndpointName(); sv.LLM != nil && name != "" {
+		// On the platform's LLM endpoint: the in-cluster listener, which
+		// checks no key, under the public name — the data plane meters the
+		// model's turns with the provider models' (gatewaymodel.go).
+		return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.LLM.Endpoint + "/v1", Model: name, PlaceholderAPIKey: true, Name: sv.Name}
+	}
 	routed := sv.routed()
 	return backend.AgentEndpoint{Provider: "OpenAI", BaseURL: sv.URL + "/v1", Model: sv.Model, APIKeyPassthrough: routed, PlaceholderAPIKey: !routed, Name: sv.Name}
 }
@@ -174,6 +187,9 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	for i := range out {
 		out[i].applyAnswer()
 	}
+	// After the answers: a model that has not answered its first request is
+	// not Ready, so it stays off the LLM endpoint.
+	b.syncGatewayModels(ctx, s, out)
 	b.rememberServed(out)
 	// While they exist, remember which repository each one fills its cache
 	// directory from (index.go).
@@ -430,6 +446,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	failure, ok, _ := unstructured.NestedMap(obj.Object, "status", "modelStatus", "lastFailureInfo")
 	sv.Failed = ok && len(failure) > 0
 	sv.URL = normalizeServedURL(servedURL(obj, sv, s.GatewayEndpoint))
+	sv.LLM = s.LLMEndpoint
 	return sv
 }
 

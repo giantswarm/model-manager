@@ -109,8 +109,9 @@ defaulting to the endpoint; lemonade: `--lemonade-agent-host` plus `/api/v1`,
 the OpenAI-compatible base URL the ModelConfigs carry). A client that matches
 ModelConfigs it did not
 create to models by hostname (the portal's "Used by") compares against
-`agentEndpoint`. kserve omits it: every served model has its own address
-(`running.endpoint`, `modelConfig.endpoint`).
+`agentEndpoint`. kserve reports the models Gateway's origin every served model
+is routed under, and omits it without the Gateway, when every served model has
+its own address (`running.endpoint`, `modelConfig.endpoint`).
 
 On ollama, `GET /api/v1/nodes` reports the proxied host as one node so a
 laptop install has capacity data too. Ollama's API has no capacity endpoint,

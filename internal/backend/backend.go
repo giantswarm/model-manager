@@ -134,8 +134,10 @@ type Info struct {
 	// AgentEndpoint is the backend as reached by agent pods — the host the
 	// driver writes into ModelConfigs (ollama: the agent host, which may
 	// differ from Endpoint; lemonade: the agent host plus /api/v1, the
-	// OpenAI-compatible base URL). Empty when the backend has no single agent-facing
-	// endpoint (kserve: every served model has its own predictor URL).
+	// OpenAI-compatible base URL; kserve: the models Gateway's origin every
+	// served model is routed under). Empty when the backend has no single
+	// agent-facing endpoint (kserve without the Gateway: every served model
+	// has its own Service).
 	// Clients that match ModelConfigs to models by hostname compare against
 	// this, not Endpoint.
 	AgentEndpoint string `json:"agentEndpoint,omitempty"`
@@ -252,6 +254,12 @@ type LoadedModel struct {
 	Runtime          *Runtime    `json:"runtime,omitempty"`
 	Interfaces       []Interface `json:"interfaces,omitzero"`
 	InterfacesReason string      `json:"interfacesReason,omitempty"`
+	// PublicName is the model's name on the platform's LLM endpoint, what a
+	// client sends as `model` there; Endpoint is then the endpoint's URL
+	// (kserve, on an installation whose discovery names the endpoint).
+	// PublicNameReason says why a served model is not on it.
+	PublicName       string `json:"publicName,omitempty"`
+	PublicNameReason string `json:"publicNameReason,omitempty"`
 }
 
 // Runtime is the software serving a model, as the running server reports it.

@@ -86,13 +86,40 @@ data:
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
 appears under `invalid` in `list_backends` with the ConfigMap name and the failing field
 (`spec.endpoint: required for ollama`), and the process keeps running with the backends it has.
-Fixing the ConfigMap loads it; deleting it clears the report.
+A loaded document that breaks — it fails the schema, or its backend fails to build — drops its
+backend in the same step that reports it: what serves is always what the ConfigMap holds, never
+the last good document beside the report. Fixing the ConfigMap loads it; deleting it clears the
+report.
 
 The target **never carries credentials**: every Kubernetes call the kserve backend makes presents
 the caller's own token (`--downstream-oauth`, the platform default), so the target apiserver must
-trust the installation's Dex (the cluster chart's OIDC / `structuredAuthentication` values). A call
-without a caller — no token in the request — is anonymous there and refused. A `local` target uses
-model-manager's in-cluster address and CA.
+trust the installation's Dex (the cluster chart's OIDC / `structuredAuthentication` values). A `local`
+target uses model-manager's in-cluster address and CA. For a remote target:
+
+- **Refused when read** when `--downstream-oauth` is off (every call there would be anonymous) and
+  with `--kserve-inventory-mode=daemonset` (it dials the cache agents' pod IPs, which the
+  installation cannot reach; the `pod` mode reads its scan pod through the target apiserver). A new
+  document is reported under `invalid` and not loaded, and `add_backend` answers `registered: false`
+  with the `error`. A registered kserve document edited into a refusal — pointed at a remote target
+  while `--downstream-oauth` is off, or given the `daemonset` inventory — is a document whose
+  backend fails to build: its backend is dropped in the same step that reports it, so
+  `list_backends` shows the document under `invalid` and no kserve backend, never the last good
+  target beside the report.
+- **A refusal names its precondition.** A 401 from the target says the target apiserver must trust
+  the installation's Dex as an OIDC issuer, naming the issuer and audience of the caller's token — or
+  that the token expired; a 403 names the caller's RBAC on the target, or a call that carried no
+  caller's token. The code and reason stay the apiserver's.
+- **Detached work runs as the caller.** A background cache rescan and the cleanup of a cancelled
+  download present the token of the call that caused them; with no caller they are skipped (logged
+  once, and the answer's `inventory.reason` says why), never made anonymously. A caller the target
+  refuses is not retried without the token.
+- **Agents reach a model on the target's models Gateway.** The backend's `agentEndpoint` is the
+  gateway origin from the target's discovery ConfigMap (`spec.gateway.endpoint`,
+  `https://models.<cluster>.<domain>`); every ModelConfig names
+  `<origin>/<namespace>/<model>/v1` with `apiKeyPassthrough: true` and no placeholder Secret. A target
+  whose discovery document enables no Gateway says so in the backend's `message`: a model served on
+  its cluster-local address is out of the installation's reach. The kagent wiring itself stays on the
+  installation's cluster.
 
 Everything the document does not name — images, timeouts, inventory mode, the cache claim — keeps
 the value of the chart's `kserve.*` values (the flags), which double as defaults for a registered
@@ -231,6 +258,83 @@ after a minute; an answer stands until the model turns Ready anew.
 Whether a registered interface serves a given request is the preset's business: tool calling
 needs `--enable-auto-tool-choice` and a `--tool-call-parser`, thinking blocks a
 `--reasoning-parser`.
+
+### Served models on the LLM endpoint
+
+The platform's LLM endpoint is described by an **LLM endpoint document**: a ConfigMap in
+model-manager's own namespace (`--namespace`, the backend documents' namespace) labelled
+`agent-platform.giantswarm.io/llm-endpoint=true`, whose key `llm-endpoint.yaml` holds
+
+```yaml
+apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: LLMEndpoint
+spec:
+  parentRefs:                 # Gateway API parents every served model attaches to
+    - {group: gateway.networking.k8s.io, kind: Gateway, name: agentgateway, sectionName: llm}
+  endpoint: http://agentgateway.agent-platform.svc:8081   # the listener's in-cluster URL
+  externalEndpoint: https://llm.example.io                # optional: the endpoint's public URL
+```
+
+The agent-platform chart renders it in the platform release with `llmRouting` on and
+model-manager serving. It is the platform's and not a serving slice's: a GPU node pool's slice is
+a release of its own, and the endpoint's data plane reaches the models of its own cluster only.
+model-manager reads it with its ServiceAccount, every time it resolves its serving settings, for a
+kserve backend serving model-manager's own cluster: a backend with a remote target reads none. A
+parent without a namespace is in the document's. With exactly one document, every Ready model
+created from a preset whose server registered at least one interface goes on the endpoint as two
+`AgentgatewayModel`s. Two or more documents, or one that does not parse, put nothing on it, and
+the log says why. The objects live in the parents' namespace and are written with model-manager's
+own ServiceAccount (the chart grants it `agentgatewaymodels` there):
+
+```yaml
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: <preset>-workload         # the concrete model: the served workload
+  labels: {app.kubernetes.io/managed-by: model-manager, model-manager.giantswarm.io/backend: kserve, agent-platform.giantswarm.io/preset: <preset>}
+spec:
+  parentRefs: [<the document's parentRefs>]
+  match: {model: <Hugging Face id>}
+  visibility: Internal
+  provider: Custom
+  baseURL: http://<name>-kserve-workload-svc.<namespace>.svc.cluster.local:8000/v1
+  custom:
+    formats: [<the interfaces the server registered>]
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: <preset>                  # the public name: what a client sends as `model`
+  labels: {…the same…}
+spec:
+  parentRefs: [<the document's parentRefs>]
+  virtualModel:
+    weighted:
+      targets: [{modelRef: {name: <preset>-workload}}]
+```
+
+The baseURL ends in `/v1`: the gateway's upstream path is the baseURL's path plus the format's
+suffix. vLLM serves the model under its Hugging Face id (the llm-d template's
+`--served-model-name`), and on agentgateway 2.1 a concrete `AgentgatewayModel` forwards the
+request's `model` unchanged — its Custom settings carry no model override, and a transformation of
+the field does not reach the provider —, while a virtual model rewrites `model` to its target's.
+So the public name is a virtual model over an Internal concrete one matched on the id, which
+`GET /v1/models` does not list. The formats are the ones the server registered, so the gateway
+converts only what the model does not speak. Both objects stay while their serving object exists
+(a model restarting keeps them), are removed by `unload_model` in the same call and when the
+serving object is deleted elsewhere, and are rewritten when their spec changes; they are compared
+with the served models on every list and at least every five minutes. Two served objects of one
+Hugging Face id would share the concrete match, so the router picks the first by name for both.
+
+`list_loaded_models` then reports `publicName` and, as `endpoint`, the endpoint's URL — its public
+one (the document's `externalEndpoint`, the chart's `llmRouting.external`) when the installation
+publishes it, else the listener's; a served
+model that is not on it carries `publicNameReason` (not Ready yet, no interfaces, not created from
+a preset, the object could not be written). The model's ModelConfig rides the endpoint: `openAI.
+baseUrl` the listener plus `/v1`, `model` the public name, the placeholder key (the in-cluster
+listener checks none), so an agent's turns on a local model are metered by the same data plane as
+its provider turns. A hand-written `LLMInferenceService` has no preset and stays off the endpoint.
+Without the document nothing is written and the ModelConfig keeps the model's own address.
 
 ### The ModelConfig's API key
 

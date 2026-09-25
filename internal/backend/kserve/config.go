@@ -191,7 +191,11 @@ type settings struct {
 	// at <origin>/<namespace>/<name>, so the address a served model gets is
 	// known the moment the object is composed — before KServe publishes it in
 	// status.addresses (giantswarm/model-manager#115).
-	GatewayEndpoint     string
+	GatewayEndpoint string
+	// LLMEndpoint puts every served model on the platform's LLM endpoint
+	// (gatewaymodel.go): the LLM endpoint document of model-manager's own
+	// namespace, for a backend serving its own cluster; nil otherwise.
+	LLMEndpoint         *llmEndpoint
 	CacheEnabled        bool
 	CacheClaim          string
 	CacheMountPath      string
@@ -500,6 +504,11 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 			s.GatewayEndpoint = strings.TrimRight(strings.TrimSpace(sp.Gateway.Endpoint), "/")
 		}
 	}
+	if ep, err := c.readLLMEndpoint(ctx); err != nil {
+		c.log.Warn("the LLM endpoint document is unusable; served models stay off the LLM endpoint", "error", err)
+	} else {
+		s.LLMEndpoint = ep
+	}
 	// Explicit options win over discovery.
 	setIf(&s.Namespace, o.Namespace)
 	setIf(&s.GPUResourceName, o.GPUResourceName)
@@ -549,9 +558,11 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 
 // clientsets returns the clientsets a resolve tries, in order: the caller's
 // when the request carries a caller token (downstream OAuth: only the caller
-// may read the ConfigMap; a remote target knows no other credential), then
-// the configured one, which still answers when the caller's token has
-// expired. Empty without either.
+// may read the ConfigMap), then the configured one, which on the local
+// cluster still answers when the caller's token has expired. A remote
+// target's configured client carries no credential: it is tried only when
+// there is no caller's, so a refusal of the caller is never retried — and
+// masked — anonymously. Empty without either.
 func (c *config) clientsets(ctx context.Context) []kubernetes.Interface {
 	var out []kubernetes.Interface
 	if c.opts.ClientsFor != nil {
@@ -559,14 +570,14 @@ func (c *config) clientsets(ctx context.Context) []kubernetes.Interface {
 			out = append(out, caller)
 		}
 	}
-	if c.opts.Clientset != nil {
+	if c.opts.Clientset != nil && (len(out) == 0 || c.opts.Target.Local()) {
 		out = append(out, c.opts.Clientset)
 	}
 	return out
 }
 
-// dynamics returns the dynamic clients a resolve tries, in the order of
-// clientsets: the caller's, then the configured one.
+// dynamics returns the dynamic clients a resolve tries, in the order and on
+// the terms of clientsets: the caller's, then the configured one.
 func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
 	var out []dynamic.Interface
 	if c.opts.ClientsFor != nil {
@@ -574,7 +585,7 @@ func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
 			out = append(out, caller)
 		}
 	}
-	if c.opts.Dynamic != nil {
+	if c.opts.Dynamic != nil && (len(out) == 0 || c.opts.Target.Local()) {
 		out = append(out, c.opts.Dynamic)
 	}
 	return out
