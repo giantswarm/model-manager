@@ -38,6 +38,10 @@ type fakeServing struct {
 	// inventory, when set, is what an inventory read (GetModel) waits for
 	// before answering — a cache scan pod that outlasts the caller.
 	inventory chan struct{}
+	// readRace, when set, is signalled by a readiness wait that read the
+	// model Ready; the wait then returns only once hold is closed or its
+	// context ends — a poll that read the object just before an unload.
+	readRace, hold chan struct{}
 }
 
 func newFakeServing() *fakeServing {
@@ -177,9 +181,16 @@ func (f *fakeServing) AgentEndpoint(model string) backend.AgentEndpoint {
 func (f *fakeServing) WaitReady(ctx context.Context, model string) error {
 	for {
 		f.mu.Lock()
-		ok := f.ready[model]
+		ok, readRace, hold := f.ready[model], f.readRace, f.hold
 		f.mu.Unlock()
 		if ok {
+			if readRace != nil {
+				close(readRace)
+				select {
+				case <-hold:
+				case <-ctx.Done():
+				}
+			}
 			return nil
 		}
 		select {
@@ -486,6 +497,33 @@ func TestServingLoadWiresInTheCallAndUnloadUnwires(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, false, body["loaded"])
 	assert.Nil(t, body["modelConfig"])
+}
+
+// An unload that lands while the load job's last readiness read still
+// saw the model Ready ends the job first: the ModelConfig stays removed.
+func TestServingUnloadEndsTheLoadJobBeforeUnwiring(t *testing.T) {
+	f := newServingFixture(t)
+	f.backend.mu.Lock()
+	f.backend.readRace, f.backend.hold = make(chan struct{}), make(chan struct{})
+	readRace, hold := f.backend.readRace, f.backend.hold
+	f.backend.mu.Unlock()
+
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	status, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
+	require.Equal(t, http.StatusOK, status)
+	loadJob := list["jobs"].([]any)[0].(map[string]any)
+	require.Equal(t, "load", loadJob["type"])
+
+	f.backend.setReady("org/tiny")
+	<-readRace
+	status, _ = f.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	close(hold)
+
+	done := f.waitJob(t, loadJob["id"].(string))
+	assert.Equal(t, "cancelled", done["phase"], done)
+	assert.Zero(t, f.wirer.count(), "the load job did not re-wire behind the unload")
 }
 
 // A model routed on the models Gateway is wired with the caller's token

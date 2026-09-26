@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- kserve: an unload no longer leaves its ModelConfig behind: `unload_model` ends the model's load job before it unwires, so a readiness poll that read the object Ready just before the deletion cannot re-wire the ModelConfig the unload removed.
 - kserve: a model whose runtime fails its first request after the list stopped waiting, and drops out of Ready while the request hangs, is `failed` (giantswarm/model-manager#177). The first request was bound to the list with a 15 s timeout. vLLM's harmony renderer answers 500 only when its vocab download gives up, after some 30 s, and the hung request also hangs `/health`, so the object left Ready and turned Ready again. Every transition sent another request that timed out, and the model sat at `loading`/`routing` for hours without reaching `failed`. A list now waits 15 s while the request runs on for up to 2 min. It's kept per object: one at a time, none beside one in flight, and asked anew on the next Ready transition. A failure stands while the object is not Ready, until a later request is answered.
 - kserve: a served model is Ready only once it has answered a request
   ([#177](https://github.com/giantswarm/model-manager/issues/177)). The `LLMInferenceService`'s
