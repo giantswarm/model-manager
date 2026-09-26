@@ -93,6 +93,7 @@ type RunFunc func(ctx context.Context, report func(backend.Progress)) (any, erro
 type entry struct {
 	job    Job
 	cancel context.CancelFunc
+	done   chan struct{} // closed once the job reached a terminal phase
 }
 
 // Manager owns the job table.
@@ -186,15 +187,17 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 			RequestedBy: identity.Caller(parent),
 		},
 		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 	m.jobs[e.job.ID] = e
 	m.wg.Add(1)
-	go m.run(ctx, e.job.ID, fn)
+	go m.run(ctx, e.job.ID, e.done, fn)
 	return e.job, true
 }
 
-func (m *Manager) run(ctx context.Context, id string, fn RunFunc) {
+func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn RunFunc) {
 	defer m.wg.Done()
+	defer close(done)
 	m.update(id, func(j *Job) {
 		t := m.now()
 		j.Phase = PhaseRunning
@@ -297,6 +300,22 @@ func (m *Manager) Cancel(id string) (Job, error) {
 	m.mu.Unlock()
 	if !job.Done() {
 		cancel()
+	}
+	return m.Get(id)
+}
+
+// Await blocks until the job reached a terminal phase, or ctx ends.
+func (m *Manager) Await(ctx context.Context, id string) (Job, error) {
+	m.mu.Lock()
+	e, ok := m.jobs[id]
+	m.mu.Unlock()
+	if !ok {
+		return Job{}, ErrNotFound
+	}
+	select {
+	case <-e.done:
+	case <-ctx.Done():
+		return Job{}, ctx.Err()
 	}
 	return m.Get(id)
 }

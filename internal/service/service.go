@@ -837,6 +837,9 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 			if err := sl.WaitReady(jobCtx, model); err != nil {
 				return nil, err
 			}
+			if err := jobCtx.Err(); err != nil {
+				return nil, err // an unload ended the job after its last readiness read
+			}
 			report(backend.Progress{Status: "ready; refreshing the ModelConfig from the published address"})
 			ref, err := s.wireModel(jobCtx, b, model, backend.WireOptions{})
 			if err != nil {
@@ -873,6 +876,7 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 	}
 	s.log.Info("model unloaded", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
+		s.endLoadJob(ctx, b.Name(), model)
 		if err := s.wirer.Remove(ctx, b.Name(), model); err != nil {
 			s.log.Warn("unwire after unload failed", "backend", b.Name(), "model", model, "error", err)
 		} else {
@@ -1312,6 +1316,24 @@ func thinkString(think *bool) string {
 		return "unset"
 	}
 	return strconv.FormatBool(*think)
+}
+
+// endLoadJob cancels the load job following model on b, if one runs, and
+// waits for it to end: a readiness poll that read the object before the
+// unload deleted it would otherwise re-wire the ModelConfig the unload is
+// about to remove.
+func (s *Service) endLoadJob(ctx context.Context, b backend.Name, model string) {
+	for _, j := range s.jobs.List() {
+		if j.Type != jobs.TypeLoad || j.Backend != b || j.Model != model || j.Done() {
+			continue
+		}
+		if _, err := s.jobs.Cancel(j.ID); err != nil {
+			continue
+		}
+		if _, err := s.jobs.Await(ctx, j.ID); err != nil {
+			s.log.Warn("waiting for the load job to end failed", "backend", b, "model", model, "job", j.ID, "error", err)
+		}
+	}
 }
 
 func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
