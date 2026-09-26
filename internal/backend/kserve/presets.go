@@ -130,6 +130,22 @@ func (p *servingPreset) fromModelImage() bool {
 	return p != nil && strings.HasPrefix(p.Spec.Model.StorageURI, "oci://")
 }
 
+// utilization is the share of each GPU's memory vLLM claims at start
+// (--gpu-memory-utilization, vLLM's 0.9 when the preset sets none or an
+// unreadable one — the fit check names the latter); 0 for a CPU preset,
+// whose runtime claims no GPU memory.
+func (p *servingPreset) utilization() float64 {
+	if p.cpu() {
+		return 0
+	}
+	if v, ok := vllmFlagValues(p.Spec.Args)[flagGPUMemoryUtilization]; ok {
+		if u, err := parseUtilization(v); err == nil {
+			return u
+		}
+	}
+	return vllmDefaultUtilization
+}
+
 func (p *servingPreset) weightsBytes() int64 {
 	return gibToBytes(p.Spec.Requirements.WeightsGiB)
 }
@@ -151,21 +167,22 @@ func gibToBytes(g float64) int64 {
 // view converts the preset to its API form.
 func (p *servingPreset) view(defaultOverheadGiB float64) backend.Preset {
 	out := backend.Preset{
-		Name:          p.name(),
-		DisplayName:   p.Spec.DisplayName,
-		Description:   p.Spec.Description,
-		Source:        p.source,
-		Model:         p.Spec.Model.ID,
-		StorageURI:    p.Spec.Model.StorageURI,
-		Format:        p.Spec.Model.Format,
-		ContextLength: p.Spec.Model.ContextLength,
-		Capabilities:  p.Spec.Model.Capabilities,
-		License:       p.Spec.Model.License,
-		GPUs:          p.gpus(),
-		WeightsBytes:  p.weightsBytes(),
-		OverheadBytes: p.overheadBytes(defaultOverheadGiB),
-		Args:          p.Spec.Args,
-		NodeSelector:  p.Spec.Scheduling.NodeSelector,
+		Name:                 p.name(),
+		DisplayName:          p.Spec.DisplayName,
+		Description:          p.Spec.Description,
+		Source:               p.source,
+		Model:                p.Spec.Model.ID,
+		StorageURI:           p.Spec.Model.StorageURI,
+		Format:               p.Spec.Model.Format,
+		ContextLength:        p.Spec.Model.ContextLength,
+		Capabilities:         p.Spec.Model.Capabilities,
+		License:              p.Spec.Model.License,
+		GPUs:                 p.gpus(),
+		GPUMemoryUtilization: p.utilization(),
+		WeightsBytes:         p.weightsBytes(),
+		OverheadBytes:        p.overheadBytes(defaultOverheadGiB),
+		Args:                 p.Spec.Args,
+		NodeSelector:         p.Spec.Scheduling.NodeSelector,
 	}
 	out.RequiredBytes = out.WeightsBytes + out.OverheadBytes
 	if p.Spec.ChatTemplate != nil {

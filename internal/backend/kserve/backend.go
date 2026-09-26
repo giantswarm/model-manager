@@ -78,6 +78,9 @@ type Backend struct {
 	// apiMu guards apiCache: what each Ready transition's server read found.
 	apiMu    sync.Mutex
 	apiCache map[string]serverAPI
+	// askMu guards asks: each object's first request by uid (answer.go).
+	askMu sync.Mutex
+	asks  map[string]*firstAsk
 	// gwMu guards what the last write of the LLM endpoint's
 	// AgentgatewayModels found and when (gatewaymodel.go).
 	gwMu          sync.Mutex
@@ -853,7 +856,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	reserved := b.reservedByNode(ctx, indexPresets(presets), nil)
+	reserved := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache

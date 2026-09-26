@@ -403,24 +403,29 @@ type LoadRequest struct {
 type Preset struct {
 	Name string `json:"name"`
 	// Backend is the driver offering this preset; set by the service.
-	Backend       Name              `json:"backend,omitempty"`
-	Target        *Target           `json:"target,omitempty"`
-	DisplayName   string            `json:"displayName"`
-	Description   string            `json:"description,omitempty"`
-	Source        string            `json:"source,omitempty"`
-	Model         string            `json:"model"`
-	StorageURI    string            `json:"storageUri,omitempty"`
-	Format        string            `json:"format,omitempty"`
-	ContextLength int64             `json:"contextLength,omitempty"`
-	Capabilities  []string          `json:"capabilities,omitempty"`
-	License       string            `json:"license,omitempty"`
-	GPUs          int64             `json:"gpus"`
-	WeightsBytes  int64             `json:"weightsBytes"`
-	OverheadBytes int64             `json:"overheadBytes"`
-	RequiredBytes int64             `json:"requiredBytes"`
-	Args          []string          `json:"args,omitempty"`
-	NodeSelector  map[string]string `json:"nodeSelector,omitempty"`
-	ChatTemplate  string            `json:"chatTemplate,omitempty"`
+	Backend       Name     `json:"backend,omitempty"`
+	Target        *Target  `json:"target,omitempty"`
+	DisplayName   string   `json:"displayName"`
+	Description   string   `json:"description,omitempty"`
+	Source        string   `json:"source,omitempty"`
+	Model         string   `json:"model"`
+	StorageURI    string   `json:"storageUri,omitempty"`
+	Format        string   `json:"format,omitempty"`
+	ContextLength int64    `json:"contextLength,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	License       string   `json:"license,omitempty"`
+	GPUs          int64    `json:"gpus"`
+	// GPUMemoryUtilization is the share of each GPU's memory the runtime
+	// claims at start (vLLM's --gpu-memory-utilization, 0.9 by default); on
+	// a unified-memory node it is a share of the whole node. Absent for a
+	// CPU preset.
+	GPUMemoryUtilization float64           `json:"gpuMemoryUtilization,omitempty"`
+	WeightsBytes         int64             `json:"weightsBytes"`
+	OverheadBytes        int64             `json:"overheadBytes"`
+	RequiredBytes        int64             `json:"requiredBytes"`
+	Args                 []string          `json:"args,omitempty"`
+	NodeSelector         map[string]string `json:"nodeSelector,omitempty"`
+	ChatTemplate         string            `json:"chatTemplate,omitempty"`
 }
 
 // SearchResult is one model-hub hit.

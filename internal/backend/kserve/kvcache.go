@@ -281,22 +281,9 @@ type vllmArgs struct {
 // judge.
 func parseVLLMArgs(args []string) (vllmArgs, error) {
 	a := vllmArgs{Utilization: vllmDefaultUtilization, KVCacheDType: kvCacheDTypeAuto, DType: kvCacheDTypeAuto, BlockSize: vllmDefaultBlockSize, TensorParallel: 1, ChunkedPrefill: true}
-	values := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		flag, value, hasValue := strings.Cut(strings.TrimSpace(args[i]), "=")
-		if !strings.HasPrefix(flag, "--") {
-			continue
-		}
-		flag = "--" + strings.ReplaceAll(flag[2:], "_", "-")
-		if flag == flagNoEnableChunkedPrefill {
-			a.ChunkedPrefill = false
-			continue
-		}
-		if !hasValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			i++
-			value = args[i]
-		}
-		values[flag] = strings.Trim(strings.TrimSpace(value), `'"`)
+	values := vllmFlagValues(args)
+	if _, off := values[flagNoEnableChunkedPrefill]; off {
+		a.ChunkedPrefill = false
 	}
 	raw, ok := values[flagMaxModelLen]
 	if !ok {
@@ -317,8 +304,8 @@ func parseVLLMArgs(args []string) (vllmArgs, error) {
 		return a, fmt.Errorf("%s=%s splits the layers across GPUs, which the check does not judge", flagPipelineParallelSize, v)
 	}
 	if v, ok := values[flagGPUMemoryUtilization]; ok {
-		if a.Utilization, err = strconv.ParseFloat(v, 64); err != nil || a.Utilization <= 0 || a.Utilization > 1 {
-			return a, fmt.Errorf("%s=%s is not a fraction", flagGPUMemoryUtilization, v)
+		if a.Utilization, err = parseUtilization(v); err != nil {
+			return a, err
 		}
 	}
 	if v, ok := values[flagKVCacheDType]; ok {
@@ -328,6 +315,35 @@ func parseVLLMArgs(args []string) (vllmArgs, error) {
 		a.DType = strings.ToLower(v)
 	}
 	return a, nil
+}
+
+// vllmFlagValues reads vLLM's command-line flags as the API server does:
+// --flag=value or --flag value, dashes and underscores alike, quotes
+// trimmed; a bare switch maps to "".
+func vllmFlagValues(args []string) map[string]string {
+	values := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		flag, value, hasValue := strings.Cut(strings.TrimSpace(args[i]), "=")
+		if !strings.HasPrefix(flag, "--") {
+			continue
+		}
+		flag = "--" + strings.ReplaceAll(flag[2:], "_", "-")
+		if !hasValue && flag != flagNoEnableChunkedPrefill && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+			value = args[i]
+		}
+		values[flag] = strings.Trim(strings.TrimSpace(value), `'"`)
+	}
+	return values
+}
+
+// parseUtilization reads a --gpu-memory-utilization value: a fraction in (0, 1].
+func parseUtilization(v string) (float64, error) {
+	u, err := strconv.ParseFloat(v, 64)
+	if err != nil || u <= 0 || u > 1 {
+		return 0, fmt.Errorf("%s=%s is not a fraction", flagGPUMemoryUtilization, v)
+	}
+	return u, nil
 }
 
 // humanReadableInt parses vLLM's token counts: 8192, 8k (×1000), 8K (×1024),

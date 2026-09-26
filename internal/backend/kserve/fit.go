@@ -261,7 +261,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved := b.reservedByNode(ctx, idx, p)
+	reserved := b.reservedByNode(ctx, idx, p, nodes)
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
 		// The discovery document appeared, or named the GPU pool, since the
@@ -532,9 +532,17 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 }
 
 // reservedByNode sums what the running LLMInferenceServices need per node, from
-// their presets. The preset being (re)loaded is not counted against itself.
-func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset) map[string]int64 {
+// their presets: the weights and overhead, and on a unified-memory node — GPUs
+// that report no memory of their own, the node's memory being theirs — at
+// least the share vLLM claims at start, --gpu-memory-utilization of the
+// node's budget, whatever the requests say. The preset being (re)loaded is not
+// counted against itself.
+func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) map[string]int64 {
 	out := map[string]int64{}
+	byName := make(map[string]nodeBudget, len(nodes))
+	for _, n := range nodes {
+		byName[n.Name] = n
+	}
 	servedList, err := b.listServed(ctx)
 	if err != nil {
 		b.log.Warn("listing LLMInferenceServices for the fit check failed", "error", err)
@@ -556,9 +564,20 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 		if p == nil {
 			continue
 		}
-		out[sv.Node] += p.weightsBytes() + p.overheadBytes(b.opts.DefaultOverheadGiB)
+		out[sv.Node] += presetReserve(p, byName[sv.Node], b.opts.DefaultOverheadGiB)
 	}
 	return out
+}
+
+// presetReserve is what one served preset holds on its node: its weights and
+// overhead, or on a unified-memory GPU node (GPUs, no GPU memory label) the
+// share of the node's budget vLLM claims at start, whichever is larger.
+func presetReserve(p *servingPreset, n nodeBudget, defaultOverheadGiB float64) int64 {
+	need := p.weightsBytes() + p.overheadBytes(defaultOverheadGiB)
+	if n.GPUCount > 0 && n.GPUMemory == 0 && n.Budget > 0 {
+		need = max(need, int64(p.utilization()*float64(n.Budget)))
+	}
+	return need
 }
 
 // isCached reports whether the model is already in the cache and how that
