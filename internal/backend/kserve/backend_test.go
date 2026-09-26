@@ -594,7 +594,7 @@ func TestListNodes(t *testing.T) {
 	assert.Nil(t, gpu.Cache, "no cache on the GPU node")
 	assert.Equal(t, testCacheNode, cache.Name)
 	assert.Equal(t, 64*gib, cache.BudgetBytes)
-	assert.Equal(t, gibToBytes(0.001)+gib, cache.ReservedBytes, "the served tiny model reserves weights + overhead")
+	assert.Equal(t, shareOf(vllmDefaultUtilization, 64*gib), cache.ReservedBytes, "the served tiny model holds vLLM's default share of the unified-memory node, more than its weights + overhead")
 	require.NotNil(t, cache.Cache)
 	assert.Equal(t, DefaultCacheClaim, cache.Cache.Claim)
 	assert.Equal(t, 1, cache.Cache.Models, "directories holding a model")

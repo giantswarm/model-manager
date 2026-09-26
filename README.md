@@ -523,7 +523,11 @@ scheduling by the registered backend document (`docs/backends.md`).
   `budgetSource: annotation` — for unified-memory nodes whose allocatable
   memory overstates what a model may use) less what the models already served
   on the node reserve (`reservedBytes`, the one reading `load` and `nodes` make
-  too; the preset being loaded is not counted against itself), so `fit-check`
+  too; the preset being loaded is not counted against itself: each served
+  preset's weights and overhead, and on a unified-memory node — GPUs without a
+  memory label of their own — at least the share vLLM claims at start,
+  `--gpu-memory-utilization` of the node's budget, 0.9 when the preset sets
+  none; `list_presets` reports it as `gpuMemoryUtilization`), so `fit-check`
   and `load` reach one verdict; `pull` judges against the whole budget and refuses what cannot be
   served, then runs a download Job with the KServe storage-initializer image
   into `<claim>/<preset name>` — the directory the preset's LLMInferenceService

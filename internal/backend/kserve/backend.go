@@ -856,7 +856,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	reserved := b.reservedByNode(ctx, indexPresets(presets), nil)
+	reserved := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache
