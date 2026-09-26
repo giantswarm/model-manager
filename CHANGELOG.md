@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- kserve: on a unified-memory node (GPUs that report no memory of their own, the node's memory being theirs) a served model reserves at least what vLLM claims at start, `--gpu-memory-utilization` of the node's budget (vLLM's 0.9 when the preset sets none), not only its preset's weights and overhead (giantswarm/model-manager#18). `check_fit`, `load_model` and `list_nodes` read the same reservation, so a second preset that vLLM would refuse to start next to the first is refused by the fit check first. `list_presets` / `GET /api/v1/presets` report each GPU preset's `gpuMemoryUtilization`.
+
 ### Removed
 
 - **Breaking** — kserve: the classic `InferenceService` kind. The backend composes, lists, stops and deletes `LLMInferenceService`s (`serving.kserve.io/v1alpha2`, KServe's llm-d control plane) and nothing else (giantswarm/model-manager#134). Gone with it: the chart values `kserve.servingKind` and `kserve.runtime` (the `kserve` block's schema rejects them), the flags `--kserve-serving-kind` / `--kserve-runtime` and their environment variables, a preset's `spec.runtime` and `spec.predictor` (ignored when a chart still publishes them), the preset field `runtime` in `list_presets` / `GET /api/v1/presets`, the values `InferenceService` of a loaded model's `kind` and the discovery document's `spec.runtime`, `spec.deploymentStrategyType` and `spec.timeoutSeconds` (ignored when present). The chart's kserve Role reads and writes `llminferenceservices` instead of `inferenceservices` and `servingruntimes`; its ClusterRole reads `llminferenceserviceconfigs` (below). An installation that serves classic `InferenceService`s or pins `kserve.servingKind: InferenceService` moves to llm-d (the platform's `kserve-llmisvc-crd`, `kserve-llmisvc-resources` and `kserve-runtime-configs` components) and drops the pin before it takes this release; an installation serving through llm-d, `servingKind` unset, needs no action. No fallback, no deprecation window.
