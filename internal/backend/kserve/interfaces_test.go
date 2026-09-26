@@ -25,8 +25,8 @@ import (
 // version GET /version reports and the document GET /openapi.json returns
 // (either empty: 404 — the runtime's docs off, a server without the route);
 // failing answers 503 to both. The first request (answer.go) is answered 200,
-// or answerStatus with answerBody; silent drops it unanswered. asked records
-// each request's path and body.
+// or answerStatus with answerBody, after answerDelay; silent drops it
+// unanswered. asked records each request's path and body.
 type modelServer struct {
 	version      string
 	openapi      string
@@ -34,6 +34,7 @@ type modelServer struct {
 	answerStatus int
 	answerBody   string
 	silent       bool
+	answerDelay  time.Duration
 	reads        int
 	asked        []askedRequest
 }
@@ -126,7 +127,9 @@ func (f *fixture) answer(req *http.Request) (*http.Response, error) {
 		_ = json.NewDecoder(req.Body).Decode(&body)
 		f.mu.Lock()
 		s.asked = append(s.asked, askedRequest{Path: req.URL.Path, Body: body})
+		delay := s.answerDelay
 		f.mu.Unlock()
+		time.Sleep(delay)
 		switch {
 		case s.silent:
 			return nil, fmt.Errorf("read tcp %s: connection reset by peer", req.URL.Host)
@@ -168,6 +171,20 @@ func (f *fixture) setReady(ctx context.Context, name string, readyAt time.Time) 
 	require.NoError(f.t, err)
 	obj.Object["status"] = map[string]any{"conditions": []any{
 		map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": readyAt.UTC().Format(time.RFC3339)},
+	}}
+	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(f.t, err)
+}
+
+// setNotReady turns the object's Ready condition False: its runtime's
+// readiness probe failing.
+func (f *fixture) setNotReady(ctx context.Context, name string) {
+	f.t.Helper()
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
+	obj, err := llmisvcs.Get(ctx, name, metav1.GetOptions{})
+	require.NoError(f.t, err)
+	obj.Object["status"] = map[string]any{"conditions": []any{
+		map[string]any{"type": "Ready", "status": "False", "reason": "MinimumReplicasUnavailable", "lastTransitionTime": time.Now().UTC().Format(time.RFC3339)},
 	}}
 	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
 	require.NoError(f.t, err)

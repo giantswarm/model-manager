@@ -90,9 +90,15 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 	}
 	var toRead []int
 	keep := make(map[string]bool, len(list))
+	uids := make(map[string]bool, len(list))
 	for i := range list {
 		sv := &list[i]
-		if !sv.Ready || sv.Deleting {
+		uids[sv.UID] = true
+		if sv.Deleting {
+			continue
+		}
+		if !sv.Ready {
+			sv.API.Answer = b.standingFailure(sv.UID)
 			continue
 		}
 		k := sv.apiKey()
@@ -109,6 +115,7 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 		}
 	}
 	b.apiMu.Unlock()
+	b.forgetAsks(uids)
 	if len(toRead) == 0 {
 		return
 	}
@@ -125,7 +132,7 @@ func (b *Backend) serverAPIs(ctx context.Context, list []served) {
 				return
 			}
 			sv.API = b.readServerAPI(ctx, origin)
-			sv.API.Answer = b.askFirst(ctx, origin, sv.Model, sv.API)
+			sv.API.Answer = b.askFirst(ctx, *sv, origin, sv.API)
 			if sv.API.Answer.Waiting != "" && sv.API.retryAt.IsZero() {
 				sv.API.retryAt = time.Now().Add(serverReadRetry)
 			}

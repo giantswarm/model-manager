@@ -24,11 +24,24 @@ import (
 // for a pooling one. An answer finishes the ready step; a failing answer fails
 // it with the runtime's status and the first line of its error; no answer
 // keeps the serve routing and asks again after serverReadRetry.
+//
+// A list waits answerWait for the answer; the request itself runs on for up
+// to answerTimeout, since a runtime that fails can take longer than a list
+// should (the harmony renderer answers 500 only when its download gives up,
+// after some 30 s). Its outcome is kept per object (firstAsk): one request
+// at a time, never a second beside one in flight — a request the runtime
+// hangs on also hangs its /health, so the object leaves Ready and turns
+// Ready again — and a failure stands while the object is not Ready, until
+// the request of a later Ready transition is answered.
+
+// answerWait is how long a list waits for the first request's answer (a
+// variable for the tests).
+var answerWait = 15 * time.Second
 
 const (
-	// answerTimeout bounds the first request: one token, sent once per Ready
-	// transition.
-	answerTimeout = 15 * time.Second
+	// answerTimeout bounds the first request itself: one token, sent once per
+	// Ready transition, answered after the list that sent it if need be.
+	answerTimeout = 2 * time.Minute
 	// answerBodyLimit caps what is read of an answer.
 	answerBodyLimit = 64 << 10
 
@@ -78,20 +91,93 @@ func firstRequest(api serverAPI, model string) (path string, body any) {
 	return "", nil
 }
 
-// askFirst sends the model its first request at origin. A server that did not
-// answer the interface reads is not asked: it is waited for.
-func (b *Backend) askFirst(ctx context.Context, origin serverOrigin, model string, api serverAPI) firstAnswer {
-	if !api.retryAt.IsZero() {
-		return firstAnswer{Waiting: api.Reason}
+// firstAsk is the first request of one object's Ready transition, kept by
+// the object's uid. answer is valid once done is closed.
+type firstAsk struct {
+	// transition is the Ready transition the request was sent for (apiKey).
+	transition string
+	path       string
+	sent       time.Time
+	done       chan struct{}
+	answer     firstAnswer
+}
+
+// finished says whether the request has its outcome.
+func (a *firstAsk) finished() bool {
+	select {
+	case <-a.done:
+		return true
+	default:
+		return false
 	}
-	path, body := firstRequest(api, model)
-	if path == "" {
-		reason := api.Reason
-		if reason == "" {
-			reason = "the model answers neither chat completions nor embeddings"
+}
+
+// askFirst is the model's answer to its first request of the Ready
+// transition sv is in, sent at origin: the request is sent unless one is in
+// flight, or this transition's has its answer or its failure. A server that
+// did not answer the interface reads is not asked: it is waited for.
+func (b *Backend) askFirst(ctx context.Context, sv served, origin serverOrigin, api serverAPI) firstAnswer {
+	b.askMu.Lock()
+	ask := b.asks[sv.UID]
+	if ask == nil || ask.finished() && (ask.transition != sv.apiKey() || ask.answer.Waiting != "") {
+		if !api.retryAt.IsZero() {
+			b.askMu.Unlock()
+			return firstAnswer{Waiting: api.Reason}
 		}
-		return firstAnswer{Skipped: "no request was sent: " + reason}
+		path, body := firstRequest(api, sv.Model)
+		if path == "" {
+			b.askMu.Unlock()
+			reason := api.Reason
+			if reason == "" {
+				reason = "the model answers neither chat completions nor embeddings"
+			}
+			return firstAnswer{Skipped: "no request was sent: " + reason}
+		}
+		ask = &firstAsk{transition: sv.apiKey(), path: path, sent: time.Now(), done: make(chan struct{})}
+		if b.asks == nil {
+			b.asks = map[string]*firstAsk{}
+		}
+		b.asks[sv.UID] = ask
+		go func() {
+			defer close(ask.done)
+			ask.answer = b.send(context.WithoutCancel(ctx), origin, path, body)
+		}()
 	}
+	b.askMu.Unlock()
+	select {
+	case <-ask.done:
+		return ask.answer
+	case <-time.After(answerWait):
+		return firstAnswer{Path: ask.path, Waiting: fmt.Sprintf("POST %s, sent %s, has no answer yet", ask.path, ask.sent.UTC().Format(time.RFC3339))}
+	case <-ctx.Done():
+		return firstAnswer{Path: ask.path, Waiting: fmt.Sprintf("POST %s has no answer yet (%v)", ask.path, ctx.Err())}
+	}
+}
+
+// standingFailure is the failed first request of the object with uid, while
+// no later request has its answer; empty otherwise.
+func (b *Backend) standingFailure(uid string) firstAnswer {
+	b.askMu.Lock()
+	defer b.askMu.Unlock()
+	if ask := b.asks[uid]; ask != nil && ask.finished() && ask.answer.Failure != "" {
+		return ask.answer
+	}
+	return firstAnswer{}
+}
+
+// forgetAsks drops the requests of objects no longer listed.
+func (b *Backend) forgetAsks(listed map[string]bool) {
+	b.askMu.Lock()
+	defer b.askMu.Unlock()
+	for uid := range b.asks {
+		if !listed[uid] {
+			delete(b.asks, uid)
+		}
+	}
+}
+
+// send posts the first request to the server at origin.
+func (b *Backend) send(ctx context.Context, origin serverOrigin, path string, body any) firstAnswer {
 	ctx, cancel := context.WithTimeout(ctx, answerTimeout)
 	defer cancel()
 	raw, err := json.Marshal(body)
@@ -149,9 +235,14 @@ func firstErrorLine(body []byte) string {
 // done when it answered, failed with the runtime's error when it answered
 // with one — the object is then not Ready and its phase failed —, and while
 // no answer is known the serve is still routing. A model whose server named
-// nothing to ask is Ready as the object says, its ready step saying why.
+// nothing to ask is Ready as the object says, its ready step saying why. A
+// failure stands while the object is not Ready: a runtime that hangs on the
+// request drops out of Ready and back, and is failed throughout.
 func (sv *served) applyAnswer() {
-	if !sv.Ready || sv.Deleting || len(sv.Steps) != len(backend.ServePhases) {
+	if sv.Deleting || len(sv.Steps) != len(backend.ServePhases) {
+		return
+	}
+	if !sv.Ready && sv.API.Answer.Failure == "" {
 		return
 	}
 	a := sv.API.Answer
