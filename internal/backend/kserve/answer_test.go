@@ -105,6 +105,60 @@ func TestFailedFirstRequestFailsTheReadyStep(t *testing.T) {
 	assert.Contains(t, err.Error(), "500 Internal Server Error: openai_harmony.HarmonyError")
 }
 
+// A runtime that answers its first request with an error only after the list
+// stopped waiting, and whose object leaves Ready while the request hangs (the
+// gpt-oss presets: the harmony renderer's download gives up after some 30 s,
+// and /health hangs with it), is failed once the answer comes, Ready or not;
+// no second request is sent while the first is in flight, and the next Ready
+// transition asks anew.
+func TestLateFailureFailsTheModelAcrossReadyFlaps(t *testing.T) {
+	wait := answerWait
+	answerWait = 20 * time.Millisecond
+	t.Cleanup(func() { answerWait = wait })
+	f := newFixture(t)
+	ctx := context.Background()
+	server := vllmServer(t, devVersion, generateDoc)
+	server.answerStatus = 500
+	server.answerBody = `{"error":{"message":"error downloading or loading vocab file: failed to download or load vocab file","type":"InternalServerError","code":500}}`
+	server.answerDelay = 300 * time.Millisecond
+	f.serve("tiny", server)
+	f.readyLLMISVC(ctx, "tiny", time.Now().Add(-time.Minute))
+
+	lm := loadedOne(t, f.b)
+	assert.Equal(t, backend.PhaseRouting, lm.Phase, "no answer within the list's wait")
+	assert.Contains(t, stepOf(t, lm, backend.PhaseRouting).Message, "has no answer yet")
+
+	f.setNotReady(ctx, "tiny")
+	lm = loadedOne(t, f.b)
+	assert.NotEqual(t, backend.PhaseReady, lm.Phase)
+	assert.NotEqual(t, backend.PhaseFailed, lm.Phase, "no answer yet")
+
+	f.setReady(ctx, "tiny", time.Now())
+	expireServerReads(f)
+	loadedOne(t, f.b)
+	f.mu.Lock()
+	asked := len(server.asked)
+	f.mu.Unlock()
+	assert.Equal(t, 1, asked, "no second request beside the one in flight")
+
+	f.setNotReady(ctx, "tiny")
+	require.Eventually(t, func() bool { return loadedOne(t, f.b).Phase == backend.PhaseFailed }, 5*time.Second, 20*time.Millisecond)
+	lm = loadedOne(t, f.b)
+	assert.Equal(t, statusNotReady, lm.Status)
+	assert.Equal(t, reasonFirstRequestFailed, lm.Reason)
+	ready := stepOf(t, lm, backend.PhaseReady)
+	assert.Equal(t, backend.StepFailed, ready.State)
+	assert.Equal(t, "the model's first request failed: POST /v1/chat/completions answered 500 Internal Server Error: error downloading or loading vocab file: failed to download or load vocab file", ready.Message)
+
+	f.setReady(ctx, "tiny", time.Now().Add(time.Minute))
+	server.answerStatus, server.answerDelay = 0, 0
+	require.Eventually(t, func() bool { return loadedOne(t, f.b).Phase == backend.PhaseReady }, 5*time.Second, 20*time.Millisecond, "the next Ready transition asks anew")
+	f.mu.Lock()
+	asked = len(server.asked)
+	f.mu.Unlock()
+	assert.Equal(t, 2, asked)
+}
+
 // A model that gives no answer yet is still routing, and is asked again
 // later; its answer then makes it Ready.
 func TestUnansweredModelIsRoutingUntilItAnswers(t *testing.T) {

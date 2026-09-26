@@ -78,6 +78,9 @@ type Backend struct {
 	// apiMu guards apiCache: what each Ready transition's server read found.
 	apiMu    sync.Mutex
 	apiCache map[string]serverAPI
+	// askMu guards asks: each object's first request by uid (answer.go).
+	askMu sync.Mutex
+	asks  map[string]*firstAsk
 	// gwMu guards what the last write of the LLM endpoint's
 	// AgentgatewayModels found and when (gatewaymodel.go).
 	gwMu          sync.Mutex
