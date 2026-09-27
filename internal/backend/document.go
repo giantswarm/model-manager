@@ -121,6 +121,76 @@ type KServeSpec struct {
 	// Router, when set, is the router shape of every LLMInferenceService
 	// the backend composes; see Router.
 	Router *Router `json:"router,omitempty"`
+	// FastLinks, when set, replace the discovery ConfigMap's spec.fastLinks:
+	// the groups of nodes a model can be split across; see FastLink.
+	FastLinks []FastLink `json:"fastLinks,omitempty"`
+}
+
+// FastLink is a group of nodes joined by a fast link (RDMA): one model can be
+// split across them, tensor parallel over the link (placement split,
+// giantswarm/model-manager#190). Networks, Resources and Env are what every
+// pod of a split needs to reach the link: the Multus network attachments on
+// the link's interfaces, the RDMA device resources, and the NCCL environment
+// that points the collective library at the link's devices.
+type FastLink struct {
+	// Name identifies the group in answers (list_nodes, check_fit).
+	Name string `json:"name"`
+	// Nodes are the group's nodes by name; two or more.
+	Nodes []string `json:"nodes"`
+	// Networks are the network attachments (NetworkAttachmentDefinition
+	// names, namespace/name or a name in the serving namespace) every pod
+	// of a split joins: the pod annotation k8s.v1.cni.cncf.io/networks.
+	Networks []string `json:"networks,omitempty"`
+	// Resources are extra requests and limits of every pod of a split (the
+	// RDMA device plugin's resources, rdma/rdma_shared_device_a: "1").
+	Resources map[string]string `json:"resources,omitempty"`
+	// Env is extra environment of every pod of a split (NCCL_IB_HCA, ...).
+	Env []EnvVar `json:"env,omitempty"`
+}
+
+// EnvVar is one name/value pair of a container's environment.
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Has reports whether node belongs to the group.
+func (f FastLink) Has(node string) bool {
+	for _, n := range f.Nodes {
+		if n == node {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateFastLinks checks the groups: a name, two or more distinct nodes,
+// no node in two groups, named environment entries.
+func ValidateFastLinks(links []FastLink) error {
+	seen := map[string]string{}
+	for i, l := range links {
+		if strings.TrimSpace(l.Name) == "" {
+			return fmt.Errorf("fastLinks[%d].name: required", i)
+		}
+		if len(l.Nodes) < 2 {
+			return fmt.Errorf("fastLinks[%d].nodes: a fast link joins two or more nodes", i)
+		}
+		for _, n := range l.Nodes {
+			if strings.TrimSpace(n) == "" {
+				return fmt.Errorf("fastLinks[%d].nodes: an empty node name", i)
+			}
+			if other, ok := seen[n]; ok {
+				return fmt.Errorf("fastLinks[%d].nodes: node %s is already in fast link %s", i, n, other)
+			}
+			seen[n] = l.Name
+		}
+		for _, e := range l.Env {
+			if strings.TrimSpace(e.Name) == "" {
+				return fmt.Errorf("fastLinks[%d].env: an entry without a name", i)
+			}
+		}
+	}
+	return nil
 }
 
 // Router is the router shape of the LLMInferenceServices the kserve backend
@@ -416,6 +486,9 @@ func (s *DocumentSpec) validateKServe() error {
 	if err := s.KServe.GPUPool.Validate(); err != nil {
 		return fmt.Errorf("spec.kserve.gpuPool.%w", err)
 	}
+	if err := ValidateFastLinks(s.KServe.FastLinks); err != nil {
+		return fmt.Errorf("spec.kserve.%w", err)
+	}
 	for name, pool := range s.KServe.GPUPools {
 		if name == "" {
 			return errors.New("spec.kserve.gpuPools: a pool without a name")
@@ -501,6 +574,7 @@ func (d *Document) Options(base Options) Options {
 			base.KServe.GPUPool = *k.GPUPool
 		}
 		base.KServe.GPUPools = k.GPUPools
+		base.KServe.FastLinks = k.FastLinks
 		if k.Router != nil {
 			base.KServe.Router = *k.Router
 		}

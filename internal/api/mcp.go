@@ -63,6 +63,8 @@ const (
 	argJobID             = "id"
 	argPreset            = "preset"
 	argNode              = "node"
+	argPlacement         = "placement"
+	argNodes             = "nodes"
 	argQuery             = "query"
 	argLimit             = "limit"
 )
@@ -154,6 +156,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the LLMInferenceService from; default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: pin the workload to this node")),
+		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: how the model is placed — copies (default: one copy, on node or the node the fit check picks) or split: one model across the nodes of one fast link, tensor parallel over the link (refused where the nodes share no fast link; never over the cluster network). check_fit's recommended names the placement to use")),
+		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve, placement split: the nodes to split across, in rank order (the first serves the API); default: the first fast link whose nodes all host the model")),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.load)
 
@@ -177,6 +181,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		backendArg("to check on (required when several backends offer fit checks)"),
 		mcp.WithString(argPreset, mcp.Description("Serving preset (overhead, model id)")),
 		mcp.WithString(argNode, mcp.Description("Node to check against; default: the best eligible node")),
+		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: the placement to judge — copies (default) or split across the nodes of one fast link: each node holds its share of the weights (weights / nodes) beside the overhead, and its share of the KV cache. The answer carries recommended (split when two or more nodes of one fast link host the model, copies otherwise) and recommendedNodes")),
+		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve, placement split: the nodes to judge; default: the first fast link whose nodes all host the model")),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.checkFit)
 
@@ -326,7 +332,7 @@ func (t *tools) load(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if name == "" && preset == "" {
 		return errResult(fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)), nil
 	}
-	m, err := t.svc.Load(ctx, service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, "")})
+	m, err := t.svc.Load(ctx, service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil)})
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -354,7 +360,7 @@ func (t *tools) search(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (t *tools) checkFit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	res, err := t.svc.FitCheck(ctx, req.GetString(argBackend, ""), backend.FitRequest{Model: req.GetString(argModel, ""), Preset: req.GetString(argPreset, ""), Node: req.GetString(argNode, "")})
+	res, err := t.svc.FitCheck(ctx, req.GetString(argBackend, ""), backend.FitRequest{Model: req.GetString(argModel, ""), Preset: req.GetString(argPreset, ""), Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil)})
 	if err != nil {
 		return errResult(err), nil
 	}

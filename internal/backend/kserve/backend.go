@@ -453,6 +453,8 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Name:      sv.Model,
 			Endpoint:  sv.URL,
 			Node:      sv.Node,
+			Placement: sv.Placement,
+			Nodes:     sv.Nodes,
 			Pool:      sv.Pool,
 			Status:    sv.Status,
 			Reason:    sv.Reason,
@@ -587,11 +589,21 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if name == "" && req.Preset == "" {
 		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
 	}
+	placement, err := validatePlacement(req.Placement, req.Nodes)
+	if err != nil {
+		return nil, err
+	}
 	s := b.cfg.settingsForLoad(ctx)
 	if reason := s.servingUnavailable(); reason != "" {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
 	}
-	plan, err := b.fitCheck(ctx, backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node})
+	fitReq := backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node, Placement: placement, Nodes: req.Nodes}
+	var plan *fitPlan
+	if placement == backend.PlacementSplit {
+		plan, err = b.splitCheck(ctx, fitReq, true)
+	} else {
+		plan, err = b.fitCheck(ctx, fitReq)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -630,10 +642,15 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
 	obj := b.composeLLM(plan.Preset, s, req.Node)
+	if placement == backend.PlacementSplit {
+		link, _ := s.fastLinkOf(fit.Nodes[0])
+		link.Nodes = fit.Nodes
+		obj = b.composeSplit(plan.Preset, s, link, b.templateImage(ctx, s))
+	}
 	if err := b.createServing(ctx, obj); err != nil {
 		return nil, err
 	}
-	b.log.Info("serving object created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "node", nodeOrAny(req.Node))
+	b.log.Info("serving object created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "placement", placement, "node", nodeOrAny(req.Node), "nodes", strings.Join(fit.Nodes, ","))
 	b.inv.invalidate()
 	return res, nil
 }
@@ -832,11 +849,25 @@ func (b *Backend) Search(ctx context.Context, query string, limit int) ([]backen
 
 // FitCheck implements backend.FitChecker.
 func (b *Backend) FitCheck(ctx context.Context, req backend.FitRequest) (*backend.FitResult, error) {
-	plan, err := b.fitCheck(ctx, req)
+	placement, err := validatePlacement(req.Placement, req.Nodes)
+	if err != nil {
+		return nil, err
+	}
+	req.Placement = placement
+	var plan *fitPlan
+	if placement == backend.PlacementSplit {
+		plan, err = b.splitCheck(ctx, req, true)
+	} else {
+		plan, err = b.fitCheck(ctx, req)
+	}
 	if err != nil {
 		return nil, err
 	}
 	res := plan.Result
+	if res.Placement == "" {
+		res.Placement = backend.PlacementCopies
+	}
+	b.recommend(ctx, &res, req)
 	return &res, nil
 }
 
@@ -882,6 +913,11 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 			}
 		}
 		out = append(out, nodeView(n, reserved[n.Name], cache))
+	}
+	for i := range out {
+		if l, ok := s.fastLinkOf(out[i].Name); ok {
+			out[i].FastLink = l.Name
+		}
 	}
 	return out, nil
 }

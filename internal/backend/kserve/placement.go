@@ -1,0 +1,507 @@
+package kserve
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/giantswarm/model-manager/internal/backend"
+)
+
+// Placement (giantswarm/model-manager#190): a served model is either split
+// across the nodes of one fast link — one vLLM instance, tensor parallel over
+// the link — or served as copies. KServe's LLMInferenceService runs a model
+// across nodes only as a LeaderWorkerSet whose size comes from data or
+// pipeline parallelism, and the only multi-node template the platform ships
+// runs data parallel; tensor parallelism alone gives it no worker group. A
+// split is therefore composed in the data-parallel shape — parallelism
+// {data: N, dataLocal: 1}, a leader template and a worker template — with
+// the main container's command of both replaced by vLLM's own multi-node
+// launch: the leader serves the API as node rank 0, the workers join headless
+// with their LeaderWorkerSet index as node rank, all of them reaching the
+// leader at LWS_LEADER_ADDRESS. Without a leader template's labels on the
+// workers, the workload Service selects the leader alone — the only pod that
+// answers.
+
+const (
+	// PlacementAnnotation and NodesAnnotation record how model-manager
+	// placed a model on its LLMInferenceService: the placement and, for a
+	// split, its nodes in rank order (comma-separated).
+	PlacementAnnotation = "model-manager.giantswarm.io/placement"
+	NodesAnnotation     = "model-manager.giantswarm.io/nodes"
+
+	// networksAnnotation is Multus' pod annotation naming the network
+	// attachments a pod joins.
+	networksAnnotation = "k8s.v1.cni.cncf.io/networks"
+	// modelRoutingAnnotation is the annotation KServe's data-parallel
+	// template sets to route by the model header; a split answers on one
+	// leader like a single-node model, so it is turned off again.
+	modelRoutingAnnotation = "serving.kserve.io/model-based-routing-enabled"
+	// splitMasterPort is the port vLLM's multi-node rendezvous listens on at
+	// the leader.
+	splitMasterPort = 29500
+)
+
+// validatePlacement checks the placement of a request and returns it
+// normalized: "" is copies.
+func validatePlacement(placement string, nodes []string) (string, error) {
+	switch p := strings.TrimSpace(placement); p {
+	case "", backend.PlacementCopies:
+		if len(nodes) > 1 {
+			return "", fmt.Errorf("%w: copies on several nodes are not available yet; serve on one node or split across a fast link", backend.ErrInvalid)
+		}
+		return backend.PlacementCopies, nil
+	case backend.PlacementSplit:
+		seen := map[string]bool{}
+		for _, n := range nodes {
+			if seen[n] {
+				return "", fmt.Errorf("%w: node %s is named twice", backend.ErrInvalid, n)
+			}
+			seen[n] = true
+		}
+		if len(nodes) == 1 {
+			return "", fmt.Errorf("%w: a split needs two or more nodes", backend.ErrInvalid)
+		}
+		return p, nil
+	default:
+		return "", fmt.Errorf("%w: placement %q: want %s or %s", backend.ErrInvalid, placement, backend.PlacementSplit, backend.PlacementCopies)
+	}
+}
+
+// fastLinkOf returns the fast link a node belongs to.
+func (s settings) fastLinkOf(node string) (backend.FastLink, bool) {
+	for _, l := range s.FastLinks {
+		if l.Has(node) {
+			return l, true
+		}
+	}
+	return backend.FastLink{}, false
+}
+
+// splitLink resolves the fast link and the nodes of a split: the nodes asked
+// for, which must all belong to one fast link, or — none asked for — the
+// nodes of each fast link in turn. It returns the candidates in the order to
+// try; an error when the asked nodes share no fast link.
+func (s settings) splitLinks(nodes []string) ([]backend.FastLink, error) {
+	if len(s.FastLinks) == 0 {
+		return nil, fmt.Errorf("no fast link joins nodes on this cluster: a split runs only across nodes that share one (the discovery document's spec.fastLinks)")
+	}
+	if len(nodes) == 0 {
+		return s.FastLinks, nil
+	}
+	link, ok := s.fastLinkOf(nodes[0])
+	if !ok {
+		return nil, fmt.Errorf("node %s shares no fast link with another node; a split runs only across nodes of one fast link, never over the cluster network", nodes[0])
+	}
+	for _, n := range nodes[1:] {
+		if !link.Has(n) {
+			return nil, fmt.Errorf("nodes %s and %s share no fast link; a split runs only across nodes of one fast link (%s: %s)", nodes[0], n, link.Name, strings.Join(link.Nodes, ", "))
+		}
+	}
+	link.Nodes = nodes
+	return []backend.FastLink{link}, nil
+}
+
+// placeSplit judges a split: every node of the fast link must be a serving
+// target, hold its share of the weights (weights / nodes) beside the preset's
+// overhead within its free budget, and fit its share of the KV cache — the
+// tensor parallel degree is the preset's times the number of nodes. With no
+// nodes asked for, the first fast link whose nodes all host the model is
+// chosen. The answer's figures are those of the tightest node.
+func (b *Backend) placeSplit(ctx context.Context, plan *fitPlan, idx presetIndex, req backend.FitRequest, forServe bool) error {
+	res, p := &plan.Result, plan.Preset
+	res.Placement = backend.PlacementSplit
+	if p == nil {
+		res.Reason = "a split is composed from a serving preset; no preset serves " + plan.Repo
+		return nil
+	}
+	if p.cpu() {
+		res.Reason = "preset " + p.name() + " requests no GPU; a split runs tensor parallel across GPUs"
+		return nil
+	}
+	s := b.cfg.settings(ctx).forPreset(p)
+	links, err := s.splitLinks(req.Nodes)
+	if err != nil {
+		res.Reason = err.Error()
+		return nil
+	}
+	var loc cacheLocation
+	if p.storesInCache() {
+		if loc, err = b.cacheNodes(ctx); err != nil {
+			return err
+		}
+	}
+	plan.CacheLocal = len(loc.Nodes) > 0
+	nodes, err := b.nodes(ctx, loc, p)
+	if err != nil {
+		return err
+	}
+	reserved := b.reservedByNode(ctx, idx, p, nodes)
+	var refusals []string
+	for _, link := range links {
+		v := b.judgeSplit(ctx, plan, link, nodes, reserved, loc, forServe)
+		if v.fits || len(links) == 1 {
+			v.apply(res)
+			if res.Fits && res.Gated && !res.TokenConfigured {
+				res.Reason += "; the repository is gated and no hub token is configured"
+			}
+			return nil
+		}
+		refusals = append(refusals, link.Name+": "+v.reason)
+	}
+	res.Fits = false
+	res.Reason = "no fast link hosts a split: " + strings.Join(refusals, "; ")
+	return nil
+}
+
+// splitVerdict is the judgment of one fast link.
+type splitVerdict struct {
+	link   backend.FastLink
+	fits   bool
+	reason string
+	// tight is the tightest node's budget, the one the answer reports.
+	tight              nodeBudget
+	reserved, required int64
+	limit              int64
+	kv                 kvVerdict
+	cached             bool
+	cacheSource        string
+}
+
+func (v splitVerdict) apply(res *backend.FitResult) {
+	res.Placement = backend.PlacementSplit
+	res.FastLink = v.link.Name
+	res.Nodes = v.link.Nodes
+	res.Fits = v.fits
+	res.Reason = v.reason
+	if v.tight.Name == "" {
+		return
+	}
+	res.Node = v.link.Nodes[0]
+	res.BudgetBytes = v.tight.Budget
+	res.BudgetSource = v.tight.BudgetSource
+	res.ReservedBytes = v.reserved
+	res.FreeBytes = max(v.tight.Budget-v.reserved, 0)
+	if v.kv.Skip != "" || v.kv.MaxModelLen > 0 {
+		applyKV(res, v.kv)
+	}
+	res.Cached, res.CacheSource = v.cached, v.cacheSource
+}
+
+// judgeSplit judges one fast link's nodes.
+func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.FastLink, nodes []nodeBudget, reserved map[string]int64, loc cacheLocation, forServe bool) splitVerdict {
+	res := &plan.Result
+	v := splitVerdict{link: link}
+	n := int64(len(link.Nodes))
+	share := ceilDiv(res.WeightsBytes, n) + res.OverheadBytes
+	kv := plan.KV.split(n)
+	var tightFree int64 = -1
+	for _, name := range link.Nodes {
+		candidates, why := b.candidateNodes(ctx, nodes, name, loc, plan.Preset)
+		if len(candidates) == 0 {
+			v.reason = why
+			return v
+		}
+		node := candidates[0]
+		if plan.CacheLocal && !slices.Contains(loc.Nodes, name) {
+			v.reason = fmt.Sprintf("node %s cannot mount the cache claim %s, which holds the weights on %s; a split needs the weights on every node", name, b.cfg.settings(ctx).CacheClaim, strings.Join(loc.Nodes, ", "))
+			return v
+		}
+		if node.Budget <= 0 {
+			v.reason = fmt.Sprintf("node %s reports no memory budget (%s)", name, node.BudgetSource)
+			return v
+		}
+		limit := node.Budget
+		if forServe {
+			limit = node.Budget - reserved[name]
+		}
+		if tightFree < 0 || limit < tightFree {
+			tightFree = limit
+			v.tight, v.reserved, v.limit = node, reserved[name], limit
+		}
+		if share > limit {
+			v.tight, v.reserved, v.limit, v.required = node, reserved[name], limit, share
+			v.reason = fmt.Sprintf("its share of a split across %s — %s of weights and %s overhead — exceeds the %s available on %s (%s budget %s%s)",
+				strings.Join(link.Nodes, ", "), humanBytes(ceilDiv(res.WeightsBytes, n)), humanBytes(res.OverheadBytes), humanBytes(limit), name, node.BudgetSource, humanBytes(node.Budget), reservedNote(reserved[name]))
+			return v
+		}
+		if kvv := kv.judge(node.GPUMemory, node.GPUProduct); kvv.Skip == "" && !kvv.Fits {
+			v.kv = kvv
+			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, kvv.clause())
+			return v
+		} else {
+			v.kv = kvv
+		}
+		cached, source := b.cacheVerdict(ctx, name, plan, loc)
+		if name == link.Nodes[0] || !cached {
+			v.cached, v.cacheSource = cached, source
+		}
+	}
+	v.fits, v.required = true, share
+	v.reason = fmt.Sprintf("split across %s (fast link %s): %s of weights and %s overhead per node fit within %s on the tightest node %s (%s%s)",
+		strings.Join(link.Nodes, ", "), link.Name, humanBytes(ceilDiv(res.WeightsBytes, n)), humanBytes(res.OverheadBytes), humanBytes(v.limit), v.tight.Name, v.tight.BudgetSource, reservedNote(v.reserved))
+	return v
+}
+
+// split is the KV check of a split across n nodes: the tensor parallel
+// degree grows by n, so each GPU holds 1/n of the weights and of the KV heads.
+func (k *kvCheck) split(n int64) *kvCheck {
+	if k == nil || n <= 1 {
+		return k
+	}
+	c := *k
+	c.Args.TensorParallel = max(c.Args.TensorParallel, 1) * n
+	return &c
+}
+
+// recommend adds the backend's recommended placement to a fit answer: split
+// across the first fast link whose nodes all host the model, copies on the
+// judged node otherwise (giantswarm/model-manager#190). A request that asked
+// for a split carries its own verdict as the recommendation when it fits.
+func (b *Backend) recommend(ctx context.Context, res *backend.FitResult, req backend.FitRequest) {
+	if res.Placement == backend.PlacementSplit && res.Fits {
+		res.Recommended, res.RecommendedNodes = backend.PlacementSplit, res.Nodes
+		return
+	}
+	s := b.cfg.settings(ctx)
+	if len(s.FastLinks) > 0 {
+		split := req
+		split.Placement, split.Nodes = backend.PlacementSplit, nil
+		if plan, err := b.splitCheck(ctx, split, false); err == nil && plan.Result.Fits {
+			res.Recommended, res.RecommendedNodes = backend.PlacementSplit, plan.Result.Nodes
+			return
+		}
+	}
+	res.Recommended = backend.PlacementCopies
+	if res.Node != "" {
+		res.RecommendedNodes = []string{res.Node}
+	}
+}
+
+// splitCheck is fitCheck for placement split.
+func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forServe bool) (*fitPlan, error) {
+	plan, idx, err := b.resolveFit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	note, err := b.sizeModel(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	plan.KV = b.kvCheckFor(ctx, plan)
+	if err := b.placeSplit(ctx, plan, idx, req, forServe); err != nil {
+		return nil, err
+	}
+	if note != "" {
+		plan.Result.Reason += "; " + note
+	}
+	return plan, nil
+}
+
+// composeSplit builds the LLMInferenceService of a split across nodes (in
+// rank order): the single-node composition as the leader template, pinned to
+// the first node, a copy of it as the worker template, pinned to the others
+// and spread one per node, both running vLLM's multi-node launch, joined to
+// the fast link's networks, requesting its devices, with its environment;
+// image the runtime of the single-node template unless the preset names one.
+func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, image string) *unstructured.Unstructured {
+	nodes := link.Nodes
+	obj := b.composeLLM(p, s, nodes[0])
+	spec := obj.Object["spec"].(map[string]any)
+	leader := spec["template"].(map[string]any)
+	worker := deepCopyMap(leader)
+
+	for i, tpl := range []map[string]any{leader, worker} {
+		main := templateMain(tpl)
+		main["command"] = splitCommand(len(nodes), i == 1)
+		if args := withoutFlag(p.Spec.Args, flagTensorParallelSize); len(args) > 0 {
+			main["args"] = toAnySlice(args)
+		} else {
+			delete(main, "args")
+		}
+		if _, set := main["image"]; !set && image != "" {
+			main["image"] = image
+		}
+		addEnv(main, link.Env)
+		addResources(main, link.Resources)
+	}
+	ns, _ := worker["nodeSelector"].(map[string]any)
+	delete(ns, labelHostname)
+	if len(ns) == 0 {
+		delete(worker, "nodeSelector")
+	}
+	worker["affinity"] = workerAffinity(obj.GetName(), nodes[1:])
+
+	spec["worker"] = worker
+	spec["parallelism"] = map[string]any{"data": int64(len(nodes)), "dataLocal": int64(1)}
+	annotations := map[string]any{modelRoutingAnnotation: "false"}
+	if len(link.Networks) > 0 {
+		annotations[networksAnnotation] = strings.Join(link.Networks, ",")
+	}
+	spec["annotations"] = annotations
+
+	meta := obj.GetAnnotations()
+	meta[PlacementAnnotation] = backend.PlacementSplit
+	meta[NodesAnnotation] = strings.Join(nodes, ",")
+	obj.SetAnnotations(meta)
+	return obj
+}
+
+// splitCommand is the main container's command of a split of n nodes:
+// vLLM's multi-node launch with the leader's address resolved to an IP (the
+// rendezvous binds to it), the leader serving the API on the template's port
+// and TLS as KServe's single-node template does, a worker headless. The
+// preset's arguments follow as the container's args ("$@").
+func splitCommand(n int, worker bool) []any {
+	rank, serve := "0", `--served-model-name "{{ .Spec.Model.Name }}" "publishers/{{ .ObjectMeta.Namespace }}/models/{{ .Spec.Model.Name }}" \
+  --port `+strconv.Itoa(llmisvcWorkloadPort)+` \
+  {{ if .GlobalConfig.EnableTLS }}--enable-ssl-refresh --ssl-certfile /var/run/kserve/tls/tls.crt --ssl-keyfile /var/run/kserve/tls/tls.key{{ end }}`
+	if worker {
+		rank, serve = `"${LWS_WORKER_INDEX}"`, "--headless"
+	}
+	script := `for i in $(seq 1 60); do
+  MASTER_ADDR=$(getent hosts "${LWS_LEADER_ADDRESS}" | cut -d' ' -f1)
+  [ -n "$MASTER_ADDR" ] && break
+  echo "waiting for ${LWS_LEADER_ADDRESS} to resolve ($i)"; sleep 2
+done
+[ -n "$MASTER_ADDR" ] || { echo "the leader address ${LWS_LEADER_ADDRESS} did not resolve"; exit 1; }
+exec vllm serve /mnt/models \
+  --tensor-parallel-size ` + strconv.Itoa(n) + ` --nnodes ` + strconv.Itoa(n) + ` --node-rank ` + rank + ` \
+  --master-addr "$MASTER_ADDR" --master-port ` + strconv.Itoa(splitMasterPort) + ` \
+  ` + serve + ` \
+  "$@"`
+	return []any{"/bin/bash", "-c", script, "--"}
+}
+
+// workerAffinity pins a split's workers to their nodes, one per node: the
+// nodes by hostname, and no two workers of the object on one node.
+func workerAffinity(name string, nodes []string) map[string]any {
+	return map[string]any{
+		"nodeAffinity": map[string]any{
+			"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+				"nodeSelectorTerms": []any{map[string]any{
+					"matchExpressions": []any{map[string]any{
+						"key": labelHostname, "operator": "In", "values": toAnySlice(nodes),
+					}},
+				}},
+			},
+		},
+		"podAntiAffinity": map[string]any{
+			"requiredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{
+				"topologyKey": labelHostname,
+				"labelSelector": map[string]any{"matchLabels": map[string]any{
+					"app.kubernetes.io/name": name, "app.kubernetes.io/component": "llminferenceservice-workload-worker",
+				}},
+			}},
+		},
+	}
+}
+
+// templateImage is the runtime image of the platform's single-node template
+// (kserve-config-llm-template's main container), which a split runs too: the
+// multi-node template names the stock image, an installation's runtime
+// override only the single-node one. "" when it cannot be read — the split
+// then runs the multi-node template's image.
+func (b *Backend) templateImage(ctx context.Context, s settings) string {
+	if s.ControlPlane == "" {
+		return ""
+	}
+	obj, err := b.dynamic(ctx).Resource(llmisvcConfigGVR).Namespace(s.ControlPlane).Get(ctx, wellKnownTemplateConfig, metav1.GetOptions{})
+	if err != nil {
+		b.log.Warn("the single-node template's image is unknown; the split runs the multi-node template's", "error", err)
+		return ""
+	}
+	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "containers")
+	for _, c := range containers {
+		if cm, ok := c.(map[string]any); ok && cm["name"] == llmisvcMainContainer {
+			image, _ := cm["image"].(string)
+			return image
+		}
+	}
+	return ""
+}
+
+// servedPlacement reads the placement model-manager recorded on an object:
+// its placement and, for a split, its nodes; copies for an object without.
+func servedPlacement(obj *unstructured.Unstructured) (string, []string) {
+	a := obj.GetAnnotations()
+	if a[PlacementAnnotation] != backend.PlacementSplit {
+		return backend.PlacementCopies, nil
+	}
+	var nodes []string
+	for _, n := range strings.Split(a[NodesAnnotation], ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			nodes = append(nodes, n)
+		}
+	}
+	return backend.PlacementSplit, nodes
+}
+
+func templateMain(tpl map[string]any) map[string]any {
+	containers, _ := tpl["containers"].([]any)
+	for _, c := range containers {
+		if cm, ok := c.(map[string]any); ok && cm["name"] == llmisvcMainContainer {
+			return cm
+		}
+	}
+	main := map[string]any{"name": llmisvcMainContainer}
+	tpl["containers"] = append(containers, main)
+	return main
+}
+
+// withoutFlag drops a flag and its value from vLLM arguments, in both the
+// "--flag value" and the "--flag=value" form.
+func withoutFlag(args []string, flag string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == flag:
+			i++
+		case strings.HasPrefix(args[i], flag+"="):
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+func addEnv(main map[string]any, env []backend.EnvVar) {
+	if len(env) == 0 {
+		return
+	}
+	list, _ := main["env"].([]any)
+	for _, e := range env {
+		list = append(list, map[string]any{"name": e.Name, "value": e.Value})
+	}
+	main["env"] = list
+}
+
+func addResources(main map[string]any, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	res, _ := main["resources"].(map[string]any)
+	if res == nil {
+		res = map[string]any{}
+		main["resources"] = res
+	}
+	for _, kind := range []string{"requests", "limits"} {
+		m, _ := res[kind].(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+			res[kind] = m
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+	}
+}
+
+func deepCopyMap(in map[string]any) map[string]any {
+	return (&unstructured.Unstructured{Object: in}).DeepCopy().Object
+}

@@ -76,6 +76,10 @@ type KServeOptions struct {
 	// registered document's spec.kserve.gpuPools (several pools, no pool
 	// pinning every predictor).
 	GPUPools map[string]GPUPool
+	// FastLinks, when set, replace the discovery ConfigMap's spec.fastLinks:
+	// the node groups a model can be split across (a registered document's
+	// spec.kserve.fastLinks).
+	FastLinks []FastLink
 	// Router is the router shape of the composed LLMInferenceServices: the
 	// route alone by default, the llm-d endpoint picker beside it when
 	// Scheduler is set. A registered document's spec.kserve.router lands

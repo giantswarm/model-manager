@@ -57,6 +57,10 @@ type served struct {
 	Message string
 	URL     string
 	Node    string
+	// Placement and Nodes are how model-manager placed the model
+	// (placement.go): split across Nodes, or copies.
+	Placement string
+	Nodes     []string
 	// Pool is the GPU pool the predictor is pinned to: the pool label in
 	// the object's template nodeSelector (giantswarm/model-manager#152).
 	Pool     string
@@ -416,6 +420,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
 	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)
+	sv.Placement, sv.Nodes = servedPlacement(obj)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
 	}

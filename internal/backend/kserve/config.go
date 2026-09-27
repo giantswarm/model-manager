@@ -140,7 +140,10 @@ type discoveryDoc struct {
 		// GPUPool is the pool taint and label (the chart's
 		// modelServing.gpuPool); see backend.GPUPool.
 		GPUPool backend.GPUPool `json:"gpuPool"`
-		Cache   struct {
+		// FastLinks are the node groups joined by a fast link (the chart's
+		// modelServing.fastLinks); see backend.FastLink.
+		FastLinks []backend.FastLink `json:"fastLinks"`
+		Cache     struct {
 			Enabled        bool   `json:"enabled"`
 			ClaimName      string `json:"claimName"`
 			MountPath      string `json:"mountPath"`
@@ -181,6 +184,10 @@ type settings struct {
 	// every workload: the fit places a model on one of them and the load
 	// pins its predictor there (giantswarm/model-manager#152).
 	GPUPools map[string]backend.GPUPool
+	// FastLinks are the node groups a model can be split across
+	// (placement.go): discovery's spec.fastLinks, the option's replacing
+	// them when set.
+	FastLinks []backend.FastLink
 	// RouterScheduler composes the llm-d endpoint picker (router.scheduler)
 	// beside the route on every LLMInferenceService whose preset does not
 	// decide for itself (llmisvc.go): the option's; discovery has no say.
@@ -494,6 +501,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		s.RuntimeClassName = sp.RuntimeClassName
 		s.NodeSelector = sp.NodeSelector
 		s.GPUPool = sp.GPUPool
+		s.FastLinks = sp.FastLinks
 		s.CacheEnabled = sp.Cache.Enabled
 		setIf(&s.CacheClaim, sp.Cache.ClaimName)
 		setIf(&s.CacheMountPath, sp.Cache.MountPath)
@@ -529,7 +537,17 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		s.GPUPool.Instances = o.GPUPool.Instances
 	}
 	s.GPUPools = o.GPUPools
+	if len(o.FastLinks) > 0 {
+		s.FastLinks = o.FastLinks
+	}
 	s.RouterScheduler = o.Router.Scheduler
+	// Discovery's fast links come from chart values nothing has checked
+	// either: a list that does not validate is dropped, and no model can be
+	// split until it is fixed.
+	if err := backend.ValidateFastLinks(s.FastLinks); err != nil {
+		c.log.Warn("ignoring the fast links", "error", err)
+		s.FastLinks = nil
+	}
 	// The document's shapes were validated when it was read; discovery's
 	// come from chart values nothing has checked. A list with a bad shape
 	// is dropped rather than judged on: the answer falls back to unverified.
