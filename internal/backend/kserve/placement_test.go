@@ -109,6 +109,7 @@ func TestSplitFitRecommendsTheFastLink(t *testing.T) {
 	assert.Equal(t, "sparks", split.FastLink)
 	assert.Equal(t, []string{sparkA, sparkB}, split.Nodes)
 	assert.Equal(t, sparkA, split.Node)
+	assert.Equal(t, (split.WeightsBytes+1)/2+split.OverheadBytes, split.RequiredBytes, "a split's requirement is per node: half the weights and the overhead")
 	assert.Contains(t, split.Reason, "split across spark-a, spark-b (fast link sparks)")
 	assert.Equal(t, backend.PlacementSplit, split.Recommended)
 
