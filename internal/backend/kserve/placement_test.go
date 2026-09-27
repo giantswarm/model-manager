@@ -203,6 +203,8 @@ func TestServeSplitComposesLeaderAndWorkers(t *testing.T) {
 		req := main["resources"].(map[string]any)["requests"].(map[string]any)
 		assert.Equal(t, "1", req["rdma/rdma_shared_device_a"], role)
 		assert.Equal(t, "1", req["nvidia.com/gpu"], role)
+		caps := main["securityContext"].(map[string]any)["capabilities"].(map[string]any)
+		assert.Equal(t, []any{"NET_BIND_SERVICE"}, caps["add"], "%s: no capability the baseline Pod Security Standard refuses", role)
 	}
 	assert.Contains(t, templateMain(leader)["command"].([]any)[2], "--node-rank 0")
 	assert.Contains(t, templateMain(leader)["command"].([]any)[2], "--served-model-name")
