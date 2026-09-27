@@ -376,6 +376,7 @@ func splitCommand(n int, worker bool) []any {
   echo "waiting for ${LWS_LEADER_ADDRESS} to resolve ($i)"; sleep 2
 done
 [ -n "$MASTER_ADDR" ] || { echo "the leader address ${LWS_LEADER_ADDRESS} did not resolve"; exit 1; }
+eval "set -- $*"
 exec vllm serve /mnt/models \
   --tensor-parallel-size ` + strconv.Itoa(n) + ` --nnodes ` + strconv.Itoa(n) + ` --node-rank ` + rank + ` \
   --master-addr "$MASTER_ADDR" --master-port ` + strconv.Itoa(splitMasterPort) + ` \

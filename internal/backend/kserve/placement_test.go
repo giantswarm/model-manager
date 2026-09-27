@@ -195,6 +195,7 @@ func TestServeSplitComposesLeaderAndWorkers(t *testing.T) {
 		assert.Contains(t, script, "--tensor-parallel-size 2 --nnodes 2", role)
 		assert.Contains(t, script, `--master-addr "$MASTER_ADDR"`, role)
 		assert.Equal(t, "--", cmd[3], role)
+		assert.Contains(t, script, `eval "set -- $*"`, "%s: a preset's shell-quoted arguments are re-split", role)
 		for _, a := range main["args"].([]any) {
 			assert.NotContains(t, a, flagTensorParallelSize, "%s: the preset's own degree would override the split's", role)
 		}
