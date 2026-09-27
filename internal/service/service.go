@@ -140,6 +140,10 @@ type LoadOptions struct {
 	KeepAlive string
 	Preset    string
 	Node      string
+	// Placement and Nodes place the model (kserve): split across the nodes
+	// of a fast link, or copies (the default).
+	Placement string
+	Nodes     []string
 }
 
 // Errors are the per-backend failures of an aggregate read, keyed by backend
@@ -733,7 +737,7 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if keepAlive == "" {
 		keepAlive = s.cfg.DefaultKeepAlive
 	}
-	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
 	// Loaded at the context window agents will ask for, so their first turn
 	// does not reload the model at another size.
 	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
@@ -1579,4 +1583,15 @@ func (s *Service) WiredModels(ctx context.Context, name backend.Name) ([]string,
 		}
 	}
 	return out, nil
+}
+
+// trimAll trims every item and drops the empty ones; nil for none.
+func trimAll(in []string) []string {
+	var out []string
+	for _, v := range in {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

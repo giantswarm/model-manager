@@ -206,6 +206,10 @@ type LoadedModel struct {
 	// Endpoint is where inference is served (kserve: the LLMInferenceService's address).
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
+	// Placement and Nodes are how the model is served (kserve): split across
+	// Nodes, or copies (Node the one it runs on when pinned).
+	Placement string   `json:"placement,omitempty"`
+	Nodes     []string `json:"nodes,omitempty"`
 	// Pool is the GPU pool the model is pinned to (kserve: the pool label
 	// its predictor selects), when it is pinned to one.
 	Pool string `json:"pool,omitempty"`
@@ -392,6 +396,12 @@ type LoadRequest struct {
 	Preset string `json:"preset,omitempty"`
 	// Node pins the predictor to one node (kserve).
 	Node string `json:"node,omitempty"`
+	// Placement is how the model is placed (kserve): PlacementSplit across
+	// the nodes of one fast link, or PlacementCopies (the default: one copy,
+	// on Node or the node the fit check picks). Nodes names the nodes of a
+	// split; empty picks a fast link whose nodes all host the model.
+	Placement string   `json:"placement,omitempty"`
+	Nodes     []string `json:"nodes,omitempty"`
 	// ContextLength is the context window to load the model at (ollama:
 	// options.num_ctx). The service sets the one agents run the model at
 	// (AgentEndpoint.ContextLength), so an agent's first turn does not
@@ -444,11 +454,24 @@ type SearchResult struct {
 	Presets []string `json:"presets,omitempty"`
 }
 
-// FitRequest asks whether a model can be served on a node.
+// Placements of a served model (kserve, giantswarm/model-manager#190).
+const (
+	// PlacementCopies serves the model as one copy per node; one node is
+	// one copy — the only placement before fast links.
+	PlacementCopies = "copies"
+	// PlacementSplit serves one model across the nodes of a fast link,
+	// tensor parallel over the link.
+	PlacementSplit = "split"
+)
+
+// FitRequest asks whether a model can be served on a node — or, placement
+// split, across the nodes of a fast link.
 type FitRequest struct {
-	Model  string `json:"model"`
-	Preset string `json:"preset,omitempty"`
-	Node   string `json:"node,omitempty"`
+	Model     string   `json:"model"`
+	Preset    string   `json:"preset,omitempty"`
+	Node      string   `json:"node,omitempty"`
+	Placement string   `json:"placement,omitempty"`
+	Nodes     []string `json:"nodes,omitempty"`
 }
 
 // FitResult is the outcome of a fit check.
@@ -493,6 +516,17 @@ type FitResult struct {
 	// and BudgetBytes the memory of the GPUs the predictor requests on it.
 	Node         string `json:"node,omitempty"`
 	InstanceType string `json:"instanceType,omitempty"`
+	// Placement is the placement the check judged (kserve: copies, or split
+	// across Nodes, the nodes of the fast link FastLink — Node is then the
+	// split's first node and the budget figures are its). Recommended is the
+	// placement the backend recommends for the model on this cluster: split
+	// when two or more nodes of one fast link host it, copies otherwise;
+	// RecommendedNodes the nodes it recommends. The portal preselects it.
+	Placement        string   `json:"placement,omitempty"`
+	Nodes            []string `json:"nodes,omitempty"`
+	FastLink         string   `json:"fastLink,omitempty"`
+	Recommended      string   `json:"recommended,omitempty"`
+	RecommendedNodes []string `json:"recommendedNodes,omitempty"`
 	// Pool is the GPU pool the model is placed on — the chosen node's
 	// giantswarm.io/machine-pool, or the pool with no node yet whose size
 	// hosts it — when no single pool pins every predictor; load_model pins
@@ -600,6 +634,9 @@ type NodeInfo struct {
 	// serve, pull or fit-check request naming the node fails with it.
 	Eligible          bool   `json:"eligible"`
 	EligibilityReason string `json:"eligibilityReason,omitempty"`
+	// FastLink names the fast link the node belongs to (kserve): a model can
+	// be split across the nodes of one fast link.
+	FastLink string `json:"fastLink,omitempty"`
 	// AllocatableMemoryBytes is the node's allocatable memory.
 	AllocatableMemoryBytes int64 `json:"allocatableMemoryBytes"`
 	GPUCount               int64 `json:"gpuCount"`

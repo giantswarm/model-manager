@@ -74,6 +74,10 @@ type modelRequest struct {
 	// node to pull to / serve on.
 	Preset string `json:"preset,omitempty"`
 	Node   string `json:"node,omitempty"`
+	// Placement and Nodes place the model (kserve load, fit): split across
+	// the nodes of a fast link, or copies.
+	Placement string   `json:"placement,omitempty"`
+	Nodes     []string `json:"nodes,omitempty"`
 	// The API-key shape of a wired ModelConfig (wire): the caller's token
 	// forwarded, or a static key in a Secret of the caller's. Mutually
 	// exclusive; neither leaves the decision to the backend.
@@ -185,7 +189,7 @@ func (h *REST) load(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.svc.Load(r.Context(), service.LoadOptions{Backend: req.Backend, Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node})
+	m, err := h.svc.Load(r.Context(), service.LoadOptions{Backend: req.Backend, Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node, Placement: req.Placement, Nodes: req.Nodes})
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -198,7 +202,7 @@ func (h *REST) fitCheck(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := h.svc.FitCheck(r.Context(), req.Backend, backend.FitRequest{Model: req.Model, Preset: req.Preset, Node: req.Node})
+	res, err := h.svc.FitCheck(r.Context(), req.Backend, backend.FitRequest{Model: req.Model, Preset: req.Preset, Node: req.Node, Placement: req.Placement, Nodes: req.Nodes})
 	if err != nil {
 		h.writeError(w, err)
 		return
