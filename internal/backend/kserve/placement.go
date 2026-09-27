@@ -334,6 +334,7 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 		}
 		addEnv(main, link.Env)
 		addResources(main, link.Resources)
+		main["securityContext"] = splitSecurityContext()
 	}
 	ns, _ := worker["nodeSelector"].(map[string]any)
 	delete(ns, labelHostname)
@@ -375,12 +376,31 @@ func splitCommand(n int, worker bool) []any {
   echo "waiting for ${LWS_LEADER_ADDRESS} to resolve ($i)"; sleep 2
 done
 [ -n "$MASTER_ADDR" ] || { echo "the leader address ${LWS_LEADER_ADDRESS} did not resolve"; exit 1; }
+eval "set -- $*"
 exec vllm serve /mnt/models \
   --tensor-parallel-size ` + strconv.Itoa(n) + ` --nnodes ` + strconv.Itoa(n) + ` --node-rank ` + rank + ` \
   --master-addr "$MASTER_ADDR" --master-port ` + strconv.Itoa(splitMasterPort) + ` \
   ` + serve + ` \
   "$@"`
 	return []any{"/bin/bash", "-c", script, "--"}
+}
+
+// splitSecurityContext is the main container's security context of a split:
+// KServe's multi-node template adds IPC_LOCK, SYS_RAWIO and NET_RAW, which
+// the baseline Pod Security Standard refuses; NCCL over the fast link needs
+// none of them (RDMA pins its buffers within the container's memlock limit),
+// so a split runs with the capabilities a single-node model pod has. The
+// list replaces the template's (KServe merges it as a whole).
+func splitSecurityContext() map[string]any {
+	return map[string]any{
+		"allowPrivilegeEscalation": false,
+		"capabilities": map[string]any{
+			"drop": []any{"ALL"},
+			"add":  []any{"NET_BIND_SERVICE"},
+		},
+		"runAsNonRoot":   true,
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}
 }
 
 // workerAffinity pins a split's workers to their nodes, one per node: the
