@@ -186,6 +186,11 @@ func (v splitVerdict) apply(res *backend.FitResult) {
 	res.BudgetBytes = v.tight.Budget
 	res.BudgetSource = v.tight.BudgetSource
 	res.ReservedBytes = v.reserved
+	if v.required > 0 {
+		// A split's requirement is per node: its share of the weights and the
+		// overhead; WeightsBytes stays the whole model's.
+		res.RequiredBytes = v.required
+	}
 	res.FreeBytes = max(v.tight.Budget-v.reserved, 0)
 	if v.kv.Skip != "" || v.kv.MaxModelLen > 0 {
 		applyKV(res, v.kv)
