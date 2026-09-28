@@ -585,6 +585,13 @@
                 "ingressNamespaces": {
                     "type": "array",
                     "description": "Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only."
+                },
+                "metricsNamespaces": {
+                    "type": "array",
+                    "description": "Namespaces allowed to scrape the metrics port (label kubernetes.io/metadata.name), when `observability.metrics.enabled`.",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -696,6 +703,20 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "metrics": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Serve Prometheus metrics on `GET /metrics` of the `metrics` port: `mcp_server_operation_duration_seconds` per tool, and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Off, `OTEL_METRICS_EXPORTER=none`: nothing is served, and nothing is pushed to `observability.otel.endpoint` either."
+                        },
+                        "port": {
+                            "type": "integer",
+                            "description": "Port of the metrics listener, apart from the API port so an HTTPRoute or the OAuth guard never covers it."
+                        }
+                    }
+                },
                 "otel": {
                     "type": "object",
                     "additionalProperties": false,
@@ -930,6 +951,25 @@
                 "name": {
                     "type": "string",
                     "description": "ServiceAccount name (generated when empty)."
+                }
+            }
+        },
+        "serviceMonitor": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Render a ServiceMonitor for the `metrics` port. Also needs `observability.metrics.enabled`; the meta chart turns this on with the tenant label."
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Scrape interval; empty uses the Prometheus Operator default."
+                },
+                "labels": {
+                    "type": "object",
+                    "description": "Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant.",
+                    "additionalProperties": true
                 }
             }
         },

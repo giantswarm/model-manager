@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Prometheus metrics on `GET /metrics` of a separate `metrics` port (`9464`): `mcp_server_operation_duration_seconds` for every `tools/call`, by `gen_ai_tool_name` and, on failure, `error_type` (`tool_error` for an `isError` result, `_OTHER` for a handler error), and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Chart: `observability.metrics.enabled` (default `true`) and `.port`; off renders `OTEL_METRICS_EXPORTER=none`, so an OTLP endpoint set for traces pushes no metrics. A ServiceMonitor gated on `serviceMonitor.enabled`, with `serviceMonitor.labels` and `.interval`, and `networkPolicy.metricsNamespaces` (default `kube-system`) admitted to the metrics port.
+
 ### Fixed
 
 - kserve: `check_fit` reads the KV cache of Gemma 4's unified multimodal checkpoints (`gemma4_unified_text`, the `gemma-4-12b` preset) and of Qwen4-Exp (`qwen4_exp_text`, the `qwen3-8-flash-next-nvfp4` preset): its full-attention layers, none for the linear-attention ones, and the sparse-attention index each full layer keeps (one bf16 key per `indexer_compress_ratio` tokens). Both presets were judged by their flat overhead alone, so a `--max-model-len` vLLM refuses read as a fit.

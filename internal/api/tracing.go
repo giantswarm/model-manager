@@ -25,6 +25,7 @@ const TracerName = "github.com/giantswarm/model-manager"
 func tracingOptions() []mcpserver.ServerOption {
 	return []mcpserver.ServerOption{
 		mcpserver.WithToolHandlerMiddleware(toolNameAttribute),
+		mcpserver.WithToolHandlerMiddleware(toolDuration(otel.Meter(TracerName))),
 		mcpotel.WithServerTracingPropagator(otel.Tracer(TracerName), propagation.NewCompositeTextMapPropagator()),
 	}
 }
