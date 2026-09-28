@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -272,6 +274,45 @@ func TestFitCheckJudgesTheKVCacheOnTheNode(t *testing.T) {
 		assert.Contains(t, res.Reason, "needs "+tc.kv+", more than the 7.3 GiB left on the 45.0 GiB GPU at --gpu-memory-utilization=0.92 beside the weights and vLLM's 3.15 GiB reserve: the estimated maximum model length is 8624 tokens")
 	}
 	assert.Zero(t, f.hub.hubCalls(), "no Hub request for an oci:// preset")
+}
+
+// A unified-memory node (a GB10: GPUs, no GPU memory label) judges the KV
+// cache against its memory capacity, the total vLLM profiles against there.
+func TestFitCheckJudgesTheKVCacheOnAUnifiedMemoryNode(t *testing.T) {
+	config, err := kvConfig("gemma-4-31b-it-fp8-dynamic.json")
+	require.NoError(t, err)
+	image := serveModelImage(t, "models/gemma-4-31b-fp8:d4ab4f579dd3", gemmaShardBytes, config)
+	unified := func(name, capacity string, gpus int64) *corev1.Node {
+		n := withGPUs(node(name, capacity, nil), gpus)
+		n.Status.Capacity[corev1.ResourceMemory] = resource.MustParse(capacity)
+		return n
+	}
+	f := newFixture(t,
+		unified("spark", "128Gi", 1),
+		unified("small", "44.5Gi", 1),
+		unified("twin", "128Gi", 2),
+		presetConfigMap("gemma-8k", gemmaPresetDoc("gemma-8k", "8192", image)),
+	)
+	ctx := context.Background()
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "spark"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "6.9 GiB", humanBytes(res.KVCacheBytes))
+	assert.Positive(t, res.KVCacheAvailableBytes)
+	assert.EqualValues(t, 8192, res.MaxModelLen)
+	assert.Contains(t, res.Reason, "fits the "+humanBytes(res.KVCacheAvailableBytes)+" left on the node's 128.0 GiB unified memory at --gpu-memory-utilization=0.92")
+	assert.NotContains(t, res.Reason, "not checked")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "small"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "the weights and overhead fit 44.5 GiB, one 8k sequence of KV cache does not: %s", res.Reason)
+	assert.Contains(t, res.Reason, ", but the KV cache of one 8192-token sequence needs 6.9 GiB, more than the")
+	assert.Contains(t, res.Reason, "left on the node's 44.5 GiB unified memory")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "twin"})
+	require.NoError(t, err)
+	assert.Contains(t, res.Reason, "the KV cache is not checked: 2 GPUs share the node's memory")
 }
 
 // A GPU pool's size hosts the predictor only when one sequence of its KV

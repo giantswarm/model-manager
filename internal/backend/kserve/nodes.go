@@ -46,6 +46,9 @@ type nodeBudget struct {
 	Labels       map[string]string
 	Taints       []corev1.Taint
 	Allocatable  int64
+	// Capacity is the node's memory capacity: the memory the kernel
+	// reports (MemTotal), which a unified-memory GPU shares.
+	Capacity     int64
 	GPUCount     int64
 	GPUMemory    int64
 	GPUProduct   string
@@ -146,6 +149,9 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 	}
 	if q, ok := n.Status.Allocatable[corev1.ResourceMemory]; ok {
 		nb.Allocatable = q.Value()
+	}
+	if q, ok := n.Status.Capacity[corev1.ResourceMemory]; ok {
+		nb.Capacity = q.Value()
 	}
 	if q, ok := n.Status.Capacity[corev1.ResourceName(gpuResource)]; ok {
 		nb.GPUCount = q.Value()
