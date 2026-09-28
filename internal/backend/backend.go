@@ -494,7 +494,9 @@ type FitResult struct {
 	// WeightsBytes is the size of the weights as served; WeightsSource says
 	// where the number came from: safetensors-index (the index's total_size),
 	// safetensors-shards (the shards the index names, when its total_size
-	// disagrees with them by more than one percent), tree, preset.
+	// disagrees with them by more than one percent), tree, preset, and for
+	// a preset served from an OCI model image model-image (the image's
+	// weights label; the Hub is never asked for such a preset).
 	// DeclaredWeightsBytes is what the preset declares
 	// (requirements.weightsGiB) when a preset serves the model — the number
 	// a GPU pool was sized from; the two differ when the hub holds more than
@@ -508,6 +510,14 @@ type FitResult struct {
 	// for a preset served from a model image the image's layers (0 and a
 	// note in the reason when its registry does not answer).
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
+	// PrePulledNodes are the nodes that already hold the model image of a
+	// preset served from one (their kubelet lists it); DownloadBytes is 0
+	// when the node the model is placed on is one of them.
+	PrePulledNodes []string `json:"prePulledNodes,omitempty"`
+	// ServingNodes are the nodes the preset already serves on; its own
+	// reservation there is left out of the answer, serving it again being
+	// a no-op, and Reason names it.
+	ServingNodes []string `json:"servingNodes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
 	// budget was derived (gpu-labels, allocatable, annotation, or
 	// pool-scale-from-zero when the GPU pool has no node yet). InstanceType
@@ -640,6 +650,11 @@ type NodeInfo struct {
 	// serve, pull or fit-check request naming the node fails with it.
 	Eligible          bool   `json:"eligible"`
 	EligibilityReason string `json:"eligibilityReason,omitempty"`
+	// ModelImageEligible is true when a preset served from an OCI model
+	// image can be served on this node (kserve): Eligible's rules but the
+	// cache claim's, which such a preset never mounts — a node pinned out by
+	// the claim is still a serving target for it (giantswarm/model-manager#189).
+	ModelImageEligible bool `json:"modelImageEligible,omitempty"`
 	// FastLink names the fast link the node belongs to (kserve): a model can
 	// be split across the nodes of one fast link.
 	FastLink string `json:"fastLink,omitempty"`

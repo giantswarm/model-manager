@@ -57,6 +57,12 @@ type nodeBudget struct {
 	// EligibilityReason explains a false value (see eligibility).
 	Eligible          bool
 	EligibilityReason string
+	// ModelImageEligible says whether a preset served from a model image
+	// can be served on the node: every rule but the cache claim's, which
+	// such a preset never mounts (giantswarm/model-manager#189).
+	ModelImageEligible bool
+	// Images are the images the node's kubelet reports it holds.
+	Images []string
 }
 
 // isAccelerator reports whether the node advertises the configured GPU
@@ -87,6 +93,16 @@ func isAccelerator(n *corev1.Node, gpuResource string) bool {
 // pinned to nodes. Every failing rule adds one reason; the reasons are
 // joined with "; " for the API. An empty reason means eligible.
 func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
+	reasons := servingReasons(n, s)
+	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !containsString(loc.Nodes, n.Name) {
+		reasons = append(reasons, fmt.Sprintf("cache claim %s is pinned to %s", loc.Claim, strings.Join(loc.Nodes, ", ")))
+	}
+	return len(reasons) == 0, strings.Join(reasons, "; ")
+}
+
+// servingReasons are the reasons a node is no serving target for any
+// preset: every rule of eligibility but the cache claim's.
+func servingReasons(n nodeBudget, s settings) []string {
 	var reasons []string
 	if !n.Ready {
 		reasons = append(reasons, "not ready")
@@ -100,10 +116,7 @@ func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
 	if taints := s.untolerated(n.Taints); len(taints) > 0 {
 		reasons = append(reasons, "taint "+strings.Join(taints, ", ")+" not tolerated (set the GPU pool taint)")
 	}
-	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !containsString(loc.Nodes, n.Name) {
-		reasons = append(reasons, fmt.Sprintf("cache claim %s is pinned to %s", loc.Claim, strings.Join(loc.Nodes, ", ")))
-	}
-	return len(reasons) == 0, strings.Join(reasons, "; ")
+	return reasons
 }
 
 // formatSelector renders a node selector as "k=v, k2=v2" in key order.
@@ -147,6 +160,9 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 		nb.GPUMemory = v * mib
 	}
 	nb.GPUProduct = n.Labels[labelGPUProduct]
+	for _, img := range n.Status.Images {
+		nb.Images = append(nb.Images, img.Names...)
+	}
 
 	gpuBudget := int64(0)
 	if nb.GPUMemory > 0 {
@@ -204,6 +220,7 @@ func (b *Backend) nodes(ctx context.Context, loc cacheLocation, p *servingPreset
 		}
 		nb := budgetOf(n, s.GPUResourceName, source)
 		nb.Eligible, nb.EligibilityReason = eligibility(nb, s, loc)
+		nb.ModelImageEligible = len(servingReasons(nb, s)) == 0
 		out = append(out, nb)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -344,6 +361,7 @@ func nodeView(nb nodeBudget, reserved int64, cache *backend.NodeCache) backend.N
 		Message:                nb.Message,
 		Eligible:               nb.Eligible,
 		EligibilityReason:      nb.EligibilityReason,
+		ModelImageEligible:     nb.ModelImageEligible,
 		ReservedBytes:          reserved,
 		FreeBytes:              nb.Budget - reserved,
 		Cache:                  cache,

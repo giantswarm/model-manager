@@ -167,7 +167,7 @@ func TestVLLMArgsTheCheckCannotJudge(t *testing.T) {
 	assert.Equal(t, vllmArgs{MaxModelLen: 25600, Utilization: 0.9, KVCacheDType: "fp8", DType: "auto", BlockSize: 16, TensorParallel: 1}, args)
 }
 
-func gemmaPresetDoc(name, maxModelLen string) string {
+func gemmaPresetDoc(name, maxModelLen, image string) string {
 	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ServingPreset
 metadata:
@@ -176,7 +176,7 @@ spec:
   displayName: Gemma 4 31B
   model:
     id: %s
-    storageUri: oci://registry.example/models/gemma-4-31b-fp8:d4ab4f579dd3
+    storageUri: %s
     format: vLLM
   args:
     - --gpu-memory-utilization=0.92
@@ -187,18 +187,23 @@ spec:
   requirements:
     weightsGiB: 31
     overheadGiB: 13
-`, name, gemmaRepo, maxModelLen)
+`, name, gemmaRepo, image, maxModelLen)
 }
 
 // check_fit on one L40S node refuses the contexts vLLM refuses, naming the
-// KV cache it needs and the maximum model length that fits, and passes 8k.
+// KV cache it needs and the maximum model length that fits, and passes 8k —
+// the layout read from the config.json the preset's model image carries, the
+// weights from its label, and the Hub never asked (giantswarm/model-manager#189).
 func TestFitCheckJudgesTheKVCacheOnTheNode(t *testing.T) {
 	const l40s = "l40s"
+	config, err := kvConfig("gemma-4-31b-it-fp8-dynamic.json")
+	require.NoError(t, err)
+	image := serveModelImage(t, "models/gemma-4-31b-fp8:d4ab4f579dd3", gemmaShardBytes, config)
 	f := newFixture(t,
 		withGPUs(node(l40s, "128Gi", map[string]string{labelGPUCount: "1", labelGPUMemory: "46068", labelGPUProduct: "NVIDIA-L40S"}), 1),
-		presetConfigMap("gemma-64k", gemmaPresetDoc("gemma-64k", "65536")),
-		presetConfigMap("gemma-32k", gemmaPresetDoc("gemma-32k", "32768")),
-		presetConfigMap("gemma-8k", gemmaPresetDoc("gemma-8k", "8192")),
+		presetConfigMap("gemma-64k", gemmaPresetDoc("gemma-64k", "65536", image)),
+		presetConfigMap("gemma-32k", gemmaPresetDoc("gemma-32k", "32768", image)),
+		presetConfigMap("gemma-8k", gemmaPresetDoc("gemma-8k", "8192", image)),
 	)
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -211,7 +216,7 @@ func TestFitCheckJudgesTheKVCacheOnTheNode(t *testing.T) {
 	} {
 		res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: tc.preset, Node: l40s})
 		require.NoError(t, err)
-		assert.Equal(t, weightsSourceShards, res.WeightsSource)
+		assert.Equal(t, weightsSourceModelImage, res.WeightsSource, "an oci:// preset is sized from its image")
 		assert.True(t, res.RequiredBytes <= res.BudgetBytes, "the flat overhead alone passes: %s", res.Reason)
 		assert.Equal(t, tc.fits, res.Fits, res.Reason)
 		assert.Equal(t, tc.kv, humanBytes(res.KVCacheBytes), tc.preset)
@@ -225,6 +230,7 @@ func TestFitCheckJudgesTheKVCacheOnTheNode(t *testing.T) {
 		assert.Contains(t, res.Reason, "fit within 45.0 GiB on l40s (gpu-labels), but the KV cache of one")
 		assert.Contains(t, res.Reason, "needs "+tc.kv+", more than the 7.3 GiB left on the 45.0 GiB GPU at --gpu-memory-utilization=0.92 beside the weights and vLLM's 3.15 GiB reserve: the estimated maximum model length is 8624 tokens")
 	}
+	assert.Zero(t, f.hub.hubCalls(), "no Hub request for an oci:// preset")
 }
 
 // A GPU pool's size hosts the predictor only when one sequence of its KV

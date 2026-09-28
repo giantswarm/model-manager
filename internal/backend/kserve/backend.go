@@ -87,6 +87,10 @@ type Backend struct {
 	gwOnEndpoint  gatewayState
 	gwFingerprint string
 	gwSyncedAt    time.Time
+	// imageMu guards images: what each model image's registry described,
+	// by storage URI (modelimage.go).
+	imageMu sync.Mutex
+	images  map[string]modelImage
 }
 
 // k8s returns the typed client a call should use: the caller's own when ctx
@@ -900,7 +904,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	reserved := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
+	reserved, _ := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache

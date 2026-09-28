@@ -541,8 +541,10 @@ func trimFloat2(f float64) string {
 
 // kvCheckFor prepares the KV cache check of a sized plan: the preset's vLLM
 // arguments and the layout of the checkpoint's config.json, read from the
-// hub within the lookup budget. A plan the hub did not size (the preset's
-// requirements stood in) has no config.json to read, and says so.
+// hub within the lookup budget — for a preset served from a model image,
+// the config.json the image carries (sizeModelImage). A plan the hub did not
+// size (the preset's requirements stood in) has no config.json to read, and
+// says so.
 func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
 	k := &kvCheck{Weights: plan.Result.WeightsBytes}
 	p := plan.Preset
@@ -554,7 +556,10 @@ func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
 	case p.cpu():
 		k.Skip = "the preset requests no GPU"
 		return k
-	case plan.Hub == nil:
+	case !p.storesInCache() && plan.Image == nil:
+		k.Skip = "the model image's registry did not answer for the checkpoint's config.json"
+		return k
+	case p.storesInCache() && plan.Hub == nil:
 		k.Skip = "the Hugging Face Hub did not answer for the checkpoint's config.json"
 		return k
 	}
@@ -562,18 +567,21 @@ func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
 		k.Skip = err.Error()
 		return k
 	}
-	hctx, hubBudget, cancel := b.hubContext(ctx)
-	defer cancel()
-	raw, err := b.hub.ModelConfig(hctx, plan.Repo, plan.Revision, plan.Files)
-	switch {
-	case err != nil:
-		k.Skip = "reading config.json failed: " + describeHubFailure(err, hubBudget)
-	case raw == nil:
-		k.Skip = "the checkpoint has no config.json"
-	default:
-		if k.Layout, err = parseKVLayout(raw); err != nil {
-			k.Skip = err.Error()
+	var raw []byte
+	if plan.Image != nil {
+		raw = plan.Image.Config
+	} else {
+		hctx, hubBudget, cancel := b.hubContext(ctx)
+		defer cancel()
+		if raw, err = b.hub.ModelConfig(hctx, plan.Repo, plan.Revision, plan.Files); err != nil {
+			k.Skip = "reading config.json failed: " + describeHubFailure(err, hubBudget)
+			return k
 		}
+	}
+	if raw == nil {
+		k.Skip = "the checkpoint has no config.json"
+	} else if k.Layout, err = parseKVLayout(raw); err != nil {
+		k.Skip = err.Error()
 	}
 	return k
 }
