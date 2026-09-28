@@ -384,7 +384,7 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	portal.SetAnnotations(nil)
 	_, err = llmisvcs.Create(ctx, portal, metav1.CreateOptions{})
 	require.NoError(t, err)
-	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode}), "same model behind the same preset: no-op")
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo}), "same model behind the same preset: no-op")
 	ep = f.b.AgentEndpoint(bigRepo)
 	assert.Equal(t, "big", ep.Name, "the ModelConfig is named after the LLMInferenceService")
 	assert.Equal(t, bigRepo, ep.Model)
@@ -1102,6 +1102,10 @@ func TestServeAnAlreadyServedPreset(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.AlreadyServing)
 	assert.Empty(t, res.ServingNodes, "no pod yet: the node is unknown")
+	// A pinned node while the object waits for one: no success it cannot keep.
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves and has no node yet; to serve it on gpu2, stop it first")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "tiny-kserve-workload-1", Namespace: testServingNS, Labels: map[string]string{"app.kubernetes.io/part-of": "llminferenceservice", llmisvcPodLabel: "tiny"}},
 		Spec:       corev1.PodSpec{NodeName: testGPUNode},

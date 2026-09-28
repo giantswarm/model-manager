@@ -221,12 +221,9 @@ func (b *Backend) servingNodes(ctx context.Context, obj *unstructured.Unstructur
 }
 
 // unservedNode is the first node a load request pins that the serving
-// object does not run on; empty when the request pins none or the object's
-// nodes are unknown.
+// object does not run on (any pinned node while the object's nodes are
+// still unknown); empty when the request pins none of them.
 func unservedNode(req backend.LoadRequest, nodes []string) string {
-	if len(nodes) == 0 {
-		return ""
-	}
 	for _, n := range append([]string{req.Node}, req.Nodes...) {
 		if n = strings.TrimSpace(n); n != "" && !slices.Contains(nodes, n) {
 			return n

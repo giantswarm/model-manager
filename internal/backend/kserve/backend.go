@@ -635,6 +635,9 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
 			nodes := b.servingNodes(ctx, existing, sv)
 			if other := unservedNode(req, nodes); other != "" {
+				if len(nodes) == 0 {
+					return nil, fmt.Errorf("%w: %s already serves and has no node yet; to serve it on %s, stop it first", backend.ErrConflict, sv.Name, other)
+				}
 				return nil, fmt.Errorf("%w: %s already serves on %s, not on %s; stop it first", backend.ErrConflict, sv.Name, strings.Join(nodes, ","), other)
 			}
 			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy, "nodes", strings.Join(nodes, ","))
