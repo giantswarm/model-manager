@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/giantswarm/mcp-toolkit/metrics"
 	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
@@ -218,6 +219,17 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		defer cancel()
 		if err := shutdownTracing(flushCtx); err != nil {
 			log.Warn("flushing traces", "error", err)
+		}
+	}()
+	shutdownMetrics, err := metrics.Init(ctx, metrics.WithServiceName("model-manager"), metrics.WithServiceVersion(build.Version))
+	if err != nil {
+		return fmt.Errorf("metrics: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := shutdownMetrics(flushCtx); err != nil {
+			log.Warn("flushing metrics", "error", err)
 		}
 	}()
 	if o.downstreamOAuth && !o.oauthEnabled {

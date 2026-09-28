@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Prometheus metrics on `GET /metrics` of a separate `metrics` port (`9464`): `mcp_server_operation_duration_seconds` for every `tools/call`, by `gen_ai_tool_name` and, on failure, `error_type` (`tool_error` for an `isError` result, `_OTHER` for a handler error), and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Chart: `observability.metrics.enabled` (default `true`) and `.port`; off renders `OTEL_METRICS_EXPORTER=none`, so an OTLP endpoint set for traces pushes no metrics. A ServiceMonitor gated on `serviceMonitor.enabled`, with `serviceMonitor.labels` and `.interval`, and `networkPolicy.metricsNamespaces` (default `kube-system`) admitted to the metrics port.
+
 ### Fixed
 
 - kserve: `check_fit` for a preset served from an OCI model image no longer asks the Hugging Face Hub. The weights come from the image's `io.giantswarm.models.weights.bytes` label (`weightsSource: model-image`, else the preset's requirements), the KV cache layout from the `config.json` the image carries (streamed from the head of its layers, no weight file fetched, read once per image), and `downloadBytes` is 0 when the chosen node already holds the image: `prePulledNodes` lists the nodes whose kubelet reports it, and the reason says "served from the model image, pre-pulled on …". `list_nodes` reports `modelImageEligible`, so a node the cache claim's pin rules out is still shown as a serving target for such presets, as the verdict places them. A fit for a preset that already serves names its nodes (`servingNodes`) and what it holds there.

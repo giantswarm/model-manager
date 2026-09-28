@@ -171,6 +171,7 @@ can stay empty.
 | networkPolicy.ingressNamespaces | list | `[]` | Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only. |
 | networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama, Lemonade or LM Studio endpoint, e.g. 172.21.0.1/32). |
 | networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring and by the kserve backend). |
+| networkPolicy.metricsNamespaces | list | `["kube-system"]` | Namespaces allowed to scrape the metrics port (label kubernetes.io/metadata.name), when `observability.metrics.enabled`. |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name (generated when empty). |
@@ -222,6 +223,11 @@ can stay empty.
 | observability.otel.resourceAttributes | string | `""` | Appended to the downward-API k8s.namespace.name, k8s.pod.name and k8s.node.name in OTEL_RESOURCE_ATTRIBUTES, e.g. `deployment.environment=glean`. |
 | observability.otel.sampler | string | `"parentbased_traceidratio"` | OTEL_TRACES_SAMPLER. The parent-based samplers follow the caller's sampling decision. |
 | observability.otel.samplerArg | string | `"0.1"` | OTEL_TRACES_SAMPLER_ARG: the ratio of root traces sampled. |
+| observability.metrics.enabled | bool | `true` | Serve Prometheus metrics on `GET /metrics` of the `metrics` port: `mcp_server_operation_duration_seconds` per tool, and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Off, `OTEL_METRICS_EXPORTER=none`: nothing is served, and nothing is pushed to `observability.otel.endpoint` either. |
+| observability.metrics.port | int | `9464` | Port of the metrics listener, apart from the API port so an HTTPRoute or the OAuth guard never covers it. |
+| serviceMonitor.enabled | bool | `false` | Render a ServiceMonitor for the `metrics` port. Also needs `observability.metrics.enabled`; the meta chart turns this on with the tenant label. |
+| serviceMonitor.interval | string | `""` | Scrape interval; empty uses the Prometheus Operator default. |
+| serviceMonitor.labels | object | `{}` | Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant. |
 | extraArgs | list | `[]` | Extra container arguments. |
 | extraEnv | list | `[]` | Extra environment variables. |
 | nodeSelector | object | `{}` | Node selector. |

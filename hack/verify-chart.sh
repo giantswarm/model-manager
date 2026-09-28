@@ -241,9 +241,31 @@ fi
 # the env and an egress rule on the collector's namespace and port, the
 # cluster-external form for a host that is not an in-cluster Service.
 got=$(helm template mm "$CHART" --show-only templates/deployment.yaml)
-if echo "$got" | grep -q -- 'OTEL_'; then
+if echo "$got" | grep -v -- 'OTEL_METRICS_EXPORTER\|OTEL_EXPORTER_PROMETHEUS_' | grep -q -- 'OTEL_'; then
   fail "deployment: OTEL_ env rendered without observability.otel.endpoint"
 fi
+
+# Metrics: the Prometheus exporter on the metrics port by default; off, the
+# exporter is none, so an OTLP endpoint set for traces does not push metrics.
+got=$(helm template mm "$CHART" --show-only templates/deployment.yaml)
+echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep -q -- 'value: prometheus' \
+  || fail "deployment: metrics on by default, want OTEL_METRICS_EXPORTER=prometheus"
+echo "$got" | grep -q -- 'name: metrics$' || fail "deployment: no metrics container port"
+got=$(helm template mm "$CHART" --show-only templates/deployment.yaml \
+  --set observability.metrics.enabled=false --set observability.otel.endpoint=http://otlp-gateway.kube-system.svc:4317)
+echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep -q -- 'value: none' \
+  || fail "deployment: metrics off, want OTEL_METRICS_EXPORTER=none"
+if echo "$got" | grep -q -- 'name: metrics$'; then fail "deployment: metrics port rendered with metrics off"; fi
+got=$(helm template mm "$CHART" --set serviceMonitor.enabled=true --set observability.metrics.enabled=false)
+if echo "$got" | grep -q -- 'kind: ServiceMonitor'; then fail "ServiceMonitor rendered with metrics off"; fi
+got=$(helm template mm "$CHART" --show-only templates/servicemonitor.yaml --set serviceMonitor.enabled=true \
+  --set-json 'serviceMonitor.labels={"observability.giantswarm.io/tenant":"giantswarm"}')
+echo "$got" | grep -q -- '^    observability.giantswarm.io/tenant: giantswarm$' \
+  || fail "ServiceMonitor lacks serviceMonitor.labels"
+echo "$got" | grep -q -- '- port: metrics$' || fail "ServiceMonitor does not scrape the metrics port"
+got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
+echo "$got" | grep -B8 -- 'port: 9464$' | grep -q -- 'kubernetes.io/metadata.name: kube-system' \
+  || fail "networkpolicy: metrics port not admitted from kube-system"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
 if echo "$got" | grep -q -- 'OTLP collector'; then
   fail "networkpolicy: OTLP egress rendered without observability.otel.endpoint"
