@@ -62,7 +62,8 @@ Lemonade-backend ADR in the team's decision log.
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call, never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
-| Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
+| Every write tool takes `dryRun` (MCP): it answers the plan and changes nothing — `pull_model` whether the model is there, the kserve fit verdict and the ModelConfig it would wire; `load_model` the loaded state, the keep-alive, the kserve fit verdict and serving object (`manifests`) or `alreadyServing`, the ModelConfig the auto-wire would ensure (`wiring`); `unload_model` the kserve serving objects it would delete and the ModelConfig it would unwire; `delete_model` the loaded state and the ModelConfig it would unwire; `cancel_job` the job | — | `pull_model`, `load_model`, `unload_model`, `delete_model`, `cancel_job` |
+| Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused; MCP `dryRun: true` returns the `manifests` it would write or delete, writing nothing) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
 | Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","backend?","node?"}` | `check_fit` |
@@ -71,11 +72,18 @@ Lemonade-backend ADR in the team's decision log.
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
-`{"error":{"code":"not_found|invalid_request|unsupported|conflict|does_not_fit|backend_error","message":"…"}}`;
+`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
 (412) that the kserve fit check refused a pull or load, `conflict` (409) also
 that an unqualified reference exists on several backends — repeat the request
-with `backend`.
+with `backend`. `gitops_owned` (409) means the object the write would change
+or delete is applied by Flux from git — it carries
+`kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name`, whatever
+its `app.kubernetes.io/managed-by` says — and a live change would be reverted
+on the next reconciliation; the message names the Flux object. Nothing was
+written. A ModelConfig reports that owner as `gitops`, and the wiring
+reconciler and the unload, unwire and delete paths leave such a ModelConfig
+alone.
 
 **Several backends in one process.** Every `Model`, `LoadedModel`, `Job`,
 `NodeInfo`, `Preset`, `FitResult` and `ModelConfigRef` carries `backend`. Reads
@@ -818,6 +826,52 @@ nothing else: a served model's ModelConfig is written by the load call itself
 and, when missing, by the caller's next `list_loaded_models`, and a running
 download Job is joined by the next `pull_model`. Health endpoints (`/healthz`,
 `/readyz`, `/backendz`) and the OAuth metadata stay public.
+
+### Commit mode: the pull request as the person
+
+`wire_model` and `unwire_model` take `mode: commit`, and so do `load_model`
+and `unload_model` on kserve: the serving object and its ModelConfig — whose
+address follows from the object's name — land in one pull request (files
+`<name>-llminferenceservice.yaml` and `<name>.yaml`), and no load job runs;
+the ModelConfig turns ready when the model does, after Flux applies the
+merge. `pull_model` and `delete_model` never commit (a download and the
+weights are no GitOps objects): `mode: commit` answers `unsupported`, as it
+does for a load or unload on ollama, lemonade or lmstudio. Instead of writing the
+ModelConfig live, model-manager opens a pull request as the signed-in person
+in the GitOps repository that owns the kagent namespace. The repository
+follows from Flux provenance: the ModelConfig's own Kustomization when Flux
+applies it, else the namespace's (through the HelmRelease that renders it,
+where a chart creates the namespace), then the Kustomization's GitRepository
+and `spec.path`. Where there is none, `repository`, `branch` and `path` name
+it. The files go under `<path>/model-manager/`, one per object, with the
+directory's `kustomization.yaml` and the parent's entry
+([gitops-commit](https://github.com/giantswarm/gitops-commit)'s `layout`). A
+Secret, the placeholder API key, is committed only SOPS-encrypted for the
+repository's `.sops.yaml` recipients. Without one the call is refused: use
+`apiKeyPassthrough` or `apiKeySecret`, or `mode: apply`. `dryRun` answers the
+files with their content and opens nothing. The answer's `commit` names the
+repository, base, directory, branch, files, the pull request's URL and number,
+and its author. Refused: an object Flux applies from a file outside
+`model-manager/` (change it where it is written), one a HelmRelease renders,
+a removal of an object that was written live, and a Kustomization whose
+`targetNamespace` would move the objects.
+
+Commit mode needs the person's GitHub authority. The chart's `github.enabled`
+registers model-manager with muster pinned to its own user-to-server GitHub
+App `giantswarm-model-manager` (`--github-authorization-server`), with
+`auth.forwardIdentity: true`: muster runs the App's consent once per person
+and puts their App user token on every call as the bearer. model-manager
+verifies it with `GET /user` and opens the pull request with it. The person's
+IdP ID token arrives in `X-Muster-Id-Token` and is validated like a forwarded
+token, so apply mode and every read keep acting on Kubernetes as the person.
+The pin applies to the MCP endpoint only: the REST API keeps the person's ID
+token as its bearer, as the portal sends it. No other GitHub credential exists
+in the pod. Without the App's token the
+call answers `auth_required` (401), naming the consent
+(`core_auth_login server=model-manager`). A server without the pin answers
+`unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
+`capabilities.commit`. The App has to be installed, with contents and
+pull-request write, on every repository a commit may target.
 
 ## Helm chart
 

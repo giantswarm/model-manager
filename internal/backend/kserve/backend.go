@@ -25,12 +25,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 )
 
 // logReader reads a pod's log with the options given — the container, a
@@ -664,6 +666,10 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		link.Nodes = fit.Nodes
 		obj = b.composeSplit(plan.Preset, s, link, b.templateImage(ctx, s))
 	}
+	if req.DryRun {
+		res.Manifests = []*unstructured.Unstructured{obj}
+		return res, nil
+	}
 	if err := b.createServing(ctx, obj); err != nil {
 		return nil, err
 	}
@@ -701,8 +707,11 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		return nil, fmt.Errorf("%w: no %s serves %s", backend.ErrNotFound, kindLLMInferenceService, name)
 	}
 	for _, sv := range matches {
-		if !sv.manageable() {
-			return nil, fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, kindLLMInferenceService, sv.Namespace, sv.Name, sv.ManagedBy)
+		if err := stoppable(sv); err != nil {
+			return nil, err
+		}
+		if sv.GitOps != nil {
+			return nil, fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(kindLLMInferenceService, sv.Namespace, sv.Name, sv.GitOps))
 		}
 	}
 	for _, sv := range matches {
@@ -720,6 +729,43 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 	}
 	b.forgetStale(ctx, matches)
 	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
+}
+
+// stoppable refuses a serving object model-manager may not delete.
+func stoppable(sv served) error {
+	if !sv.manageable() {
+		return fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, kindLLMInferenceService, sv.Namespace, sv.Name, sv.ManagedBy)
+	}
+	return nil
+}
+
+// StopPlan implements backend.StopPlanner.
+func (b *Backend) StopPlan(ctx context.Context, name string) (string, []*unstructured.Unstructured, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
+	}
+	matches, err := b.servedFor(ctx, name)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(matches) == 0 {
+		return "", nil, fmt.Errorf("%w: no %s serves %s", backend.ErrNotFound, kindLLMInferenceService, name)
+	}
+	var out []*unstructured.Unstructured
+	for _, sv := range matches {
+		if err := stoppable(sv); err != nil {
+			return "", nil, err
+		}
+		obj, err := b.getServing(ctx, sv.Namespace, sv.Name)
+		if err != nil {
+			return "", nil, err
+		}
+		if obj != nil {
+			out = append(out, obj)
+		}
+	}
+	return matches[0].Model, out, nil
 }
 
 // servedFor finds the LLMInferenceServices serving a model (by repository id,

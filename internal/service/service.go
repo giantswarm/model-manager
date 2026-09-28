@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/wiring"
@@ -169,6 +170,7 @@ type Service struct {
 
 	jobs   *jobs.Manager
 	wirer  wiring.Wirer
+	commit *gitops.Committer // nil: commit mode not offered
 	wiring *WiringInfo
 	cfg    Config
 	log    *slog.Logger
@@ -402,6 +404,7 @@ func joinNames(names []backend.Name) string {
 func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 	caps := b.Capabilities()
 	caps.Wire = s.wirer != nil
+	caps.Commit = s.wirer != nil && s.commit != nil
 	return caps
 }
 
@@ -718,37 +721,11 @@ func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.
 // the model to readiness and refreshes the ModelConfig from the address the
 // backend published.
 func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error) {
-	if strings.TrimSpace(opts.Backend) != "" {
-		b, err := s.named(opts.Backend)
-		if err != nil {
-			return nil, err
-		}
-		if !b.Capabilities().Load {
-			return nil, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
-		}
-	}
-	name := strings.TrimSpace(opts.Model)
-	if name == "" && opts.Preset != "" {
-		name = strings.TrimSpace(opts.Preset)
-	}
-	b, m, err := s.resolve(ctx, opts.Backend, name)
+	b, m, req, err := s.loadTarget(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if !b.Capabilities().Load {
-		return nil, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
-	}
-	keepAlive := opts.KeepAlive
-	if keepAlive == "" {
-		keepAlive = s.cfg.DefaultKeepAlive
-	}
-	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
-	// Loaded at the context window agents will ask for, so their first turn
-	// does not reload the model at another size.
-	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
-	if req.Preset == "" && m.Preset != "" {
-		req.Preset = m.Preset
-	}
+	keepAlive := req.KeepAlive
 	res := &backend.LoadResult{}
 	srv, isServer := b.(backend.Server)
 	if isServer {
@@ -807,6 +784,43 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	view := s.loadedView(ctx, b, m)
 	view.Fit = fit
 	return view, nil
+}
+
+// loadTarget resolves a load: the backend, the model and the request the
+// backend is asked with.
+func (s *Service) loadTarget(ctx context.Context, opts LoadOptions) (backend.Backend, *backend.Model, backend.LoadRequest, error) {
+	if strings.TrimSpace(opts.Backend) != "" {
+		b, err := s.named(opts.Backend)
+		if err != nil {
+			return nil, nil, backend.LoadRequest{}, err
+		}
+		if !b.Capabilities().Load {
+			return nil, nil, backend.LoadRequest{}, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
+		}
+	}
+	name := strings.TrimSpace(opts.Model)
+	if name == "" && opts.Preset != "" {
+		name = strings.TrimSpace(opts.Preset)
+	}
+	b, m, err := s.resolve(ctx, opts.Backend, name)
+	if err != nil {
+		return nil, nil, backend.LoadRequest{}, err
+	}
+	if !b.Capabilities().Load {
+		return nil, nil, backend.LoadRequest{}, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
+	}
+	keepAlive := opts.KeepAlive
+	if keepAlive == "" {
+		keepAlive = s.cfg.DefaultKeepAlive
+	}
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
+	// Loaded at the context window agents will ask for, so their first turn
+	// does not reload the model at another size.
+	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
+	if req.Preset == "" && m.Preset != "" {
+		req.Preset = m.Preset
+	}
+	return b, m, req, nil
 }
 
 // wire wires model on b as the caller and says what it did: Wired with the
@@ -970,7 +984,9 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 		return b.Name(), fmt.Errorf("%w: delete on %s", backend.ErrUnsupported, b.Name())
 	}
 	if unwire && s.wirer != nil {
-		if err := s.wirer.Remove(ctx, b.Name(), m.Name); err != nil {
+		if err := s.wirer.Remove(ctx, b.Name(), m.Name); errors.Is(err, backend.ErrGitOpsOwned) {
+			return b.Name(), fmt.Errorf("unwire %s: %w; nothing was deleted — remove the ModelConfig with unwire_model mode commit, or repeat with unwire=false to delete the weights alone", m.Name, err)
+		} else if err != nil {
 			return b.Name(), fmt.Errorf("unwire %s: %w", m.Name, err)
 		}
 	}
@@ -997,30 +1013,45 @@ func (s *Service) Wire(ctx context.Context, name, ref string, opts backend.WireO
 // and reports the backend it belonged to. Unqualified, the managed
 // ModelConfigs are consulted first — the model may be gone from its backend.
 func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, error) {
+	b, ref, err := s.unwireTarget(ctx, name, ref)
+	if err != nil || b == nil {
+		return "", err
+	}
+	if err := s.wirer.Remove(ctx, b.Name(), ref); err != nil {
+		return b.Name(), err
+	}
+	s.log.Info("model unwired", "backend", b.Name(), "model", ref, identity.LogAttr(ctx))
+	return b.Name(), nil
+}
+
+// unwireTarget is the backend and canonical reference an unwire of ref
+// addresses; a nil backend without error when nothing is wired or
+// downloaded under ref, which counts as unwired.
+func (s *Service) unwireTarget(ctx context.Context, name, ref string) (backend.Backend, string, error) {
 	if s.wirer == nil {
-		return "", ErrWiringDisabled
+		return nil, "", ErrWiringDisabled
 	}
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", fmt.Errorf("%w: model name is required", backend.ErrInvalid)
+		return nil, "", fmt.Errorf("%w: model name is required", backend.ErrInvalid)
 	}
 	var b backend.Backend
 	if strings.TrimSpace(name) != "" || len(s.all()) == 1 {
 		var err error
 		if b, err = s.named(name); err != nil {
-			return "", err
+			return nil, "", err
 		}
 	} else {
 		owners, err := s.wiredBackends(ctx, ref)
 		if err != nil {
-			return "", err
+			return nil, "", err
 		}
 		switch len(owners) {
 		case 1:
 			b, _ = s.lookup(owners[0])
 		case 0:
 		default:
-			return "", fmt.Errorf("%w: %s is wired on %s; name the backend", backend.ErrConflict, ref, joinNames(owners))
+			return nil, "", fmt.Errorf("%w: %s is wired on %s; name the backend", backend.ErrConflict, ref, joinNames(owners))
 		}
 		if b == nil {
 			resolved, _, err := s.resolve(ctx, "", ref)
@@ -1029,20 +1060,16 @@ func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, e
 				b = resolved
 			case errors.Is(err, backend.ErrNotFound):
 				// Nothing wired, nothing downloaded: absent counts as success.
-				return "", nil
+				return nil, "", nil
 			default:
-				return "", err
+				return nil, "", err
 			}
 		}
 	}
 	if m, err := b.GetModel(ctx, ref); err == nil {
 		ref = m.Name
 	}
-	if err := s.wirer.Remove(ctx, b.Name(), ref); err != nil {
-		return b.Name(), err
-	}
-	s.log.Info("model unwired", "backend", b.Name(), "model", ref, identity.LogAttr(ctx))
-	return b.Name(), nil
+	return b, ref, nil
 }
 
 // wiredBackends lists the configured backends holding a managed ModelConfig
@@ -1311,6 +1338,9 @@ func (s *Service) refreshModelConfigs(ctx context.Context, b backend.Backend) {
 		if r.Backend != "" && r.Backend != b.Name() {
 			continue
 		}
+		if r.GitOps != nil {
+			continue // its file in git is what it carries; Flux would revert a re-wire
+		}
 		if ep := b.AgentEndpoint(r.Model); ep.ContextLength == 0 && ep.Think == nil && r.ContextLength == 0 && r.Think == nil {
 			continue // nothing to write, nothing written
 		}
@@ -1374,6 +1404,27 @@ func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
 // WireOptions laid over it (the API-key shape), refused before anything is
 // written when the shape is not one the ModelConfig can carry.
 func (s *Service) wireModel(ctx context.Context, b backend.Backend, model string, opts backend.WireOptions) (*wiring.ModelConfigRef, error) {
+	model, ep, existing, err := s.endpointFor(ctx, b, model, opts)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		s.log.Info("model already wired by another owner", "backend", b.Name(), "model", model, "modelConfig", existing.Namespace+"/"+existing.Name)
+		return existing, nil
+	}
+	ref, err := s.wirer.Ensure(ctx, model, ep)
+	if err != nil {
+		return nil, err
+	}
+	s.log.Info("model wired", "backend", b.Name(), "model", model, "modelConfig", ref.Namespace+"/"+ref.Name)
+	return ref, nil
+}
+
+// endpointFor is what a wiring of model on b writes: the canonical model
+// name, the endpoint the ModelConfig carries, or — on a serve-lifecycle
+// backend — the ModelConfig someone else created for the served model, which
+// counts as the wiring and is never duplicated or touched.
+func (s *Service) endpointFor(ctx context.Context, b backend.Backend, model string, opts backend.WireOptions) (string, backend.AgentEndpoint, *wiring.ModelConfigRef, error) {
 	// Resolve the canonical name so "smollm2:135m" and "smollm2:135m" pulled
 	// as "smollm2" end up in one ModelConfig, and the model the endpoint is
 	// fitted to: its own context length caps the window the ModelConfig asks
@@ -1386,23 +1437,14 @@ func (s *Service) wireModel(ctx context.Context, b backend.Backend, model string
 	ep := opts.Apply(b.AgentEndpoint(model)).FitTo(fit)
 	ep.Backend = b.Name()
 	if err := ep.Validate(); err != nil {
-		return nil, err
+		return "", ep, nil, err
 	}
-	// On serve-lifecycle backends the endpoint identifies the served model:
-	// a ModelConfig someone else created for it (the portal's serve flow)
-	// counts as wired — never a duplicate, never touched.
 	if _, ok := serveLifecycle(b); ok {
 		if existing := s.foreignForEndpoint(ctx, ep); existing != nil {
-			s.log.Info("model already wired by another owner", "backend", b.Name(), "model", model, "modelConfig", existing.Namespace+"/"+existing.Name)
-			return existing, nil
+			return model, ep, existing, nil
 		}
 	}
-	ref, err := s.wirer.Ensure(ctx, model, ep)
-	if err != nil {
-		return nil, err
-	}
-	s.log.Info("model wired", "backend", b.Name(), "model", model, "modelConfig", ref.Namespace+"/"+ref.Name)
-	return ref, nil
+	return model, ep, nil, nil
 }
 
 // foreignForEndpoint finds a ModelConfig not created by model-manager that

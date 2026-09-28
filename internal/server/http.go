@@ -83,12 +83,12 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 	// health endpoints above stay open for the probes.
 	rest := http.NewServeMux()
 	api.NewREST(svc, log).Register(rest)
-	mux.Handle(api.Prefix+"/", s.guard(rest))
+	mux.Handle(api.Prefix+"/", s.guard(rest, false))
 
 	if cfg.MCPEnabled && mcpSrv != nil {
 		mux.Handle(cfg.MCPPath, s.guard(mcpserver.NewStreamableHTTPServer(mcpSrv,
 			mcpserver.WithEndpointPath(cfg.MCPPath),
-		)))
+		), true))
 	}
 
 	s.http = &http.Server{
@@ -106,12 +106,13 @@ func traced(r *http.Request) bool {
 	return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 }
 
-// guard requires an authenticated caller when OAuth is on.
-func (s *Server) guard(next http.Handler) http.Handler {
+// guard requires an authenticated caller when OAuth is on; mcp is the MCP
+// endpoint, the one the GitHub App pin applies to.
+func (s *Server) guard(next http.Handler, mcp bool) http.Handler {
 	if s.oauth == nil {
 		return next
 	}
-	return s.oauth.protect(next)
+	return s.oauth.protect(next, mcp)
 }
 
 // Handler exposes the mux (tests).

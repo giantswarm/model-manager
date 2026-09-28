@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // Name identifies a serving backend driver.
@@ -52,6 +54,10 @@ var (
 	// cluster as it stands — its serving control plane is not installed —
 	// and nothing was created; the message says what is missing.
 	ErrUnavailable = errors.New("backend unavailable")
+	// ErrGitOpsOwned means the object the write would change or remove is
+	// applied by Flux from git: a live change would be reverted on the next
+	// reconciliation, so it is changed in git (mode commit) or not at all.
+	ErrGitOpsOwned = errors.New("owned by GitOps")
 )
 
 // Capabilities are explicit data, not conditionals in clients. A flag is true
@@ -84,6 +90,10 @@ type Capabilities struct {
 	NodeInventory bool `json:"nodeInventory"`
 	// Search proxies a model hub search (kserve: Hugging Face Hub).
 	Search bool `json:"search"`
+	// Commit lands wiring writes as a pull request opened as the person in
+	// the repository that owns the target (mode commit). Set by the service
+	// from its GitHub App pin and its Kubernetes access, not by the driver.
+	Commit bool `json:"commit"`
 }
 
 // Keep-alive scopes a driver reports in Loading.KeepAliveScope.
@@ -407,6 +417,9 @@ type LoadRequest struct {
 	// (AgentEndpoint.ContextLength), so an agent's first turn does not
 	// reload the model at another size. 0: the server's default.
 	ContextLength int64 `json:"contextLength,omitempty"`
+	// DryRun composes what the load would create and creates nothing (a
+	// Server answers the objects in LoadResult.Manifests).
+	DryRun bool `json:"-"`
 }
 
 // Preset is a curated serving recipe (kserve: a published ServingPreset).
@@ -594,6 +607,8 @@ type LoadResult struct {
 	// ServingNodes are the nodes the existing serving object runs on (a
 	// split's nodes, the pinned node or its pod's); empty while unknown.
 	ServingNodes []string `json:"servingNodes,omitempty"`
+	// Manifests are the serving objects a dry run would create.
+	Manifests []*unstructured.Unstructured `json:"-"`
 }
 
 // Server is implemented by backends whose Load fit-checks the model first
@@ -632,6 +647,15 @@ type InventoryRefresh struct {
 // the answer.
 type Stopper interface {
 	Stop(ctx context.Context, name string) (*UnloadResult, error)
+}
+
+// StopPlanner is a Stopper that tells which serving objects a Stop deletes,
+// and the model they serve (the reference its ModelConfig is unwired by),
+// without deleting them: a dry run's answer and commit mode's removal. The
+// refusals are Stop's, but an object Flux applies from git is listed (commit
+// mode removes it in git).
+type StopPlanner interface {
+	StopPlan(ctx context.Context, name string) (string, []*unstructured.Unstructured, error)
 }
 
 // NodeInfo is one node's serving budget and cache state.

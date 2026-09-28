@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
@@ -224,6 +226,24 @@ func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string) erro
 	defer w.mu.Unlock()
 	delete(w.refs, refKey(b, model))
 	return nil
+}
+func (w *fakeWirer) Render(_ context.Context, model string, ep backend.AgentEndpoint) (*wiring.Rendered, error) {
+	name := wiring.ModelConfigName("", model)
+	if ep.Name != "" {
+		name = ep.Name
+	}
+	mc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "kagent.dev/v1alpha3", "kind": "ModelConfig", "metadata": map[string]any{"name": name, "namespace": "kagent"}}}
+	return &wiring.Rendered{Name: name, Objects: []*unstructured.Unstructured{mc}}, nil
+}
+func (w *fakeWirer) Removal(_ context.Context, b backend.Name, model string) (*wiring.Rendered, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	r, ok := w.refs[refKey(b, model)]
+	if !ok {
+		return &wiring.Rendered{}, nil
+	}
+	mc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "kagent.dev/v1alpha3", "kind": "ModelConfig", "metadata": map[string]any{"name": r.Name, "namespace": r.Namespace}}}
+	return &wiring.Rendered{Name: r.Name, Objects: []*unstructured.Unstructured{mc}}, nil
 }
 func (w *fakeWirer) ListAll(context.Context) ([]wiring.ModelConfigRef, error) {
 	w.mu.Lock()

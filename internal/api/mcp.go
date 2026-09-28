@@ -10,6 +10,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -68,6 +69,74 @@ const (
 	argQuery             = "query"
 	argLimit             = "limit"
 )
+
+// The commit target of a write in mode commit where Flux provenance names none.
+const (
+	argRepository = "repository"
+	argBranch     = "branch"
+	argPath       = "path"
+)
+
+// commitArgs are the mode argument of a write that commits and its explicit
+// target; what names the tool's files.
+func commitArgs(what string) mcp.ToolOption {
+	opts := []mcp.ToolOption{
+		mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply (default): write "+what+" live, as you — refused with gitops_owned for an object Flux applies from git. commit: open a pull request as you in the GitOps repository that owns the kagent namespace (Flux provenance: the object's Kustomization, else the namespace's), the files under <path>/model-manager/ with their kustomization entries, a Secret SOPS-encrypted for the repository's .sops.yaml; answers the pull request (commit.pullRequest), or auth_required naming the one-time consent (core_auth_login server=model-manager). get_backend's capabilities.commit says whether this server offers it")),
+		mcp.WithString(argRepository, mcp.Description("mode commit: the repository (owner/name) to commit to where no Flux provenance names one; with branch and path it overrides the provenance")),
+		mcp.WithString(argBranch, mcp.Description("mode commit: the base branch of repository")),
+		mcp.WithString(argPath, mcp.Description("mode commit: the directory in repository a Flux Kustomization builds from (default: the root); model-manager's files go under <path>/model-manager/")),
+	}
+	return func(t *mcp.Tool) {
+		for _, o := range opts {
+			o(t)
+		}
+	}
+}
+
+// Why pull_model and delete_model never commit.
+const (
+	noCommitPull   = "a download is no object of a GitOps repository; wire the model with wire_model mode commit"
+	noCommitDelete = "the weights are no object of a GitOps repository; remove a committed ModelConfig with unwire_model mode commit, then delete with unwire=false"
+)
+
+// applyOnly is the mode argument of a write that never commits: commit
+// answers unsupported, why names what to do instead.
+func applyOnly(tool, why string) mcp.ToolOption {
+	return mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply only: "+tool+" in mode commit answers unsupported — "+why))
+}
+
+// refuseCommit is applyOnly's refusal.
+func refuseCommit(req mcp.CallToolRequest, tool, why string) error {
+	mode, err := modeOf(req)
+	if err != nil {
+		return err
+	}
+	if mode == ModeCommit {
+		return fmt.Errorf("%w: mode commit on %s: %s", backend.ErrUnsupported, tool, why)
+	}
+	return nil
+}
+
+// commitTarget is the explicit target of a request.
+func commitTarget(req mcp.CallToolRequest) gitops.Target {
+	return gitops.Target{Repository: req.GetString(argRepository, ""), Branch: req.GetString(argBranch, ""), Path: req.GetString(argPath, "")}
+}
+
+// modeOf is the request's mode, refused when it is neither.
+func modeOf(req mcp.CallToolRequest) (string, error) {
+	switch mode := req.GetString(argMode, ModeApply); mode {
+	case ModeApply, ModeCommit:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%w: mode %q: apply or commit", backend.ErrInvalid, mode)
+	}
+}
+
+// dryRunArg is the dryRun argument of a write tool; returns says what the
+// dry run answers.
+func dryRunArg(returns string) mcp.ToolOption {
+	return mcp.WithBoolean(argDryRun, mcp.Description("Write nothing: return "+returns))
+}
 
 // backendArg is the optional backend argument every tool takes.
 func backendArg(what string) mcp.ToolOption {
@@ -147,6 +216,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade, lmstudio; default: the server's autoWire setting)")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its LLMInferenceService mounts the resulting cache directory); default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
+		dryRunArg("the plan: whether the model is downloaded already (present), on kserve the fit verdict and the node the download would go to (fit), and the ModelConfig a successful pull would wire (wiring); no download starts"),
+		applyOnly("pull_model", noCommitPull),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
@@ -158,6 +229,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argNode, mcp.Description("kserve: pin the workload to this node")),
 		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: how the model is placed — copies (default: one copy, on node or the node the fit check picks) or split: one model across the nodes of one fast link, tensor parallel over the link (refused where the nodes share no fast link; never over the cluster network). check_fit's recommended names the placement to use")),
 		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve, placement split: the nodes to split across, in rank order (the first serves the API); default: the first fast link whose nodes all host the model")),
+		dryRunArg("the plan: whether the model is loaded (loaded), the keep-alive a load would set (ollama), on kserve the fit verdict (fit) and the serving object it would create (manifests) or where it serves already (alreadyServing, servingNodes), and the ModelConfig the auto-wire would ensure (wiring); nothing is loaded, created or wired"),
+		commitArgs("the serving object and its ModelConfig (kserve; mode commit answers unsupported on the other backends, which serve no manifest)"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.load)
 
@@ -196,6 +269,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays. On kserve the serving object is deleted and its ModelConfig unwired within the call, whatever the cache scan would take; the answer's inventory says whether the cache is rescanned in the background or why it cannot be, and next says what list_loaded_models shows meanwhile."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
+		dryRunArg("the plan: on kserve the serving objects the unload would delete (manifests) and the ModelConfig it would unwire (wiring), elsewhere whether the model is loaded; nothing is unloaded"),
+		commitArgs("the removal of the serving object and its ModelConfig (kserve; mode commit answers unsupported on the other backends)"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unload)
 
@@ -204,23 +279,29 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argUnwire, mcp.Description("Also remove the ModelConfig (default true)")),
+		dryRunArg("the plan: whether the model is loaded and the ModelConfig the delete would unwire (wiring); nothing is deleted"),
+		applyOnly("delete_model", noCommitDelete),
 		mcp.WithDestructiveHintAnnotation(true),
 	), t.deleteModel)
 
 	s.AddTool(mcp.NewTool(ToolWireModel,
-		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive."),
+		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive. A ModelConfig Flux applies from git (kustomize.toolkit.fluxcd.io or helm.toolkit.fluxcd.io labels, whatever its managed-by says) is never written live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argAPIKeyPassthrough, mcp.Description("Forward the Bearer token of the agent's incoming request to the endpoint as the API key (for an endpoint that admits the person's token, such as the models Gateway); no Secret is referenced or created")),
 		mcp.WithString(argAPIKeySecret, mcp.Description("Name of an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it")),
 		mcp.WithString(argAPIKeySecretKey, mcp.Description("Key within apiKeySecret holding the API key (default OPENAI_API_KEY)")),
+		dryRunArg("the manifests the wiring writes (the ModelConfig and, for a keyless endpoint, its placeholder Secret), the ModelConfig's name, the Flux object applying it from git where one does (gitops) and a ModelConfig of another owner that already wires the served model (alreadyWired); in mode commit also the pull request it would open (commit: repository, base, directory, branch, files with their content)"),
+		commitArgs("the ModelConfig"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
-		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model. The model itself stays."),
+		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret. The model itself stays. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("the ModelConfig belongs to; without it the wired ModelConfigs are consulted (conflict when several backends wire the reference)"),
+		dryRunArg("the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops); in mode commit also the removing pull request it would open"),
+		commitArgs("the removal"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unwire)
 
@@ -239,6 +320,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	s.AddTool(mcp.NewTool(ToolCancelJob,
 		mcp.WithDescription("Cancel a running job."),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id")),
+		dryRunArg("the job it would cancel"),
 	), t.cancelJob)
 
 	return s
@@ -319,7 +401,15 @@ func (t *tools) pull(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 			wire = &b
 		}
 	}
-	job, created, err := t.svc.Pull(ctx, service.PullOptions{Backend: req.GetString(argBackend, ""), Model: name, Wire: wire, Preset: req.GetString(argPreset, ""), Node: req.GetString(argNode, "")})
+	if err := refuseCommit(req, "pull_model", noCommitPull); err != nil {
+		return errResult(err), nil
+	}
+	opts := service.PullOptions{Backend: req.GetString(argBackend, ""), Model: name, Wire: wire, Preset: req.GetString(argPreset, ""), Node: req.GetString(argNode, "")}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanPull(ctx, opts)
+		return planResult(plan, err)
+	}
+	job, created, err := t.svc.Pull(ctx, opts)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -332,7 +422,19 @@ func (t *tools) load(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if name == "" && preset == "" {
 		return errResult(fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)), nil
 	}
-	m, err := t.svc.Load(ctx, service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil)})
+	opts := service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil)}
+	mode, err := modeOf(req)
+	switch {
+	case err != nil:
+		return errResult(err), nil
+	case mode == ModeCommit:
+		plan, err := t.svc.CommitLoad(ctx, opts, commitTarget(req), req.GetBool(argDryRun, false))
+		return commitPlanResult(plan, err, req.GetBool(argDryRun, false))
+	case req.GetBool(argDryRun, false):
+		plan, err := t.svc.PlanLoad(ctx, opts)
+		return planResult(plan, err)
+	}
+	m, err := t.svc.Load(ctx, opts)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -380,6 +482,17 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if err != nil {
 		return errResult(err), nil
 	}
+	mode, err := modeOf(req)
+	switch {
+	case err != nil:
+		return errResult(err), nil
+	case mode == ModeCommit:
+		plan, err := t.svc.CommitUnload(ctx, req.GetString(argBackend, ""), name, commitTarget(req), req.GetBool(argDryRun, false))
+		return commitPlanResult(plan, err, req.GetBool(argDryRun, false))
+	case req.GetBool(argDryRun, false):
+		plan, err := t.svc.PlanUnload(ctx, req.GetString(argBackend, ""), name)
+		return planResult(plan, err)
+	}
 	view, err := t.svc.Unload(ctx, req.GetString(argBackend, ""), name)
 	if err != nil {
 		return errResult(err), nil
@@ -409,6 +522,13 @@ func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return errResult(err), nil
 	}
 	unwire := req.GetBool(argUnwire, true)
+	if err := refuseCommit(req, "delete_model", noCommitDelete); err != nil {
+		return errResult(err), nil
+	}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanDelete(ctx, req.GetString(argBackend, ""), name, unwire)
+		return planResult(plan, err)
+	}
 	b, err := t.svc.Delete(ctx, req.GetString(argBackend, ""), name, unwire)
 	if err != nil {
 		return errResult(err), nil
@@ -426,6 +546,24 @@ func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 		APIKeySecret:      req.GetString(argAPIKeySecret, ""),
 		APIKeySecretKey:   req.GetString(argAPIKeySecretKey, ""),
 	}
+	mode, err := modeOf(req)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if mode == ModeCommit {
+		view, err := t.svc.CommitWire(ctx, req.GetString(argBackend, ""), name, opts, commitTarget(req), req.GetBool(argDryRun, false))
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(commitView(view, req.GetBool(argDryRun, false)))
+	}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanWire(ctx, req.GetString(argBackend, ""), name, opts)
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(dryRunView(plan))
+	}
 	ref, err := t.svc.Wire(ctx, req.GetString(argBackend, ""), name, opts)
 	if err != nil {
 		return errResult(err), nil
@@ -437,6 +575,24 @@ func (t *tools) unwire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	name, err := req.RequireString(argModel)
 	if err != nil {
 		return errResult(err), nil
+	}
+	mode, err := modeOf(req)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if mode == ModeCommit {
+		view, err := t.svc.CommitUnwire(ctx, req.GetString(argBackend, ""), name, commitTarget(req), req.GetBool(argDryRun, false))
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(commitView(view, req.GetBool(argDryRun, false)))
+	}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanUnwire(ctx, req.GetString(argBackend, ""), name)
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(dryRunView(plan))
 	}
 	b, err := t.svc.Unwire(ctx, req.GetString(argBackend, ""), name)
 	if err != nil {
@@ -474,11 +630,94 @@ func (t *tools) cancelJob(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 	if err != nil {
 		return errResult(err), nil
 	}
+	if req.GetBool(argDryRun, false) {
+		job, err := t.svc.PlanCancel(id)
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(map[string]any{argDryRun: true, "job": job})
+	}
 	job, err := t.svc.CancelJob(id)
 	if err != nil {
 		return errResult(err), nil
 	}
 	return jsonResult(job)
+}
+
+// commitView is a write's answer in mode commit: the plan and the pull
+// request (commit), with next saying what follows.
+func commitView(view *service.CommitView, dryRun bool) map[string]any {
+	out := dryRunView(view.WirePlan)
+	out[argDryRun], out[argMode] = dryRun, ModeCommit
+	switch c := view.Commit; {
+	case c == nil && view.AlreadyWired != nil:
+		out["next"] = "the served model is wired already by " + view.AlreadyWired.Namespace + "/" + view.AlreadyWired.Name + ": nothing to commit"
+	case c == nil:
+		out["next"] = "nothing is wired: nothing to commit"
+	case c.PullRequest == "" && !dryRun:
+		out["commit"], out["next"] = c, c.Repository+" already carries the change: nothing to commit"
+	case dryRun:
+		out["commit"], out["next"] = c, "re-run without dryRun to open the pull request as "+c.Author+" in "+c.Repository
+	default:
+		out["commit"], out["next"] = c, "review and merge "+c.PullRequest+"; Flux applies it after the merge"
+	}
+	return out
+}
+
+// planResult is an operational write's dry-run answer.
+func planResult(plan *service.OpPlan, err error) (*mcp.CallToolResult, error) {
+	if err != nil {
+		return errResult(err), nil
+	}
+	return jsonResult(struct {
+		DryRun bool `json:"dryRun"`
+		*service.OpPlan
+	}{true, plan})
+}
+
+// commitPlanResult is a load or unload in mode commit: the plan, the pull
+// request (commit) and what follows (next).
+func commitPlanResult(plan *service.OpPlan, err error, dryRun bool) (*mcp.CallToolResult, error) {
+	if err != nil {
+		return errResult(err), nil
+	}
+	var next string
+	switch c := plan.Commit; {
+	case c == nil && plan.AlreadyServing:
+		next = "the preset serves already: nothing to commit"
+	case c == nil:
+		next = "nothing to commit"
+	case dryRun:
+		next = "re-run without dryRun to open the pull request as " + c.Author + " in " + c.Repository
+	case c.PullRequest == "":
+		next = c.Repository + " already carries the change: nothing to commit"
+	default:
+		next = "review and merge " + c.PullRequest + "; Flux applies it after the merge"
+	}
+	return jsonResult(struct {
+		DryRun bool   `json:"dryRun"`
+		Mode   string `json:"mode"`
+		*service.OpPlan
+		Next string `json:"next"`
+	}{dryRun, ModeCommit, plan, next})
+}
+
+// dryRunView is a write tool's dry-run answer: the plan, marked as one.
+func dryRunView(plan *service.WirePlan) map[string]any {
+	out := map[string]any{argDryRun: true, argBackend: plan.Backend, argModel: plan.Model, "manifests": plan.Manifests}
+	if plan.ModelConfig != "" {
+		out["modelConfig"] = plan.ModelConfig
+	}
+	if plan.GitOps != nil {
+		out["gitops"] = plan.GitOps
+	}
+	if plan.Replaces != "" {
+		out["replaces"] = plan.Replaces
+	}
+	if plan.AlreadyWired != nil {
+		out["alreadyWired"] = plan.AlreadyWired
+	}
+	return out
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {
