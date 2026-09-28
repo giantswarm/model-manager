@@ -209,6 +209,10 @@ func TestServeSplitComposesLeaderAndWorkers(t *testing.T) {
 	}
 	assert.Contains(t, templateMain(leader)["command"].([]any)[2], "--node-rank 0")
 	assert.Contains(t, templateMain(leader)["command"].([]any)[2], "--served-model-name")
+	leaderArgs := templateMain(leader)["args"].([]any)
+	assert.Equal(t, []any{"--served-model-name"}, leaderArgs[len(leaderArgs)-4:len(leaderArgs)-3], "the leader answers under the preset name too")
+	assert.Equal(t, "huge", leaderArgs[len(leaderArgs)-1])
+	assert.NotContains(t, templateMain(worker)["args"], "--served-model-name", "a headless worker serves no API")
 	assert.Contains(t, templateMain(worker)["command"].([]any)[2], `--node-rank "${LWS_WORKER_INDEX}"`)
 	assert.Contains(t, templateMain(worker)["command"].([]any)[2], "--headless")
 

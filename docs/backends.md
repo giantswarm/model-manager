@@ -321,8 +321,10 @@ spec:
 ```
 
 The baseURL ends in `/v1`: the gateway's upstream path is the baseURL's path plus the format's
-suffix. vLLM serves the model under its Hugging Face id (the llm-d template's
-`--served-model-name`), and on agentgateway 2.1 a concrete `AgentgatewayModel` forwards the
+suffix. vLLM serves the model under its Hugging Face id first (the llm-d template's
+`--served-model-name`, which model-manager repeats after the preset's arguments with the preset
+name added: `<id> publishers/<ns>/models/<id> <preset>`, so a request naming the preset also
+answers at the model's own route and workload Service), and on agentgateway 2.1 a concrete `AgentgatewayModel` forwards the
 request's `model` unchanged — its Custom settings carry no model override, and a transformation of
 the field does not reach the provider —, while a virtual model rewrites `model` to its target's.
 So the public name is a virtual model over an Internal concrete one matched on the id, which
