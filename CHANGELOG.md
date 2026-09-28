@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wire_model` and `unwire_model` take `dryRun`: the answer carries the `manifests` the call would write (the ModelConfig and, for a keyless endpoint, its placeholder Secret) or delete, the ModelConfig's name, the Flux object applying it from git (`gitops`) and a ModelConfig of another owner that already wires the served model (`alreadyWired`); nothing is written.
+- A ModelConfig or LLMInferenceService Flux applies from git (`kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name`, whatever its `app.kubernetes.io/managed-by` says) is never changed or deleted live: `wire_model`, `unwire_model`, `unload_model` and `delete_model` answer the new error code `gitops_owned` (409) naming the Flux object, and the wiring reconciler leaves such a ModelConfig alone. A ModelConfig reports its owner as `gitops`.
+
 - Prometheus metrics on `GET /metrics` of a separate `metrics` port (`9464`): `mcp_server_operation_duration_seconds` for every `tools/call`, by `gen_ai_tool_name` and, on failure, `error_type` (`tool_error` for an `isError` result, `_OTHER` for a handler error), and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Chart: `observability.metrics.enabled` (default `true`) and `.port`; off renders `OTEL_METRICS_EXPORTER=none`, so an OTLP endpoint set for traces pushes no metrics. A ServiceMonitor gated on `serviceMonitor.enabled`, with `serviceMonitor.labels` and `.interval`, and `networkPolicy.metricsNamespaces` (default `kube-system`) admitted to the metrics port.
 
 ### Fixed

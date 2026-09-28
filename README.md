@@ -62,7 +62,7 @@ Lemonade-backend ADR in the team's decision log.
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call, never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
-| Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
+| Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused; MCP `dryRun: true` returns the `manifests` it would write or delete, writing nothing) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
 | Fit check (kserve) | `POST /api/v1/models/fit-check {"model" or "preset","backend?","node?"}` | `check_fit` |
@@ -71,11 +71,18 @@ Lemonade-backend ADR in the team's decision log.
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
-`{"error":{"code":"not_found|invalid_request|unsupported|conflict|does_not_fit|backend_error","message":"…"}}`;
+`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
 (412) that the kserve fit check refused a pull or load, `conflict` (409) also
 that an unqualified reference exists on several backends — repeat the request
-with `backend`.
+with `backend`. `gitops_owned` (409) means the object the write would change
+or delete is applied by Flux from git — it carries
+`kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name`, whatever
+its `app.kubernetes.io/managed-by` says — and a live change would be reverted
+on the next reconciliation; the message names the Flux object. Nothing was
+written. A ModelConfig reports that owner as `gitops`, and the wiring
+reconciler and the unload, unwire and delete paths leave such a ModelConfig
+alone.
 
 **Several backends in one process.** Every `Model`, `LoadedModel`, `Job`,
 `NodeInfo`, `Preset`, `FitResult` and `ModelConfigRef` carries `backend`. Reads

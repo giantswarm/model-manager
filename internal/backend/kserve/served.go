@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 )
 
 // Labels and annotations model-manager puts on the objects it creates.
@@ -48,10 +49,13 @@ type served struct {
 	// by model-manager and by the portal's serve flow); a preset inferred from
 	// the name alone does not make an LLMInferenceService manageable.
 	PresetLabelled bool
-	StorageURI     string
-	GPUs           int64
-	Ready          bool
-	Status         string
+	// GitOps is the Flux object applying the LLMInferenceService from git:
+	// it is changed there, never live.
+	GitOps     *gitops.Owner
+	StorageURI string
+	GPUs       int64
+	Ready      bool
+	Status     string
 	// Reason names why Status is not Ready: the Ready condition's reason, a
 	// failed load's, or the predictor pod's (Unschedulable, ImagePullBackOff).
 	Reason  string
@@ -448,6 +452,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 		PresetLabelled: obj.GetLabels()[PresetLabel] != "",
 		Created:        obj.GetCreationTimestamp().Time,
 		Deleting:       obj.GetDeletionTimestamp() != nil,
+		GitOps:         gitops.OwnerOf(obj.GetLabels()),
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
 	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)

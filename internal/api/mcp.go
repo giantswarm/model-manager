@@ -69,6 +69,12 @@ const (
 	argLimit             = "limit"
 )
 
+// dryRunArg is the dryRun argument of a write tool; returns says what the
+// dry run answers.
+func dryRunArg(returns string) mcp.ToolOption {
+	return mcp.WithBoolean(argDryRun, mcp.Description("Write nothing: return "+returns))
+}
+
 // backendArg is the optional backend argument every tool takes.
 func backendArg(what string) mcp.ToolOption {
 	return mcp.WithString(argBackend, mcp.Description("Backend (ollama|kserve|lemonade|lmstudio) "+what+"; one model-manager may run several — list_backends names them. Optional when one backend is configured."))
@@ -208,19 +214,21 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.deleteModel)
 
 	s.AddTool(mcp.NewTool(ToolWireModel,
-		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive."),
+		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive. A ModelConfig Flux applies from git (kustomize.toolkit.fluxcd.io or helm.toolkit.fluxcd.io labels, whatever its managed-by says) is never written live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argAPIKeyPassthrough, mcp.Description("Forward the Bearer token of the agent's incoming request to the endpoint as the API key (for an endpoint that admits the person's token, such as the models Gateway); no Secret is referenced or created")),
 		mcp.WithString(argAPIKeySecret, mcp.Description("Name of an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it")),
 		mcp.WithString(argAPIKeySecretKey, mcp.Description("Key within apiKeySecret holding the API key (default OPENAI_API_KEY)")),
+		dryRunArg("the manifests the wiring writes (the ModelConfig and, for a keyless endpoint, its placeholder Secret), the ModelConfig's name, the Flux object applying it from git where one does (gitops) and a ModelConfig of another owner that already wires the served model (alreadyWired)"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
-		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model. The model itself stays."),
+		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret. The model itself stays. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("the ModelConfig belongs to; without it the wired ModelConfigs are consulted (conflict when several backends wire the reference)"),
+		dryRunArg("the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops)"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unwire)
 
@@ -426,6 +434,13 @@ func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 		APIKeySecret:      req.GetString(argAPIKeySecret, ""),
 		APIKeySecretKey:   req.GetString(argAPIKeySecretKey, ""),
 	}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanWire(ctx, req.GetString(argBackend, ""), name, opts)
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(dryRunView(plan))
+	}
 	ref, err := t.svc.Wire(ctx, req.GetString(argBackend, ""), name, opts)
 	if err != nil {
 		return errResult(err), nil
@@ -437,6 +452,13 @@ func (t *tools) unwire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	name, err := req.RequireString(argModel)
 	if err != nil {
 		return errResult(err), nil
+	}
+	if req.GetBool(argDryRun, false) {
+		plan, err := t.svc.PlanUnwire(ctx, req.GetString(argBackend, ""), name)
+		if err != nil {
+			return errResult(err), nil
+		}
+		return jsonResult(dryRunView(plan))
 	}
 	b, err := t.svc.Unwire(ctx, req.GetString(argBackend, ""), name)
 	if err != nil {
@@ -479,6 +501,24 @@ func (t *tools) cancelJob(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 		return errResult(err), nil
 	}
 	return jsonResult(job)
+}
+
+// dryRunView is a write tool's dry-run answer: the plan, marked as one.
+func dryRunView(plan *service.WirePlan) map[string]any {
+	out := map[string]any{argDryRun: true, argBackend: plan.Backend, argModel: plan.Model, "manifests": plan.Manifests}
+	if plan.ModelConfig != "" {
+		out["modelConfig"] = plan.ModelConfig
+	}
+	if plan.GitOps != nil {
+		out["gitops"] = plan.GitOps
+	}
+	if plan.Replaces != "" {
+		out["replaces"] = plan.Replaces
+	}
+	if plan.AlreadyWired != nil {
+		out["alreadyWired"] = plan.AlreadyWired
+	}
+	return out
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {

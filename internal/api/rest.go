@@ -362,6 +362,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, backend.ErrUnsupported):
 		return http.StatusNotImplemented, "unsupported"
+	case errors.Is(err, backend.ErrGitOpsOwned):
+		return http.StatusConflict, "gitops_owned"
 	case errors.Is(err, backend.ErrConflict):
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, backend.ErrUnfit):

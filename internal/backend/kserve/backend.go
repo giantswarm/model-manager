@@ -31,6 +31,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 )
 
 // logReader reads a pod's log with the options given — the container, a
@@ -703,6 +704,9 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 	for _, sv := range matches {
 		if !sv.manageable() {
 			return nil, fmt.Errorf("%w: %s %s/%s was not created from a serving preset (managed by %q); delete it where it was created", backend.ErrConflict, kindLLMInferenceService, sv.Namespace, sv.Name, sv.ManagedBy)
+		}
+		if sv.GitOps != nil {
+			return nil, fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(kindLLMInferenceService, sv.Namespace, sv.Name, sv.GitOps))
 		}
 	}
 	for _, sv := range matches {

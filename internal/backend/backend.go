@@ -52,6 +52,10 @@ var (
 	// cluster as it stands — its serving control plane is not installed —
 	// and nothing was created; the message says what is missing.
 	ErrUnavailable = errors.New("backend unavailable")
+	// ErrGitOpsOwned means the object the write would change or remove is
+	// applied by Flux from git: a live change would be reverted on the next
+	// reconciliation, so it is changed in git (mode commit) or not at all.
+	ErrGitOpsOwned = errors.New("owned by GitOps")
 )
 
 // Capabilities are explicit data, not conditionals in clients. A flag is true

@@ -46,6 +46,7 @@ import (
 	"k8s.io/client-go/openapi"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 )
 
 const (
@@ -99,6 +100,10 @@ type ModelConfigRef struct {
 	// Managed is true when model-manager created the ModelConfig; others
 	// (the portal's, hand-written ones) are reported but never modified.
 	Managed bool `json:"managed"`
+	// GitOps is the Flux object that applies the ModelConfig from git; a
+	// ModelConfig with one is changed only in git (mode commit), whatever
+	// Managed says.
+	GitOps *gitops.Owner `json:"gitops,omitempty"`
 	// ProviderModel is spec.model — the name the provider serves the model
 	// under (kserve: the LLMInferenceService name); Model is the backend's
 	// reference.
@@ -138,10 +143,11 @@ func (r ModelConfigRef) Carries(ep backend.AgentEndpoint) bool {
 // annotation, so the same reference on two backends is two ModelConfigs.
 type Wirer interface {
 	// Ensure creates or updates the ModelConfig for model on ep.Backend
-	// (idempotent).
+	// (idempotent); one Flux applies from git is refused (ErrGitOpsOwned).
 	Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error)
 	// Remove deletes the ModelConfig for model on backend b; absent is not an
-	// error. Only model-manager's own ModelConfigs are ever deleted.
+	// error. Only model-manager's own ModelConfigs are ever deleted, and never
+	// one Flux applies from git (ErrGitOpsOwned).
 	Remove(ctx context.Context, b backend.Name, model string) error
 	// Lookup returns the ModelConfig for model on backend b, or nil when none
 	// exists.
@@ -152,6 +158,13 @@ type Wirer interface {
 	// ListAll returns every ModelConfig in the namespace, whoever created it,
 	// so callers can recognise a model that is already wired by someone else.
 	ListAll(ctx context.Context) ([]ModelConfigRef, error)
+	// Render returns what Ensure would write for model on ep.Backend, and
+	// the Flux object applying the ModelConfig it would update; nothing is
+	// written. A dry run shows it, commit mode lands it in git.
+	Render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error)
+	// Removal returns what Remove would delete for model on backend b; no
+	// objects when nothing is wired. Nothing is deleted.
+	Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error)
 	// Writable returns ep as Ensure writes it: without the settings the
 	// served ModelConfig schema lacks, which the apiserver would prune — so
 	// a comparison with what a ModelConfig reads back (Carries) holds once
@@ -247,8 +260,68 @@ func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 	return "", fmt.Errorf("API group %s not found (is kagent installed?)", KagentGroup)
 }
 
-// Ensure implements Wirer.
-func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error) {
+// Rendered is what a wiring write lands: the objects it creates or updates
+// (the ModelConfig, then its placeholder Secret where it needs one) or, for a
+// removal, the objects it deletes. Name is the ModelConfig's name, GitOps the
+// Flux object that applies the ModelConfig as it exists now (nil: none, or
+// written live). Replaces names an older ModelConfig of the same model the
+// write removes (the backend-chosen name converging, Ensure).
+type Rendered struct {
+	Name     string
+	Objects  []*unstructured.Unstructured
+	GitOps   *gitops.Owner
+	Replaces string
+}
+
+// ModelConfig is the rendered ModelConfig, nil for a removal with nothing to
+// remove.
+func (r *Rendered) ModelConfig() *unstructured.Unstructured {
+	for _, o := range r.Objects {
+		if o.GetKind() == "ModelConfig" {
+			return o
+		}
+	}
+	return nil
+}
+
+// Render implements Wirer: Ensure's decision without the write.
+func (k *Kagent) Render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error) {
+	p, err := k.plan(ctx, model, ep)
+	if err != nil {
+		return nil, err
+	}
+	return p.rendered(), nil
+}
+
+// wirePlan is one Ensure decided against the cluster: the name, the desired
+// objects, the ModelConfig as it exists (nil: none) and the older one a
+// backend-chosen name replaces.
+type wirePlan struct {
+	name     string
+	desired  *unstructured.Unstructured
+	secret   *unstructured.Unstructured
+	existing *unstructured.Unstructured
+	replaces *unstructured.Unstructured
+}
+
+func (p *wirePlan) rendered() *Rendered {
+	r := &Rendered{Name: p.name, Objects: []*unstructured.Unstructured{p.desired}}
+	if p.secret != nil {
+		r.Objects = append(r.Objects, p.secret)
+	}
+	if p.existing != nil {
+		r.GitOps = gitops.OwnerOf(p.existing.GetLabels())
+	}
+	if p.replaces != nil {
+		r.Replaces = p.replaces.GetName()
+	}
+	return r
+}
+
+// plan decides an Ensure: the name the ModelConfig gets and what it holds,
+// refused when the name belongs to a ModelConfig model-manager does not
+// manage. Nothing is written.
+func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoint) (*wirePlan, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
@@ -276,25 +349,58 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	// it. Only a backend-chosen name (ep.Name, the kserve LLMInferenceService
 	// rule) converges an older derived name onto the new one, replacing it,
 	// never duplicating it.
-	name := target
+	p := &wirePlan{name: target}
 	old, err := k.find(ctx, ep.Backend, model)
 	if err != nil {
 		return nil, err
 	}
 	if old != nil {
 		if ep.Name != "" && old.GetName() != target {
-			if err := k.removeObj(ctx, old.GetName()); err != nil {
-				return nil, err
-			}
+			p.replaces = old
 		} else {
-			name = old.GetName()
+			p.name = old.GetName()
 		}
 	}
-	desired := k.build(name, model, ep)
-	existing, err := res.Get(ctx, name, metav1.GetOptions{})
+	p.desired = k.build(p.name, model, ep)
+	if placeholderNeeded(ep) {
+		p.secret = k.placeholderSecret(p.name)
+	}
+	existing, err := res.Get(ctx, p.name, metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
-		if placeholderNeeded(ep) {
+		return p, nil
+	case err != nil:
+		return nil, fmt.Errorf("get ModelConfig %s/%s: %w", k.namespace, p.name, err)
+	}
+	if existing.GetLabels()[ManagedByLabel] != ManagedByValue {
+		return nil, fmt.Errorf("%w: ModelConfig %s/%s exists but is not managed by %s", backend.ErrConflict, k.namespace, p.name, ManagedByValue)
+	}
+	p.existing = existing
+	return p, nil
+}
+
+// Ensure implements Wirer. A ModelConfig Flux applies from git — the one it
+// would update or the older one it would replace — is never written live:
+// the answer is ErrGitOpsOwned.
+func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error) {
+	p, err := k.plan(ctx, model, ep)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range []*unstructured.Unstructured{p.existing, p.replaces} {
+		if err := refuseGitOps(obj); err != nil {
+			return nil, err
+		}
+	}
+	if p.replaces != nil {
+		if err := k.removeObj(ctx, p.replaces.GetName()); err != nil {
+			return nil, err
+		}
+	}
+	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
+	name, desired, existing := p.name, p.desired, p.existing
+	if existing == nil {
+		if p.secret != nil {
 			if err := k.ensurePlaceholderSecret(ctx, name); err != nil {
 				return nil, err
 			}
@@ -304,16 +410,11 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 			return nil, fmt.Errorf("create ModelConfig %s/%s: %w", k.namespace, name, err)
 		}
 		return toRef(created), nil
-	case err != nil:
-		return nil, fmt.Errorf("get ModelConfig %s/%s: %w", k.namespace, name, err)
-	}
-	if existing.GetLabels()[ManagedByLabel] != ManagedByValue {
-		return nil, fmt.Errorf("%w: ModelConfig %s/%s exists but is not managed by %s", backend.ErrConflict, k.namespace, name, ManagedByValue)
 	}
 	// The placeholder Secret follows the shape: created for it, removed when a
 	// re-wire moves the ModelConfig off it (a stale placeholder would otherwise
 	// outlive the ModelConfig's need for it).
-	if placeholderNeeded(ep) {
+	if p.secret != nil {
 		if err := k.ensurePlaceholderSecret(ctx, name); err != nil {
 			return nil, err
 		}
@@ -348,6 +449,18 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	return toRef(updated), nil
 }
 
+// refuseGitOps is ErrGitOpsOwned for an object Flux applies, nil otherwise
+// (and for nil).
+func refuseGitOps(obj *unstructured.Unstructured) error {
+	if obj == nil {
+		return nil
+	}
+	if owner := gitops.OwnerOf(obj.GetLabels()); owner != nil {
+		return fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(obj.GetKind(), obj.GetNamespace(), obj.GetName(), owner))
+	}
+	return nil
+}
+
 // Writable implements Wirer. Only a setting that needs the served schema
 // consults it: think, which kagent's ModelConfig has from 1.0.3 on.
 func (k *Kagent) Writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {
@@ -364,7 +477,27 @@ func (k *Kagent) Writable(ctx context.Context, ep backend.AgentEndpoint) (backen
 	return ep, nil
 }
 
-// Remove implements Wirer.
+// Removal implements Wirer: Remove's decision without the write — the
+// owned ModelConfig for model on backend b and the placeholder Secret
+// model-manager created for it; no objects when nothing is wired.
+func (k *Kagent) Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error) {
+	obj, err := k.find(ctx, b, model)
+	if err != nil || obj == nil {
+		return &Rendered{}, err
+	}
+	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: gitops.OwnerOf(obj.GetLabels())}
+	sec, err := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
+	switch {
+	case err == nil && sec.GetLabels()[ManagedByLabel] == ManagedByValue:
+		r.Objects = append(r.Objects, sec)
+	case err != nil && !errors.IsNotFound(err):
+		return nil, fmt.Errorf("get Secret %s/%s: %w", k.namespace, placeholderSecretName(obj.GetName()), err)
+	}
+	return r, nil
+}
+
+// Remove implements Wirer. A ModelConfig Flux applies from git is never
+// deleted live: the answer is ErrGitOpsOwned.
 func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error {
 	obj, err := k.find(ctx, b, model)
 	if err != nil {
@@ -372,6 +505,9 @@ func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error
 	}
 	if obj == nil {
 		return nil
+	}
+	if err := refuseGitOps(obj); err != nil {
+		return err
 	}
 	return k.removeObj(ctx, obj.GetName())
 }
@@ -386,13 +522,13 @@ func (k *Kagent) removeObj(ctx context.Context, name string) error {
 }
 
 // removePlaceholderSecret deletes the placeholder Secret of the ModelConfig
-// named mcName when model-manager created it; a Secret of anyone else's or
-// none at all is left alone.
+// named mcName when model-manager created it live; a Secret of anyone
+// else's, one Flux applies from git, or none at all is left alone.
 func (k *Kagent) removePlaceholderSecret(ctx context.Context, mcName string) error {
 	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
 	secretName := placeholderSecretName(mcName)
 	sec, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue {
+	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue || gitops.OwnerOf(sec.GetLabels()) != nil {
 		return nil
 	}
 	if err := secrets.Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
@@ -614,6 +750,7 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 		ref.Model = m
 	}
 	ref.Managed = obj.GetLabels()[ManagedByLabel] == ManagedByValue
+	ref.GitOps = gitops.OwnerOf(obj.GetLabels())
 	ref.Backend = backend.Name(obj.GetLabels()[BackendLabel])
 	if u, _, _ := unstructured.NestedString(obj.Object, "spec", "openAI", "baseUrl"); u != "" {
 		ref.Endpoint = u
