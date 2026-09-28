@@ -843,7 +843,18 @@ follows from Flux provenance: the ModelConfig's own Kustomization when Flux
 applies it, else the namespace's (through the HelmRelease that renders it,
 where a chart creates the namespace), then the Kustomization's GitRepository
 and `spec.path`. Where there is none, `repository`, `branch` and `path` name
-it. The files go under `<path>/model-manager/`, one per object, with the
+it. A kserve backend on a remote target splits the commit: the serving object
+lands on the target, its ModelConfig in the kagent namespace of
+model-manager's own cluster. The serving namespace's provenance is read on the
+target as the caller; the Flux objects are read on model-manager's cluster,
+where Flux applies to the target through `spec.kubeConfig`. An owning
+Kustomization must apply through one. For a namespace a HelmRelease renders
+there, the location is the one Kustomization in the HelmRelease's namespace
+that applies through the same kubeconfig Secret; none or several are refused.
+The ModelConfig follows the kagent namespace's provenance, and an explicit
+`repository`/`branch`/`path` names the serving object's location only. Each
+repository gets its own pull request, and the answer's `commit.also` lists the
+further locations. The files go under `<path>/model-manager/`, one per object, with the
 directory's `kustomization.yaml` and the parent's entry
 ([gitops-commit](https://github.com/giantswarm/gitops-commit)'s `layout`). A
 Secret, the placeholder API key, is committed only SOPS-encrypted for the

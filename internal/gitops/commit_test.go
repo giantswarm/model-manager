@@ -202,3 +202,102 @@ func TestServingObjectAndItsModelConfigGetTheirOwnFiles(t *testing.T) {
 	assert.Contains(t, paths, "platform/model-manager/tiny-llminferenceservice.yaml")
 	assert.Contains(t, paths, "platform/model-manager/tiny.yaml")
 }
+
+var fleet = commit.Repository{Owner: "giantswarm", Name: "lab-fleet"}
+
+// remoteClusters are model-manager's own cluster — the kagent namespace of
+// cluster(), a stale model-serving namespace naming a release that is gone,
+// the HelmRelease rendering the target's serving namespace through the
+// kubeconfig Secret wc-kubeconfig, and the Kustomizations of its namespace
+// (extra) — and the target, whose model-serving namespace that release
+// labels.
+func remoteClusters(kustomizations ...runtime.Object) (local, target dynamic.Interface) {
+	objs := append([]runtime.Object{
+		obj("v1", "Namespace", "", "model-serving", map[string]any{LabelHelmName: "gone-connectivity", LabelHelmNamespace: "org-old"}, nil),
+		obj("helm.toolkit.fluxcd.io/v2", "HelmRelease", "org-lab", "wc-connectivity", nil, map[string]any{"kubeConfig": map[string]any{"secretRef": map[string]any{"name": "wc-kubeconfig"}}}),
+		obj("source.toolkit.fluxcd.io/v1", "GitRepository", "org-lab", "lab-fleet", nil, map[string]any{
+			"url": "https://github.com/giantswarm/lab-fleet", "ref": map[string]any{"branch": "main"},
+		}),
+	}, kustomizations...)
+	local = cluster(objs...)
+	target = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{namespaceGVR: "NamespaceList"},
+		obj("v1", "Namespace", "", "model-serving", map[string]any{LabelHelmName: "wc-connectivity", LabelHelmNamespace: "org-lab"}, nil))
+	return local, target
+}
+
+func wcKustomization(name, secret string) runtime.Object {
+	spec := map[string]any{"path": "./clusters/wc/" + name, "prune": true, "sourceRef": map[string]any{"kind": "GitRepository", "name": "lab-fleet"}}
+	if secret != "" {
+		spec["kubeConfig"] = map[string]any{"secretRef": map[string]any{"name": secret}}
+	}
+	return obj("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "org-lab", name, nil, spec)
+}
+
+func servingRequest(target dynamic.Interface) Request {
+	isvc := obj("serving.kserve.io/v1alpha2", "LLMInferenceService", "model-serving", "qwen3", map[string]any{"app.kubernetes.io/managed-by": "model-manager"}, map[string]any{"model": map[string]any{"name": "qwen3"}})
+	return Request{
+		Namespace: "model-serving", Write: []*unstructured.Unstructured{isvc},
+		Cluster: &Cluster{Name: "wc", Dynamic: func(context.Context) dynamic.Interface { return target }},
+		Also:    []Part{{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3")}}},
+		Verb:    "serve", Subject: "qwen3", Tool: "load_model", Summary: "Serves qwen3",
+	}
+}
+
+// TestCommitOnARemoteTarget resolves the serving part on the target — its
+// namespace read there, the Kustomization applying through the target's
+// kubeconfig Secret — and the ModelConfig on model-manager's own cluster:
+// two repositories, two pull requests.
+func TestCommitOnARemoteTarget(t *testing.T) {
+	local, target := remoteClusters(wcKustomization("wc-out-of-band", "wc-kubeconfig"), wcKustomization("mc-apps", ""), wcKustomization("other-wc", "other-kubeconfig"))
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("resources: []\n")})
+	fake.AddBranch(fleet, "main", map[string][]byte{"clusters/wc/wc-out-of-band/kustomization.yaml": []byte("resources: []\n")})
+	c := committer(local, fake)
+
+	dry := servingRequest(target)
+	dry.DryRun = true
+	plan, err := c.Commit(asPerson(), dry)
+	require.NoError(t, err)
+	assert.Equal(t, "giantswarm/lab-fleet", plan.Repository)
+	assert.Equal(t, "clusters/wc/wc-out-of-band/model-manager", plan.Directory)
+	assert.Equal(t, "org-lab/wc-out-of-band", plan.Kustomization)
+	assert.Equal(t, "wc", plan.Cluster)
+	require.Len(t, plan.Also, 1)
+	assert.Equal(t, "giantswarm/lab-gitops", plan.Also[0].Repository)
+	assert.Equal(t, "platform/model-manager", plan.Also[0].Directory)
+	assert.Empty(t, plan.Also[0].Cluster)
+	assert.Empty(t, fake.PullRequests())
+
+	res, err := c.Commit(asPerson(), servingRequest(target))
+	require.NoError(t, err)
+	require.NotEmpty(t, res.PullRequest)
+	require.NotEmpty(t, res.Also[0].PullRequest)
+	assert.NotEqual(t, res.PullRequest, res.Also[0].PullRequest)
+	assert.Len(t, fake.PullRequests(), 2)
+	assert.Contains(t, string(fake.Files(fleet, "model-manager/serve-qwen3")["clusters/wc/wc-out-of-band/model-manager/qwen3-llminferenceservice.yaml"]), "kind: LLMInferenceService")
+	assert.Contains(t, string(fake.Files(repo, "model-manager/serve-qwen3")["platform/model-manager/qwen3.yaml"]), "kind: ModelConfig")
+}
+
+func TestCommitOnARemoteTargetNeedsOneKustomizationApplyingThere(t *testing.T) {
+	for name, ks := range map[string][]runtime.Object{
+		"none":    {wcKustomization("mc-apps", "")},
+		"several": {wcKustomization("wc-a", "wc-kubeconfig"), wcKustomization("wc-b", "wc-kubeconfig")},
+	} {
+		local, target := remoteClusters(ks...)
+		fake := commit.NewFake()
+		_, err := committer(local, fake).Commit(asPerson(), servingRequest(target))
+		require.ErrorIs(t, err, backend.ErrInvalid, name)
+		assert.Contains(t, err.Error(), "wc-kubeconfig", name)
+		assert.Contains(t, err.Error(), "pass repository, branch and path", name)
+		assert.Empty(t, fake.PullRequests(), name)
+	}
+}
+
+func TestCommitOnARemoteTargetRefusesAKustomizationApplyingLocally(t *testing.T) {
+	local, _ := remoteClusters(wcKustomization("mc-apps", ""))
+	target := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{namespaceGVR: "NamespaceList"},
+		obj("v1", "Namespace", "", "model-serving", map[string]any{LabelKustomizeName: "mc-apps", LabelKustomizeNamespace: "org-lab"}, nil))
+	_, err := committer(local, commit.NewFake()).Commit(asPerson(), servingRequest(target))
+	require.ErrorIs(t, err, backend.ErrInvalid)
+	assert.Contains(t, err.Error(), "applies to model-manager's own cluster")
+}
