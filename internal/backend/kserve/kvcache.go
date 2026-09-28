@@ -412,6 +412,29 @@ type kvVerdict struct {
 	GPUMemory   int64
 	Utilization float64
 	GPUs        int64
+	// Unified: GPUMemory is the node's memory, which the GPU shares.
+	Unified bool
+}
+
+// judgeOn runs the check on one node's GPU. A GPU with memory of its own is
+// judged against its label; a unified-memory GPU (GPUs, no GPU memory
+// label: a GB10) against the node's memory capacity, the total vLLM profiles
+// against there — torch.cuda.mem_get_info reports the system memory as the
+// device's. Several GPUs sharing one node's memory are not judged: each would
+// claim its share of the same total.
+func (k *kvCheck) judgeOn(n nodeBudget) kvVerdict {
+	if n.GPUMemory > 0 || n.GPUCount == 0 {
+		return k.judge(n.GPUMemory, n.GPUProduct)
+	}
+	if n.GPUCount > 1 {
+		return kvVerdict{Skip: fmt.Sprintf("%d GPUs share the node's memory", n.GPUCount)}
+	}
+	if n.Capacity <= 0 {
+		return kvVerdict{Skip: "the unified-memory node reports no memory capacity"}
+	}
+	v := k.judge(n.Capacity, n.GPUProduct)
+	v.Unified = v.Skip == ""
+	return v
 }
 
 // judge runs the check against a GPU of gpuMemory bytes (product: the GPU's
@@ -530,8 +553,12 @@ func (v kvVerdict) clause() string {
 	if v.GPUs > 1 {
 		gpus = fmt.Sprintf("each of the %d", v.GPUs)
 	}
-	left := fmt.Sprintf("%s left on %s %s GPU at %s=%s beside the weights and vLLM's %s GiB reserve",
-		humanBytes(max(v.Available, 0)), gpus, humanBytes(v.GPUMemory), flagGPUMemoryUtilization, trimFloat2(v.Utilization), trimFloat2(vllmReserveGiB))
+	memory := fmt.Sprintf("%s %s GPU", gpus, humanBytes(v.GPUMemory))
+	if v.Unified {
+		memory = fmt.Sprintf("the node's %s unified memory", humanBytes(v.GPUMemory))
+	}
+	left := fmt.Sprintf("%s left on %s at %s=%s beside the weights and vLLM's %s GiB reserve",
+		humanBytes(max(v.Available, 0)), memory, flagGPUMemoryUtilization, trimFloat2(v.Utilization), trimFloat2(vllmReserveGiB))
 	if v.Fits {
 		return fmt.Sprintf("the KV cache of one %d-token sequence (%s) fits the %s", v.MaxModelLen, humanBytes(v.Need), left)
 	}

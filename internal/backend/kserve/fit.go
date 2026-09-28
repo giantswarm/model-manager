@@ -420,7 +420,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
 			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
 	}
-	applyKV(res, plan.KV.judge(best.GPUMemory, best.GPUProduct))
+	applyKV(res, plan.KV.judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
