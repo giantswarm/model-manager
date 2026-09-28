@@ -603,13 +603,9 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if reason := s.servingUnavailable(); reason != "" {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
 	}
+	req.Node, req.Nodes = oneCopy(placement, req.Node, req.Nodes)
 	fitReq := backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node, Placement: placement, Nodes: req.Nodes}
-	var plan *fitPlan
-	if placement == backend.PlacementSplit {
-		plan, err = b.splitCheck(ctx, fitReq, true)
-	} else {
-		plan, err = b.fitCheck(ctx, fitReq)
-	}
+	plan, err := b.placementCheck(ctx, fitReq, false)
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +641,27 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
 			nodes := b.servingNodes(ctx, existing, sv)
-			if other := unservedNode(req, nodes); other != "" {
+			other := unservedNode(req, nodes)
+			if other != "" && len(nodes) > 0 && placement == backend.PlacementCopies && sv.Placement == backend.PlacementCopies && sv.GitOps == nil {
+				// More nodes for a model served as copies: copies are added
+				// there (giantswarm/model-manager#194).
+				if !fit.Fits {
+					return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, fit.Reason)
+				}
+				obj, all, err := b.addCopies(ctx, existing, nodes, askedNodes(req), req.DryRun)
+				if err != nil {
+					return nil, err
+				}
+				res.ServingNodes = all
+				if req.DryRun {
+					res.Manifests = []*unstructured.Unstructured{obj}
+					return res, nil
+				}
+				b.log.Info("copies added", "name", sv.Name, "model", sv.Model, "nodes", strings.Join(all, ","))
+				b.inv.invalidate()
+				return res, nil
+			}
+			if other != "" {
 				if len(nodes) == 0 {
 					return nil, fmt.Errorf("%w: %s already serves and has no node yet; to serve it on %s, stop it first", backend.ErrConflict, sv.Name, other)
 				}
@@ -661,10 +677,13 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
 	obj := b.composeLLM(plan.Preset, s, req.Node)
-	if placement == backend.PlacementSplit {
+	switch {
+	case placement == backend.PlacementSplit:
 		link, _ := s.fastLinkOf(fit.Nodes[0])
 		link.Nodes = fit.Nodes
 		obj = b.composeSplit(plan.Preset, s, link, b.templateImage(ctx, s))
+	case len(req.Nodes) > 1:
+		applyCopies(obj, req.Nodes)
 	}
 	if req.DryRun {
 		res.Manifests = []*unstructured.Unstructured{obj}
@@ -917,12 +936,8 @@ func (b *Backend) FitCheck(ctx context.Context, req backend.FitRequest) (*backen
 		return nil, err
 	}
 	req.Placement = placement
-	var plan *fitPlan
-	if placement == backend.PlacementSplit {
-		plan, err = b.splitCheck(ctx, req, true)
-	} else {
-		plan, err = b.fitCheck(ctx, req)
-	}
+	req.Node, req.Nodes = oneCopy(placement, req.Node, req.Nodes)
+	plan, err := b.placementCheck(ctx, req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -932,6 +947,32 @@ func (b *Backend) FitCheck(ctx context.Context, req backend.FitRequest) (*backen
 	}
 	b.recommend(ctx, &res, req)
 	return &res, nil
+}
+
+// placementCheck is the fit check of a placement: a split's, else the
+// copies'; verdicts adds each node's verdict of one copy to a check that
+// names no node (check_fit, not load_model).
+func (b *Backend) placementCheck(ctx context.Context, req backend.FitRequest, verdicts bool) (*fitPlan, error) {
+	if req.Placement == backend.PlacementSplit {
+		return b.splitCheck(ctx, req, true)
+	}
+	return b.copiesCheck(ctx, req, true, verdicts)
+}
+
+// oneCopy normalizes a request for copies on one node to the node pin.
+func oneCopy(placement, node string, nodes []string) (string, []string) {
+	if placement == backend.PlacementCopies && len(nodes) == 1 && (node == "" || node == nodes[0]) {
+		return nodes[0], nil
+	}
+	return node, nodes
+}
+
+// askedNodes are the nodes a load request names: its copies', else its pin.
+func askedNodes(req backend.LoadRequest) []string {
+	if len(req.Nodes) > 0 {
+		return req.Nodes
+	}
+	return []string{req.Node}
 }
 
 // ListNodes implements backend.NodeLister: the accelerator nodes, each with

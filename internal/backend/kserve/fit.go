@@ -606,7 +606,8 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 }
 
 // reservedByNode sums what the running LLMInferenceServices need per node, from
-// their presets: the weights and overhead, and on a unified-memory node — GPUs
+// their presets: the weights and overhead — a copy's in full on each of its
+// nodes, a split's share on each of its — and on a unified-memory node — GPUs
 // that report no memory of their own, the node's memory being theirs — at
 // least the share vLLM claims at start, --gpu-memory-utilization of the
 // node's budget, whatever the requests say. The preset being (re)loaded is not
@@ -623,11 +624,18 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 		return out, own
 	}
 	for _, sv := range servedList {
-		if sv.Node == "" || sv.Deleting {
+		on := sv.onNodes()
+		if len(on) == 0 || sv.Deleting {
 			continue
 		}
+		parts := int64(1)
+		if sv.Placement == backend.PlacementSplit {
+			parts = int64(len(on))
+		}
 		if loading != nil && sv.Name == loading.name() {
-			own[sv.Node] += presetReserve(loading, byName[sv.Node], b.opts.DefaultOverheadGiB)
+			for _, n := range on {
+				own[n] += presetShare(loading, byName[n], b.opts.DefaultOverheadGiB, parts)
+			}
 			continue
 		}
 		p, ok := idx.byName[sv.Preset]
@@ -639,7 +647,9 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 		if p == nil {
 			continue
 		}
-		out[sv.Node] += presetReserve(p, byName[sv.Node], b.opts.DefaultOverheadGiB)
+		for _, n := range on {
+			out[n] += presetShare(p, byName[n], b.opts.DefaultOverheadGiB, parts)
+		}
 	}
 	return out, own
 }
@@ -648,7 +658,13 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 // overhead, or on a unified-memory GPU node (GPUs, no GPU memory label) the
 // share of the node's budget vLLM claims at start, whichever is larger.
 func presetReserve(p *servingPreset, n nodeBudget, defaultOverheadGiB float64) int64 {
-	need := p.weightsBytes() + p.overheadBytes(defaultOverheadGiB)
+	return presetShare(p, n, defaultOverheadGiB, 1)
+}
+
+// presetShare is presetReserve for one of parts nodes a split spreads the
+// weights over: its share of the weights beside the whole overhead.
+func presetShare(p *servingPreset, n nodeBudget, defaultOverheadGiB float64, parts int64) int64 {
+	need := ceilDiv(p.weightsBytes(), max(parts, 1)) + p.overheadBytes(defaultOverheadGiB)
 	if n.GPUCount > 0 && n.GPUMemory == 0 && n.Budget > 0 {
 		need = max(need, int64(p.utilization()*float64(n.Budget)))
 	}

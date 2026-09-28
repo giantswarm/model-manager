@@ -31,7 +31,8 @@ import (
 const (
 	// PlacementAnnotation and NodesAnnotation record how model-manager
 	// placed a model on its LLMInferenceService: the placement and, for a
-	// split, its nodes in rank order (comma-separated).
+	// split, its nodes in rank order, for copies on several nodes, the
+	// nodes (comma-separated).
 	PlacementAnnotation = "model-manager.giantswarm.io/placement"
 	NodesAnnotation     = "model-manager.giantswarm.io/nodes"
 
@@ -48,29 +49,26 @@ const (
 )
 
 // validatePlacement checks the placement of a request and returns it
-// normalized: "" is copies.
+// normalized: "" is copies. No node may be named twice.
 func validatePlacement(placement string, nodes []string) (string, error) {
-	switch p := strings.TrimSpace(placement); p {
-	case "", backend.PlacementCopies:
-		if len(nodes) > 1 {
-			return "", fmt.Errorf("%w: copies on several nodes are not available yet; serve on one node or split across a fast link", backend.ErrInvalid)
-		}
-		return backend.PlacementCopies, nil
-	case backend.PlacementSplit:
-		seen := map[string]bool{}
-		for _, n := range nodes {
-			if seen[n] {
-				return "", fmt.Errorf("%w: node %s is named twice", backend.ErrInvalid, n)
-			}
-			seen[n] = true
-		}
-		if len(nodes) == 1 {
-			return "", fmt.Errorf("%w: a split needs two or more nodes", backend.ErrInvalid)
-		}
-		return p, nil
-	default:
+	p := strings.TrimSpace(placement)
+	if p == "" {
+		p = backend.PlacementCopies
+	}
+	if p != backend.PlacementCopies && p != backend.PlacementSplit {
 		return "", fmt.Errorf("%w: placement %q: want %s or %s", backend.ErrInvalid, placement, backend.PlacementSplit, backend.PlacementCopies)
 	}
+	seen := map[string]bool{}
+	for _, n := range nodes {
+		if seen[n] {
+			return "", fmt.Errorf("%w: node %s is named twice", backend.ErrInvalid, n)
+		}
+		seen[n] = true
+	}
+	if p == backend.PlacementSplit && len(nodes) == 1 {
+		return "", fmt.Errorf("%w: a split needs two or more nodes", backend.ErrInvalid)
+	}
+	return p, nil
 }
 
 // fastLinkOf returns the fast link a node belongs to.
@@ -346,7 +344,7 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 	if len(ns) == 0 {
 		delete(worker, "nodeSelector")
 	}
-	worker["affinity"] = workerAffinity(obj.GetName(), nodes[1:])
+	worker["affinity"] = pinnedAffinity(obj.GetName(), workerComponent, nodes[1:])
 
 	spec["worker"] = worker
 	spec["parallelism"] = map[string]any{"data": int64(len(nodes)), "dataLocal": int64(1)}
@@ -408,9 +406,10 @@ func splitSecurityContext() map[string]any {
 	}
 }
 
-// workerAffinity pins a split's workers to their nodes, one per node: the
-// nodes by hostname, and no two workers of the object on one node.
-func workerAffinity(name string, nodes []string) map[string]any {
+// pinnedAffinity pins an object's pods of one component — a split's workers,
+// the copies — to their nodes, one per node: the nodes by hostname, and no
+// two of those pods on one node.
+func pinnedAffinity(name, component string, nodes []string) map[string]any {
 	return map[string]any{
 		"nodeAffinity": map[string]any{
 			"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
@@ -425,7 +424,7 @@ func workerAffinity(name string, nodes []string) map[string]any {
 			"requiredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{
 				"topologyKey": labelHostname,
 				"labelSelector": map[string]any{"matchLabels": map[string]any{
-					"app.kubernetes.io/name": name, "app.kubernetes.io/component": "llminferenceservice-workload-worker",
+					"app.kubernetes.io/name": name, "app.kubernetes.io/component": component,
 				}},
 			}},
 		},
@@ -457,11 +456,13 @@ func (b *Backend) templateImage(ctx context.Context, s settings) string {
 }
 
 // servedPlacement reads the placement model-manager recorded on an object:
-// its placement and, for a split, its nodes; copies for an object without.
+// its placement and its nodes (a split's in rank order, the copies'); copies
+// without nodes for an object without.
 func servedPlacement(obj *unstructured.Unstructured) (string, []string) {
 	a := obj.GetAnnotations()
-	if a[PlacementAnnotation] != backend.PlacementSplit {
-		return backend.PlacementCopies, nil
+	placement := backend.PlacementCopies
+	if a[PlacementAnnotation] == backend.PlacementSplit {
+		placement = backend.PlacementSplit
 	}
 	var nodes []string
 	for _, n := range strings.Split(a[NodesAnnotation], ",") {
@@ -469,7 +470,7 @@ func servedPlacement(obj *unstructured.Unstructured) (string, []string) {
 			nodes = append(nodes, n)
 		}
 	}
-	return backend.PlacementSplit, nodes
+	return placement, nodes
 }
 
 func templateMain(tpl map[string]any) map[string]any {

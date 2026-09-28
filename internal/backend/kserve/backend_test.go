@@ -1089,10 +1089,11 @@ func TestServeAnAlreadyServedPreset(t *testing.T) {
 		assert.Equal(t, []string{testGPUNode}, res.ServingNodes, "the node the object is pinned to")
 	}
 
-	// Pinned to another node: a conflict naming both, never a success.
+	// Pinned to another node: a copy there (copies_test.go), judged like
+	// any — never a success on a node that cannot host it.
 	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
-	assert.ErrorIs(t, err, backend.ErrConflict)
-	assert.ErrorContains(t, err, "tiny already serves on "+testGPUNode+", not on gpu2; stop it first")
+	assert.ErrorIs(t, err, backend.ErrUnfit)
+	assert.ErrorContains(t, err, `node "gpu2" not found`)
 
 	// Unpinned, the node is its predictor pod's.
 	require.NoError(t, f.b.Unload(ctx, tinyRepo))
@@ -1116,7 +1117,7 @@ func TestServeAnAlreadyServedPreset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{testGPUNode}, res.ServingNodes)
 	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
-	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorIs(t, err, backend.ErrUnfit)
 
 	// Stopping: neither "already serving" nor a new object.
 	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
