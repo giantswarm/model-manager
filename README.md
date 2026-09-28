@@ -858,7 +858,7 @@ a removal of an object that was written live, and a Kustomization whose
 
 Commit mode needs the person's GitHub authority. The chart's `github.enabled`
 registers model-manager with muster pinned to its own user-to-server GitHub
-App `giantswarm-model-manager` (`--github-authorization-server`), with
+App `model-manager` (`--github-authorization-server`), with
 `auth.forwardIdentity: true`: muster runs the App's consent once per person
 and puts their App user token on every call as the bearer. model-manager
 verifies it with `GET /user` and opens the pull request with it. The person's

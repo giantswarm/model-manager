@@ -17,7 +17,7 @@ import (
 
 // GitHubPin makes the MCP endpoint the App-pinned registration muster
 // connects with (MCPServer auth.authorizationServer pinned to the App
-// giantswarm-model-manager, auth.forwardIdentity: true): the bearer is the
+// model-manager, auth.forwardIdentity: true): the bearer is the
 // person's user token of the App, verified with GET /user and kept for commit
 // mode's pull request, and the person's IdP ID token arrives in
 // ForwardedIdentityHeader. That token then goes through the same validation
@@ -25,7 +25,7 @@ import (
 // the pin, so apply mode is unchanged.
 type GitHubPin struct {
 	// AuthorizationServer is the App's issuer identity muster pins,
-	// https://github.com/apps/giantswarm-model-manager: named in the
+	// https://github.com/apps/model-manager: named in the
 	// refusals.
 	AuthorizationServer string
 	// APIURL is the API base URL GET /user goes to (empty: api.github.com).

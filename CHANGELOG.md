@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The GitHub App commit mode pins to is `model-manager`, not `giantswarm-model-manager`: model-manager is part of the agent platform, and the `giantswarm-` prefix is kept for Giant Swarm-internal managers. The chart defaults `github.authorizationServer.issuer` to `https://github.com/apps/model-manager` and `github.authorizationServer.clientCredentialsSecretRef.name` to `model-manager-oauth-client`. No installation has `github.enabled` on yet.
+
 ### Added
 
 - Every write tool takes `dryRun`: `pull_model`, `load_model`, `unload_model`, `delete_model` and `cancel_job` answer the plan (present and loaded state, keep-alive, the kserve fit verdict, the serving object a load would create or an unload delete, the ModelConfig the call would wire or unwire, the job) and change nothing.

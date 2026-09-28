@@ -40,7 +40,7 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 	idp := newFakeIdP(t)
 	gh, calls := fakeGitHub(t, "ghu_person", "jane")
 	cfg := idp.config(true)
-	cfg.GitHub = &GitHubPin{AuthorizationServer: "https://github.com/apps/giantswarm-model-manager", APIURL: gh.URL}
+	cfg.GitHub = &GitHubPin{AuthorizationServer: "https://github.com/apps/model-manager", APIURL: gh.URL}
 	o, err := newOAuth(cfg, "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
@@ -105,5 +105,5 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 func TestGitHubPinValidation(t *testing.T) {
 	assert.Error(t, GitHubPin{}.Validate())
 	assert.Error(t, GitHubPin{AuthorizationServer: "github.com/apps/x"}.Validate())
-	assert.NoError(t, GitHubPin{AuthorizationServer: "https://github.com/apps/giantswarm-model-manager"}.Validate())
+	assert.NoError(t, GitHubPin{AuthorizationServer: "https://github.com/apps/model-manager"}.Validate())
 }

@@ -9,7 +9,7 @@ id_token (forwardToken), which this server validates against its trusted
 audiences (oauth.trustedAudiences plus the requiredAudiences below), and
 requests the requiredAudiences at login. Without OAuth muster connects
 anonymously. With github.enabled the auth pins the GitHub App
-giantswarm-model-manager instead: the bearer is the person's App user token
+model-manager instead: the bearer is the person's App user token
 (commit mode's pull request) and forwardIdentity puts the ID token in
 X-Muster-Id-Token next to it.
 */}}
