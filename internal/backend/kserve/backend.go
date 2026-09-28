@@ -630,6 +630,11 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if err != nil {
 		return nil, err
 	}
+	if existing != nil && existing.GetDeletionTimestamp() != nil {
+		// A stop still in progress: answering "already serving" would promise
+		// a model that is about to be gone, and creating now would collide.
+		return nil, fmt.Errorf("%w: %s is stopping; serve it again once it is gone", backend.ErrConflict, existing.GetName())
+	}
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {

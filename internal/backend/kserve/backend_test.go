@@ -1117,4 +1117,16 @@ func TestServeAnAlreadyServedPreset(t *testing.T) {
 	assert.Equal(t, []string{testGPUNode}, res.ServingNodes)
 	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
 	assert.ErrorIs(t, err, backend.ErrConflict)
+
+	// Stopping: neither "already serving" nor a new object.
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
+	obj, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
+	require.NoError(t, err)
+	now := metav1.Now()
+	obj.SetDeletionTimestamp(&now)
+	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny is stopping; serve it again once it is gone")
 }
