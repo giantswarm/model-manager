@@ -16,6 +16,9 @@ const (
 	weightsSourceShards = "safetensors-shards"
 	weightsSourceTree   = "tree"
 	weightsSourcePreset = "preset"
+	// weightsSourceModelImage: the weights label of the model image a preset
+	// is served from (giantswarm/model-manager#189).
+	weightsSourceModelImage = "model-image"
 	// budgetSourcePoolScaleFromZero marks a fit answered without a node: the
 	// GPU pool (spec.gpuPool.nodeSelector) has no node yet and scales from
 	// zero once a predictor is pending, so the fit is against the pool, not
@@ -38,6 +41,13 @@ type fitPlan struct {
 	CacheLocal bool
 	// KV is the KV cache check the placement runs on each GPU it judges.
 	KV *kvCheck
+	// Image is the model image of a preset served from one, as its registry
+	// described it; nil for every other model, or when it did not answer.
+	Image *modelImage
+	// Nodes are the nodes the placement judged; Own is what the preset
+	// itself already holds on the nodes it serves on.
+	Nodes []nodeBudget
+	Own   map[string]int64
 }
 
 // fitCheck sizes a model (hub, falling back to the preset) and compares
@@ -71,7 +81,7 @@ func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, 
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
 		return err
 	}
-	if note != "" {
+	if note = joinNotes(note, placementNote(plan)); note != "" {
 		plan.Result.Reason += "; " + note
 	}
 	return nil
@@ -130,6 +140,9 @@ func (b *Backend) resolveFit(ctx context.Context, req backend.FitRequest) (*fitP
 // in for the hub or the image's size could not be read.
 func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) {
 	res, p, repo := &plan.Result, plan.Preset, plan.Repo
+	if p != nil && !p.storesInCache() {
+		return b.sizeModelImage(ctx, plan)
+	}
 	// Bounded on the caller's context: a hub whose packets an egress policy
 	// drops must leave the fallback time to answer within the caller's
 	// meta-tool deadline (giantswarm/model-manager#88).
@@ -177,16 +190,43 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 	if res.WeightsBytes <= 0 {
 		return "", fmt.Errorf("%w: cannot determine the weight size of %s (no safetensors index, no weight files, no preset)", backend.ErrInvalid, repo)
 	}
-	if p != nil && !p.storesInCache() {
-		res.DownloadBytes = 0
-		size, err := modelImageBytes(hctx, p.Spec.Model.StorageURI)
-		if err != nil {
-			b.log.Warn("reading the model image's size failed", "model", repo, "image", p.Spec.Model.StorageURI, "error", err)
-			note = joinNotes(note, "the download size is unknown: "+err.Error())
-		} else {
-			res.DownloadBytes = size
-		}
+	b.addOverhead(res, p)
+	return note, nil
+}
+
+// sizeModelImage sizes a preset served from an OCI model image from the
+// image alone (giantswarm/model-manager#189): the weights from its label,
+// else the preset's requirements; the download from its layers; the KV cache
+// layout from the config.json it carries (kvCheckFor). The Hub is not where
+// its weights come from and is not asked. A registry that does not answer
+// leaves the download unknown and the preset's numbers standing, and says so.
+func (b *Backend) sizeModelImage(ctx context.Context, plan *fitPlan) (string, error) {
+	res, p := &plan.Result, plan.Preset
+	ictx, _, cancel := b.hubContext(ctx)
+	defer cancel()
+	var note string
+	img, err := b.modelImage(ictx, p.Spec.Model.StorageURI)
+	if err != nil {
+		b.log.Warn("reading the model image failed", "model", plan.Repo, "image", p.Spec.Model.StorageURI, "error", err)
+		note = "the download size is unknown: " + err.Error()
+	} else {
+		plan.Image = &img
+		res.DownloadBytes = img.Bytes
 	}
+	res.WeightsBytes, res.WeightsSource = p.weightsBytes(), weightsSourcePreset
+	if img.WeightsBytes > 0 {
+		res.WeightsBytes, res.WeightsSource = img.WeightsBytes, weightsSourceModelImage
+	}
+	if res.WeightsBytes <= 0 {
+		return "", fmt.Errorf("%w: cannot determine the weight size of %s (the model image %s carries no weights label and the preset declares no requirements.weightsGiB)", backend.ErrInvalid, plan.Repo, p.Spec.Model.StorageURI)
+	}
+	b.addOverhead(res, p)
+	return note, nil
+}
+
+// addOverhead completes a sized answer: the preset's declared weights and
+// overhead (the default without a preset) and the sum required.
+func (b *Backend) addOverhead(res *backend.FitResult, p *servingPreset) {
 	if p != nil {
 		res.DeclaredWeightsBytes = p.weightsBytes()
 		res.OverheadBytes = p.overheadBytes(b.opts.DefaultOverheadGiB)
@@ -194,7 +234,39 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		res.OverheadBytes = gibToBytes(b.opts.DefaultOverheadGiB)
 	}
 	res.RequiredBytes = res.WeightsBytes + res.OverheadBytes
-	return note, nil
+}
+
+// placementNote completes a placed answer with what the nodes say beyond
+// the budget: which nodes already hold the model image of a preset served
+// from one — nothing to download when the model goes to one of them — and
+// where the preset already serves, holding what (giantswarm/model-manager#189).
+func placementNote(plan *fitPlan) string {
+	res, p := &plan.Result, plan.Preset
+	var notes []string
+	if p != nil && !p.storesInCache() {
+		res.PrePulledNodes = nil
+		for _, n := range plan.Nodes {
+			if imageOnNode(p.Spec.Model.StorageURI, n.Images) {
+				res.PrePulledNodes = append(res.PrePulledNodes, n.Name)
+			}
+		}
+		switch {
+		case res.Node != "" && containsString(res.PrePulledNodes, res.Node):
+			res.DownloadBytes = 0
+			notes = append(notes, "served from the model image, pre-pulled on "+strings.Join(res.PrePulledNodes, ", "))
+		case len(res.PrePulledNodes) > 0:
+			notes = append(notes, "the model image is pre-pulled on "+strings.Join(res.PrePulledNodes, ", ")+", not on the node it goes to")
+		}
+	}
+	res.ServingNodes = nil
+	for node := range plan.Own {
+		res.ServingNodes = append(res.ServingNodes, node)
+	}
+	sort.Strings(res.ServingNodes)
+	for _, node := range res.ServingNodes {
+		notes = append(notes, fmt.Sprintf("%s already serves on %s, holding %s there (left out of this answer: serving it again is a no-op)", p.name(), node, humanBytes(plan.Own[node])))
+	}
+	return joinNotes(notes...)
 }
 
 // hubContext bounds the hub lookups of one call (fit check, search) by
@@ -261,7 +333,8 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved := b.reservedByNode(ctx, idx, p, nodes)
+	reserved, own := b.reservedByNode(ctx, idx, p, nodes)
+	plan.Nodes, plan.Own = nodes, own
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
 		// The discovery document appeared, or named the GPU pool, since the
@@ -271,6 +344,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		if nodes, err = b.nodes(ctx, loc, p); err != nil {
 			return err
 		}
+		plan.Nodes = nodes
 		candidates, why = b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	}
 	if len(candidates) == 0 {
@@ -536,9 +610,9 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 // that report no memory of their own, the node's memory being theirs — at
 // least the share vLLM claims at start, --gpu-memory-utilization of the
 // node's budget, whatever the requests say. The preset being (re)loaded is not
-// counted against itself.
-func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) map[string]int64 {
-	out := map[string]int64{}
+// counted against itself: what it holds is own, per node it serves on.
+func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) (reserved, own map[string]int64) {
+	out, own := map[string]int64{}, map[string]int64{}
 	byName := make(map[string]nodeBudget, len(nodes))
 	for _, n := range nodes {
 		byName[n.Name] = n
@@ -546,13 +620,14 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 	servedList, err := b.listServed(ctx)
 	if err != nil {
 		b.log.Warn("listing LLMInferenceServices for the fit check failed", "error", err)
-		return out
+		return out, own
 	}
 	for _, sv := range servedList {
 		if sv.Node == "" || sv.Deleting {
 			continue
 		}
 		if loading != nil && sv.Name == loading.name() {
+			own[sv.Node] += presetReserve(loading, byName[sv.Node], b.opts.DefaultOverheadGiB)
 			continue
 		}
 		p, ok := idx.byName[sv.Preset]
@@ -566,7 +641,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 		}
 		out[sv.Node] += presetReserve(p, byName[sv.Node], b.opts.DefaultOverheadGiB)
 	}
-	return out
+	return out, own
 }
 
 // presetReserve is what one served preset holds on its node: its weights and

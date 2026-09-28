@@ -141,7 +141,8 @@ func (b *Backend) placeSplit(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved := b.reservedByNode(ctx, idx, p, nodes)
+	reserved, own := b.reservedByNode(ctx, idx, p, nodes)
+	plan.Nodes, plan.Own = nodes, own
 	var refusals []string
 	for _, link := range links {
 		v := b.judgeSplit(ctx, plan, link, nodes, reserved, loc, forServe)
@@ -302,7 +303,7 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 	if err := b.placeSplit(ctx, plan, idx, req, forServe); err != nil {
 		return nil, err
 	}
-	if note != "" {
+	if note = joinNotes(note, placementNote(plan)); note != "" {
 		plan.Result.Reason += "; " + note
 	}
 	return plan, nil
