@@ -64,13 +64,17 @@ const (
 // per token: K and V of Heads × HeadDim each, or for multi-head latent
 // attention (MLA) one latent of Latent elements that every GPU holds whole.
 // Window is the sliding window of a sliding-attention layer, 0 for a layer
-// that holds the whole context.
+// that holds the whole context. A latent of TokensPerState > 1 is stored once
+// per that many tokens (a compressed sparse-attention index); ElemBytes > 0
+// is a dtype of its own rather than the KV cache's.
 type kvLayers struct {
-	Count   int64
-	Heads   int64
-	HeadDim int64
-	Latent  int64
-	Window  int64
+	Count          int64
+	Heads          int64
+	HeadDim        int64
+	Latent         int64
+	Window         int64
+	TokensPerState int64
+	ElemBytes      int64
 }
 
 // kvLayout is what the KV cache of a checkpoint holds: its layers with
@@ -102,6 +106,9 @@ type hfTextConfig struct {
 	KVLoraRank             *int64   `json:"kv_lora_rank"`
 	QKRopeHeadDim          int64    `json:"qk_rope_head_dim"`
 	HybridOverridePattern  string   `json:"hybrid_override_pattern"`
+	IndexerKVHeads         int64    `json:"indexer_kv_heads"`
+	IndexerHeadDim         int64    `json:"indexer_head_dim"`
+	IndexerCompressRatio   int64    `json:"indexer_compress_ratio"`
 	DType                  string   `json:"dtype"`
 	TorchDType             string   `json:"torch_dtype"`
 }
@@ -116,14 +123,15 @@ type hfConfig struct {
 // cache the layout reads from config.json, by how their layers are declared:
 // every layer full attention, the layer_types list (full, sliding, and
 // layers without growing state), MLA, or Nemotron-H's
-// hybrid_override_pattern. Any other architecture is not guessed at.
+// hybrid_override_pattern; Qwen4-Exp's full layers add a compressed sparse
+// attention index. Any other architecture is not guessed at.
 var kvModelTypes = map[string]bool{
 	"llama": true, "mistral": true, "mixtral": true, "ministral": true,
 	"qwen2": true, "qwen2_moe": true, "qwen3": true, "qwen3_moe": true, "qwen3_vl_text": true, "qwen3_vl_moe_text": true,
-	"qwen3_next": true, "qwen3_5_text": true, "qwen3_5_moe_text": true,
+	"qwen3_next": true, "qwen3_5_text": true, "qwen3_5_moe_text": true, "qwen4_exp_text": true,
 	"phi3": true, "granite": true, "granitemoe": true, "granitemoehybrid": true,
 	"glm4": true, "glm4_moe": true, "olmo2": true, "olmo3": true,
-	"gemma2": true, "gemma3_text": true, "gemma4_text": true, "cohere2": true,
+	"gemma2": true, "gemma3_text": true, "gemma4_text": true, "gemma4_unified_text": true, "cohere2": true,
 	"gpt_oss": true, "deepseek_v2": true, "deepseek_v3": true, "kimi_k2": true,
 	"nemotron_h": true, "lfm2": true,
 }
@@ -206,8 +214,20 @@ func kvLayersOf(tc hfTextConfig) ([]kvLayers, error) {
 	default:
 		full.Count = owning
 	}
+	// Qwen4-Exp's sparse attention (QSA) keeps beside each full layer's KV
+	// one normed index key per indexer_compress_ratio tokens, in bf16 unless
+	// the attention config asks for fp8 (QSACompressedKeyCache); the ring of
+	// raw keys still being compressed is one block per request and not
+	// counted.
+	layers := []kvLayers{full, sliding}
+	if tc.IndexerHeadDim > 0 {
+		if tc.IndexerKVHeads <= 0 || tc.IndexerCompressRatio <= 0 {
+			return nil, errors.New("config.json names a sparse-attention indexer without indexer_kv_heads or indexer_compress_ratio")
+		}
+		layers = append(layers, kvLayers{Count: full.Count, Latent: tc.IndexerKVHeads * tc.IndexerHeadDim, TokensPerState: tc.IndexerCompressRatio, ElemBytes: 2})
+	}
 	var out []kvLayers
-	for _, l := range []kvLayers{full, sliding} {
+	for _, l := range layers {
 		if l.Count > 0 {
 			out = append(out, l)
 		}
@@ -443,7 +463,9 @@ func (k *kvCheck) judge(gpuMemory int64, product string) kvVerdict {
 // maxLen tokens: a full-attention layer holds the whole sequence, a
 // sliding-window layer the window and one prefill chunk, in blocks
 // (FullAttentionSpec, SlidingWindowSpec); tensor parallelism splits the KV
-// heads, never below one per GPU, and leaves an MLA latent whole.
+// heads, never below one per GPU, and leaves an MLA latent whole; a latent
+// stored once per TokensPerState tokens fills a block with that many fewer
+// states (MLAAttentionSpec's tokens_per_state).
 func (k *kvCheck) needBytes(maxLen, batched, dtypeBytes int64) int64 {
 	a := k.Args
 	if !a.ChunkedPrefill {
@@ -451,15 +473,19 @@ func (k *kvCheck) needBytes(maxLen, batched, dtypeBytes int64) int64 {
 	}
 	var total int64
 	for _, l := range k.Layout.Layers {
-		perToken := l.Latent * dtypeBytes
+		elem := dtypeBytes
+		if l.ElemBytes > 0 {
+			elem = l.ElemBytes
+		}
+		perState := l.Latent * elem
 		if l.Latent == 0 {
-			perToken = 2 * max(l.Heads/a.TensorParallel, 1) * l.HeadDim * dtypeBytes
+			perState = 2 * max(l.Heads/a.TensorParallel, 1) * l.HeadDim * elem
 		}
 		blocks := ceilDiv(maxLen, a.BlockSize)
 		if l.Window > 0 {
 			blocks = ceilDiv(min(l.Window-1+batched, maxLen), a.BlockSize) + 1
 		}
-		total += l.Count * blocks * a.BlockSize * perToken
+		total += l.Count * blocks * (a.BlockSize / max(l.TokensPerState, 1)) * perState
 	}
 	return total
 }

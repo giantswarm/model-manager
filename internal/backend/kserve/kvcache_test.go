@@ -15,9 +15,13 @@ import (
 // The checkpoints' own config.json files (testdata/kvcache): Gemma 4 31B
 // (RedHatAI's FP8-dynamic repack, the text config nested, sliding and full
 // layers with their own heads), gpt-oss-20b (sliding and full, no dtype),
-// DeepSeek-V3 (MLA), Qwen3.5 9B (linear and full attention) and Nemotron 3
+// DeepSeek-V3 (MLA), Qwen3.5 9B (linear and full attention), Nemotron 3
 // Super (Mamba, MoE and attention in a pattern, a ModelOpt FP8 KV cache;
-// trimmed to the fields read).
+// trimmed to the fields read), and the two model-image presets' checkpoints
+// at their pinned revisions: Gemma 4 12B QAT (Gemma 4's unified multimodal
+// variant) and Qwen3.8-Flash-Next (Qwen4-Exp: linear and full attention with
+// a sparse-attention index; the vision config and the quantization's layer
+// lists trimmed).
 //
 //go:embed testdata/kvcache/*.json
 var kvConfigs embed.FS
@@ -66,6 +70,42 @@ func TestKVLayoutOfTheCheckpoints(t *testing.T) {
 	nemotron := readKVLayout(t, "nemotron-3-super-nvfp4.json")
 	assert.Equal(t, []kvLayers{{Count: 8, Heads: 2, HeadDim: 128}}, nemotron.Layers, "the attention layers of the hybrid pattern")
 	assert.Equal(t, kvCacheDTypeFP8, nemotron.CheckpointCache, "ModelOpt's 8-bit float KV scheme is vLLM's fp8 for auto")
+
+	gemma12 := readKVLayout(t, "gemma-4-12b-it-qat-w4a16.json")
+	assert.Equal(t, "bfloat16", gemma12.DType)
+	assert.Empty(t, gemma12.CheckpointCache, "compressed-tensors without a KV cache scheme")
+	assert.Equal(t, []kvLayers{{Count: 8, Heads: 1, HeadDim: 512}, {Count: 40, Heads: 8, HeadDim: 256, Window: 1024}}, gemma12.Layers,
+		"gemma4_unified_text is Gemma 4's text model: global heads on the full layers, the window on the sliding ones")
+
+	flashNext := readKVLayout(t, "qwen3-8-flash-next-nvfp4.json")
+	assert.Equal(t, "bfloat16", flashNext.DType)
+	assert.Empty(t, flashNext.CheckpointCache, "ModelOpt without a KV cache scheme")
+	assert.Equal(t, []kvLayers{{Count: 12, Heads: 2, HeadDim: 256}, {Count: 12, Latent: 128, TokensPerState: 4, ElemBytes: 2}}, flashNext.Layers,
+		"the 36 linear-attention layers hold no KV cache; each full layer adds a bf16 index key per 4 tokens")
+}
+
+// The model-image presets at their own vLLM arguments: Gemma 4 12B at 32k in
+// bf16 (the L4's batch default of 2048 tokens), Qwen3.8-Flash-Next at 262k
+// in fp8 — 3 GiB of KV for the 12 full layers and 192 MiB of sparse index.
+func TestKVCheckOfTheModelImagePresets(t *testing.T) {
+	for _, tc := range []struct {
+		fixture string
+		args    []string
+		batched int64
+		need    int64
+	}{
+		{"gemma-4-12b-it-qat-w4a16.json", []string{"--gpu-memory-utilization=0.90", "--max-model-len=32768", "--enable-chunked-prefill"}, vllmBatchedTokensDefault,
+			8*2048*16*(2*1*512*2) + 40*193*16*(2*8*256*2)},
+		{"qwen3-8-flash-next-nvfp4.json", []string{"--kv-cache-dtype=fp8", "--dtype=bfloat16", "--block-size=16", "--max-model-len=262144", "--max-num-batched-tokens=4096", "--gpu-memory-utilization=0.80"}, 4096,
+			12*16384*16*(2*2*256) + 12*16384*4*(128*2)},
+	} {
+		args, err := parseVLLMArgs(tc.args)
+		require.NoError(t, err)
+		k := &kvCheck{Layout: readKVLayout(t, tc.fixture), Args: args}
+		dtypeBytes, err := k.dtypeBytes()
+		require.NoError(t, err)
+		assert.Equal(t, tc.need, k.needBytes(args.MaxModelLen, tc.batched, dtypeBytes), tc.fixture)
+	}
 }
 
 func TestKVLayoutSaysWhatItCannotRead(t *testing.T) {
@@ -75,6 +115,7 @@ func TestKVLayoutSaysWhatItCannotRead(t *testing.T) {
 		"unknown layer type":                 `{"model_type":"gemma3_text","num_hidden_layers":2,"num_attention_heads":8,"num_key_value_heads":4,"head_dim":128,"sliding_window":512,"layer_types":["full_attention","chunked_attention"]}`,
 		"NVFP4 KV cache":                     `{"model_type":"llama","num_hidden_layers":2,"num_attention_heads":8,"head_dim":64,"quantization_config":{"quant_method":"modelopt","kv_cache_scheme":{"num_bits":4,"type":"float"}}}`,
 		"layer types of another layer count": `{"model_type":"gpt_oss","num_hidden_layers":3,"num_attention_heads":8,"head_dim":64,"sliding_window":128,"layer_types":["full_attention"]}`,
+		"indexer without a compress ratio":   `{"model_type":"qwen4_exp_text","num_hidden_layers":2,"num_attention_heads":8,"num_key_value_heads":2,"head_dim":256,"layer_types":["linear_attention","full_attention"],"indexer_kv_heads":1,"indexer_head_dim":128}`,
 	} {
 		_, err := parseKVLayout([]byte(cfg))
 		assert.Error(t, err, name)
