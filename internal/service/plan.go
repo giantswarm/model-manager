@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -253,20 +254,56 @@ func (s *Service) CommitLoad(ctx context.Context, opts LoadOptions, target gitop
 		return plan, nil
 	}
 	serving := plan.objects[0]
-	write := append([]*unstructured.Unstructured{}, plan.objects...)
-	if plan.Wiring != nil {
-		write = append(write, plan.Wiring.objects...)
-	}
-	plan.Commit, err = s.commit.Commit(ctx, gitops.Request{
-		Namespace: serving.GetNamespace(), Write: write, Target: target,
+	req := gitops.Request{
+		Namespace: serving.GetNamespace(), Target: target,
 		Verb: "serve", Subject: serving.GetName(), Tool: "load_model", DryRun: dryRun,
 		Summary: fmt.Sprintf("Serves the model `%s` as %s `%s/%s`, wired into kagent", plan.Model, serving.GetKind(), serving.GetNamespace(), serving.GetName()),
-	})
+	}
+	var wiring []*unstructured.Unstructured
+	if plan.Wiring != nil {
+		wiring = plan.Wiring.objects
+	}
+	if err := splitForTarget(&req, b, plan.objects, wiring, false); err != nil {
+		return nil, err
+	}
+	plan.Commit, err = s.commit.Commit(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	plan.Commit.LiveSteps = append(plan.Commit.LiveSteps, "the ModelConfig turns ready once the served model does; its entry on the platform's LLM endpoint follows with the next read of list_loaded_models")
 	return plan, nil
+}
+
+// splitForTarget puts a serving commit's objects into req: on a local
+// target the serving objects and their wiring share the serving namespace's
+// location; on a remote target the serving objects land on the target (its
+// namespace's provenance read there as the caller) and the wiring — the
+// ModelConfig and its Secret in the kagent namespace — on model-manager's
+// own cluster, a part of its own. remove says the objects go.
+func splitForTarget(req *gitops.Request, b backend.Backend, serving, wiring []*unstructured.Unstructured, remove bool) error {
+	put := func(objs []*unstructured.Unstructured) ([]*unstructured.Unstructured, []*unstructured.Unstructured) {
+		if remove {
+			return nil, objs
+		}
+		return objs, nil
+	}
+	t := backend.TargetOf(b)
+	if t == nil {
+		req.Write, req.Remove = put(append(slices.Clone(serving), wiring...))
+		return nil
+	}
+	client, ok := b.(backend.TargetClient)
+	if !ok {
+		return fmt.Errorf("%w: the backend on cluster %s offers no client of its target to read the serving namespace's provenance there", backend.ErrUnsupported, t.Cluster)
+	}
+	req.Cluster = &gitops.Cluster{Name: t.Cluster, Dynamic: client.TargetDynamic}
+	req.Write, req.Remove = put(serving)
+	if len(wiring) > 0 {
+		part := gitops.Part{Namespace: wiring[0].GetNamespace(), Owner: gitops.OwnerOf(wiring[0].GetLabels())}
+		part.Write, part.Remove = put(wiring)
+		req.Also = []gitops.Part{part}
+	}
+	return nil
 }
 
 // CommitUnload is unload_model in mode commit (kserve): the removing pull
@@ -283,16 +320,20 @@ func (s *Service) CommitUnload(ctx context.Context, name, ref string, target git
 	if _, ok := b.(backend.StopPlanner); !ok {
 		return nil, errCommitsOnKServe("unload_model", plan.Backend)
 	}
-	remove := append([]*unstructured.Unstructured{}, plan.objects...)
-	if plan.Wiring != nil {
-		remove = append(remove, plan.Wiring.objects...)
-	}
 	serving := plan.objects[0]
-	plan.Commit, err = s.commit.Commit(ctx, gitops.Request{
-		Namespace: serving.GetNamespace(), Remove: remove, Owner: gitops.OwnerOf(serving.GetLabels()), Target: target,
+	req := gitops.Request{
+		Namespace: serving.GetNamespace(), Owner: gitops.OwnerOf(serving.GetLabels()), Target: target,
 		Verb: "unserve", Subject: serving.GetName(), Tool: "unload_model", DryRun: dryRun,
 		Summary: fmt.Sprintf("Stops serving the model `%s`: removes %s `%s/%s` and its ModelConfig", plan.Model, serving.GetKind(), serving.GetNamespace(), serving.GetName()),
-	})
+	}
+	var wiring []*unstructured.Unstructured
+	if plan.Wiring != nil {
+		wiring = plan.Wiring.objects
+	}
+	if err := splitForTarget(&req, b, plan.objects, wiring, true); err != nil {
+		return nil, err
+	}
+	plan.Commit, err = s.commit.Commit(ctx, req)
 	if err != nil {
 		return nil, err
 	}

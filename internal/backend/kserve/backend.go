@@ -1029,6 +1029,10 @@ func (b *Backend) tokenConfigured(ctx context.Context) bool {
 	return b.hubToken(ctx) != ""
 }
 
+// TargetDynamic is the backend's client of its target as the caller
+// (backend.TargetClient).
+func (b *Backend) TargetDynamic(ctx context.Context) dynamic.Interface { return b.dynamic(ctx) }
+
 // Target is the cluster the backend acts on (backend.Targeter); nil for the
 // local cluster.
 func (b *Backend) Target() *backend.Target { return b.opts.Target.Identity() }

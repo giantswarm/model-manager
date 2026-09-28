@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 )
 
 // Name identifies a serving backend driver.
@@ -900,6 +901,13 @@ type Backend interface {
 // service stamps the target onto the models, nodes and presets it reports.
 type Targeter interface {
 	Target() *Target
+}
+
+// TargetClient is implemented by a backend on a remote target: its client of
+// the target as the caller, which reads a namespace's Flux provenance there
+// for commit mode.
+type TargetClient interface {
+	TargetDynamic(ctx context.Context) dynamic.Interface
 }
 
 // TargetOf returns b's target identity, nil when b has none.
