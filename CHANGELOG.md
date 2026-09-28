@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- kserve: a served model also answers under its preset name (`--served-model-name <id> publishers/<ns>/models/<id> <preset>` after the preset's arguments, on a split's leader too); a request naming the preset at the model's route or workload Service got `404 model does not exist`. The id stays first, so responses, `/v1/models`, the ModelConfig and the LLM endpoint objects are unchanged.
 - kserve: a split's launch re-splits the preset's shell-quoted arguments as the single-node template's entrypoint does; a quoted JSON value (`--speculative-config '{"method":"mtp"}'`) reached vLLM with its quotes and the split's pods exited at start.
 - kserve: a split's containers run without the capabilities KServe's multi-node template adds (`IPC_LOCK`, `SYS_RAWIO`, `NET_RAW`), which a namespace enforcing the baseline Pod Security Standard refuses (the split's pods were never created); NCCL over the fast link needs none of them.
 - kserve: a split's fit answer reports `requiredBytes` per node — its share of the weights plus the overhead, the figure each node is judged by — instead of the whole model's requirement (`weightsBytes` stays the whole model's).

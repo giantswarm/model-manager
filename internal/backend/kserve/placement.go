@@ -324,7 +324,11 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 	for i, tpl := range []map[string]any{leader, worker} {
 		main := templateMain(tpl)
 		main["command"] = splitCommand(len(nodes), i == 1)
-		if args := withoutFlag(p.Spec.Args, flagTensorParallelSize); len(args) > 0 {
+		args := slices.Clone(withoutFlag(p.Spec.Args, flagTensorParallelSize))
+		if i == 0 { // the leader serves the API; a worker runs headless
+			args = append(args, servedNameArgs(p, s.Namespace)...)
+		}
+		if len(args) > 0 {
 			main["args"] = toAnySlice(args)
 		} else {
 			delete(main, "args")

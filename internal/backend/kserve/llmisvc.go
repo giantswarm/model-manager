@@ -2,6 +2,7 @@ package kserve
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -58,8 +59,8 @@ func workloadService(name string) string { return name + "-kserve-workload-svc" 
 // containers[main].image.
 func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstructured.Unstructured {
 	main := map[string]any{"name": llmisvcMainContainer}
-	if len(p.Spec.Args) > 0 {
-		main["args"] = toAnySlice(p.Spec.Args)
+	if args := append(slices.Clone(p.Spec.Args), servedNameArgs(p, s.Namespace)...); len(args) > 0 {
+		main["args"] = toAnySlice(args)
 	}
 	if env := p.env(); len(env) > 0 {
 		main["env"] = mapsToAny(env)
@@ -100,6 +101,21 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	obj := newServingObject(p, s.Namespace)
 	obj.Object["spec"] = spec
 	return obj
+}
+
+// servedNameArgs makes vLLM answer under the preset's name as well as under
+// the names the well-known template serves (the model id and its publishers/
+// path): `--served-model-name` takes a list and its last occurrence wins, so
+// the list is repeated in full after the preset's arguments. The id stays
+// first — the name responses and /v1/models carry, the one the ModelConfig and
+// the LLM endpoint's concrete model match on. Nothing when the preset is named
+// after its id.
+func servedNameArgs(p *servingPreset, namespace string) []string {
+	id := p.Spec.Model.ID
+	if p.name() == id {
+		return nil
+	}
+	return []string{"--served-model-name", id, "publishers/" + namespace + "/models/" + id, p.name()}
 }
 
 // modelcarEnv is the environment of a predictor served from a model image

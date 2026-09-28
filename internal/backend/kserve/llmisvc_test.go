@@ -139,7 +139,11 @@ func TestComposeLLMInferenceServiceForEveryShippedPreset(t *testing.T) {
 			require.NotNil(t, main)
 			_, hasImage := main["image"]
 			assert.False(t, hasImage, "no image: the well-known template's llm-d-cuda image runs")
-			assert.Equal(t, toAnySlice(p.Spec.Args), main["args"])
+			served := []any{"--served-model-name", p.Spec.Model.ID, "publishers/" + testServingNS + "/models/" + p.Spec.Model.ID, p.name()}
+			assert.Equal(t, append(toAnySlice(p.Spec.Args), served...), main["args"], "the preset's args, then every served name: the id first, the preset name last")
+			for _, a := range p.Spec.Args {
+				assert.False(t, strings.HasPrefix(a, "--served-model-name"), "a preset's own served names would replace the template's id")
+			}
 			if len(p.Spec.Env) > 0 {
 				assert.Equal(t, mapsToAny(p.Spec.Env), main["env"])
 			} else {
@@ -217,7 +221,7 @@ func TestComposeLLMInferenceServicePresetOverrides(t *testing.T) {
 	main := mainContainer(obj)
 	require.NotNil(t, main)
 	assert.Equal(t, "gsoci.azurecr.io/giantswarm/llm-d-cuda:custom", main["image"], "the preset's image override")
-	assert.Equal(t, []any{"--max-model-len=4096"}, main["args"], "merged by name: the args stay")
+	assert.Equal(t, []any{"--max-model-len=4096", "--served-model-name", "org/custom", "publishers/" + testServingNS + "/models/org/custom", "custom"}, main["args"], "merged by name: the args stay")
 	assert.Equal(t, []any{map[string]any{"name": "VLLM_LOGGING_LEVEL", "value": "DEBUG"}}, main["env"])
 	grace, _, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "template", "terminationGracePeriodSeconds")
 	assert.EqualValues(t, 30, grace, "template extras copied verbatim")
@@ -517,4 +521,18 @@ func TestLoadRechecksAControlPlaneThatJustLanded(t *testing.T) {
 	assert.Len(t, list.Items, 1, "the object is created")
 	assert.Equal(t, testControlPlaneNS, f.b.cfg.settings(ctx).ControlPlane, "the fresh settings are cached for everyone")
 	assert.Empty(t, f.b.Info(ctx).Message)
+}
+
+func TestServedNameArgs(t *testing.T) {
+	named := &servingPreset{}
+	named.Metadata.Name = "qwen3-8-flash-next-nvfp4"
+	named.Spec.Model.ID = "local-inference-lab/Qwen3.8-Flash-Next-NVFP4"
+	assert.Equal(t, []string{"--served-model-name", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+		"publishers/kserve/models/local-inference-lab/Qwen3.8-Flash-Next-NVFP4", "qwen3-8-flash-next-nvfp4"},
+		servedNameArgs(named, "kserve"))
+
+	same := &servingPreset{}
+	same.Metadata.Name = "qwen3-4b"
+	same.Spec.Model.ID = "qwen3-4b"
+	assert.Empty(t, servedNameArgs(same, "kserve"), "a preset named after its id is served under the template's names")
 }
