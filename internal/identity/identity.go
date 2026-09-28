@@ -153,6 +153,7 @@ func TokenClaims(token string) Claims {
 	}
 	return c
 }
+
 // GitHub is the caller's GitHub identity on the App-pinned registration: the
 // login GET /user answered for the bearer muster put on the call — the
 // person's user token of the App giantswarm-model-manager — and that token,
