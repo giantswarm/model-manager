@@ -88,6 +88,64 @@
         "gcpProject": {
             "type": "string"
         },
+        "github": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "apiURL": {
+                    "type": "string",
+                    "description": "GitHub's REST API, for `GET /user` and the pull request."
+                },
+                "authorizationServer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "authorizationEndpoint": {
+                            "type": "string",
+                            "description": "GitHub's authorize endpoint (GitHub publishes no discovery document)."
+                        },
+                        "clientCredentialsSecretRef": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Secret with the App's OAuth client under `client-id` and `client-secret`."
+                                },
+                                "namespace": {
+                                    "type": "string",
+                                    "description": "Namespace of that Secret; empty is the release namespace."
+                                }
+                            }
+                        },
+                        "expectedIssuer": {
+                            "type": "string",
+                            "description": "The issuer GitHub puts in the RFC 9207 `iss` parameter of its authorization response, `https://github.com/login/oauth` for every App. Empty omits the field."
+                        },
+                        "grantScope": {
+                            "type": "string",
+                            "description": "`subject`: the grant belongs to the person, not to one login session."
+                        },
+                        "issuer": {
+                            "type": "string",
+                            "description": "The issuer identity the person's grant is filed under: the App's own, so the login App's GitHub grant stays separate. Also passed to the server, which names it in its refusals."
+                        },
+                        "scopes": {
+                            "type": "string",
+                            "description": "The OAuth `scope` parameter, only for an authorization server that needs one (a lab's stand-in); empty for GitHub, whose App permissions are the App's. Empty omits the field."
+                        },
+                        "tokenEndpoint": {
+                            "type": "string",
+                            "description": "GitHub's token endpoint."
+                        }
+                    }
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Register with muster pinned to the GitHub App `giantswarm-model-manager` and offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). The MCPServer's auth then pins the App as the authorization server — muster runs the App's consent once per person and puts their user token on every call, which this server verifies with `GET /user` and opens the pull request with — and sets `forwardIdentity: true`: muster forwards the person's IdP ID token in `X-Muster-Id-Token` next to it, validated as `oauth` validates a forwarded token, so apply mode keeps acting on Kubernetes as the person. One registration carries both tokens. Needs `oauth.enabled`. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
+                }
+            }
+        },
         "global": {
             "type": "object",
             "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly.",
@@ -513,64 +571,6 @@
                 "path": {
                     "type": "string",
                     "description": "MCP endpoint path."
-                }
-            }
-        },
-        "github": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "apiURL": {
-                    "type": "string",
-                    "description": "GitHub's REST API, for `GET /user` and the pull request."
-                },
-                "authorizationServer": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "authorizationEndpoint": {
-                            "type": "string",
-                            "description": "GitHub's authorize endpoint (GitHub publishes no discovery document)."
-                        },
-                        "clientCredentialsSecretRef": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Secret with the App's OAuth client under `client-id` and `client-secret`."
-                                },
-                                "namespace": {
-                                    "type": "string",
-                                    "description": "Namespace of that Secret; empty is the release namespace."
-                                }
-                            }
-                        },
-                        "expectedIssuer": {
-                            "type": "string",
-                            "description": "The issuer GitHub puts in the RFC 9207 `iss` parameter of its authorization response, `https://github.com/login/oauth` for every App. Empty omits the field."
-                        },
-                        "grantScope": {
-                            "type": "string",
-                            "description": "`subject`: the grant belongs to the person, not to one login session."
-                        },
-                        "issuer": {
-                            "type": "string",
-                            "description": "The issuer identity the person's grant is filed under: the App's own, so the login App's GitHub grant stays separate. Also passed to the server, which names it in its refusals."
-                        },
-                        "scopes": {
-                            "type": "string",
-                            "description": "The OAuth `scope` parameter, only for an authorization server that needs one (a lab's stand-in); empty for GitHub, whose App permissions are the App's. Empty omits the field."
-                        },
-                        "tokenEndpoint": {
-                            "type": "string",
-                            "description": "GitHub's token endpoint."
-                        }
-                    }
-                },
-                "enabled": {
-                    "type": "boolean",
-                    "description": "Register with muster pinned to the GitHub App `giantswarm-model-manager` and offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). The MCPServer's auth then pins the App as the authorization server — muster runs the App's consent once per person and puts their user token on every call, which this server verifies with `GET /user` and opens the pull request with — and sets `forwardIdentity: true`: muster forwards the person's IdP ID token in `X-Muster-Id-Token` next to it, validated as `oauth` validates a forwarded token, so apply mode keeps acting on Kubernetes as the person. One registration carries both tokens. Needs `oauth.enabled`. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
                 }
             }
         },
