@@ -856,7 +856,9 @@ and puts their App user token on every call as the bearer. model-manager
 verifies it with `GET /user` and opens the pull request with it. The person's
 IdP ID token arrives in `X-Muster-Id-Token` and is validated like a forwarded
 token, so apply mode and every read keep acting on Kubernetes as the person.
-No other GitHub credential exists in the pod. Without the App's token the
+The pin applies to the MCP endpoint only: the REST API keeps the person's ID
+token as its bearer, as the portal sends it. No other GitHub credential exists
+in the pod. Without the App's token the
 call answers `auth_required` (401), naming the consent
 (`core_auth_login server=model-manager`). A server without the pin answers
 `unsupported` for `mode: commit`, and `get_backend`/`list_backends` report

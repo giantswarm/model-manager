@@ -231,12 +231,14 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
 // server's own access tokens, or a forwarded IdP id_token whose audience is
-// trusted) and then attaches the caller to the request. Pinned to the App,
-// the GitHub bearer is verified first and the forwarded ID token is what
-// mcp-oauth validates.
-func (o *oauthRuntime) protect(next http.Handler) http.Handler {
+// trusted) and then attaches the caller to the request. pinned is the MCP
+// endpoint of a registration pinned to the App: the GitHub bearer is
+// verified first and the forwarded ID token is what mcp-oauth validates. The
+// REST API is never pinned — the portal calls it with the person's ID token
+// as the bearer.
+func (o *oauthRuntime) protect(next http.Handler, pinned bool) http.Handler {
 	h := o.handler.ValidateToken(o.attachIdentity(next))
-	if o.github != nil {
+	if pinned && o.github != nil {
 		return o.github.protect(h)
 	}
 	return h

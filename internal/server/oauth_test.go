@@ -197,7 +197,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 		seen.id, seen.ok = identity.FromContext(r.Context())
 		seen.token, _ = identity.TokenFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	}), false)
 
 	call := func(bearer string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
@@ -243,7 +243,7 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller = identity.Caller(r.Context())
 		_, hasToken = identity.TokenFromContext(r.Context())
-	}))
+	}), false)
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))
 	rec := httptest.NewRecorder()
@@ -296,7 +296,7 @@ func TestUntrustedAudienceIsNamedInTheRefusal(t *testing.T) {
 			seen.id, seen.ok = identity.FromContext(r.Context())
 			seen.token, _ = identity.TokenFromContext(r.Context())
 			w.WriteHeader(http.StatusNoContent)
-		}))
+		}), false)
 		return func(bearer string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 			req.Header.Set("Authorization", "Bearer "+bearer)
