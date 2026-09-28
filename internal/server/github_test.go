@@ -55,7 +55,7 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 		seen.token, _ = identity.TokenFromContext(r.Context())
 		seen.gh, _ = identity.GitHubFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	}), true)
 	call := func(bearer, idToken string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 		if bearer != "" {
@@ -91,6 +91,15 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	assert.Equal(t, http.StatusUnauthorized, call("ghu_person", idp.idToken(t, []string{"someone-else"}, time.Now().Add(30*time.Minute))).Code, "the ID token is validated as without the pin")
+
+	// The REST API is not pinned: the portal calls it with the ID token as
+	// the bearer, and no GitHub token is asked for.
+	rest := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }), false)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+forwarded)
+	restRec := httptest.NewRecorder()
+	rest.ServeHTTP(restRec, req)
+	assert.Equal(t, http.StatusNoContent, restRec.Code, restRec.Body.String())
 }
 
 func TestGitHubPinValidation(t *testing.T) {
