@@ -62,6 +62,7 @@ Lemonade-backend ADR in the team's decision log.
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call, never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
+| Every write tool takes `dryRun` (MCP): it answers the plan and changes nothing — `pull_model` whether the model is there, the kserve fit verdict and the ModelConfig it would wire; `load_model` the loaded state, the keep-alive, the kserve fit verdict and serving object (`manifests`) or `alreadyServing`, the ModelConfig the auto-wire would ensure (`wiring`); `unload_model` the kserve serving objects it would delete and the ModelConfig it would unwire; `delete_model` the loaded state and the ModelConfig it would unwire; `cancel_job` the job | — | `pull_model`, `load_model`, `unload_model`, `delete_model`, `cancel_job` |
 | Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused; MCP `dryRun: true` returns the `manifests` it would write or delete, writing nothing) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
@@ -828,7 +829,14 @@ download Job is joined by the next `pull_model`. Health endpoints (`/healthz`,
 
 ### Commit mode: the pull request as the person
 
-`wire_model` and `unwire_model` take `mode: commit`. Instead of writing the
+`wire_model` and `unwire_model` take `mode: commit`, and so do `load_model`
+and `unload_model` on kserve: the serving object and its ModelConfig — whose
+address follows from the object's name — land in one pull request (files
+`<name>-llminferenceservice.yaml` and `<name>.yaml`), and no load job runs;
+the ModelConfig turns ready when the model does, after Flux applies the
+merge. `pull_model` and `delete_model` never commit (a download and the
+weights are no GitOps objects): `mode: commit` answers `unsupported`, as it
+does for a load or unload on ollama, lemonade or lmstudio. Instead of writing the
 ModelConfig live, model-manager opens a pull request as the signed-in person
 in the GitOps repository that owns the kagent namespace. The repository
 follows from Flux provenance: the ModelConfig's own Kustomization when Flux

@@ -721,37 +721,11 @@ func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.
 // the model to readiness and refreshes the ModelConfig from the address the
 // backend published.
 func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error) {
-	if strings.TrimSpace(opts.Backend) != "" {
-		b, err := s.named(opts.Backend)
-		if err != nil {
-			return nil, err
-		}
-		if !b.Capabilities().Load {
-			return nil, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
-		}
-	}
-	name := strings.TrimSpace(opts.Model)
-	if name == "" && opts.Preset != "" {
-		name = strings.TrimSpace(opts.Preset)
-	}
-	b, m, err := s.resolve(ctx, opts.Backend, name)
+	b, m, req, err := s.loadTarget(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if !b.Capabilities().Load {
-		return nil, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
-	}
-	keepAlive := opts.KeepAlive
-	if keepAlive == "" {
-		keepAlive = s.cfg.DefaultKeepAlive
-	}
-	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
-	// Loaded at the context window agents will ask for, so their first turn
-	// does not reload the model at another size.
-	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
-	if req.Preset == "" && m.Preset != "" {
-		req.Preset = m.Preset
-	}
+	keepAlive := req.KeepAlive
 	res := &backend.LoadResult{}
 	srv, isServer := b.(backend.Server)
 	if isServer {
@@ -810,6 +784,43 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	view := s.loadedView(ctx, b, m)
 	view.Fit = fit
 	return view, nil
+}
+
+// loadTarget resolves a load: the backend, the model and the request the
+// backend is asked with.
+func (s *Service) loadTarget(ctx context.Context, opts LoadOptions) (backend.Backend, *backend.Model, backend.LoadRequest, error) {
+	if strings.TrimSpace(opts.Backend) != "" {
+		b, err := s.named(opts.Backend)
+		if err != nil {
+			return nil, nil, backend.LoadRequest{}, err
+		}
+		if !b.Capabilities().Load {
+			return nil, nil, backend.LoadRequest{}, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
+		}
+	}
+	name := strings.TrimSpace(opts.Model)
+	if name == "" && opts.Preset != "" {
+		name = strings.TrimSpace(opts.Preset)
+	}
+	b, m, err := s.resolve(ctx, opts.Backend, name)
+	if err != nil {
+		return nil, nil, backend.LoadRequest{}, err
+	}
+	if !b.Capabilities().Load {
+		return nil, nil, backend.LoadRequest{}, fmt.Errorf("%w: load on %s", backend.ErrUnsupported, b.Name())
+	}
+	keepAlive := opts.KeepAlive
+	if keepAlive == "" {
+		keepAlive = s.cfg.DefaultKeepAlive
+	}
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
+	// Loaded at the context window agents will ask for, so their first turn
+	// does not reload the model at another size.
+	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
+	if req.Preset == "" && m.Preset != "" {
+		req.Preset = m.Preset
+	}
+	return b, m, req, nil
 }
 
 // wire wires model on b as the caller and says what it did: Wired with the

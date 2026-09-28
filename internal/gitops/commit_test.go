@@ -188,3 +188,17 @@ func TestCommitRefusesAKustomizationThatMovesTheNamespace(t *testing.T) {
 	require.ErrorIs(t, err, backend.ErrInvalid)
 	assert.Contains(t, err.Error(), "targetNamespace default")
 }
+
+func TestServingObjectAndItsModelConfigGetTheirOwnFiles(t *testing.T) {
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{})
+	llm := obj("serving.kserve.io/v1alpha1", "LLMInferenceService", "kagent", "tiny", nil, map[string]any{"model": map[string]any{"uri": "hf://x/tiny"}})
+	res, err := committer(cluster(), fake).Commit(asPerson(), Request{Namespace: "kagent", Write: []*unstructured.Unstructured{llm, modelConfig("tiny")}, Verb: "serve", Subject: "tiny", DryRun: true})
+	require.NoError(t, err)
+	var paths []string
+	for _, f := range res.Files {
+		paths = append(paths, f.Path)
+	}
+	assert.Contains(t, paths, "platform/model-manager/tiny-llminferenceservice.yaml")
+	assert.Contains(t, paths, "platform/model-manager/tiny.yaml")
+}

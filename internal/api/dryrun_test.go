@@ -87,3 +87,41 @@ func TestCommitModeRefusals(t *testing.T) {
 	assert.Contains(t, text, "auth_required: ")
 	assert.Contains(t, text, "core_auth_login server=model-manager")
 }
+
+func TestOperationalDryRunsDoNothing(t *testing.T) {
+	fb := newFakeBackend()
+	fb.models["qwen3:0.6b"] = backend.Model{Name: "qwen3:0.6b"}
+	fw := newFakeWirer()
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
+
+	for tool, args := range map[string]map[string]any{
+		ToolPullModel:   {"model": "smollm2:135m", "dryRun": true},
+		ToolLoadModel:   {"model": "qwen3:0.6b", "dryRun": true},
+		ToolUnloadModel: {"model": "qwen3:0.6b", "dryRun": true},
+		ToolDeleteModel: {"model": "qwen3:0.6b", "dryRun": true},
+	} {
+		text, isErr := callTool(t, srv, tool, args)
+		require.False(t, isErr, "%s: %s", tool, text)
+		var plan map[string]any
+		require.NoError(t, json.Unmarshal([]byte(text), &plan))
+		assert.Equal(t, true, plan["dryRun"], tool)
+	}
+	assert.Contains(t, fb.models, "qwen3:0.6b", "the delete dry run deleted nothing")
+	assert.NotContains(t, fb.models, "smollm2:135m", "the pull dry run pulled nothing")
+	assert.Empty(t, fb.loaded, "the load dry run loaded nothing")
+	assert.Zero(t, fw.count(), "no dry run wired anything")
+
+	text, _ := callTool(t, srv, ToolLoadModel, map[string]any{"model": "qwen3:0.6b", "dryRun": true})
+	assert.Contains(t, text, `"wiring"`, "the load plan names the ModelConfig the auto-wire would ensure")
+
+	for _, tool := range []string{ToolPullModel, ToolDeleteModel} {
+		text, isErr := callTool(t, srv, tool, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
+		require.True(t, isErr, tool)
+		assert.Contains(t, text, "unsupported: ", tool)
+	}
+	svc.WithCommitter(gitops.NewCommitter(func(string) (gitops.Remote, error) { return commit.NewFake(), nil }, func(context.Context) dynamic.Interface { return nil }))
+	text, isErr := callTool(t, srv, ToolLoadModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
+	require.True(t, isErr)
+	assert.Contains(t, text, "only kserve")
+}

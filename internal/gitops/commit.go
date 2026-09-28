@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/giantswarm/gitops-commit/commit"
@@ -157,7 +158,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	}
 	var remove []string
 	for _, obj := range req.Remove {
-		remove = append(remove, dir.ObjectFile(obj.GetKind(), obj.GetName()))
+		remove = append(remove, fileOf(dir, obj))
 	}
 	if err := c.inDirectory(ctx, remote, loc, req); err != nil {
 		return nil, err
@@ -203,7 +204,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 // the directory at all (it was written live: removed live).
 func (c *Committer) inDirectory(ctx context.Context, remote Remote, loc location, req Request) error {
 	check := func(obj *unstructured.Unstructured, removal bool) error {
-		p := loc.directory().ObjectFile(obj.GetKind(), obj.GetName())
+		p := fileOf(loc.directory(), obj)
 		raw, err := remote.ReadFile(ctx, loc.Repository, loc.Branch, p)
 		switch {
 		case err == nil && raw != nil:
@@ -264,7 +265,7 @@ func (c *Committer) locate(ctx context.Context, req Request) (location, error) {
 			return location{}, err
 		}
 	}
-	return c.resolve(ctx, owner, req.Namespace)
+	return c.resolve(ctx, owner, req)
 }
 
 // namespaceOwner is the Kustomization the namespace's own object carries,
@@ -284,7 +285,7 @@ func (c *Committer) namespaceOwner(ctx context.Context, namespace string) (*Owne
 // resolve follows owner to its GitRepository and path: a HelmRelease
 // through the Kustomization that applies it, a Kustomization whose
 // targetNamespace would move the objects out of namespace refused.
-func (c *Committer) resolve(ctx context.Context, owner *Owner, namespace string) (location, error) {
+func (c *Committer) resolve(ctx context.Context, owner *Owner, req Request) (location, error) {
 	dyn := c.dyn(ctx)
 	if owner.Kind == KindHelmRelease {
 		hr, err := dyn.Resource(HelmReleaseGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
@@ -301,8 +302,12 @@ func (c *Committer) resolve(ctx context.Context, owner *Owner, namespace string)
 	if err != nil {
 		return location{}, fmt.Errorf("get %s: %w", owner, err)
 	}
-	if target := nested(ks, "spec", "targetNamespace"); target != "" && target != namespace {
-		return location{}, fmt.Errorf("%w: %s sets targetNamespace %s, which would move the objects out of %s: pass repository, branch and path", backend.ErrInvalid, owner, target, namespace)
+	if target := nested(ks, "spec", "targetNamespace"); target != "" {
+		for _, obj := range append(slices.Clone(req.Write), req.Remove...) {
+			if obj.GetNamespace() != target {
+				return location{}, fmt.Errorf("%w: %s sets targetNamespace %s, which would move %s %s out of %s: pass repository, branch and path", backend.ErrInvalid, owner, target, obj.GetKind(), obj.GetName(), obj.GetNamespace())
+			}
+		}
 	}
 	src := provenance.SourceRef{Kind: nested(ks, "spec", "sourceRef", "kind"), Name: nested(ks, "spec", "sourceRef", "name"), Namespace: nested(ks, "spec", "sourceRef", "namespace")}
 	flux := provenance.Flux{Kustomizations: []provenance.Kustomization{{Name: owner.Name, Namespace: owner.Namespace, SourceRef: src, Path: nested(ks, "spec", "path")}}}
@@ -327,6 +332,18 @@ func (c *Committer) resolve(ctx context.Context, owner *Owner, namespace string)
 	return location{Location: loc, kustomization: owner.Namespace + "/" + owner.Name, prune: prune}, nil
 }
 
+// fileOf is an object's file in the directory: named after a ModelConfig
+// (and a Secret, in its secret file), after any other object with its kind
+// appended — a serving object and the ModelConfig wiring it share a name.
+func fileOf(dir layout.Directory, obj *unstructured.Unstructured) string {
+	switch kind := obj.GetKind(); kind {
+	case "ModelConfig", "Secret":
+		return dir.ObjectFile(kind, obj.GetName())
+	default:
+		return dir.ObjectFile(kind, obj.GetName()+"-"+strings.ToLower(kind))
+	}
+}
+
 // files renders the objects as the directory's files: one per object, a
 // Secret in a secret file of its own (encrypted by the layout).
 func files(dir layout.Directory, objs []*unstructured.Unstructured) (map[string][]byte, error) {
@@ -336,7 +353,7 @@ func files(dir layout.Directory, objs []*unstructured.Unstructured) (map[string]
 		if err != nil {
 			return nil, fmt.Errorf("render %s %s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		out[dir.ObjectFile(obj.GetKind(), obj.GetName())] = raw
+		out[fileOf(dir, obj)] = raw
 	}
 	return out, nil
 }
