@@ -1,15 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -50,4 +54,36 @@ func TestGitOpsOwnedAnswersItsOwnCode(t *testing.T) {
 	status, code := statusFor(fmt.Errorf("%w: ModelConfig kagent/x is applied from git", backend.ErrGitOpsOwned))
 	assert.Equal(t, 409, status)
 	assert.Equal(t, "gitops_owned", code)
+}
+
+func TestCommitModeRefusals(t *testing.T) {
+	fb := newFakeBackend()
+	fb.models["qwen3:0.6b"] = backend.Model{Name: "qwen3:0.6b"}
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), newFakeWirer(), &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
+	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
+
+	text, isErr := callTool(t, srv, ToolWireModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
+	require.True(t, isErr)
+	assert.Contains(t, text, "unsupported: ")
+	assert.Contains(t, text, "github.enabled")
+
+	text, isErr = callTool(t, srv, ToolWireModel, map[string]any{"model": "qwen3:0.6b", "mode": "live"})
+	require.True(t, isErr)
+	assert.Contains(t, text, "invalid_request")
+
+	text, _ = callTool(t, srv, ToolGetBackend, nil)
+	assert.Contains(t, text, `"commit": false`)
+
+	svc.WithCommitter(gitops.NewCommitter(func(string) (gitops.Remote, error) { return commit.NewFake(), nil }, func(context.Context) dynamic.Interface { return nil }))
+	text, _ = callTool(t, srv, ToolGetBackend, nil)
+	assert.Contains(t, text, `"commit": true`)
+
+	text, isErr = callTool(t, srv, ToolUnwireModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, "nothing is wired: nothing to commit")
+
+	text, isErr = callTool(t, srv, ToolWireModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit", "dryRun": true})
+	require.True(t, isErr)
+	assert.Contains(t, text, "auth_required: ")
+	assert.Contains(t, text, "core_auth_login server=model-manager")
 }

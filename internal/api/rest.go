@@ -15,6 +15,7 @@ import (
 
 	spec "github.com/giantswarm/model-manager/api"
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -362,6 +363,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, backend.ErrUnsupported):
 		return http.StatusNotImplemented, "unsupported"
+	case errors.Is(err, gitops.ErrAuthRequired):
+		return http.StatusUnauthorized, "auth_required"
 	case errors.Is(err, backend.ErrGitOpsOwned):
 		return http.StatusConflict, "gitops_owned"
 	case errors.Is(err, backend.ErrConflict):

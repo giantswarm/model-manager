@@ -218,3 +218,45 @@ subjects:
     name: {{ include "model-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
+{{- if and $rbac .Values.github.enabled (not .Values.kagent.disableWiring) }}
+{{- /*
+Commit mode follows the kagent namespace to the repository that owns it: the
+namespace's Flux labels, the HelmRelease that renders it, the Kustomization
+and its GitRepository. Reads only; nothing is written live.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "model-manager.fullname" . }}-commit-provenance
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    verbs: ["get"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-commit-provenance
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "model-manager.fullname" . }}-commit-provenance
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -105,4 +106,66 @@ func Manifest(obj *unstructured.Unstructured) map[string]any {
 		}
 	}
 	return out.Object
+}
+
+// WithCommitter offers commit mode: wiring writes land as a pull request
+// opened as the person. Call before the service serves.
+func (s *Service) WithCommitter(c *gitops.Committer) *Service {
+	s.commit = c
+	return s
+}
+
+// ErrCommitUnavailable is mode commit on a server without its GitHub App pin.
+var ErrCommitUnavailable = fmt.Errorf("%w: mode commit (a pull request opened as you) is not offered by this server: it is not registered with its GitHub App (chart value github.enabled), so it holds no GitHub authorization of yours — use mode apply", backend.ErrUnsupported)
+
+// CommitView is a write in commit mode: the plan and the pull request.
+type CommitView struct {
+	*WirePlan
+	Commit *gitops.Result `json:"commit,omitempty"`
+}
+
+// CommitWire is wire_model in commit mode: the ModelConfig (and its
+// placeholder Secret) as files in the repository that owns the kagent
+// namespace, one pull request opened as the caller; dryRun answers it
+// without opening it. A ModelConfig of another owner that already wires the
+// served model is answered, and nothing is committed.
+func (s *Service) CommitWire(ctx context.Context, name, ref string, opts backend.WireOptions, target gitops.Target, dryRun bool) (*CommitView, error) {
+	if s.commit == nil {
+		return nil, ErrCommitUnavailable
+	}
+	plan, err := s.PlanWire(ctx, name, ref, opts)
+	if err != nil || plan.AlreadyWired != nil {
+		return &CommitView{WirePlan: plan}, err
+	}
+	res, err := s.commit.Commit(ctx, gitops.Request{
+		Namespace: s.wiring.Namespace, Write: plan.objects, Owner: plan.GitOps, Target: target,
+		Verb: "wire", Subject: plan.ModelConfig, Tool: "wire_model", DryRun: dryRun,
+		Summary: fmt.Sprintf("Wires the model `%s` (backend %s) into kagent: ModelConfig `%s/%s`", plan.Model, plan.Backend, s.wiring.Namespace, plan.ModelConfig),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &CommitView{WirePlan: plan, Commit: res}, nil
+}
+
+// CommitUnwire is unwire_model in commit mode: the removing pull request of
+// the ModelConfig's files (and its placeholder Secret's). Nothing wired:
+// nothing to commit.
+func (s *Service) CommitUnwire(ctx context.Context, name, ref string, target gitops.Target, dryRun bool) (*CommitView, error) {
+	if s.commit == nil {
+		return nil, ErrCommitUnavailable
+	}
+	plan, err := s.PlanUnwire(ctx, name, ref)
+	if err != nil || len(plan.objects) == 0 {
+		return &CommitView{WirePlan: plan}, err
+	}
+	res, err := s.commit.Commit(ctx, gitops.Request{
+		Namespace: s.wiring.Namespace, Remove: plan.objects, Owner: plan.GitOps, Target: target,
+		Verb: "unwire", Subject: plan.ModelConfig, Tool: "unwire_model", DryRun: dryRun,
+		Summary: fmt.Sprintf("Unwires the model `%s` (backend %s) from kagent: removes ModelConfig `%s/%s`", plan.Model, plan.Backend, s.wiring.Namespace, plan.ModelConfig),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &CommitView{WirePlan: plan, Commit: res}, nil
 }

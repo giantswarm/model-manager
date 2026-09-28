@@ -71,7 +71,7 @@ Lemonade-backend ADR in the team's decision log.
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
-`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|does_not_fit|backend_error","message":"…"}}`;
+`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
 (412) that the kserve fit check refused a pull or load, `conflict` (409) also
 that an unqualified reference exists on several backends — repeat the request
@@ -825,6 +825,43 @@ nothing else: a served model's ModelConfig is written by the load call itself
 and, when missing, by the caller's next `list_loaded_models`, and a running
 download Job is joined by the next `pull_model`. Health endpoints (`/healthz`,
 `/readyz`, `/backendz`) and the OAuth metadata stay public.
+
+### Commit mode: the pull request as the person
+
+`wire_model` and `unwire_model` take `mode: commit`. Instead of writing the
+ModelConfig live, model-manager opens a pull request as the signed-in person
+in the GitOps repository that owns the kagent namespace. The repository
+follows from Flux provenance: the ModelConfig's own Kustomization when Flux
+applies it, else the namespace's (through the HelmRelease that renders it,
+where a chart creates the namespace), then the Kustomization's GitRepository
+and `spec.path`. Where there is none, `repository`, `branch` and `path` name
+it. The files go under `<path>/model-manager/`, one per object, with the
+directory's `kustomization.yaml` and the parent's entry
+([gitops-commit](https://github.com/giantswarm/gitops-commit)'s `layout`). A
+Secret, the placeholder API key, is committed only SOPS-encrypted for the
+repository's `.sops.yaml` recipients. Without one the call is refused: use
+`apiKeyPassthrough` or `apiKeySecret`, or `mode: apply`. `dryRun` answers the
+files with their content and opens nothing. The answer's `commit` names the
+repository, base, directory, branch, files, the pull request's URL and number,
+and its author. Refused: an object Flux applies from a file outside
+`model-manager/` (change it where it is written), one a HelmRelease renders,
+a removal of an object that was written live, and a Kustomization whose
+`targetNamespace` would move the objects.
+
+Commit mode needs the person's GitHub authority. The chart's `github.enabled`
+registers model-manager with muster pinned to its own user-to-server GitHub
+App `giantswarm-model-manager` (`--github-authorization-server`), with
+`auth.forwardIdentity: true`: muster runs the App's consent once per person
+and puts their App user token on every call as the bearer. model-manager
+verifies it with `GET /user` and opens the pull request with it. The person's
+IdP ID token arrives in `X-Muster-Id-Token` and is validated like a forwarded
+token, so apply mode and every read keep acting on Kubernetes as the person.
+No other GitHub credential exists in the pod. Without the App's token the
+call answers `auth_required` (401), naming the consent
+(`core_auth_login server=model-manager`). A server without the pin answers
+`unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
+`capabilities.commit`. The App has to be installed, with contents and
+pull-request write, on every repository a commit may target.
 
 ## Helm chart
 

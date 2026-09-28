@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/wiring"
@@ -169,6 +170,7 @@ type Service struct {
 
 	jobs   *jobs.Manager
 	wirer  wiring.Wirer
+	commit *gitops.Committer // nil: commit mode not offered
 	wiring *WiringInfo
 	cfg    Config
 	log    *slog.Logger
@@ -402,6 +404,7 @@ func joinNames(names []backend.Name) string {
 func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 	caps := b.Capabilities()
 	caps.Wire = s.wirer != nil
+	caps.Commit = s.wirer != nil && s.commit != nil
 	return caps
 }
 

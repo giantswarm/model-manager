@@ -59,6 +59,7 @@ type ctxKey int
 const (
 	identityKey ctxKey = iota
 	tokenKey
+	gitHubKey
 )
 
 // ContextWith returns ctx carrying id.
@@ -151,4 +152,26 @@ func TokenClaims(token string) Claims {
 		c.Expires = time.Unix(exp, 0)
 	}
 	return c
+}
+// GitHub is the caller's GitHub identity on the App-pinned registration: the
+// login GET /user answered for the bearer muster put on the call — the
+// person's user token of the App giantswarm-model-manager — and that token,
+// which commit mode opens the pull request with.
+type GitHub struct {
+	Login string
+	Token string
+}
+
+// ContextWithGitHub returns ctx carrying the caller's GitHub identity.
+func ContextWithGitHub(ctx context.Context, gh *GitHub) context.Context {
+	if gh == nil || gh.Token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, gitHubKey, gh)
+}
+
+// GitHubFromContext returns the caller's GitHub identity, if any.
+func GitHubFromContext(ctx context.Context) (*GitHub, bool) {
+	gh, ok := ctx.Value(gitHubKey).(*GitHub)
+	return gh, ok && gh != nil
 }

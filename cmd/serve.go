@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/giantswarm/gitops-commit/commit"
+
 	"github.com/giantswarm/mcp-toolkit/metrics"
 	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
@@ -25,6 +27,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend/lemonade"
 	"github.com/giantswarm/model-manager/internal/backend/lmstudio"
 	"github.com/giantswarm/model-manager/internal/backend/ollama"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/kube"
 	"github.com/giantswarm/model-manager/internal/registry"
@@ -82,6 +85,8 @@ type serveOptions struct {
 	ssoAllowPrivateIPs            bool
 	allowPublicClientRegistration bool
 	downstreamOAuth               bool
+	githubAuthorizationServer     string
+	githubAPIURL                  string
 
 	jobRetention time.Duration
 }
@@ -204,6 +209,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (SSO_ALLOW_PRIVATE_IPS)")
 	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
 	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
+	f.StringVar(&o.githubAuthorizationServer, "github-authorization-server", envOr("MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER", ""), "Issuer identity of the GitHub App muster pins this server's registration to (https://github.com/apps/giantswarm-model-manager): the bearer of every call is then the person's App user token, verified with GET /user and used for commit mode's pull request, and the person's IdP ID token arrives in X-Muster-Id-Token (MCPServer auth.forwardIdentity). Empty: the bearer is the forwarded IdP ID token and commit mode is not offered. Needs --enable-oauth (MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER)")
+	f.StringVar(&o.githubAPIURL, "github-api-url", envOr("MODEL_MANAGER_GITHUB_API_URL", server.DefaultGitHubAPIURL), "GitHub REST API base URL for GET /user and commit mode (MODEL_MANAGER_GITHUB_API_URL)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
 }
@@ -234,6 +241,10 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}()
 	if o.downstreamOAuth && !o.oauthEnabled {
 		return fmt.Errorf("--downstream-oauth needs --enable-oauth: without OAuth there is no caller token to present to the Kubernetes API")
+	}
+
+	if o.githubAuthorizationServer != "" && !o.oauthEnabled {
+		return fmt.Errorf("--github-authorization-server needs --enable-oauth: the forwarded IdP ID token is validated by the OAuth resource server")
 	}
 
 	names, err := backendNames(o.backendName, o.backendNameSet, o.backends)
@@ -318,6 +329,19 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
 	svc := service.New(backends, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
 
+	if o.githubAuthorizationServer != "" && clients != nil && wirer != nil {
+		// Commit mode: the pull request is opened as the person, with the
+		// App user token the pinned registration carries; the Flux objects
+		// that name the repository are read as the caller.
+		apiURL := o.githubAPIURL
+		svc.WithCommitter(gitops.NewCommitter(func(token string) (gitops.Remote, error) {
+			if apiURL == server.DefaultGitHubAPIURL {
+				return commit.NewGitHub(token)
+			}
+			return commit.NewGitHub(token, commit.WithBaseURL(apiURL))
+		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic }))
+	}
+
 	var (
 		reg     *registry.Registry
 		mcpOpts []api.Option
@@ -353,12 +377,15 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			AllowPublicClientRegistration: o.allowPublicClientRegistration,
 			DownstreamOAuth:               o.downstreamOAuth,
 		}
+		if o.githubAuthorizationServer != "" {
+			cfg.OAuth.GitHub = &server.GitHubPin{AuthorizationServer: o.githubAuthorizationServer, APIURL: o.githubAPIURL}
+		}
 	}
 	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, build, mcpOpts...), log)
 	if err != nil {
 		return err
 	}
-	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth)
+	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth, "commit", o.githubAuthorizationServer != "")
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -88,6 +88,10 @@ type Capabilities struct {
 	NodeInventory bool `json:"nodeInventory"`
 	// Search proxies a model hub search (kserve: Hugging Face Hub).
 	Search bool `json:"search"`
+	// Commit lands wiring writes as a pull request opened as the person in
+	// the repository that owns the target (mode commit). Set by the service
+	// from its GitHub App pin and its Kubernetes access, not by the driver.
+	Commit bool `json:"commit"`
 }
 
 // Keep-alive scopes a driver reports in Loading.KeepAliveScope.
