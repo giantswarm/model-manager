@@ -572,7 +572,7 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 
 // Load implements backend.Backend: fit-check, then create the
 // LLMInferenceService composed from the preset. Loading the same preset again
-// is a no-op.
+// is a no-op, and a conflict when it pins a node the preset does not serve on.
 func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	_, err := b.Serve(ctx, req)
 	return err
@@ -633,7 +633,12 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if existing != nil {
 		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
-			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy)
+			nodes := b.servingNodes(ctx, existing, sv)
+			if other := unservedNode(req, nodes); other != "" {
+				return nil, fmt.Errorf("%w: %s already serves on %s, not on %s; stop it first", backend.ErrConflict, sv.Name, strings.Join(nodes, ","), other)
+			}
+			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy, "nodes", strings.Join(nodes, ","))
+			res.AlreadyServing, res.ServingNodes = true, nodes
 			return res, nil
 		}
 		return nil, fmt.Errorf("%w: %s %s/%s exists (model %s, managed by %q)", backend.ErrConflict, kindLLMInferenceService, s.Namespace, sv.Name, sv.Model, sv.ManagedBy)

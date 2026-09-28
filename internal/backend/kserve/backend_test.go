@@ -1072,3 +1072,45 @@ func TestCacheIndexNeedsACache(t *testing.T) {
 		run(t, f)
 	})
 }
+
+func TestServeAnAlreadyServedPreset(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	res, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: testGPUNode})
+	require.NoError(t, err)
+	assert.False(t, res.AlreadyServing, "the first serve creates the object")
+
+	// Served already: success naming the node it serves on, nothing created.
+	for _, node := range []string{"", testGPUNode} {
+		res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: node})
+		require.NoError(t, err)
+		assert.True(t, res.AlreadyServing, "node %q", node)
+		assert.Equal(t, []string{testGPUNode}, res.ServingNodes, "the node the object is pinned to")
+	}
+
+	// Pinned to another node: a conflict naming both, never a success.
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves on "+testGPUNode+", not on gpu2; stop it first")
+
+	// Unpinned, the node is its predictor pod's.
+	require.NoError(t, f.b.Unload(ctx, tinyRepo))
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyServing)
+	assert.Empty(t, res.ServingNodes, "no pod yet: the node is unknown")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "tiny-kserve-workload-1", Namespace: testServingNS, Labels: map[string]string{"app.kubernetes.io/part-of": "llminferenceservice", llmisvcPodLabel: "tiny"}},
+		Spec:       corev1.PodSpec{NodeName: testGPUNode},
+	}
+	_, err = f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{testGPUNode}, res.ServingNodes)
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+}

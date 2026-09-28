@@ -76,6 +76,11 @@ type ModelView struct {
 	// Fit is the verdict a load judged the model by (backend.Server); only
 	// a load's answer carries it.
 	Fit *backend.FitResult `json:"fit,omitempty"`
+	// AlreadyServing says a load found the model served already and created
+	// nothing; ServingNodes are the nodes it serves on (empty while unknown).
+	// Only a load's answer carries them.
+	AlreadyServing bool     `json:"alreadyServing,omitempty"`
+	ServingNodes   []string `json:"servingNodes,omitempty"`
 	// Wiring is what a load did about the ModelConfig on a serve-lifecycle
 	// backend — created in the same call, before the model is ready; only a
 	// load's answer carries it.
@@ -744,19 +749,35 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if req.Preset == "" && m.Preset != "" {
 		req.Preset = m.Preset
 	}
-	var fit *backend.FitResult
-	if srv, ok := b.(backend.Server); ok {
-		res, err := srv.Serve(ctx, req)
+	res := &backend.LoadResult{}
+	srv, isServer := b.(backend.Server)
+	if isServer {
+		served, err := srv.Serve(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		if res != nil {
-			fit = res.Fit
+		if served != nil {
+			res = served
 		}
 	} else if err := b.Load(ctx, req); err != nil {
 		return nil, err
 	}
-	s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+	if res.AlreadyServing {
+		// Nothing was created: the answer says where the model already
+		// serves, and no load job follows an object this call did not start.
+		s.log.Info("model already serving", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "nodes", strings.Join(res.ServingNodes, ","), identity.LogAttr(ctx))
+		view := s.loadedView(ctx, b, m)
+		view.Fit, view.AlreadyServing, view.ServingNodes = res.Fit, true, res.ServingNodes
+		return view, nil
+	}
+	fit := res.Fit
+	if isServer {
+		// A Server serves until stopped: keep-alive is an in-memory
+		// backend's notion.
+		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+	} else {
+		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+	}
 	if s.cfg.AutoWire && s.wirer != nil {
 		if sl, ok := serveLifecycle(b); ok {
 			// The answer names the serving object the load created

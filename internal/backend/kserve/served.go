@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,6 +200,39 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	// directory from (index.go).
 	b.recordServed(ctx, out)
 	return out, nil
+}
+
+// servingNodes are the nodes an existing serving object runs on: a split's
+// nodes, else the node it is pinned to, else its predictor pod's; none while
+// an unpinned object waits for a node.
+func (b *Backend) servingNodes(ctx context.Context, obj *unstructured.Unstructured, sv served) []string {
+	if len(sv.Nodes) > 0 {
+		return sv.Nodes
+	}
+	if node, _, _ := unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelHostname); node != "" {
+		return []string{node}
+	}
+	pods := map[string]*corev1.Pod{}
+	b.podsByName(ctx, sv.Namespace, llmisvcPodSelector+","+llmisvcPodLabel+"="+sv.Name, llmisvcPodLabel, pods)
+	if p := pods[sv.Name]; p != nil && p.Spec.NodeName != "" {
+		return []string{p.Spec.NodeName}
+	}
+	return nil
+}
+
+// unservedNode is the first node a load request pins that the serving
+// object does not run on; empty when the request pins none or the object's
+// nodes are unknown.
+func unservedNode(req backend.LoadRequest, nodes []string) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	for _, n := range append([]string{req.Node}, req.Nodes...) {
+		if n = strings.TrimSpace(n); n != "" && !slices.Contains(nodes, n) {
+			return n
+		}
+	}
+	return ""
 }
 
 // predictorPod is what the driver reads off the workload pod of an
