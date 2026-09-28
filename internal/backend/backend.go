@@ -575,9 +575,15 @@ const (
 )
 
 // LoadResult is what a Server's Serve answers next to the error: the fit
-// verdict it judged the model by before creating the serving object.
+// verdict it judged the model by before creating the serving object, or —
+// when a serving object for the preset already existed and nothing was
+// created — AlreadyServing with the nodes it runs on.
 type LoadResult struct {
-	Fit *FitResult `json:"fit,omitempty"`
+	Fit            *FitResult `json:"fit,omitempty"`
+	AlreadyServing bool       `json:"alreadyServing,omitempty"`
+	// ServingNodes are the nodes the existing serving object runs on (a
+	// split's nodes, the pinned node or its pod's); empty while unknown.
+	ServingNodes []string `json:"servingNodes,omitempty"`
 }
 
 // Server is implemented by backends whose Load fit-checks the model first

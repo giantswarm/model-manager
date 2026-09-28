@@ -235,10 +235,17 @@ type servingFixture struct {
 
 func newServingFixture(t *testing.T) *servingFixture {
 	t.Helper()
+	return newServingFixtureOf(t, func(fb *fakeServing) backend.Backend { return fb })
+}
+
+// newServingFixtureOf is newServingFixture with the backend the service
+// runs on wrapped around the fake.
+func newServingFixtureOf(t *testing.T, wrap func(*fakeServing) backend.Backend) *servingFixture {
+	t.Helper()
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny", Path: "tiny", Node: "n1"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{wrap(fb)}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -870,4 +877,48 @@ func (f *servingFixture) doWith(t *testing.T, client *http.Client, method, path 
 	t.Helper()
 	fx := &fixture{srv: f.srv}
 	return fx.doWith(t, client, method, path, body)
+}
+
+// fakeServer is fakeServing with kserve's Serve: a model served already
+// answers AlreadyServing on n1 and creates nothing.
+type fakeServer struct{ *fakeServing }
+
+func (f fakeServer) Serve(ctx context.Context, req backend.LoadRequest) (*backend.LoadResult, error) {
+	f.fakeBackend.mu.Lock()
+	served := f.loaded[req.Name]
+	f.fakeBackend.mu.Unlock()
+	if served {
+		return &backend.LoadResult{AlreadyServing: true, ServingNodes: []string{"n1"}}, nil
+	}
+	return &backend.LoadResult{}, f.Load(ctx, req)
+}
+
+func TestServingLoadOfAServedModelStartsNoLoadJob(t *testing.T) {
+	f := newServingFixtureOf(t, func(fb *fakeServing) backend.Backend { return fakeServer{fb} })
+	loadJobs := func() []map[string]any {
+		t.Helper()
+		status, list := f.do(t, http.MethodGet, Prefix+"/jobs", nil)
+		require.Equal(t, http.StatusOK, status)
+		var out []map[string]any
+		for _, j := range list["jobs"].([]any) {
+			if jm := j.(map[string]any); jm["type"] == "load" {
+				out = append(out, jm)
+			}
+		}
+		return out
+	}
+
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Nil(t, body["alreadyServing"], "a new serve is no already-serving answer")
+	jobs := loadJobs()
+	require.Len(t, jobs, 1)
+	f.backend.setReady("org/tiny")
+	f.waitJob(t, jobs[0]["id"].(string))
+
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, true, body["alreadyServing"])
+	assert.Equal(t, []any{"n1"}, body["servingNodes"])
+	assert.Len(t, loadJobs(), 1, "no second load job follows a model this call did not start")
 }

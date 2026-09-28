@@ -384,7 +384,7 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	portal.SetAnnotations(nil)
 	_, err = llmisvcs.Create(ctx, portal, metav1.CreateOptions{})
 	require.NoError(t, err)
-	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo, Node: testGPUNode}), "same model behind the same preset: no-op")
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: bigRepo}), "same model behind the same preset: no-op")
 	ep = f.b.AgentEndpoint(bigRepo)
 	assert.Equal(t, "big", ep.Name, "the ModelConfig is named after the LLMInferenceService")
 	assert.Equal(t, bigRepo, ep.Model)
@@ -1071,4 +1071,62 @@ func TestCacheIndexNeedsACache(t *testing.T) {
 		require.NoError(t, err)
 		run(t, f)
 	})
+}
+
+func TestServeAnAlreadyServedPreset(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	res, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: testGPUNode})
+	require.NoError(t, err)
+	assert.False(t, res.AlreadyServing, "the first serve creates the object")
+
+	// Served already: success naming the node it serves on, nothing created.
+	for _, node := range []string{"", testGPUNode} {
+		res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: node})
+		require.NoError(t, err)
+		assert.True(t, res.AlreadyServing, "node %q", node)
+		assert.Equal(t, []string{testGPUNode}, res.ServingNodes, "the node the object is pinned to")
+	}
+
+	// Pinned to another node: a conflict naming both, never a success.
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves on "+testGPUNode+", not on gpu2; stop it first")
+
+	// Unpinned, the node is its predictor pod's.
+	require.NoError(t, f.b.Unload(ctx, tinyRepo))
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyServing)
+	assert.Empty(t, res.ServingNodes, "no pod yet: the node is unknown")
+	// A pinned node while the object waits for one: no success it cannot keep.
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves and has no node yet; to serve it on gpu2, stop it first")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "tiny-kserve-workload-1", Namespace: testServingNS, Labels: map[string]string{"app.kubernetes.io/part-of": "llminferenceservice", llmisvcPodLabel: "tiny"}},
+		Spec:       corev1.PodSpec{NodeName: testGPUNode},
+	}
+	_, err = f.cs.CoreV1().Pods(testServingNS).Create(ctx, pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{testGPUNode}, res.ServingNodes)
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Node: "gpu2"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+
+	// Stopping: neither "already serving" nor a new object.
+	llmisvcs := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS)
+	obj, err := llmisvcs.Get(ctx, "tiny", metav1.GetOptions{})
+	require.NoError(t, err)
+	now := metav1.Now()
+	obj.SetDeletionTimestamp(&now)
+	_, err = llmisvcs.Update(ctx, obj, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny is stopping; serve it again once it is gone")
 }
