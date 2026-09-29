@@ -56,7 +56,8 @@ func TestValidatePlacement(t *testing.T) {
 	}{
 		{"", nil, backend.PlacementCopies, ""},
 		{"copies", []string{"a"}, backend.PlacementCopies, ""},
-		{"copies", []string{"a", "b"}, "", "copies on several nodes"},
+		{"copies", []string{"a", "b"}, backend.PlacementCopies, ""},
+		{"copies", []string{"a", "a"}, "", "named twice"},
 		{"split", nil, backend.PlacementSplit, ""},
 		{"split", []string{"a", "b"}, backend.PlacementSplit, ""},
 		{"split", []string{"a"}, "", "two or more nodes"},

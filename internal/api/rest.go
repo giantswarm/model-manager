@@ -76,7 +76,7 @@ type modelRequest struct {
 	Preset string `json:"preset,omitempty"`
 	Node   string `json:"node,omitempty"`
 	// Placement and Nodes place the model (kserve load, fit): split across
-	// the nodes of a fast link, or copies.
+	// the nodes of a fast link, or copies, one on each of the nodes.
 	Placement string   `json:"placement,omitempty"`
 	Nodes     []string `json:"nodes,omitempty"`
 	// The API-key shape of a wired ModelConfig (wire): the caller's token

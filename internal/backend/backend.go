@@ -218,7 +218,8 @@ type LoadedModel struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	Node     string `json:"node,omitempty"`
 	// Placement and Nodes are how the model is served (kserve): split across
-	// Nodes, or copies (Node the one it runs on when pinned).
+	// Nodes, or copies — one per node of Nodes when it runs on several
+	// (Node the one it runs on when pinned to one).
 	Placement string   `json:"placement,omitempty"`
 	Nodes     []string `json:"nodes,omitempty"`
 	// Pool is the GPU pool the model is pinned to (kserve: the pool label
@@ -408,9 +409,10 @@ type LoadRequest struct {
 	// Node pins the predictor to one node (kserve).
 	Node string `json:"node,omitempty"`
 	// Placement is how the model is placed (kserve): PlacementSplit across
-	// the nodes of one fast link, or PlacementCopies (the default: one copy,
-	// on Node or the node the fit check picks). Nodes names the nodes of a
-	// split; empty picks a fast link whose nodes all host the model.
+	// the nodes of one fast link, or PlacementCopies (the default: one copy
+	// per node of Nodes, else one on Node or the node the fit check picks).
+	// Nodes names the nodes of a split — empty picks a fast link whose nodes
+	// all host the model — or of the copies.
 	Placement string   `json:"placement,omitempty"`
 	Nodes     []string `json:"nodes,omitempty"`
 	// ContextLength is the context window to load the model at (ollama:
@@ -470,8 +472,8 @@ type SearchResult struct {
 
 // Placements of a served model (kserve, giantswarm/model-manager#190).
 const (
-	// PlacementCopies serves the model as one copy per node; one node is
-	// one copy — the only placement before fast links.
+	// PlacementCopies serves the model as one copy per node, behind one
+	// endpoint; one node is one copy.
 	PlacementCopies = "copies"
 	// PlacementSplit serves one model across the nodes of a fast link,
 	// tensor parallel over the link.
@@ -479,7 +481,8 @@ const (
 )
 
 // FitRequest asks whether a model can be served on a node — or, placement
-// split, across the nodes of a fast link.
+// split, across the nodes of a fast link, or, placement copies with Nodes,
+// as one copy on each of them.
 type FitRequest struct {
 	Model     string   `json:"model"`
 	Preset    string   `json:"preset,omitempty"`
@@ -546,11 +549,16 @@ type FitResult struct {
 	// placement the backend recommends for the model on this cluster: split
 	// when two or more nodes of one fast link host it, copies otherwise;
 	// RecommendedNodes the nodes it recommends. The portal preselects it.
-	Placement        string   `json:"placement,omitempty"`
-	Nodes            []string `json:"nodes,omitempty"`
-	FastLink         string   `json:"fastLink,omitempty"`
-	Recommended      string   `json:"recommended,omitempty"`
-	RecommendedNodes []string `json:"recommendedNodes,omitempty"`
+	// Copies with Nodes judged one copy on each of them: Node is then the
+	// tightest one and the budget figures are its. Copies is, for placement
+	// copies on a cluster of several nodes, the verdict of one copy on each
+	// node — the ones a person can put copies on, and why the others not.
+	Placement        string    `json:"placement,omitempty"`
+	Nodes            []string  `json:"nodes,omitempty"`
+	FastLink         string    `json:"fastLink,omitempty"`
+	Recommended      string    `json:"recommended,omitempty"`
+	RecommendedNodes []string  `json:"recommendedNodes,omitempty"`
+	Copies           []NodeFit `json:"copies,omitempty"`
 	// Pool is the GPU pool the model is placed on — the chosen node's
 	// giantswarm.io/machine-pool, or the pool with no node yet whose size
 	// hosts it — when no single pool pins every predictor; load_model pins
@@ -588,6 +596,13 @@ type FitResult struct {
 	// backends without a cache.
 	Cached      bool   `json:"cached"`
 	CacheSource string `json:"cacheSource,omitempty"`
+}
+
+// NodeFit is the verdict of one copy of a model on one node.
+type NodeFit struct {
+	Node   string `json:"node"`
+	Fits   bool   `json:"fits"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // The CacheSource values of a FitResult.
