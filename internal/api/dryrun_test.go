@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -124,4 +127,15 @@ func TestOperationalDryRunsDoNothing(t *testing.T) {
 	text, isErr := callTool(t, srv, ToolLoadModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
 	require.True(t, isErr)
 	assert.Contains(t, text, "only kserve")
+}
+
+func TestForbiddenAnswers403(t *testing.T) {
+	denied := apierrors.NewForbidden(schema.GroupResource{Group: "kagent.dev", Resource: "modelconfigs"}, "", fmt.Errorf("RBAC: access denied"))
+	status, code := statusFor(fmt.Errorf("list ModelConfigs in kagent: %w", denied))
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.Equal(t, "forbidden", code)
+
+	status, code = statusFor(fmt.Errorf("list ModelConfigs in kagent: %w", apierrors.NewInternalError(fmt.Errorf("etcd"))))
+	assert.Equal(t, http.StatusBadGateway, status, "any other apiserver failure stays a backend error")
+	assert.Equal(t, "backend_error", code)
 }
