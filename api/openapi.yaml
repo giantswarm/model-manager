@@ -168,6 +168,7 @@ paths:
                     items: { $ref: "#/components/schemas/Model" }
                   errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/{name}:
     parameters:
@@ -187,6 +188,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
     delete:
       tags: [models]
@@ -214,6 +216,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/loaded:
     get:
@@ -238,6 +241,7 @@ paths:
                   errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/pull:
     post:
@@ -366,6 +370,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "412": { $ref: "#/components/responses/DoesNotFit" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/fit-check:
     post:
@@ -414,6 +419,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/presets:
     get:
@@ -443,6 +449,7 @@ paths:
                   errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/search:
     get:
@@ -475,6 +482,7 @@ paths:
                   errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/nodes:
     get:
@@ -549,6 +557,7 @@ paths:
                   errors: { $ref: "#/components/schemas/BackendErrors" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/unload:
     post:
@@ -576,6 +585,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/wire:
     post:
@@ -615,6 +625,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/unwire:
     post:
       tags: [wiring]
@@ -645,6 +657,8 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/jobs:
     get:
       tags: [jobs]
@@ -731,6 +745,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: the cluster refused the caller — model-manager acts as the caller, so their own Kubernetes RBAC decides; not retryable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BackendError:
       description: the serving backend failed or is unreachable
       content:
@@ -752,7 +771,7 @@ components:
           properties:
             code:
               type: string
-              enum: [not_found, invalid_request, unsupported, conflict, does_not_fit, unavailable, backend_error]
+              enum: [not_found, invalid_request, no_backend, unsupported, conflict, gitops_owned, auth_required, forbidden, does_not_fit, unavailable, backend_error]
             message: { type: string }
     BackendName:
       type: string

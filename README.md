@@ -72,7 +72,7 @@ Lemonade-backend ADR in the team's decision log.
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
-`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|does_not_fit|backend_error","message":"…"}}`;
+`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|forbidden|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
 (412) that the kserve fit check refused a pull or load, `conflict` (409) also
 that an unqualified reference exists on several backends — repeat the request
@@ -83,7 +83,9 @@ its `app.kubernetes.io/managed-by` says — and a live change would be reverted
 on the next reconciliation; the message names the Flux object. Nothing was
 written. A ModelConfig reports that owner as `gitops`, and the wiring
 reconciler and the unload, unwire and delete paths leave such a ModelConfig
-alone.
+alone. `forbidden` (403) means the cluster refused the caller: model-manager
+acts as the caller, so their own Kubernetes RBAC decides; retrying does not
+help, and `backend_error` (502) stays for a backend that failed.
 
 **Several backends in one process.** Every `Model`, `LoadedModel`, `Job`,
 `NodeInfo`, `Preset`, `FitResult` and `ModelConfigRef` carries `backend`. Reads
