@@ -29,9 +29,10 @@ against the workload URL for a kserve model on its in-cluster Service, and
 against Lemonade's `/api/v1` for lemonade; a kserve model's ModelConfig is
 created by the load call, before the model is ready), so agents can use them
 without manual steps. They are written in the kagent.dev API version the
-cluster serves (`v1alpha3` on kagent API v2, discovered at start-up), and a
-ModelConfig is `ready` once kagent has accepted it and resolved its Secret
-(conditions `Accepted` and `ResolvedRefs`).
+cluster serves (`v1alpha3` on kagent API v2, discovered at start-up and
+re-discovered when a call fails `NotFound`, as after a CRD version cut-over),
+and a ModelConfig is `ready` once kagent has accepted it and resolved its
+Secret (conditions `Accepted` and `ResolvedRefs`).
 
 The same operations are exposed twice from one process:
 

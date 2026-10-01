@@ -3,6 +3,7 @@ package wiring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -15,6 +16,10 @@ import (
 // a kagent upgrade that adds a field reaches the ModelConfigs within it,
 // without a restart of model-manager.
 const schemaTTL = time.Minute
+
+// errVersionNotServed is the OpenAPI v3 document's miss of the group version
+// in use: the version is no longer served.
+var errVersionNotServed = errors.New("version not served")
 
 // servedSchema answers which fields the ModelConfig schema the apiserver
 // serves has, from the OpenAPI v3 document it publishes for the kagent.dev
@@ -67,7 +72,7 @@ func (s *servedSchema) fetchOllamaFields(ctx context.Context) (map[string]bool, 
 	}
 	p, ok := paths["apis/"+gv]
 	if !ok {
-		return nil, fmt.Errorf("the apiserver publishes no OpenAPI v3 schema for %s (is kagent installed?)", gv)
+		return nil, fmt.Errorf("the apiserver publishes no OpenAPI v3 schema for %s (is kagent installed?): %w", gv, errVersionNotServed)
 	}
 	raw, err := p.SchemaWithContext(ctx, runtime.ContentTypeJSON)
 	if err != nil {

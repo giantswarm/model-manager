@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wiring follows a kagent CRD version cut-over under a running process: with `--kagent-api-version auto` a call that fails `NotFound` at the version discovered at start-up re-discovers the served version and is retried once at the new one, instead of failing until a restart. An explicit `--kagent-api-version` never re-discovers.
 - kserve: a split's environment is merged by name: a preset's `spec.split.env` entry replaces the fast link's of the same name, and a fast link's entry a preset's `spec.env` already sets. The LLMInferenceService API refused the load with `Duplicate value` on the env name.
 - kserve: `check_fit` judges the KV cache on a unified-memory node (a GB10: GPUs, no `nvidia.com/gpu.memory` label) against the node's memory capacity, the total vLLM profiles against there, instead of skipping it with "the node reports no GPU memory". The verdict names "the node's … unified memory"; a node whose memory several GPUs share is not judged, and says so.
 - kserve: `check_fit` reads the KV cache of Gemma 4's unified multimodal checkpoints (`gemma4_unified_text`, the `gemma-4-12b` preset) and of Qwen4-Exp (`qwen4_exp_text`, the `qwen3-8-flash-next-nvfp4` preset): its full-attention layers, none for the linear-attention ones, and the sparse-attention index each full layer keeps (one bf16 key per `indexer_compress_ratio` tokens). Both presets were judged by their flat overhead alone, so a `--max-model-len` vLLM refuses read as a fit.
