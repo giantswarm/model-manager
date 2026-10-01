@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- kserve: a serving preset's `spec.split.env` reaches the leader and the workers of a split placement, after the fast link's environment, and never a single-node pod: environment measured for the split alone, such as the RoCE all-reduce of a tensor-parallel split.
 - Every write tool takes `dryRun`: `pull_model`, `load_model`, `unload_model`, `delete_model` and `cancel_job` answer the plan (present and loaded state, keep-alive, the kserve fit verdict, the serving object a load would create or an unload delete, the ModelConfig the call would wire or unwire, the job) and change nothing.
 - kserve `load_model` and `unload_model` take `mode: commit`: the LLMInferenceService and the ModelConfig wiring it land in one pull request as the person (the removing one for an unload), in the repository that owns the serving namespace. `pull_model` and `delete_model` answer `unsupported` for `mode: commit`, as does a load or unload on the other backends.
 

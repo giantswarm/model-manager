@@ -311,7 +311,8 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 // rank order): the single-node composition as the leader template, pinned to
 // the first node, a copy of it as the worker template, pinned to the others
 // and spread one per node, both running vLLM's multi-node launch, joined to
-// the fast link's networks, requesting its devices, with its environment;
+// the fast link's networks, requesting its devices, with its environment and
+// the preset's split environment after it;
 // image the runtime of the single-node template unless the preset names one.
 func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, image string) *unstructured.Unstructured {
 	nodes := link.Nodes
@@ -336,6 +337,10 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 			main["image"] = image
 		}
 		addEnv(main, link.Env)
+		if env := p.Spec.Split.Env; len(env) > 0 {
+			list, _ := main["env"].([]any)
+			main["env"] = append(list, mapsToAny(env)...)
+		}
 		addResources(main, link.Resources)
 		main["securityContext"] = splitSecurityContext()
 	}

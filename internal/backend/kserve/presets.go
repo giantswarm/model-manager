@@ -76,6 +76,13 @@ type presetSpec struct {
 	// alone: Scheduler set composes (true) or leaves out (false) the llm-d
 	// endpoint picker whatever the backend's default; nil follows it.
 	Router *presetRouter `json:"router"`
+	// Split is what a split placement of this preset adds: Env reaches the
+	// leader and the workers after the fast link's, and never a single-node
+	// pod — environment measured for the split alone, such as an in-graph
+	// all-reduce over the link.
+	Split struct {
+		Env []map[string]any `json:"env"`
+	} `json:"split"`
 }
 
 // presetRouter is a preset's spec.router.
