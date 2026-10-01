@@ -241,6 +241,8 @@ const splitEnvDoc = `  split:
     env:
       - name: VLLM_ENABLE_ROCE_ALLREDUCE
         value: "1"
+      - name: NCCL_IB_HCA
+        value: rocep1s0f1
 `
 
 var splitEnvVar = map[string]any{"name": "VLLM_ENABLE_ROCE_ALLREDUCE", "value": "1"}
@@ -258,7 +260,13 @@ func TestSplitEnvReachesOnlyASplit(t *testing.T) {
 		for role, tpl := range map[string]map[string]any{"leader": leader, "worker": worker} {
 			env := templateMain(tpl)["env"].([]any)
 			assert.Contains(t, env, splitEnvVar, role)
-			assert.Equal(t, splitEnvVar, env[len(env)-1], "%s: the preset's split environment follows the fast link's", role)
+			var hca []any
+			for _, e := range env {
+				if e.(map[string]any)["name"] == "NCCL_IB_HCA" {
+					hca = append(hca, e.(map[string]any)["value"])
+				}
+			}
+			assert.Equal(t, []any{"rocep1s0f1"}, hca, "%s: the preset's split environment replaces the fast link's entry of the same name; the API refuses two", role)
 		}
 	})
 

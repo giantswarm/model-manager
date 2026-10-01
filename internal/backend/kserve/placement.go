@@ -312,7 +312,8 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 // the first node, a copy of it as the worker template, pinned to the others
 // and spread one per node, both running vLLM's multi-node launch, joined to
 // the fast link's networks, requesting its devices, with its environment and
-// the preset's split environment after it;
+// the preset's split environment over it (by name: a later source replaces an
+// entry of the same name);
 // image the runtime of the single-node template unless the preset names one.
 func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, image string) *unstructured.Unstructured {
 	nodes := link.Nodes
@@ -336,11 +337,8 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 		if _, set := main["image"]; !set && image != "" {
 			main["image"] = image
 		}
-		addEnv(main, link.Env)
-		if env := p.Spec.Split.Env; len(env) > 0 {
-			list, _ := main["env"].([]any)
-			main["env"] = append(list, mapsToAny(env)...)
-		}
+		mergeEnv(main, linkEnv(link.Env))
+		mergeEnv(main, p.Spec.Split.Env)
 		addResources(main, link.Resources)
 		main["securityContext"] = splitSecurityContext()
 	}
@@ -506,15 +504,41 @@ func withoutFlag(args []string, flag string) []string {
 	return out
 }
 
-func addEnv(main map[string]any, env []backend.EnvVar) {
+// mergeEnv sets env on the main container by name: an entry whose name the
+// container already carries replaces it in place, the others follow in order.
+// The LLMInferenceService API refuses two entries of one name.
+func mergeEnv(main map[string]any, env []map[string]any) {
 	if len(env) == 0 {
 		return
 	}
 	list, _ := main["env"].([]any)
+	at := make(map[string]int, len(list))
+	for i, e := range list {
+		if m, ok := e.(map[string]any); ok {
+			if name, ok := m["name"].(string); ok {
+				at[name] = i
+			}
+		}
+	}
 	for _, e := range env {
-		list = append(list, map[string]any{"name": e.Name, "value": e.Value})
+		name, _ := e["name"].(string)
+		if i, ok := at[name]; ok {
+			list[i] = e
+			continue
+		}
+		at[name] = len(list)
+		list = append(list, e)
 	}
 	main["env"] = list
+}
+
+// linkEnv is a fast link's environment as container env entries.
+func linkEnv(env []backend.EnvVar) []map[string]any {
+	out := make([]map[string]any, 0, len(env))
+	for _, e := range env {
+		out = append(out, map[string]any{"name": e.Name, "value": e.Value})
+	}
+	return out
 }
 
 func addResources(main map[string]any, extra map[string]string) {
