@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -809,4 +810,97 @@ func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
 			assert.Equal(t, string(want), string(got))
 		})
 	}
+}
+
+// cutOver is a cluster whose kagent.dev CRD serves one ModelConfig version
+// at a time, switched by flip: a call at any other version fails NotFound,
+// as the apiserver answers a version the CRD no longer serves.
+type cutOver struct {
+	served    string
+	discovery *discoveryfake.FakeDiscovery
+	client    *dynamicfake.FakeDynamicClient
+	misses    int
+}
+
+func newCutOver(served string) *cutOver {
+	c := &cutOver{discovery: &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{}}}
+	c.client = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		{Group: KagentGroup, Version: "v1alpha2", Resource: ModelConfigResource}: "ModelConfigList",
+		testGVR:   "ModelConfigList",
+		secretGVR: "SecretList",
+	})
+	c.client.PrependReactor("*", ModelConfigResource, func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if v := a.GetResource().Version; v != c.served {
+			c.misses++
+			return true, nil, apierrors.NewGenericServerResponse(404, a.GetVerb(), a.GetResource().GroupResource(), "", "", 0, true)
+		}
+		return false, nil, nil
+	})
+	c.flip(served)
+	return c
+}
+
+func (c *cutOver) flip(served string) {
+	c.served = served
+	c.discovery.Resources = []*metav1.APIResourceList{apiResources(KagentGroup+"/"+served, "agents", ModelConfigResource)}
+}
+
+func TestWiringFollowsACRDVersionCutOver(t *testing.T) {
+	ctx := context.Background()
+	c := newCutOver("v1alpha2")
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "").
+		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
+	ep := ollamaEndpoint("smollm2:135m")
+	ep.Think = nil
+
+	before, err := k.Ensure(ctx, "smollm2:135m", ep)
+	require.NoError(t, err)
+	assert.Equal(t, KagentGroup+"/v1alpha2", before.APIVersion)
+
+	c.flip("v1alpha3")
+	after, err := k.Ensure(ctx, "qwen2.5:0.5b", ep)
+	require.NoError(t, err, "the first call after the cut-over re-discovers and retries")
+	assert.Positive(t, c.misses, "the call failed NotFound at the old version")
+	assert.Equal(t, testAPIVersion, after.APIVersion)
+	assert.Equal(t, "v1alpha3", k.APIVersion())
+
+	misses := c.misses
+	refs, err := k.List(ctx)
+	require.NoError(t, err)
+	assert.Len(t, refs, 1, "the new version's ModelConfigs")
+	assert.Equal(t, misses, c.misses, "later calls go to the new version at once")
+}
+
+func TestWiringRediscoversWhenTheSchemaVersionIsGone(t *testing.T) {
+	c := newCutOver("v1alpha3")
+	k := NewKagent(c.client, servedOpenAPI("v1alpha3", kagentOllamaFields...), "kagent", "v1alpha2", "").
+		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
+
+	ep, err := k.Writable(context.Background(), ollamaEndpoint("qwen3:0.6b"))
+	require.NoError(t, err)
+	assert.Equal(t, ptr(false), ep.Think, "read from the v1alpha3 schema")
+	assert.Equal(t, "v1alpha3", k.APIVersion())
+}
+
+func TestAnExplicitAPIVersionNeverRediscovers(t *testing.T) {
+	c := newCutOver("v1alpha3")
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "")
+
+	_, err := k.List(context.Background())
+	require.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+	assert.Equal(t, "v1alpha2", k.APIVersion())
+}
+
+func TestARediscoveryOfTheSameVersionKeepsTheError(t *testing.T) {
+	c := newCutOver("v1alpha2")
+	calls := 0
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "").
+		WithDiscovery(func() (string, error) { calls++; return "v1alpha2", nil }, nil)
+	c.served = "none"
+
+	_, err := k.List(context.Background())
+	require.Error(t, err)
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, 1, c.misses, "no retry at an unchanged version")
 }

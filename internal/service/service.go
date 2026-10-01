@@ -317,8 +317,18 @@ func (s *Service) Source(name backend.Name) string {
 }
 
 // Wiring describes where ModelConfigs are created, nil when agent wiring is
-// disabled.
-func (s *Service) Wiring() *WiringInfo { return s.wiring }
+// disabled. The API version is the wirer's current one when it follows the
+// served version (wiring.Kagent re-discovers it).
+func (s *Service) Wiring() *WiringInfo {
+	if s.wiring == nil {
+		return nil
+	}
+	info := *s.wiring
+	if v, ok := s.wirer.(interface{ APIVersion() string }); ok {
+		info.APIVersion = v.APIVersion()
+	}
+	return &info
+}
 
 // Names lists the configured backends in order.
 func (s *Service) Names() []backend.Name {
@@ -416,7 +426,7 @@ func (s *Service) describe(ctx context.Context, b backend.Backend, source string
 		resp.Loading.KeepAliveDefault = s.cfg.DefaultKeepAlive
 	}
 	if s.wirer != nil {
-		resp.Wiring = s.wiring
+		resp.Wiring = s.Wiring()
 	}
 	return resp
 }

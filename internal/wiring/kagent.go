@@ -31,10 +31,13 @@ package wiring
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -176,10 +179,17 @@ type Wirer interface {
 type Kagent struct {
 	client    dynamic.Interface
 	clientFor func(ctx context.Context) dynamic.Interface
-	gvr       schema.GroupVersionResource
+	openAPI   openapi.ClientWithContext
 	namespace string
 	prefix    string
-	schema    *servedSchema
+	// discover, when set, re-discovers the served version after a call
+	// misses it (WithDiscovery).
+	discover func() (string, error)
+	log      *slog.Logger
+
+	mu     sync.RWMutex
+	gvr    schema.GroupVersionResource
+	schema *servedSchema
 }
 
 // NewKagent builds a Wirer writing into namespace with the given API version.
@@ -190,13 +200,72 @@ func NewKagent(client dynamic.Interface, openAPI openapi.ClientWithContext, name
 	if apiVersion == "" {
 		apiVersion = DefaultAPIVersion
 	}
-	return &Kagent{
-		client:    client,
-		gvr:       schema.GroupVersionResource{Group: KagentGroup, Version: apiVersion, Resource: ModelConfigResource},
-		namespace: namespace,
-		prefix:    prefix,
-		schema:    &servedSchema{client: openAPI, version: apiVersion, now: time.Now},
+	k := &Kagent{client: client, openAPI: openAPI, namespace: namespace, prefix: prefix}
+	k.setVersion(apiVersion)
+	return k
+}
+
+// WithDiscovery makes the wirer follow the version the apiserver serves: a
+// call that fails NotFound — the version it uses is no longer served, as
+// after a kagent CRD version cut-over — re-runs discover and, when the
+// served version changed, is retried once at the new one. Without it (an
+// explicit version) the version never changes.
+func (k *Kagent) WithDiscovery(discover func() (string, error), log *slog.Logger) *Kagent {
+	if log == nil {
+		log = slog.Default()
 	}
+	k.discover, k.log = discover, log
+	return k
+}
+
+func (k *Kagent) setVersion(v string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.gvr = schema.GroupVersionResource{Group: KagentGroup, Version: v, Resource: ModelConfigResource}
+	k.schema = &servedSchema{client: k.openAPI, version: v, now: time.Now}
+}
+
+// resource is the ModelConfig resource in the version in use.
+func (k *Kagent) resource() schema.GroupVersionResource {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.gvr
+}
+
+func (k *Kagent) served() *servedSchema {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.schema
+}
+
+// rediscovered reports whether err is a miss of the version in use and
+// discovery found another one, which the wirer now uses.
+func (k *Kagent) rediscovered(err error) bool {
+	missed := errors.IsNotFound(err) || stderrors.Is(err, errVersionNotServed)
+	if k.discover == nil || !missed {
+		return false
+	}
+	old := k.APIVersion()
+	v, derr := k.discover()
+	if derr != nil {
+		k.log.Warn("kagent API re-discovery failed", "apiVersion", old, "error", derr)
+		return false
+	}
+	if v == old {
+		return false
+	}
+	k.setVersion(v)
+	k.log.Info("kagent API version changed", "from", old, "to", v)
+	return true
+}
+
+// retried runs call, and once more after a re-discovery its error caused.
+func retried[T any](k *Kagent, call func() (T, error)) (T, error) {
+	v, err := call()
+	if err != nil && k.rediscovered(err) {
+		return call()
+	}
+	return v, err
 }
 
 // WithClientFor makes every call pick its client from ctx (downstream OAuth:
@@ -221,7 +290,7 @@ func (k *Kagent) dyn(ctx context.Context) dynamic.Interface {
 func (k *Kagent) Namespace() string { return k.namespace }
 
 // APIVersion returns the CRD version in use.
-func (k *Kagent) APIVersion() string { return k.gvr.Version }
+func (k *Kagent) APIVersion() string { return k.resource().Version }
 
 // DiscoverAPIVersion returns the kagent.dev version the API server serves
 // ModelConfigs in: the group's preferred version when it has the resource,
@@ -286,6 +355,10 @@ func (r *Rendered) ModelConfig() *unstructured.Unstructured {
 
 // Render implements Wirer: Ensure's decision without the write.
 func (k *Kagent) Render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error) {
+	return retried(k, func() (*Rendered, error) { return k.render(ctx, model, ep) })
+}
+
+func (k *Kagent) render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error) {
 	p, err := k.plan(ctx, model, ep)
 	if err != nil {
 		return nil, err
@@ -328,7 +401,7 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	if err := ep.Validate(); err != nil {
 		return nil, err
 	}
-	ep, err := k.Writable(ctx, ep)
+	ep, err := k.writable(ctx, ep)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +409,7 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	if ep.Name != "" {
 		target = k.prefixed(ep.Name)
 	}
-	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
 	// The derived name may already belong to the same reference on ANOTHER
 	// backend (one model-manager, several backends): that ModelConfig keeps
 	// the plain name, this one gets the backend appended. The annotation
@@ -383,6 +456,10 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 // would update or the older one it would replace — is never written live:
 // the answer is ErrGitOpsOwned.
 func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error) {
+	return retried(k, func() (*ModelConfigRef, error) { return k.ensure(ctx, model, ep) })
+}
+
+func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error) {
 	p, err := k.plan(ctx, model, ep)
 	if err != nil {
 		return nil, err
@@ -397,7 +474,7 @@ func (k *Kagent) Ensure(ctx context.Context, model string, ep backend.AgentEndpo
 			return nil, err
 		}
 	}
-	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
 	name, desired, existing := p.name, p.desired, p.existing
 	if existing == nil {
 		if p.secret != nil {
@@ -464,10 +541,14 @@ func refuseGitOps(obj *unstructured.Unstructured) error {
 // Writable implements Wirer. Only a setting that needs the served schema
 // consults it: think, which kagent's ModelConfig has from 1.0.3 on.
 func (k *Kagent) Writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {
+	return retried(k, func() (backend.AgentEndpoint, error) { return k.writable(ctx, ep) })
+}
+
+func (k *Kagent) writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {
 	if ep.Provider != "Ollama" || ep.Think == nil {
 		return ep, nil
 	}
-	fields, err := k.schema.ollamaFields(ctx)
+	fields, err := k.served().ollamaFields(ctx)
 	if err != nil {
 		return ep, fmt.Errorf("read the served ModelConfig schema: %w", err)
 	}
@@ -481,6 +562,10 @@ func (k *Kagent) Writable(ctx context.Context, ep backend.AgentEndpoint) (backen
 // owned ModelConfig for model on backend b and the placeholder Secret
 // model-manager created for it; no objects when nothing is wired.
 func (k *Kagent) Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error) {
+	return retried(k, func() (*Rendered, error) { return k.removal(ctx, b, model) })
+}
+
+func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Rendered, error) {
 	obj, err := k.find(ctx, b, model)
 	if err != nil || obj == nil {
 		return &Rendered{}, err
@@ -499,6 +584,11 @@ func (k *Kagent) Removal(ctx context.Context, b backend.Name, model string) (*Re
 // Remove implements Wirer. A ModelConfig Flux applies from git is never
 // deleted live: the answer is ErrGitOpsOwned.
 func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error {
+	_, err := retried(k, func() (struct{}, error) { return struct{}{}, k.remove(ctx, b, model) })
+	return err
+}
+
+func (k *Kagent) remove(ctx context.Context, b backend.Name, model string) error {
 	obj, err := k.find(ctx, b, model)
 	if err != nil {
 		return err
@@ -514,7 +604,7 @@ func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error
 
 // removeObj deletes an owned ModelConfig and its placeholder Secret.
 func (k *Kagent) removeObj(ctx context.Context, name string) error {
-	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelConfig %s/%s: %w", k.namespace, name, err)
 	}
@@ -546,6 +636,10 @@ func placeholderNeeded(ep backend.AgentEndpoint) bool {
 
 // Lookup implements Wirer.
 func (k *Kagent) Lookup(ctx context.Context, b backend.Name, model string) (*ModelConfigRef, error) {
+	return retried(k, func() (*ModelConfigRef, error) { return k.lookup(ctx, b, model) })
+}
+
+func (k *Kagent) lookup(ctx context.Context, b backend.Name, model string) (*ModelConfigRef, error) {
 	obj, err := k.find(ctx, b, model)
 	if err != nil || obj == nil {
 		return nil, err
@@ -555,7 +649,11 @@ func (k *Kagent) Lookup(ctx context.Context, b backend.Name, model string) (*Mod
 
 // List implements Wirer.
 func (k *Kagent) List(ctx context.Context) ([]ModelConfigRef, error) {
-	list, err := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{
+	return retried(k, func() ([]ModelConfigRef, error) { return k.list(ctx) })
+}
+
+func (k *Kagent) list(ctx context.Context) ([]ModelConfigRef, error) {
+	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: ManagedByLabel + "=" + ManagedByValue,
 	})
 	if err != nil {
@@ -574,7 +672,11 @@ func (k *Kagent) List(ctx context.Context) ([]ModelConfigRef, error) {
 
 // ListAll implements Wirer.
 func (k *Kagent) ListAll(ctx context.Context) ([]ModelConfigRef, error) {
-	list, err := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
+	return retried(k, func() ([]ModelConfigRef, error) { return k.listAll(ctx) })
+}
+
+func (k *Kagent) listAll(ctx context.Context) ([]ModelConfigRef, error) {
+	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
@@ -598,7 +700,7 @@ func (k *Kagent) prefixed(name string) string {
 // backend label (written before the label existed) matches any backend; an
 // empty b matches any label.
 func (k *Kagent) find(ctx context.Context, b backend.Name, model string) (*unstructured.Unstructured, error) {
-	res := k.dyn(ctx).Resource(k.gvr).Namespace(k.namespace)
+	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
 	list, err := res.List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
@@ -679,8 +781,9 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 	if ep.Backend != "" {
 		labels[BackendLabel] = string(ep.Backend)
 	}
+	gvr := k.resource()
 	obj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": k.gvr.Group + "/" + k.gvr.Version,
+		"apiVersion": gvr.Group + "/" + gvr.Version,
 		"kind":       "ModelConfig",
 		"metadata": map[string]any{
 			"name":      name,
