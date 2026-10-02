@@ -65,7 +65,10 @@ type BackendResponse struct {
 type WiringInfo struct {
 	Namespace  string `json:"namespace"`
 	APIVersion string `json:"apiVersion,omitempty"`
-	AutoWire   bool   `json:"autoWire"`
+	// Instance is the model-manager.giantswarm.io/instance value this
+	// model-manager creates ModelConfigs under, the only ones it deletes.
+	Instance string `json:"instance,omitempty"`
+	AutoWire bool   `json:"autoWire"`
 }
 
 // ModelView is a downloaded model enriched with loaded state and wiring.
@@ -903,17 +906,20 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 }
 
 // UnloadView is what an unload answers: the backend the model was on, the
-// reference as the caller gave it, and — on a backend.Stopper (kserve) —
-// what follows the deletion in the cache inventory.
+// reference as the caller gave it, — on a backend.Stopper (kserve) — what
+// follows the deletion in the cache inventory, and the model's ModelConfig
+// the unload left in place because this model-manager did not create it.
 type UnloadView struct {
-	Backend   backend.Name              `json:"backend"`
-	Model     string                    `json:"model"`
-	Loaded    bool                      `json:"loaded"`
-	Inventory *backend.InventoryRefresh `json:"inventory,omitempty"`
+	Backend         backend.Name              `json:"backend"`
+	Model           string                    `json:"model"`
+	Loaded          bool                      `json:"loaded"`
+	Inventory       *backend.InventoryRefresh `json:"inventory,omitempty"`
+	ModelConfigLeft *wiring.NotOwnedError     `json:"modelConfigLeft,omitempty"`
 }
 
 // Unload evicts a model and reports the backend it was on. On ServeLifecycle
-// backends the ModelConfig goes with the endpoint. A backend.Stopper named by
+// backends the ModelConfig this model-manager created goes with the
+// endpoint; any other is left and reported. A backend.Stopper named by
 // the caller — or the only backend — is asked to stop by the reference
 // directly: it finds the served object itself, so no inventory read stands
 // between the call and the deletion, and the answer carries what follows
@@ -924,15 +930,20 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 		return nil, err
 	}
 	s.log.Info("model unloaded", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
+	view := &UnloadView{Backend: b.Name(), Model: strings.TrimSpace(ref)}
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
 		s.endLoadJob(ctx, b.Name(), model)
-		if err := s.wirer.Remove(ctx, b.Name(), model); err != nil {
+		var left *wiring.NotOwnedError
+		switch err := s.wirer.Remove(ctx, b.Name(), model); {
+		case errors.As(err, &left):
+			view.ModelConfigLeft = left
+			s.log.Info("ModelConfig left in place", "backend", b.Name(), "model", model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
+		case err != nil:
 			s.log.Warn("unwire after unload failed", "backend", b.Name(), "model", model, "error", err)
-		} else {
+		default:
 			s.log.Info("model unwired", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
 		}
 	}
-	view := &UnloadView{Backend: b.Name(), Model: strings.TrimSpace(ref)}
 	if res != nil {
 		view.Inventory = &res.Inventory
 	}
@@ -994,8 +1005,11 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 		return b.Name(), fmt.Errorf("%w: delete on %s", backend.ErrUnsupported, b.Name())
 	}
 	if unwire && s.wirer != nil {
+		var left *wiring.NotOwnedError
 		if err := s.wirer.Remove(ctx, b.Name(), m.Name); errors.Is(err, backend.ErrGitOpsOwned) {
 			return b.Name(), fmt.Errorf("unwire %s: %w; nothing was deleted — remove the ModelConfig with unwire_model mode commit, or repeat with unwire=false to delete the weights alone", m.Name, err)
+		} else if errors.As(err, &left) {
+			return b.Name(), fmt.Errorf("unwire %s: %w; nothing was deleted — repeat with unwire=false to delete the weights alone", m.Name, err)
 		} else if err != nil {
 			return b.Name(), fmt.Errorf("unwire %s: %w", m.Name, err)
 		}
@@ -1351,6 +1365,9 @@ func (s *Service) refreshModelConfigs(ctx context.Context, b backend.Backend) {
 		if r.GitOps != nil {
 			continue // its file in git is what it carries; Flux would revert a re-wire
 		}
+		if s.wiring != nil && r.CreatedBy != "" && r.CreatedBy != s.wiring.Instance {
+			continue // another model-manager's: it refreshes its own
+		}
 		if ep := b.AgentEndpoint(r.Model); ep.ContextLength == 0 && ep.Think == nil && r.ContextLength == 0 && r.Think == nil {
 			continue // nothing to write, nothing written
 		}
@@ -1613,10 +1630,10 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, backend.ErrNotFound) || errors.Is(err, jobs.ErrNotFound)
 }
 
-// UnwireBackend removes every model-manager-owned ModelConfig of backend
-// name — what remove_backend does before the document goes. Nothing wired,
-// or wiring disabled, is not an error; the removed model references are
-// returned.
+// UnwireBackend removes every ModelConfig of backend name this
+// model-manager created — what remove_backend does before the document goes;
+// one it did not create is left. Nothing wired, or wiring disabled, is not an
+// error; the removed model references are returned.
 func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]string, error) {
 	if s.wirer == nil {
 		return nil, nil
@@ -1630,7 +1647,11 @@ func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]strin
 		if r.Backend != name {
 			continue
 		}
-		if err := s.wirer.Remove(ctx, name, r.Model); err != nil {
+		var left *wiring.NotOwnedError
+		if err := s.wirer.Remove(ctx, name, r.Model); errors.As(err, &left) {
+			s.log.Info("ModelConfig left in place with its backend", "backend", name, "model", r.Model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
+			continue
+		} else if err != nil {
 			return removed, fmt.Errorf("unwire %s on %s: %w", r.Model, name, err)
 		}
 		removed = append(removed, r.Model)

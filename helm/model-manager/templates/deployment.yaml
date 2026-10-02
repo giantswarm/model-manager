@@ -149,6 +149,7 @@ spec:
             - --disable-wiring=true
             {{- else }}
             - --kagent-namespace={{ .Values.kagent.namespace }}
+            - --instance={{ .Release.Namespace }}-{{ .Release.Name }}
             - --kagent-api-version={{ .Values.kagent.apiVersion }}
             - --auto-wire={{ .Values.kagent.autoWire }}
             {{- if .Values.kagent.modelConfigPrefix }}

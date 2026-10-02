@@ -220,6 +220,9 @@ func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool)
 		if plan.Wiring, err = s.unwiring(ctx, b.Name(), m.Name); err != nil {
 			return nil, err
 		}
+		if plan.Wiring != nil && plan.Wiring.Left != nil {
+			return nil, fmt.Errorf("unwire %s: %w; nothing would be deleted — repeat with unwire=false to delete the weights alone", m.Name, plan.Wiring.Left)
+		}
 	}
 	return plan, nil
 }
