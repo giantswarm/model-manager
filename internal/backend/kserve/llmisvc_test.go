@@ -221,7 +221,7 @@ func TestComposeLLMInferenceServicePresetOverrides(t *testing.T) {
 	main := mainContainer(obj)
 	require.NotNil(t, main)
 	assert.Equal(t, "gsoci.azurecr.io/giantswarm/llm-d-cuda:custom", main["image"], "the preset's image override")
-	assert.Equal(t, []any{"--max-model-len=4096", "--served-model-name", "org/custom", "publishers/" + testServingNS + "/models/org/custom", "custom"}, main["args"], "merged by name: the args stay")
+	assert.Equal(t, []any{"--max-model-len=4096", "--gpu-memory-utilization=0.5", "--served-model-name", "org/custom", "publishers/" + testServingNS + "/models/org/custom", "custom"}, main["args"], "merged by name: the args stay")
 	assert.Equal(t, []any{map[string]any{"name": "VLLM_LOGGING_LEVEL", "value": "DEBUG"}}, main["env"])
 	grace, _, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "template", "terminationGracePeriodSeconds")
 	assert.EqualValues(t, 30, grace, "template extras copied verbatim")

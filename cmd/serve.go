@@ -121,6 +121,7 @@ type kserveFlags struct {
 	inventoryAgentPort  int
 	budgetSource        string
 	defaultOverheadGiB  float64
+	unifiedHeadroomGiB  float64
 	readyTimeout        time.Duration
 	scaleUpTimeout      time.Duration
 	pollInterval        time.Duration
@@ -180,6 +181,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.IntVar(&k.inventoryAgentPort, "kserve-inventory-agent-port", envInt("KSERVE_INVENTORY_AGENT_PORT", kserve.DefaultInventoryAgentPort), "Port of the cache-agent pods (daemonset mode) (KSERVE_INVENTORY_AGENT_PORT)")
 	f.StringVar(&k.budgetSource, "kserve-budget-source", envOr("KSERVE_BUDGET_SOURCE", kserve.DefaultBudgetSource), "Node memory budget: auto (GPU labels when present, else allocatable memory), gpu-labels, allocatable; the node annotation "+kserve.BudgetAnnotation+" (GiB) overrides it per node (KSERVE_BUDGET_SOURCE)")
 	f.Float64Var(&k.defaultOverheadGiB, "kserve-default-overhead-gib", envFloat("KSERVE_DEFAULT_OVERHEAD_GIB", kserve.DefaultOverheadGiB), "Serving overhead added to the weights when the preset has none (KSERVE_DEFAULT_OVERHEAD_GIB)")
+	f.Float64Var(&k.unifiedHeadroomGiB, "kserve-unified-host-headroom-gib", envFloat("KSERVE_UNIFIED_HOST_HEADROOM_GIB", kserve.DefaultUnifiedHostHeadroomGiB), "Memory a unified-memory GPU node (GPUs without memory of their own, a GB10) keeps for its host beside vLLM's --gpu-memory-utilization share of the whole memory; a preset whose share leaves less is refused (KSERVE_UNIFIED_HOST_HEADROOM_GIB)")
 	f.DurationVar(&k.readyTimeout, "kserve-ready-timeout", envDuration("KSERVE_READY_TIMEOUT", kserve.DefaultReadyTimeout), "How long a load job waits for an LLMInferenceService to become ready (KSERVE_READY_TIMEOUT)")
 	f.DurationVar(&k.scaleUpTimeout, "kserve-scale-up-timeout", envDuration("KSERVE_SCALE_UP_TIMEOUT", kserve.DefaultScaleUpTimeout), "The GPU pool's scale-up budget: how long a predictor may wait for a node while Karpenter refuses to launch one (InsufficientInstanceCapacity) before its scheduling step and the phase read failed naming the refusal, counted from the pod's creation (KSERVE_SCALE_UP_TIMEOUT)")
 	f.DurationVar(&k.pollInterval, "kserve-poll-interval", envDuration("KSERVE_POLL_INTERVAL", kserve.DefaultPollInterval), "Poll period for Job progress and readiness (KSERVE_POLL_INTERVAL)")
@@ -469,6 +471,7 @@ func (k kserveFlags) options() backend.KServeOptions {
 		InventoryAgentPort:     k.inventoryAgentPort,
 		BudgetSource:           k.budgetSource,
 		DefaultOverheadGiB:     k.defaultOverheadGiB,
+		UnifiedHostHeadroomGiB: k.unifiedHeadroomGiB,
 		ReadyTimeout:           k.readyTimeout,
 		ScaleUpTimeout:         k.scaleUpTimeout,
 		PollInterval:           k.pollInterval,

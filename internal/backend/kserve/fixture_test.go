@@ -218,6 +218,7 @@ spec:
     capabilities: [chat, tools]
   args:
     - --max-model-len=4096
+    - --gpu-memory-utilization=0.5
   resources:
     gpus: 1
     requests: {cpu: "2", memory: 8Gi}

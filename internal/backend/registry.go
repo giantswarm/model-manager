@@ -134,6 +134,10 @@ type KServeOptions struct {
 	BudgetSource string
 	// DefaultOverheadGiB is the serving overhead when no preset says.
 	DefaultOverheadGiB float64
+	// UnifiedHostHeadroomGiB is the memory a unified-memory GPU node keeps
+	// for its host beside vLLM's claim (--gpu-memory-utilization of the
+	// whole memory): a preset whose claim leaves less is refused.
+	UnifiedHostHeadroomGiB float64
 	// ReadyTimeout bounds WaitReady.
 	ReadyTimeout time.Duration
 	// ScaleUpTimeout is the GPU pool's scale-up budget: how long a predictor

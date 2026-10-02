@@ -233,6 +233,15 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 				strings.Join(link.Nodes, ", "), humanBytes(ceilDiv(res.WeightsBytes, n)), humanBytes(res.OverheadBytes), humanBytes(limit), name, node.BudgetSource, humanBytes(node.Budget), reservedNote(reserved[name]))
 			return v
 		}
+		running := int64(0)
+		if forServe {
+			running = reserved[name]
+		}
+		if uv := b.unifiedClaimOn(plan.Preset, node, running, share); uv.Checked && !uv.Fits {
+			v.tight, v.reserved, v.limit, v.required = node, reserved[name], limit, share
+			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, uv.clause())
+			return v
+		}
 		if kvv := kv.judgeOn(node); kvv.Skip == "" && !kvv.Fits {
 			v.kv = kvv
 			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, kvv.clause())

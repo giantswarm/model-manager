@@ -139,6 +139,7 @@ spec:
             {{- end }}
             - --kserve-budget-source={{ $k.budget.source }}
             - --kserve-default-overhead-gib={{ $k.budget.defaultOverheadGiB }}
+            - --kserve-unified-host-headroom-gib={{ $k.budget.unifiedHostHeadroomGiB }}
             - --kserve-ready-timeout={{ $k.readyTimeout }}
             - --kserve-scale-up-timeout={{ $k.scaleUpTimeout }}
             {{- end }}

@@ -612,6 +612,15 @@ scheduling by the registered backend document (`docs/backends.md`).
   and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
   `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
   named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
+  On a unified-memory node (GPUs without memory of their own, a GB10) vLLM claims
+  `--gpu-memory-utilization × the node's whole memory` at start, outside the pod's memory limit
+  and the kubelet's accounting: that claim (`unifiedReservationBytes`) must fit the node's
+  budget, at most its memory less the host headroom (`hostHeadroomBytes`,
+  `--kserve-unified-host-headroom-gib`, chart `kserve.budget.unifiedHostHeadroomGiB`, 16 GiB),
+  less what running models reserve there; else `fits` is false, `load_model` refuses, and
+  `reason` names the claim, the utilization and the highest one that fits
+  (`fitGpuMemoryUtilization`): a preset at 0.90 sized for a 24 GB GPU is refused on a 121.7 GiB
+  GB10, where 0.86 fits. A dedicated GPU is judged as before.
 - **Serve / stop** — `load` composes the serving object from the preset
   after the fit check `fit-check` answers (the node's free budget, the KV cache); `unload` deletes it and
   unwires within the caller's deadline — the object is found by repository,
