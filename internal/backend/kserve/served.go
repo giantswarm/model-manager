@@ -1,6 +1,7 @@
 package kserve
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/url"
@@ -27,6 +28,9 @@ const (
 	BackendLabel    = "model-manager.giantswarm.io/backend"
 	ComponentLabel  = "model-manager.giantswarm.io/component"
 	ModelAnnotation = "model-manager.giantswarm.io/model"
+	// ChartVersionAnnotation is the chart version of the preset a serving
+	// object was created from (PresetChartVersionAnnotation at the load).
+	ChartVersionAnnotation = "model-manager.giantswarm.io/preset-chart-version"
 
 	statusReady    = "Ready"
 	statusNotReady = "NotReady"
@@ -54,8 +58,13 @@ type served struct {
 	GitOps     *gitops.Owner
 	StorageURI string
 	GPUs       int64
-	Ready      bool
-	Status     string
+	// RuntimeImage is the image the main container runs: the object's own,
+	// else the well-known template's. ChartVersion is the preset's chart
+	// version recorded at the load (ChartVersionAnnotation).
+	RuntimeImage string
+	ChartVersion string
+	Ready        bool
+	Status       string
 	// Reason names why Status is not Ready: the Ready condition's reason, a
 	// failed load's, or the predictor pod's (Unschedulable, ImagePullBackOff).
 	Reason  string
@@ -459,7 +468,10 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv.Placement, sv.Nodes = servedPlacement(obj)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
+		sv.RuntimeImage = containerImage(main)
 	}
+	sv.RuntimeImage = cmp.Or(sv.RuntimeImage, s.TemplateImage)
+	sv.ChartVersion = obj.GetAnnotations()[ChartVersionAnnotation]
 
 	// Model id: the annotation, the object's model name, the preset, then
 	// the hf:// storage URI.

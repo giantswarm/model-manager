@@ -472,6 +472,9 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			ManagedBy: sv.ManagedBy,
 			Phase:     sv.Phase,
 			Steps:     sv.Steps,
+
+			RuntimeImage: sv.RuntimeImage,
+			ChartVersion: sv.ChartVersion,
 		}
 		if sv.API.read() {
 			lm.Runtime, lm.Interfaces, lm.InterfacesReason = sv.API.Runtime, sv.API.Interfaces, sv.API.Reason
@@ -681,7 +684,7 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	case placement == backend.PlacementSplit:
 		link, _ := s.fastLinkOf(fit.Nodes[0])
 		link.Nodes = fit.Nodes
-		obj = b.composeSplit(plan.Preset, s, link, b.templateImage(ctx, s))
+		obj = b.composeSplit(plan.Preset, s, link)
 	case len(req.Nodes) > 1:
 		applyCopies(obj, req.Nodes)
 	}
@@ -889,6 +892,7 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 
 // ListPresets implements backend.PresetLister.
 func (b *Backend) ListPresets(ctx context.Context) ([]backend.Preset, error) {
+	s := b.cfg.settings(ctx)
 	presets, warnings, err := b.presets(ctx)
 	if err != nil {
 		return nil, err
@@ -898,7 +902,7 @@ func (b *Backend) ListPresets(ctx context.Context) ([]backend.Preset, error) {
 	}
 	out := make([]backend.Preset, 0, len(presets))
 	for _, p := range presets {
-		out = append(out, p.view(b.opts.DefaultOverheadGiB))
+		out = append(out, p.view(b.opts.DefaultOverheadGiB, s.TemplateImage))
 	}
 	return out, nil
 }

@@ -999,6 +999,8 @@ components:
             `endpoint` is then the endpoint's URL (its public one when the installation publishes it),
             and the model's ModelConfig reaches it at the in-cluster listener.
         publicNameReason: { type: string, description: "kserve, on an installation with the LLM endpoint — why a served model is not on it (not Ready yet, no interfaces reported, not created from a preset, the object could not be written)" }
+        runtimeImage: { type: string, description: "kserve — the image the serving object's main container runs: its own, else the well-known template's" }
+        chartVersion: { type: string, description: "kserve — the chart version of the preset the load created the object from (its `model-manager.giantswarm.io/preset-chart-version` annotation); absent on an object model-manager did not create or whose preset named none" }
     Runtime:
       type: object
       description: kserve — the runtime serving a Ready model, as its server reports it
@@ -1107,6 +1109,8 @@ components:
         args: { type: array, items: { type: string } }
         nodeSelector: { type: object, additionalProperties: { type: string } }
         chatTemplate: { type: string, description: ConfigMap of the chat template mounted into the predictor }
+        runtimeImage: { type: string, example: "gsoci.azurecr.io/giantswarm/llm-d-cuda:v0.4.0", description: "the image a load runs the model with: the preset's `template.containers[main].image`, else the well-known template's (kserve-config-llm-template); absent when neither can be read" }
+        chartVersion: { type: string, example: "4.107.0+86298ff6b72b", description: "the version of the chart that published the preset (the agent-platform connectivity chart, the ConfigMap's `agent-platform.giantswarm.io/chart-version` annotation); absent when the ConfigMap carries none" }
     SearchResult:
       type: object
       required: [id, downloads, likes, gated, private]

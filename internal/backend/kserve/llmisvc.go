@@ -100,6 +100,11 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstruc
 	}
 	obj := newServingObject(p, s.Namespace)
 	obj.Object["spec"] = spec
+	if p.chartVersion != "" {
+		annotations := obj.GetAnnotations()
+		annotations[ChartVersionAnnotation] = p.chartVersion
+		obj.SetAnnotations(annotations)
+	}
 	return obj
 }
 
@@ -309,8 +314,9 @@ func mergeContainer(containers []any, extra map[string]any) []any {
 	return append(containers, extra)
 }
 
-// mainContainer returns the main container of an LLMInferenceService's
-// template, nil when there is none.
+// mainContainer returns the main container of the template of an
+// LLMInferenceService or an LLMInferenceServiceConfig, nil when there is
+// none.
 func mainContainer(obj *unstructured.Unstructured) map[string]any {
 	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "containers")
 	for _, c := range containers {
@@ -319,4 +325,10 @@ func mainContainer(obj *unstructured.Unstructured) map[string]any {
 		}
 	}
 	return nil
+}
+
+// containerImage is a container's image, "" for none.
+func containerImage(c map[string]any) string {
+	image, _ := c["image"].(string)
+	return image
 }

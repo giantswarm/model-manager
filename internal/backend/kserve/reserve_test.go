@@ -40,10 +40,10 @@ func TestPresetReserveCountsVLLMsShareOnUnifiedMemory(t *testing.T) {
 }
 
 func TestPresetUtilizationIsPublished(t *testing.T) {
-	assert.InDelta(t, 0.6, reservePreset("--gpu_memory_utilization=0.60").view(30).GPUMemoryUtilization, 1e-9)
-	assert.InDelta(t, vllmDefaultUtilization, reservePreset().view(30).GPUMemoryUtilization, 1e-9)
-	assert.InDelta(t, vllmDefaultUtilization, reservePreset("--gpu-memory-utilization=1.5").view(30).GPUMemoryUtilization, 1e-9, "an unreadable value is vLLM's default")
+	assert.InDelta(t, 0.6, reservePreset("--gpu_memory_utilization=0.60").view(30, "").GPUMemoryUtilization, 1e-9)
+	assert.InDelta(t, vllmDefaultUtilization, reservePreset().view(30, "").GPUMemoryUtilization, 1e-9)
+	assert.InDelta(t, vllmDefaultUtilization, reservePreset("--gpu-memory-utilization=1.5").view(30, "").GPUMemoryUtilization, 1e-9, "an unreadable value is vLLM's default")
 	cpu := reservePreset()
 	cpu.Spec.Resources.GPUs = ptr.To(int64(0))
-	assert.Zero(t, cpu.view(30).GPUMemoryUtilization)
+	assert.Zero(t, cpu.view(30, "").GPUMemoryUtilization)
 }

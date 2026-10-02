@@ -276,6 +276,13 @@ type LoadedModel struct {
 	// PublicNameReason says why a served model is not on it.
 	PublicName       string `json:"publicName,omitempty"`
 	PublicNameReason string `json:"publicNameReason,omitempty"`
+	// RuntimeImage and ChartVersion are the serving object's provenance
+	// (kserve): the image its main container runs (its own, else the
+	// well-known template's) and the chart version of the preset the load
+	// created it from, as model-manager recorded it on the object (empty on
+	// an object model-manager did not create).
+	RuntimeImage string `json:"runtimeImage,omitempty"`
+	ChartVersion string `json:"chartVersion,omitempty"`
 }
 
 // Runtime is the software serving a model, as the running server reports it.
@@ -452,6 +459,14 @@ type Preset struct {
 	Args                 []string          `json:"args,omitempty"`
 	NodeSelector         map[string]string `json:"nodeSelector,omitempty"`
 	ChatTemplate         string            `json:"chatTemplate,omitempty"`
+	// RuntimeImage is the image a load runs the model with (kserve: the
+	// preset's template.containers[main].image, else the well-known
+	// template's); empty when neither can be read.
+	RuntimeImage string `json:"runtimeImage,omitempty"`
+	// ChartVersion is the version of the chart that published the preset
+	// (kserve: the agent-platform connectivity chart's, from its preset
+	// ConfigMap); empty when the ConfigMap does not say.
+	ChartVersion string `json:"chartVersion,omitempty"`
 }
 
 // SearchResult is one model-hub hit.

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -314,8 +313,11 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 // the fast link's networks, requesting its devices, with its environment and
 // the preset's split environment over it (by name: a later source replaces an
 // entry of the same name);
-// image the runtime of the single-node template unless the preset names one.
-func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, image string) *unstructured.Unstructured {
+// image the runtime of the single-node template (settings.TemplateImage),
+// which a split runs too — the multi-node template names the stock image, an
+// installation's runtime override only the single-node one — unless the
+// preset names one.
+func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink) *unstructured.Unstructured {
 	nodes := link.Nodes
 	obj := b.composeLLM(p, s, nodes[0])
 	spec := obj.Object["spec"].(map[string]any)
@@ -334,8 +336,8 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 		} else {
 			delete(main, "args")
 		}
-		if _, set := main["image"]; !set && image != "" {
-			main["image"] = image
+		if _, set := main["image"]; !set && s.TemplateImage != "" {
+			main["image"] = s.TemplateImage
 		}
 		mergeEnv(main, linkEnv(link.Env))
 		mergeEnv(main, p.Spec.Split.Env)
@@ -432,30 +434,6 @@ func pinnedAffinity(name, component string, nodes []string) map[string]any {
 			}},
 		},
 	}
-}
-
-// templateImage is the runtime image of the platform's single-node template
-// (kserve-config-llm-template's main container), which a split runs too: the
-// multi-node template names the stock image, an installation's runtime
-// override only the single-node one. "" when it cannot be read — the split
-// then runs the multi-node template's image.
-func (b *Backend) templateImage(ctx context.Context, s settings) string {
-	if s.ControlPlane == "" {
-		return ""
-	}
-	obj, err := b.dynamic(ctx).Resource(llmisvcConfigGVR).Namespace(s.ControlPlane).Get(ctx, wellKnownTemplateConfig, metav1.GetOptions{})
-	if err != nil {
-		b.log.Warn("the single-node template's image is unknown; the split runs the multi-node template's", "error", err)
-		return ""
-	}
-	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "containers")
-	for _, c := range containers {
-		if cm, ok := c.(map[string]any); ok && cm["name"] == llmisvcMainContainer {
-			image, _ := cm["image"].(string)
-			return image
-		}
-	}
-	return ""
 }
 
 // servedPlacement reads the placement model-manager recorded on an object:
