@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -420,6 +421,11 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
 			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
 	}
+	running := int64(0)
+	if forServe {
+		running = res.ReservedBytes
+	}
+	applyUnified(res, b.unifiedClaimOn(p, best, running, res.RequiredBytes))
 	applyKV(res, plan.KV.judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
@@ -656,7 +662,8 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 
 // presetReserve is what one served preset holds on its node: its weights and
 // overhead, or on a unified-memory GPU node (GPUs, no GPU memory label) the
-// share of the node's budget vLLM claims at start, whichever is larger.
+// share of the node's memory vLLM claims at start (vllmClaim), whichever is
+// larger.
 func presetReserve(p *servingPreset, n nodeBudget, defaultOverheadGiB float64) int64 {
 	return presetShare(p, n, defaultOverheadGiB, 1)
 }
@@ -665,10 +672,101 @@ func presetReserve(p *servingPreset, n nodeBudget, defaultOverheadGiB float64) i
 // weights over: its share of the weights beside the whole overhead.
 func presetShare(p *servingPreset, n nodeBudget, defaultOverheadGiB float64, parts int64) int64 {
 	need := ceilDiv(p.weightsBytes(), max(parts, 1)) + p.overheadBytes(defaultOverheadGiB)
-	if n.GPUCount > 0 && n.GPUMemory == 0 && n.Budget > 0 {
-		need = max(need, int64(p.utilization()*float64(n.Budget)))
+	if claim, _, ok := vllmClaim(p, n); ok {
+		need = max(need, claim)
 	}
 	return need
+}
+
+// vllmClaim is what vLLM claims at start on a unified-memory GPU node — GPUs
+// that report no memory of their own, the node's memory being theirs (a
+// GB10) — and of what: --gpu-memory-utilization of the memory
+// torch.cuda.mem_get_info reports there, the node's capacity (its budget
+// when it reports none). The claim is outside the pod's memory limit and the
+// kubelet's accounting: nothing on the Kubernetes side refuses or evicts it.
+// ok is false on a node whose GPUs have memory of their own, on a CPU-only
+// node, for a CPU preset and without a preset (a bare model reference is
+// sized, never served: load_model needs a preset).
+func vllmClaim(p *servingPreset, n nodeBudget) (claim, memory int64, ok bool) {
+	if p == nil || p.cpu() || n.GPUCount == 0 || n.GPUMemory > 0 {
+		return 0, 0, false
+	}
+	memory = n.Capacity
+	if memory <= 0 {
+		memory = n.Budget
+	}
+	if memory <= 0 {
+		return 0, 0, false
+	}
+	return int64(p.utilization() * float64(memory)), memory, true
+}
+
+// unifiedVerdict is the check of vLLM's claim on a unified-memory node: the
+// claim (vllmClaim) must fit what the node leaves models — its budget, at
+// most its memory less the host headroom — less what running models
+// reserve there. On a refusal Fit is the highest --gpu-memory-utilization
+// that would fit and still holds the weights and overhead (0: none).
+type unifiedVerdict struct {
+	Checked     bool
+	Fits        bool
+	Utilization float64
+	Claim       int64
+	Memory      int64
+	Headroom    int64
+	Available   int64
+	Reserved    int64
+	Fit         float64
+}
+
+// unifiedClaimOn judges the preset's claim on node n, beside reserved bytes
+// of running models, for a model that needs need bytes (weights and
+// overhead).
+func (b *Backend) unifiedClaimOn(p *servingPreset, n nodeBudget, reserved, need int64) unifiedVerdict {
+	claim, memory, ok := vllmClaim(p, n)
+	if !ok {
+		return unifiedVerdict{}
+	}
+	headroom := gibToBytes(b.opts.UnifiedHostHeadroomGiB)
+	v := unifiedVerdict{Checked: true, Utilization: p.utilization(), Claim: claim, Memory: memory, Headroom: headroom, Reserved: reserved}
+	v.Available = max(min(n.Budget, memory-headroom)-reserved, 0)
+	v.Fits = claim <= v.Available
+	if !v.Fits {
+		if u := math.Floor(float64(v.Available)/float64(memory)*100) / 100; u > 0 && int64(u*float64(memory)) >= need {
+			v.Fit = u
+		}
+	}
+	return v
+}
+
+// clause words the verdict for the fit's reason.
+func (v unifiedVerdict) clause() string {
+	claim := fmt.Sprintf("vLLM claims %s at start (%s=%s of the node's %s unified memory)",
+		humanBytes(v.Claim), flagGPUMemoryUtilization, trimFloat2(v.Utilization), humanBytes(v.Memory))
+	left := fmt.Sprintf("the %s the node leaves models beside its %s host headroom%s", humanBytes(v.Available), humanBytes(v.Headroom), reservedNote(v.Reserved))
+	if v.Fits {
+		return claim + ", within " + left
+	}
+	out := claim + ", more than " + left
+	if v.Fit > 0 {
+		return out + fmt.Sprintf(": %s=%s fits", flagGPUMemoryUtilization, trimFloat2(v.Fit))
+	}
+	return out
+}
+
+// applyUnified writes the verdict into a fit answer: the figures, and the
+// clause of the reason — a refusal when the weights fit but the claim does
+// not.
+func applyUnified(res *backend.FitResult, v unifiedVerdict) {
+	if !v.Checked {
+		return
+	}
+	res.UnifiedReservationBytes, res.HostHeadroomBytes, res.FitGPUMemoryUtilization = v.Claim, v.Headroom, v.Fit
+	if res.Fits && !v.Fits {
+		res.Fits = false
+		res.Reason += ", but " + v.clause()
+		return
+	}
+	res.Reason += "; " + v.clause()
 }
 
 // isCached reports whether the model is already in the cache and how that

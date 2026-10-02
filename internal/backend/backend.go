@@ -595,6 +595,16 @@ type FitResult struct {
 	KVCacheBytes          int64 `json:"kvCacheBytes,omitempty"`
 	KVCacheAvailableBytes int64 `json:"kvCacheAvailableBytes,omitempty"`
 	EstimatedMaxModelLen  int64 `json:"estimatedMaxModelLen,omitempty"`
+	// UnifiedReservationBytes is, on a unified-memory node (GPUs without
+	// memory of their own, a GB10), what vLLM claims there at start:
+	// --gpu-memory-utilization of the node's whole memory, outside the pod's
+	// memory limit. It must fit the node's budget less HostHeadroomBytes and
+	// what running models reserve; on a refusal FitGPUMemoryUtilization is
+	// the highest utilization that would fit and still hold the weights and
+	// overhead (0: none). Zero on a node whose GPUs have memory of their own.
+	UnifiedReservationBytes int64   `json:"unifiedReservationBytes,omitempty"`
+	HostHeadroomBytes       int64   `json:"hostHeadroomBytes,omitempty"`
+	FitGPUMemoryUtilization float64 `json:"fitGpuMemoryUtilization,omitempty"`
 	// Gated / Private describe the hub repository; TokenConfigured says
 	// whether a hub token is available for gated downloads.
 	Gated           bool `json:"gated"`

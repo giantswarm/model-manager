@@ -293,6 +293,9 @@ func TestFitCheckJudgesTheKVCacheOnAUnifiedMemoryNode(t *testing.T) {
 		unified("twin", "128Gi", 2),
 		presetConfigMap("gemma-8k", gemmaPresetDoc("gemma-8k", "8192", image)),
 	)
+	// The KV cache alone is judged here: a host headroom that leaves
+	// vLLM's 0.92 share standing (unified_test.go judges the share).
+	f.b.opts.UnifiedHostHeadroomGiB = 1
 	ctx := context.Background()
 
 	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "spark"})

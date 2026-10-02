@@ -487,6 +487,11 @@ kserve:
     # -- Serving overhead (KV cache, activations, runtime) added to the weights
     # when the preset has no `requirements.overheadGiB`.
     defaultOverheadGiB: 30
+    # -- GiB a unified-memory GPU node, one whose GPUs have no memory of their
+    # own like a GB10, keeps for its host beside what vLLM claims at start,
+    # the GPU memory utilization share of the node's whole memory. A preset
+    # whose claim leaves less is refused.
+    unifiedHostHeadroomGiB: 16
   # -- How long a load job waits for an LLMInferenceService to become ready
   # before it gives up on wiring.
   readyTimeout: 2h

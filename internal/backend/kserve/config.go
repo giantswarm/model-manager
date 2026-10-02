@@ -52,7 +52,12 @@ const (
 	DefaultInitImage    = "gsoci.azurecr.io/giantswarm/alpine:3.22.1"
 	DefaultBudgetSource = "auto"
 	DefaultOverheadGiB  = 30
-	DefaultDiscoveryTTL = time.Minute
+	// DefaultUnifiedHostHeadroomGiB is what a unified-memory node keeps for
+	// its operating system, kubelet and other pods beside vLLM's claim: a
+	// GB10's 121.7 GiB leave a preset at --gpu-memory-utilization=0.86 at
+	// most (gpt-oss-20b's 0.90 sized for a 24 GB GPU exhausted the host).
+	DefaultUnifiedHostHeadroomGiB = 16
+	DefaultDiscoveryTTL           = time.Minute
 	// DiscoveryAbsentTTL bounds how long settings resolved without the
 	// configured discovery ConfigMap stand (config.fresh): the document
 	// appears when the serving slice's connectivity child installs, and a
@@ -743,6 +748,9 @@ func applyDefaults(o *backend.KServeOptions) {
 	}
 	if o.DefaultOverheadGiB <= 0 {
 		o.DefaultOverheadGiB = DefaultOverheadGiB
+	}
+	if o.UnifiedHostHeadroomGiB <= 0 {
+		o.UnifiedHostHeadroomGiB = DefaultUnifiedHostHeadroomGiB
 	}
 	if o.DiscoveryTTL <= 0 {
 		o.DiscoveryTTL = DefaultDiscoveryTTL

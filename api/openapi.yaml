@@ -1151,6 +1151,9 @@ components:
         kvCacheBytes: { type: integer, format: int64, description: "the KV cache vLLM needs on each GPU for one sequence of maxModelLen tokens, from the checkpoint's config.json (per layer: full attention holds the sequence, sliding attention its window and one prefill chunk, MLA its latent; linear-attention and Mamba layers none)" }
         kvCacheAvailableBytes: { type: integer, format: int64, description: "what vLLM leaves the KV cache on each GPU: --gpu-memory-utilization of its memory less the weights and vLLM's reserve" }
         estimatedMaxModelLen: { type: integer, format: int64, description: "on a refusal for the KV cache, the longest sequence that fits, as vLLM estimates it" }
+        unifiedReservationBytes: { type: integer, format: int64, description: "on a unified-memory node (GPUs without memory of their own): what vLLM claims at start, --gpu-memory-utilization of the node's whole memory; it must fit the budget, at most the memory less hostHeadroomBytes, less reservedBytes" }
+        hostHeadroomBytes: { type: integer, format: int64, description: "on a unified-memory node: the memory kept for the host beside vLLM's claim" }
+        fitGpuMemoryUtilization: { type: number, format: double, description: "on a refusal for vLLM's claim on a unified-memory node: the highest --gpu-memory-utilization that fits and still holds the weights and overhead" }
         gated: { type: boolean }
         private: { type: boolean }
         tokenConfigured: { type: boolean, description: a hub token Secret is configured }
