@@ -36,11 +36,13 @@ func splitFixture(t *testing.T, links ...backend.FastLink) *fixture {
 	huge := strings.Replace(presetDoc("huge", splitRepo, 200, ""), "storageUri: hf://"+splitRepo, "storageUri: oci://registry.example/models/huge:1", 1)
 	huge = strings.Replace(huge, "    - --max-model-len=4096\n", "    - --max-model-len=4096\n    - --tensor-parallel-size=1\n", 1)
 	giant := strings.Replace(presetDoc("giant", "org/giant", 400, ""), "storageUri: hf://org/giant", "storageUri: oci://registry.example/models/giant:1", 1)
+	duo := strings.Replace(presetDoc("duo", "org/duo", 50, splitEnvDoc), "storageUri: hf://org/duo", "storageUri: oci://registry.example/models/duo:1", 1)
 	f := newFixture(t,
 		node(sparkA, "128Gi", gb10),
 		node(sparkB, "128Gi", gb10),
 		presetConfigMap("huge", huge),
 		presetConfigMap("giant", giant),
+		presetConfigMap("duo", duo),
 	)
 	f.b.cfg.opts.FastLinks = links
 	f.resetSettings()
@@ -232,6 +234,52 @@ func TestServeSplitComposesLeaderAndWorkers(t *testing.T) {
 	assert.Equal(t, "sparks", links[sparkA])
 	assert.Equal(t, "sparks", links[sparkB])
 	assert.Empty(t, links[testGPUNode])
+}
+
+// splitEnvDoc is the spec.split block of the "duo" preset: one node or two.
+const splitEnvDoc = `  split:
+    env:
+      - name: VLLM_ENABLE_ROCE_ALLREDUCE
+        value: "1"
+      - name: NCCL_IB_HCA
+        value: rocep1s0f1
+`
+
+var splitEnvVar = map[string]any{"name": "VLLM_ENABLE_ROCE_ALLREDUCE", "value": "1"}
+
+func TestSplitEnvReachesOnlyASplit(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("split", func(t *testing.T) {
+		f := splitFixture(t, sparkLink)
+		_, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "duo", Placement: backend.PlacementSplit})
+		require.NoError(t, err)
+		obj := f.llmisvc(ctx, "duo")
+		leader, _, _ := unstructured.NestedMap(obj, "spec", "template")
+		worker, _, _ := unstructured.NestedMap(obj, "spec", "worker")
+		for role, tpl := range map[string]map[string]any{"leader": leader, "worker": worker} {
+			env := templateMain(tpl)["env"].([]any)
+			assert.Contains(t, env, splitEnvVar, role)
+			var hca []any
+			for _, e := range env {
+				if e.(map[string]any)["name"] == "NCCL_IB_HCA" {
+					hca = append(hca, e.(map[string]any)["value"])
+				}
+			}
+			assert.Equal(t, []any{"rocep1s0f1"}, hca, "%s: the preset's split environment replaces the fast link's entry of the same name; the API refuses two", role)
+		}
+	})
+
+	t.Run("one node", func(t *testing.T) {
+		f := splitFixture(t, sparkLink)
+		_, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "duo", Nodes: []string{sparkA}})
+		require.NoError(t, err)
+		obj := f.llmisvc(ctx, "duo")
+		_, split, _ := unstructured.NestedMap(obj, "spec", "worker")
+		require.False(t, split)
+		tpl, _, _ := unstructured.NestedMap(obj, "spec", "template")
+		assert.NotContains(t, templateMain(tpl)["env"], splitEnvVar, "a single-node pod never carries the split environment")
+	})
 }
 
 func TestWithoutFlag(t *testing.T) {

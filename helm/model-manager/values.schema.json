@@ -235,7 +235,7 @@
             "properties": {
                 "apiVersion": {
                     "type": "string",
-                    "description": "kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version."
+                    "description": "kagent.dev API version for ModelConfigs; `auto` discovers the server's preferred version, and re-discovers it when a call fails NotFound (a CRD version cut-over)."
                 },
                 "autoWire": {
                     "type": "boolean",

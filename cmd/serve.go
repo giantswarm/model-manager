@@ -312,8 +312,10 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		// Already warned above.
 	default:
 		apiVersion := o.kagentAPIVersion
-		if apiVersion == "" || apiVersion == "auto" {
-			apiVersion, err = wiring.DiscoverAPIVersion(clients.Discovery)
+		auto := apiVersion == "" || apiVersion == "auto"
+		discover := func() (string, error) { return wiring.DiscoverAPIVersion(clients.Discovery) }
+		if auto {
+			apiVersion, err = discover()
 			if err != nil {
 				log.Warn("kagent API discovery failed, using default", "default", wiring.DefaultAPIVersion, "error", err)
 				apiVersion = wiring.DefaultAPIVersion
@@ -321,6 +323,11 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		}
 		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix).
 			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
+		if auto {
+			// A CRD version cut-over under the running process is followed
+			// on the first call that misses the old version.
+			k.WithDiscovery(discover, log)
+		}
 		wirer = k
 		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion()}
 		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "autoWire", o.autoWire)

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -311,9 +310,14 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 // rank order): the single-node composition as the leader template, pinned to
 // the first node, a copy of it as the worker template, pinned to the others
 // and spread one per node, both running vLLM's multi-node launch, joined to
-// the fast link's networks, requesting its devices, with its environment;
-// image the runtime of the single-node template unless the preset names one.
-func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, image string) *unstructured.Unstructured {
+// the fast link's networks, requesting its devices, with its environment and
+// the preset's split environment over it (by name: a later source replaces an
+// entry of the same name);
+// image the runtime of the single-node template (settings.TemplateImage),
+// which a split runs too — the multi-node template names the stock image, an
+// installation's runtime override only the single-node one — unless the
+// preset names one.
+func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink) *unstructured.Unstructured {
 	nodes := link.Nodes
 	obj := b.composeLLM(p, s, nodes[0])
 	spec := obj.Object["spec"].(map[string]any)
@@ -332,10 +336,11 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 		} else {
 			delete(main, "args")
 		}
-		if _, set := main["image"]; !set && image != "" {
-			main["image"] = image
+		if _, set := main["image"]; !set && s.TemplateImage != "" {
+			main["image"] = s.TemplateImage
 		}
-		addEnv(main, link.Env)
+		mergeEnv(main, linkEnv(link.Env))
+		mergeEnv(main, p.Spec.Split.Env)
 		addResources(main, link.Resources)
 		main["securityContext"] = splitSecurityContext()
 	}
@@ -431,30 +436,6 @@ func pinnedAffinity(name, component string, nodes []string) map[string]any {
 	}
 }
 
-// templateImage is the runtime image of the platform's single-node template
-// (kserve-config-llm-template's main container), which a split runs too: the
-// multi-node template names the stock image, an installation's runtime
-// override only the single-node one. "" when it cannot be read — the split
-// then runs the multi-node template's image.
-func (b *Backend) templateImage(ctx context.Context, s settings) string {
-	if s.ControlPlane == "" {
-		return ""
-	}
-	obj, err := b.dynamic(ctx).Resource(llmisvcConfigGVR).Namespace(s.ControlPlane).Get(ctx, wellKnownTemplateConfig, metav1.GetOptions{})
-	if err != nil {
-		b.log.Warn("the single-node template's image is unknown; the split runs the multi-node template's", "error", err)
-		return ""
-	}
-	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "containers")
-	for _, c := range containers {
-		if cm, ok := c.(map[string]any); ok && cm["name"] == llmisvcMainContainer {
-			image, _ := cm["image"].(string)
-			return image
-		}
-	}
-	return ""
-}
-
 // servedPlacement reads the placement model-manager recorded on an object:
 // its placement and its nodes (a split's in rank order, the copies'); copies
 // without nodes for an object without.
@@ -501,15 +482,41 @@ func withoutFlag(args []string, flag string) []string {
 	return out
 }
 
-func addEnv(main map[string]any, env []backend.EnvVar) {
+// mergeEnv sets env on the main container by name: an entry whose name the
+// container already carries replaces it in place, the others follow in order.
+// The LLMInferenceService API refuses two entries of one name.
+func mergeEnv(main map[string]any, env []map[string]any) {
 	if len(env) == 0 {
 		return
 	}
 	list, _ := main["env"].([]any)
+	at := make(map[string]int, len(list))
+	for i, e := range list {
+		if m, ok := e.(map[string]any); ok {
+			if name, ok := m["name"].(string); ok {
+				at[name] = i
+			}
+		}
+	}
 	for _, e := range env {
-		list = append(list, map[string]any{"name": e.Name, "value": e.Value})
+		name, _ := e["name"].(string)
+		if i, ok := at[name]; ok {
+			list[i] = e
+			continue
+		}
+		at[name] = len(list)
+		list = append(list, e)
 	}
 	main["env"] = list
+}
+
+// linkEnv is a fast link's environment as container env entries.
+func linkEnv(env []backend.EnvVar) []map[string]any {
+	out := make([]map[string]any, 0, len(env))
+	for _, e := range env {
+		out = append(out, map[string]any{"name": e.Name, "value": e.Value})
+	}
+	return out
 }
 
 func addResources(main map[string]any, extra map[string]string) {

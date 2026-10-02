@@ -135,7 +135,8 @@ kagent:
   # -- Namespace where kagent ModelConfigs are created (RBAC is scoped here).
   namespace: kagent
   # -- kagent.dev API version for ModelConfigs; `auto` discovers the server's
-  # preferred version.
+  # preferred version, and re-discovers it when a call fails NotFound (a CRD
+  # version cut-over).
   apiVersion: auto
   # -- Prefix for generated ModelConfig names (empty: the sanitized model name,
   # e.g. smollm2:135m -> smollm2-135m).

@@ -1,6 +1,7 @@
 package kserve
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -18,6 +19,9 @@ import (
 const (
 	PresetLabel       = "agent-platform.giantswarm.io/preset"
 	PresetSourceLabel = "agent-platform.giantswarm.io/preset-source"
+	// PresetChartVersionAnnotation is the version of the chart that
+	// rendered the preset ConfigMap.
+	PresetChartVersionAnnotation = "agent-platform.giantswarm.io/chart-version"
 )
 
 // servingPreset is a published ServingPreset document (schema:
@@ -29,8 +33,10 @@ type servingPreset struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec presetSpec `json:"spec"`
-	// source is the preset-source label (shipped|values); not part of the doc.
-	source string
+	// source is the preset-source label (shipped|values) and chartVersion
+	// the chart-version annotation of the ConfigMap; not part of the doc.
+	source       string
+	chartVersion string
 }
 
 type presetSpec struct {
@@ -76,6 +82,13 @@ type presetSpec struct {
 	// alone: Scheduler set composes (true) or leaves out (false) the llm-d
 	// endpoint picker whatever the backend's default; nil follows it.
 	Router *presetRouter `json:"router"`
+	// Split is what a split placement of this preset adds: Env reaches the
+	// leader and the workers after the fast link's, and never a single-node
+	// pod — environment measured for the split alone, such as an in-graph
+	// all-reduce over the link.
+	Split struct {
+		Env []map[string]any `json:"env"`
+	} `json:"split"`
 }
 
 // presetRouter is a preset's spec.router.
@@ -164,8 +177,21 @@ func gibToBytes(g float64) int64 {
 	return int64(math.Round(g * float64(gib)))
 }
 
-// view converts the preset to its API form.
-func (p *servingPreset) view(defaultOverheadGiB float64) backend.Preset {
+// image is the runtime image the preset names (template.containers[main].
+// image), "" when it leaves it to the well-known template.
+func (p *servingPreset) image() string {
+	containers, _ := p.Spec.Template["containers"].([]any)
+	for _, c := range containers {
+		if cm, ok := c.(map[string]any); ok && cm["name"] == llmisvcMainContainer {
+			return containerImage(cm)
+		}
+	}
+	return ""
+}
+
+// view converts the preset to its API form; templateImage is the well-known
+// template's runtime image, which a preset naming none runs.
+func (p *servingPreset) view(defaultOverheadGiB float64, templateImage string) backend.Preset {
 	out := backend.Preset{
 		Name:                 p.name(),
 		DisplayName:          p.Spec.DisplayName,
@@ -183,6 +209,8 @@ func (p *servingPreset) view(defaultOverheadGiB float64) backend.Preset {
 		OverheadBytes:        p.overheadBytes(defaultOverheadGiB),
 		Args:                 p.Spec.Args,
 		NodeSelector:         p.Spec.Scheduling.NodeSelector,
+		RuntimeImage:         cmp.Or(p.image(), templateImage),
+		ChartVersion:         p.chartVersion,
 	}
 	out.RequiredBytes = out.WeightsBytes + out.OverheadBytes
 	if p.Spec.ChatTemplate != nil {
@@ -242,6 +270,7 @@ func (b *Backend) presets(ctx context.Context) ([]*servingPreset, []string, erro
 			warnings = append(warnings, fmt.Sprintf("%s: %v", cm.Name, err))
 			continue
 		}
+		p.chartVersion = cm.Annotations[PresetChartVersionAnnotation]
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name() < out[j].name() })
