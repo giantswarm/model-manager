@@ -2,17 +2,20 @@ package gitops
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/identity"
@@ -300,4 +303,53 @@ func TestCommitOnARemoteTargetRefusesAKustomizationApplyingLocally(t *testing.T)
 	_, err := committer(local, commit.NewFake()).Commit(asPerson(), servingRequest(target))
 	require.ErrorIs(t, err, backend.ErrInvalid)
 	assert.Contains(t, err.Error(), "applies to model-manager's own cluster")
+}
+
+// staleNamespace is a namespace whose Flux labels name an owner that is gone:
+// what disable_model_serving leaves behind.
+func staleNamespace(name string, labels map[string]any) dynamic.Interface {
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{namespaceGVR: "NamespaceList"},
+		obj("v1", "Namespace", "", name, labels, nil))
+}
+
+func TestCommitRefusesANamespaceWhoseOwnerIsGone(t *testing.T) {
+	gone := map[string]map[string]any{
+		"HelmRelease":   {LabelHelmName: "wc-connectivity", LabelHelmNamespace: "org-old"},
+		"Kustomization": {LabelKustomizeName: "wc-apps", LabelKustomizeNamespace: "org-old"},
+	}
+	for kind, labels := range gone {
+		t.Run("local "+kind, func(t *testing.T) {
+			fake := commit.NewFake()
+			local := cluster(obj("v1", "Namespace", "", "model-serving", labels, nil))
+			isvc := obj("serving.kserve.io/v1alpha2", "LLMInferenceService", "model-serving", "qwen3", nil, nil)
+			_, err := committer(local, fake).Commit(asPerson(), Request{Namespace: "model-serving", Write: []*unstructured.Unstructured{isvc}, Verb: "serve", Subject: "qwen3"})
+			require.ErrorIs(t, err, backend.ErrInvalid)
+			assert.Contains(t, err.Error(), "namespace model-serving on model-manager's own cluster")
+			assert.Contains(t, err.Error(), kind+" org-old/")
+			assert.Contains(t, err.Error(), "does not exist")
+			assert.Contains(t, err.Error(), "pass repository, branch and path")
+			assert.Empty(t, fake.PullRequests())
+		})
+		t.Run("remote "+kind, func(t *testing.T) {
+			local, _ := remoteClusters(wcKustomization("wc-out-of-band", "wc-kubeconfig"))
+			fake := commit.NewFake()
+			_, err := committer(local, fake).Commit(asPerson(), servingRequest(staleNamespace("model-serving", labels)))
+			require.ErrorIs(t, err, backend.ErrInvalid)
+			assert.Contains(t, err.Error(), "namespace model-serving on cluster wc")
+			assert.Contains(t, err.Error(), kind+" org-old/")
+			assert.Contains(t, err.Error(), "pass repository, branch and path")
+			assert.Empty(t, fake.PullRequests())
+		})
+	}
+}
+
+func TestCommitKeepsOtherOwnerReadErrors(t *testing.T) {
+	local, target := remoteClusters(wcKustomization("wc-out-of-band", "wc-kubeconfig"))
+	local.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "helmreleases", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(HelmReleaseGVR.GroupResource(), "wc-connectivity", errors.New("no"))
+	})
+	_, err := committer(local, commit.NewFake()).Commit(asPerson(), servingRequest(target))
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, backend.ErrInvalid)
+	assert.True(t, apierrors.IsForbidden(err))
 }
