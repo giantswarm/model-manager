@@ -599,12 +599,24 @@ type FitResult struct {
 	// memory of their own, a GB10), what vLLM claims there at start:
 	// --gpu-memory-utilization of the node's whole memory, outside the pod's
 	// memory limit. It must fit the node's budget less HostHeadroomBytes and
-	// what running models reserve; on a refusal FitGPUMemoryUtilization is
-	// the highest utilization that would fit and still hold the weights and
-	// overhead (0: none). Zero on a node whose GPUs have memory of their own.
+	// what running models reserve. A preset whose own utilization claims more
+	// is sized down to the highest utilization that fits and still holds the
+	// weights and overhead (GPUMemoryUtilization); when none does, the fit is
+	// refused and FitGPUMemoryUtilization is 0. Zero on a node whose GPUs have
+	// memory of their own.
 	UnifiedReservationBytes int64   `json:"unifiedReservationBytes,omitempty"`
 	HostHeadroomBytes       int64   `json:"hostHeadroomBytes,omitempty"`
 	FitGPUMemoryUtilization float64 `json:"fitGpuMemoryUtilization,omitempty"`
+	// DevicesPerPod is the GPU devices each serving pod requests where the
+	// model is placed, TensorParallel vLLM's tensor parallel degree there (a
+	// split's: devices per pod × nodes) and GPUMemoryUtilization the
+	// --gpu-memory-utilization it runs with, derived from the node: the
+	// preset's resources.gpus and arguments describe its reference shape
+	// (giantswarm/model-manager#223). Zero when no node was judged (a GPU
+	// pool with no node yet, a CPU preset): the preset's own shape then.
+	DevicesPerPod        int64   `json:"devicesPerPod,omitempty"`
+	TensorParallel       int64   `json:"tensorParallel,omitempty"`
+	GPUMemoryUtilization float64 `json:"gpuMemoryUtilization,omitempty"`
 	// Gated / Private describe the hub repository; TokenConfigured says
 	// whether a hub token is available for gated downloads.
 	Gated           bool `json:"gated"`

@@ -425,8 +425,10 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if forServe {
 		running = res.ReservedBytes
 	}
-	applyUnified(res, b.unifiedClaimOn(p, best, running, res.RequiredBytes))
-	applyKV(res, plan.KV.judgeOn(best))
+	sh, uv := b.shapeOn(p, best, running, res.RequiredBytes, 1)
+	applyUnified(res, uv)
+	applyShape(res, p, sh, best)
+	applyKV(res, plan.KV.shaped(sh).judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
@@ -640,7 +642,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 		}
 		if loading != nil && sv.Name == loading.name() {
 			for _, n := range on {
-				own[n] += presetShare(loading, byName[n], b.opts.DefaultOverheadGiB, parts)
+				own[n] += presetShare(loading, byName[n], b.opts.DefaultOverheadGiB, parts, sv.Utilization)
 			}
 			continue
 		}
@@ -654,7 +656,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 			continue
 		}
 		for _, n := range on {
-			out[n] += presetShare(p, byName[n], b.opts.DefaultOverheadGiB, parts)
+			out[n] += presetShare(p, byName[n], b.opts.DefaultOverheadGiB, parts, sv.Utilization)
 		}
 	}
 	return out, own
@@ -665,14 +667,19 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 // share of the node's memory vLLM claims at start (vllmClaim), whichever is
 // larger.
 func presetReserve(p *servingPreset, n nodeBudget, defaultOverheadGiB float64) int64 {
-	return presetShare(p, n, defaultOverheadGiB, 1)
+	return presetShare(p, n, defaultOverheadGiB, 1, 0)
 }
 
 // presetShare is presetReserve for one of parts nodes a split spreads the
-// weights over: its share of the weights beside the whole overhead.
-func presetShare(p *servingPreset, n nodeBudget, defaultOverheadGiB float64, parts int64) int64 {
+// weights over: its share of the weights beside the whole overhead; on a
+// unified-memory node the claim is at utilization, the one the object was
+// composed with (served.Utilization), when it is known.
+func presetShare(p *servingPreset, n nodeBudget, defaultOverheadGiB float64, parts int64, utilization float64) int64 {
 	need := ceilDiv(p.weightsBytes(), max(parts, 1)) + p.overheadBytes(defaultOverheadGiB)
-	if claim, _, ok := vllmClaim(p, n); ok {
+	if claim, memory, ok := vllmClaim(p, n); ok {
+		if utilization > 0 {
+			claim = int64(utilization * float64(memory))
+		}
 		need = max(need, claim)
 	}
 	return need
@@ -710,12 +717,17 @@ type unifiedVerdict struct {
 	Checked     bool
 	Fits        bool
 	Utilization float64
-	Claim       int64
-	Memory      int64
-	Headroom    int64
-	Available   int64
-	Reserved    int64
-	Fit         float64
+	// Preset is the preset's own utilization when Utilization was sized
+	// down from it (sized); 0 otherwise.
+	Preset    float64
+	Claim     int64
+	Memory    int64
+	Headroom  int64
+	Available int64
+	Reserved  int64
+	Fit       float64
+	// Need is the weights and overhead the claim must hold.
+	Need int64
 }
 
 // unifiedClaimOn judges the preset's claim on node n, beside reserved bytes
@@ -727,7 +739,7 @@ func (b *Backend) unifiedClaimOn(p *servingPreset, n nodeBudget, reserved, need 
 		return unifiedVerdict{}
 	}
 	headroom := gibToBytes(b.opts.UnifiedHostHeadroomGiB)
-	v := unifiedVerdict{Checked: true, Utilization: p.utilization(), Claim: claim, Memory: memory, Headroom: headroom, Reserved: reserved}
+	v := unifiedVerdict{Checked: true, Utilization: p.utilization(), Claim: claim, Memory: memory, Headroom: headroom, Reserved: reserved, Need: need}
 	v.Available = max(min(n.Budget, memory-headroom)-reserved, 0)
 	v.Fits = claim <= v.Available
 	if !v.Fits {
@@ -740,8 +752,12 @@ func (b *Backend) unifiedClaimOn(p *servingPreset, n nodeBudget, reserved, need 
 
 // clause words the verdict for the fit's reason.
 func (v unifiedVerdict) clause() string {
-	claim := fmt.Sprintf("vLLM claims %s at start (%s=%s of the node's %s unified memory)",
-		humanBytes(v.Claim), flagGPUMemoryUtilization, trimFloat2(v.Utilization), humanBytes(v.Memory))
+	sizedFrom := ""
+	if v.Preset > 0 {
+		sizedFrom = ", sized down from the preset's " + trimFloat2(v.Preset) + ","
+	}
+	claim := fmt.Sprintf("vLLM claims %s at start (%s=%s%s of the node's %s unified memory)",
+		humanBytes(v.Claim), flagGPUMemoryUtilization, trimFloat2(v.Utilization), sizedFrom, humanBytes(v.Memory))
 	left := fmt.Sprintf("the %s the node leaves models beside its %s host headroom%s", humanBytes(v.Available), humanBytes(v.Headroom), reservedNote(v.Reserved))
 	if v.Fits {
 		return claim + ", within " + left
@@ -760,7 +776,10 @@ func applyUnified(res *backend.FitResult, v unifiedVerdict) {
 	if !v.Checked {
 		return
 	}
-	res.UnifiedReservationBytes, res.HostHeadroomBytes, res.FitGPUMemoryUtilization = v.Claim, v.Headroom, v.Fit
+	res.UnifiedReservationBytes, res.HostHeadroomBytes = v.Claim, v.Headroom
+	if !v.Fits {
+		res.FitGPUMemoryUtilization = v.Fit
+	}
 	if res.Fits && !v.Fits {
 		res.Fits = false
 		res.Reason += ", but " + v.clause()

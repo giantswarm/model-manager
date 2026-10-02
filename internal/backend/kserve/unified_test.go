@@ -53,31 +53,35 @@ spec:
 
 // On a unified-memory node vLLM claims --gpu-memory-utilization of the whole
 // memory at start: a preset sized for a dedicated 24 GB GPU at 0.90 is
-// refused there, naming the share, while it still fits the L4 it is sized
-// for and a preset tuned for unified memory still fits the GB10.
+// sized down there to the share its weights and overhead need, so the host
+// keeps its headroom, while it runs as written on the L4 it is sized for and
+// a preset tuned for unified memory still fits the GB10 as written. A preset
+// whose weights and overhead alone leave the host less than its headroom is
+// refused, naming the share.
 func TestFitCheckJudgesVLLMsShareOnAUnifiedMemoryNode(t *testing.T) {
 	f := newFixture(t,
 		gb10Node("gb10"),
 		l4Node("l4"),
 		utilizationPreset("gpt-oss-20b", 12.8, 9, "0.90"),
 		utilizationPreset("tuned", 30, 20, "0.80"),
+		utilizationPreset("crowded", 80, 30, "0.90"),
 	)
 	ctx := context.Background()
 
 	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-20b", Node: "gb10"})
 	require.NoError(t, err)
-	assert.False(t, res.Fits, res.Reason)
-	assert.Equal(t, "109.5 GiB", humanBytes(res.UnifiedReservationBytes))
+	assert.True(t, res.Fits, res.Reason)
+	assert.InDelta(t, 0.18, res.GPUMemoryUtilization, 1e-9)
+	assert.Equal(t, "21.9 GiB", humanBytes(res.UnifiedReservationBytes))
 	assert.Equal(t, gibToBytes(DefaultUnifiedHostHeadroomGiB), res.HostHeadroomBytes)
-	assert.Contains(t, res.Reason, "vLLM claims 109.5 GiB at start (--gpu-memory-utilization=0.9 of the node's 121.7 GiB unified memory)")
-	assert.Contains(t, res.Reason, "more than the 105.7 GiB the node leaves models beside its 16.0 GiB host headroom")
-	assert.Contains(t, res.Reason, "--gpu-memory-utilization=0.86 fits")
-	assert.InDelta(t, 0.86, res.FitGPUMemoryUtilization, 1e-9)
+	assert.Contains(t, res.Reason, "vLLM claims 21.9 GiB at start (--gpu-memory-utilization=0.18, sized down from the preset's 0.9, of the node's 121.7 GiB unified memory)")
+	assert.Zero(t, res.FitGPUMemoryUtilization)
 
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-20b", Node: "l4"})
 	require.NoError(t, err)
 	assert.True(t, res.Fits, res.Reason)
 	assert.Zero(t, res.UnifiedReservationBytes, "a dedicated GPU is judged by weights and overhead alone")
+	assert.InDelta(t, 0.9, res.GPUMemoryUtilization, 1e-9)
 	assert.NotContains(t, res.Reason, "unified")
 
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "tuned", Node: "gb10"})
@@ -85,19 +89,34 @@ func TestFitCheckJudgesVLLMsShareOnAUnifiedMemoryNode(t *testing.T) {
 	assert.True(t, res.Fits, res.Reason)
 	assert.Equal(t, "97.4 GiB", humanBytes(res.UnifiedReservationBytes))
 	assert.Contains(t, res.Reason, "vLLM claims 97.4 GiB at start (--gpu-memory-utilization=0.8 of the node's 121.7 GiB unified memory)")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "crowded", Node: "gb10"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, res.Reason)
+	assert.Equal(t, "109.5 GiB", humanBytes(res.UnifiedReservationBytes))
+	assert.Contains(t, res.Reason, "vLLM claims 109.5 GiB at start (--gpu-memory-utilization=0.9 of the node's 121.7 GiB unified memory)")
+	assert.Contains(t, res.Reason, "more than the 105.7 GiB the node leaves models beside its 16.0 GiB host headroom")
+	assert.Zero(t, res.FitGPUMemoryUtilization, "no utilization holds 110 GiB within 105.7 GiB")
 }
 
-// load_model refuses what check_fit refuses and creates nothing.
-func TestLoadRefusesVLLMsShareOnAUnifiedMemoryNode(t *testing.T) {
-	f := newFixture(t, gb10Node("gb10"), utilizationPreset("gpt-oss-20b", 12.8, 9, "0.90"))
+// load_model refuses what check_fit refuses and creates nothing; what it
+// sizes down it composes at the sized utilization.
+func TestLoadOnAUnifiedMemoryNode(t *testing.T) {
+	f := newFixture(t, gb10Node("gb10"), utilizationPreset("crowded", 80, 30, "0.90"), utilizationPreset("gpt-oss-20b", 12.8, 9, "0.90"))
 	ctx := context.Background()
 
-	err := f.b.Load(ctx, backend.LoadRequest{Name: "gpt-oss-20b", Preset: "gpt-oss-20b", Node: "gb10"})
+	err := f.b.Load(ctx, backend.LoadRequest{Name: "crowded", Preset: "crowded", Node: "gb10"})
 	require.ErrorIs(t, err, backend.ErrUnfit)
 	assert.Contains(t, err.Error(), "--gpu-memory-utilization=0.9")
 	list, err := f.b.listServed(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, list, "no LLMInferenceService")
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: "gpt-oss-20b", Preset: "gpt-oss-20b", Node: "gb10"}))
+	list, err = f.b.listServed(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.InDelta(t, 0.18, list[0].Utilization, 1e-9)
 }
 
 // A running predictor on a unified-memory node holds its share of the memory

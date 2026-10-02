@@ -617,10 +617,22 @@ scheduling by the registered backend document (`docs/backends.md`).
   and the kubelet's accounting: that claim (`unifiedReservationBytes`) must fit the node's
   budget, at most its memory less the host headroom (`hostHeadroomBytes`,
   `--kserve-unified-host-headroom-gib`, chart `kserve.budget.unifiedHostHeadroomGiB`, 16 GiB),
-  less what running models reserve there; else `fits` is false, `load_model` refuses, and
-  `reason` names the claim, the utilization and the highest one that fits
-  (`fitGpuMemoryUtilization`): a preset at 0.90 sized for a 24 GB GPU is refused on a 121.7 GiB
-  GB10, where 0.86 fits. A dedicated GPU is judged as before.
+  less what running models reserve there. A preset whose own claim does not fit is composed at
+  the utilization its weights and overhead need there (`gpuMemoryUtilization`, in hundredths):
+  a preset at 0.90 sized for a 24 GB GPU (21.8 GiB) runs at 0.18 on a 121.7 GiB GB10. Only
+  when that does not fit either is `fits` false, `load_model` refuses, and `reason` names the
+  claim and the utilization. A dedicated GPU is judged as before.
+  **Serving shape** — a preset's `resources.gpus` and `--tensor-parallel-size` describe its
+  reference shape, the node it is written for; the fit derives the shape from the node the
+  model is placed on (`devicesPerPod`, `tensorParallel`, `gpuMemoryUtilization`). On a
+  unified-memory node (one GPU without memory of its own) a pod requests one device; on a node
+  whose GPUs have memory of their own, the smallest power of two whose cards hold the weights
+  and overhead (a preset written for four 48 GB L40S cards keeps four on a `g6e.12xlarge`). A
+  split requests that count on every pod and runs tensor parallel over devices × nodes. A shape
+  that differs from the reference is named in `reason`; more devices per pod than the node has
+  allocatable answer `fits: false`, and copies on nodes of different device counts are refused.
+  The composed object carries the derived device count, `--tensor-parallel-size` and
+  `--gpu-memory-utilization`; on its reference node a preset is composed as written.
 - **Serve / stop** — `load` composes the serving object from the preset
   after the fit check `fit-check` answers (the node's free budget, the KV cache); `unload` deletes it and
   unwires within the caller's deadline — the object is found by repository,

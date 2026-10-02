@@ -167,6 +167,7 @@ type splitVerdict struct {
 	reserved, required int64
 	limit              int64
 	kv                 kvVerdict
+	shape              servingShape
 	cached             bool
 	cacheSource        string
 }
@@ -194,16 +195,23 @@ func (v splitVerdict) apply(res *backend.FitResult) {
 		applyKV(res, v.kv)
 	}
 	res.Cached, res.CacheSource = v.cached, v.cacheSource
+	if v.fits && v.shape.Devices > 0 {
+		res.DevicesPerPod, res.TensorParallel, res.GPUMemoryUtilization = v.shape.Devices, v.shape.TensorParallel, v.shape.Utilization
+	}
 }
 
-// judgeSplit judges one fast link's nodes.
+// judgeSplit judges one fast link's nodes: each must hold its share and, on
+// unified memory, vLLM's claim; then the split's shape — the most devices a
+// node needs on every pod, the lowest utilization a node leaves — must be
+// schedulable on every node and fit its KV cache there.
 func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.FastLink, nodes []nodeBudget, reserved map[string]int64, loc cacheLocation, forServe bool) splitVerdict {
 	res := &plan.Result
 	v := splitVerdict{link: link}
 	n := int64(len(link.Nodes))
 	share := ceilDiv(res.WeightsBytes, n) + res.OverheadBytes
-	kv := plan.KV.split(n)
 	var tightFree int64 = -1
+	judged := make([]nodeBudget, 0, len(link.Nodes))
+	var sh servingShape
 	for _, name := range link.Nodes {
 		candidates, why := b.candidateNodes(ctx, nodes, name, loc, plan.Preset)
 		if len(candidates) == 0 {
@@ -237,38 +245,46 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 		if forServe {
 			running = reserved[name]
 		}
-		if uv := b.unifiedClaimOn(plan.Preset, node, running, share); uv.Checked && !uv.Fits {
+		nodeShape, uv := b.shapeOn(plan.Preset, node, running, share, n)
+		if uv.Checked && !uv.Fits {
 			v.tight, v.reserved, v.limit, v.required = node, reserved[name], limit, share
 			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, uv.clause())
 			return v
 		}
-		if kvv := kv.judgeOn(node); kvv.Skip == "" && !kvv.Fits {
-			v.kv = kvv
-			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, kvv.clause())
-			return v
-		} else {
-			v.kv = kvv
+		if len(judged) == 0 {
+			sh = nodeShape
 		}
+		sh.Devices = max(sh.Devices, nodeShape.Devices)
+		sh.Utilization = min(sh.Utilization, nodeShape.Utilization)
+		judged = append(judged, node)
 		cached, source := b.cacheVerdict(ctx, name, plan, loc)
 		if name == link.Nodes[0] || !cached {
 			v.cached, v.cacheSource = cached, source
 		}
 	}
+	sh.TensorParallel = sh.Devices * n
+	v.shape = sh
+	kv := plan.KV.shaped(sh)
+	for _, node := range judged {
+		if clause := devicesClause(sh.Devices, node); clause != "" {
+			v.reason = fmt.Sprintf("a split across %s fits the weights, but %s", strings.Join(link.Nodes, ", "), clause)
+			return v
+		}
+		if kvv := kv.judgeOn(node); kvv.Skip == "" && !kvv.Fits {
+			v.kv = kvv
+			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), node.Name, kvv.clause())
+			return v
+		} else {
+			v.kv = kvv
+		}
+	}
 	v.fits, v.required = true, share
 	v.reason = fmt.Sprintf("split across %s (fast link %s): %s of weights and %s overhead per node fit within %s on the tightest node %s (%s%s)",
 		strings.Join(link.Nodes, ", "), link.Name, humanBytes(ceilDiv(res.WeightsBytes, n)), humanBytes(res.OverheadBytes), humanBytes(v.limit), v.tight.Name, v.tight.BudgetSource, reservedNote(v.reserved))
-	return v
-}
-
-// split is the KV check of a split across n nodes: the tensor parallel
-// degree grows by n, so each GPU holds 1/n of the weights and of the KV heads.
-func (k *kvCheck) split(n int64) *kvCheck {
-	if k == nil || n <= 1 {
-		return k
+	if p := plan.Preset; p != nil && sh.Utilization > 0 && sh.Utilization != p.utilization() {
+		v.reason += fmt.Sprintf("; %s=%s, sized down from the preset's %s so the unified-memory nodes keep their host headroom", flagGPUMemoryUtilization, trimFloat2(sh.Utilization), trimFloat2(p.utilization()))
 	}
-	c := *k
-	c.Args.TensorParallel = max(c.Args.TensorParallel, 1) * n
-	return &c
+	return v
 }
 
 // recommend adds the backend's recommended placement to a fit answer: split
@@ -326,17 +342,17 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 // which a split runs too — the multi-node template names the stock image, an
 // installation's runtime override only the single-node one — unless the
 // preset names one.
-func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink) *unstructured.Unstructured {
+func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLink, sh servingShape) *unstructured.Unstructured {
 	nodes := link.Nodes
-	obj := b.composeLLM(p, s, nodes[0])
+	obj := b.composeLLM(p, s, nodes[0], sh)
 	spec := obj.Object["spec"].(map[string]any)
 	leader := spec["template"].(map[string]any)
 	worker := deepCopyMap(leader)
 
 	for i, tpl := range []map[string]any{leader, worker} {
 		main := templateMain(tpl)
-		main["command"] = splitCommand(len(nodes), i == 1)
-		args := slices.Clone(withoutFlag(p.Spec.Args, flagTensorParallelSize))
+		main["command"] = splitCommand(len(nodes), sh.TensorParallel, i == 1)
+		args := withoutFlag(shapeArgs(p, sh), flagTensorParallelSize)
 		if i == 0 { // the leader serves the API; a worker runs headless
 			args = append(args, servedNameArgs(p, s.Namespace)...)
 		}
@@ -375,12 +391,13 @@ func (b *Backend) composeSplit(p *servingPreset, s settings, link backend.FastLi
 	return obj
 }
 
-// splitCommand is the main container's command of a split of n nodes:
+// splitCommand is the main container's command of a split of n nodes
+// running tensor parallel tp (at least n: one device per pod):
 // vLLM's multi-node launch with the leader's address resolved to an IP (the
 // rendezvous binds to it), the leader serving the API on the template's port
 // and TLS as KServe's single-node template does, a worker headless. The
 // preset's arguments follow as the container's args ("$@").
-func splitCommand(n int, worker bool) []any {
+func splitCommand(n int, tp int64, worker bool) []any {
 	rank, serve := "0", `--served-model-name "{{ .Spec.Model.Name }}" "publishers/{{ .ObjectMeta.Namespace }}/models/{{ .Spec.Model.Name }}" \
   --port `+strconv.Itoa(llmisvcWorkloadPort)+` \
   {{ if .GlobalConfig.EnableTLS }}--enable-ssl-refresh --ssl-certfile /var/run/kserve/tls/tls.crt --ssl-keyfile /var/run/kserve/tls/tls.key{{ end }}`
@@ -395,7 +412,7 @@ done
 [ -n "$MASTER_ADDR" ] || { echo "the leader address ${LWS_LEADER_ADDRESS} did not resolve"; exit 1; }
 eval "set -- $*"
 exec vllm serve /mnt/models \
-  --tensor-parallel-size ` + strconv.Itoa(n) + ` --nnodes ` + strconv.Itoa(n) + ` --node-rank ` + rank + ` \
+  --tensor-parallel-size ` + strconv.FormatInt(max(tp, int64(n)), 10) + ` --nnodes ` + strconv.Itoa(n) + ` --node-rank ` + rank + ` \
   --master-addr "$MASTER_ADDR" --master-port ` + strconv.Itoa(splitMasterPort) + ` \
   ` + serve + ` \
   "$@"`

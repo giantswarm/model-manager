@@ -58,6 +58,9 @@ type served struct {
 	GitOps     *gitops.Owner
 	StorageURI string
 	GPUs       int64
+	// Utilization is the --gpu-memory-utilization the main container runs
+	// with (a shape sized on a unified-memory node); 0 when it sets none.
+	Utilization float64
 	// RuntimeImage is the image the main container runs: the object's own,
 	// else the well-known template's. ChartVersion is the preset's chart
 	// version recorded at the load (ChartVersionAnnotation).
@@ -468,6 +471,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv.Placement, sv.Nodes = servedPlacement(obj)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
+		sv.Utilization = argsUtilization(main["args"])
 		sv.RuntimeImage = containerImage(main)
 	}
 	sv.RuntimeImage = cmp.Or(sv.RuntimeImage, s.TemplateImage)
@@ -691,4 +695,21 @@ func (b *Backend) deleteServing(ctx context.Context, namespace, name string) err
 		return fmt.Errorf("delete %s %s/%s: %w", kindLLMInferenceService, namespace, name, err)
 	}
 	return nil
+}
+
+// argsUtilization reads --gpu-memory-utilization from a container's args; 0
+// without a readable one.
+func argsUtilization(raw any) float64 {
+	list, _ := raw.([]any)
+	args := make([]string, 0, len(list))
+	for _, a := range list {
+		if v, ok := a.(string); ok {
+			args = append(args, v)
+		}
+	}
+	u, err := parseUtilization(vllmFlagValues(args)[flagGPUMemoryUtilization])
+	if err != nil {
+		return 0
+	}
+	return u
 }

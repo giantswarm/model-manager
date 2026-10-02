@@ -127,12 +127,37 @@ func (b *Backend) judgeCopies(ctx context.Context, plan *fitPlan, idx presetInde
 		res.Pool = ""
 	}
 	res.Fits = len(refusals) == 0
-	if res.Fits {
+	// One LLMInferenceService runs one pod template: copies on nodes of
+	// different device counts would leave some of them unschedulable; the
+	// copies run at the lowest utilization a node leaves.
+	shapes := map[servingShape][]string{}
+	for i, per := range each {
+		sh := servingShape{Devices: per.Result.DevicesPerPod, TensorParallel: per.Result.TensorParallel}
+		shapes[sh] = append(shapes[sh], nodes[i])
+		if u := per.Result.GPUMemoryUtilization; u > 0 {
+			res.GPUMemoryUtilization = min(res.GPUMemoryUtilization, u)
+		}
+	}
+	switch {
+	case res.Fits && len(shapes) > 1:
+		res.Fits = false
+		res.Reason = fmt.Sprintf("the nodes need different serving shapes (%s) and copies share one; serve copies on nodes of one shape", describeShapes(shapes))
+	case res.Fits:
 		res.Reason = fmt.Sprintf("%d copies on %s; the tightest, %s: %s", len(nodes), strings.Join(nodes, ", "), res.Node, res.Reason)
-	} else {
+	default:
 		res.Reason = fmt.Sprintf("%d of %d nodes cannot host a copy — %s", len(refusals), len(nodes), strings.Join(refusals, "; "))
 	}
 	return nil
+}
+
+// describeShapes words the shapes of copies' nodes, in node order.
+func describeShapes(shapes map[servingShape][]string) string {
+	parts := make([]string, 0, len(shapes))
+	for sh, on := range shapes {
+		parts = append(parts, fmt.Sprintf("%s: %s, tensor parallel %d", strings.Join(on, ", "), plural(sh.Devices, "GPU device"), sh.TensorParallel))
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, "; ")
 }
 
 // tighter says whether verdict a leaves less room than b: a refusal before a

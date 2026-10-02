@@ -115,7 +115,7 @@ func TestComposeLLMInferenceServiceForEveryShippedPreset(t *testing.T) {
 	withChatTemplate := 0
 	for _, p := range shippedPresets(t) {
 		t.Run(p.name(), func(t *testing.T) {
-			obj := f.b.composeLLM(p, s, "")
+			obj := f.b.composeLLM(p, s, "", referenceShape(p))
 			schema.assertValid(t, obj)
 			assert.Equal(t, "serving.kserve.io/v1alpha2", obj.GetAPIVersion())
 			assert.Equal(t, kindLLMInferenceService, obj.GetKind())
@@ -187,7 +187,7 @@ func TestComposeLLMInferenceServiceForEveryShippedPreset(t *testing.T) {
 
 	// An empty runtimeClassName sets nothing.
 	f.setDiscoveryOpts(ctx, discoveryOpts{})
-	obj := f.b.composeLLM(shippedPresets(t)[0], f.b.cfg.settings(ctx), "")
+	obj := f.b.composeLLM(shippedPresets(t)[0], f.b.cfg.settings(ctx), "", referenceShape(shippedPresets(t)[0]))
 	schema.assertValid(t, obj)
 	_, hasRuntimeClass, _ := unstructured.NestedString(obj.Object, "spec", "template", "runtimeClassName")
 	assert.False(t, hasRuntimeClass, "empty runtimeClassName is omitted")
@@ -215,7 +215,7 @@ func TestComposeLLMInferenceServicePresetOverrides(t *testing.T) {
 	_, err := f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap("custom", custom), metav1.CreateOptions{})
 	require.NoError(t, err)
 	s := f.b.cfg.settings(ctx)
-	obj := f.b.composeLLM(mustPreset(t, f, "custom"), s, testGPUNode)
+	obj := f.b.composeLLM(mustPreset(t, f, "custom"), s, testGPUNode, referenceShape(mustPreset(t, f, "custom")))
 	loadLLMISVCSchema(t).assertValid(t, obj)
 
 	main := mainContainer(obj)
@@ -254,7 +254,7 @@ func TestComposeLLMInferenceServiceRouterScheduler(t *testing.T) {
 	schema := loadLLMISVCSchema(t)
 	router := func(t *testing.T, preset string) map[string]any {
 		t.Helper()
-		obj := f.b.composeLLM(mustPreset(t, f, preset), f.b.cfg.settings(ctx), "")
+		obj := f.b.composeLLM(mustPreset(t, f, preset), f.b.cfg.settings(ctx), "", referenceShape(mustPreset(t, f, preset)))
 		schema.assertValid(t, obj)
 		r, _, _ := unstructured.NestedMap(obj.Object, "spec", "router")
 		return r

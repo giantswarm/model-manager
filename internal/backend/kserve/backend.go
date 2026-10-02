@@ -679,12 +679,13 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if !plan.Result.Fits {
 		return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, plan.Result.Reason)
 	}
-	obj := b.composeLLM(plan.Preset, s, req.Node)
+	sh := shapeOf(plan.Preset, fit)
+	obj := b.composeLLM(plan.Preset, s, req.Node, sh)
 	switch {
 	case placement == backend.PlacementSplit:
 		link, _ := s.fastLinkOf(fit.Nodes[0])
 		link.Nodes = fit.Nodes
-		obj = b.composeSplit(plan.Preset, s, link)
+		obj = b.composeSplit(plan.Preset, s, link, sh)
 	case len(req.Nodes) > 1:
 		applyCopies(obj, req.Nodes)
 	}

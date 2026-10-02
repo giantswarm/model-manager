@@ -1154,6 +1154,9 @@ components:
         unifiedReservationBytes: { type: integer, format: int64, description: "on a unified-memory node (GPUs without memory of their own): what vLLM claims at start, --gpu-memory-utilization of the node's whole memory; it must fit the budget, at most the memory less hostHeadroomBytes, less reservedBytes" }
         hostHeadroomBytes: { type: integer, format: int64, description: "on a unified-memory node: the memory kept for the host beside vLLM's claim" }
         fitGpuMemoryUtilization: { type: number, format: double, description: "on a refusal for vLLM's claim on a unified-memory node: the highest --gpu-memory-utilization that fits and still holds the weights and overhead" }
+        devicesPerPod: { type: integer, format: int64, description: "kserve: the GPU devices each serving pod requests where the model is placed, derived from the node (one on a unified-memory node, else the smallest power of two whose cards hold the weights and overhead); the preset's resources.gpus is its reference shape. Absent when no node was judged" }
+        tensorParallel: { type: integer, format: int64, description: "kserve: vLLM's --tensor-parallel-size there (a split's: devicesPerPod × nodes)" }
+        gpuMemoryUtilization: { type: number, format: double, description: "kserve: the --gpu-memory-utilization the model runs with there: the preset's, or on a unified-memory node where the preset's claim does not fit, the one its weights and overhead need" }
         gated: { type: boolean }
         private: { type: boolean }
         tokenConfigured: { type: boolean, description: a hub token Secret is configured }

@@ -111,7 +111,7 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 
 	// Unset: nothing changes and the tainted node is reported as blocked.
 	s := f.b.cfg.settings(ctx)
-	obj := f.b.composeLLM(mustPreset(t, f, "big"), s, testGPUNode)
+	obj := f.b.composeLLM(mustPreset(t, f, "big"), s, testGPUNode, referenceShape(mustPreset(t, f, "big")))
 	_, has, _ := unstructured.NestedSlice(obj.Object, "spec", "predictor", "tolerations")
 	assert.False(t, has, "no tolerations without an input")
 	job := f.b.buildJob(downloadPlan{Dir: "big", Repo: bigRepo, Node: testCacheNode}, s)
@@ -132,7 +132,7 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 	want := map[string]any{"key": poolTaintKey, "operator": "Exists", "effect": "NoSchedule"}
 
 	// The workload: pool toleration, pool label under the preset's selector and the pin.
-	obj = f.b.composeLLM(mustPreset(t, f, "big"), s, poolNode)
+	obj = f.b.composeLLM(mustPreset(t, f, "big"), s, poolNode, referenceShape(mustPreset(t, f, "big")))
 	tols, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "tolerations")
 	assert.Equal(t, []any{want}, tols)
 	sel, _, _ := unstructured.NestedMap(obj.Object, "spec", "template", "nodeSelector")
@@ -142,7 +142,7 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 	custom := presetDoc("custom", "org/custom", 1, poolToleranceYAML)
 	_, err = f.cs.CoreV1().ConfigMaps(testPlatformNS).Create(ctx, presetConfigMap("custom", custom), metav1.CreateOptions{})
 	require.NoError(t, err)
-	obj = f.b.composeLLM(mustPreset(t, f, "custom"), s, "")
+	obj = f.b.composeLLM(mustPreset(t, f, "custom"), s, "", referenceShape(mustPreset(t, f, "custom")))
 	loadLLMISVCSchema(t).assertValid(t, obj)
 	tols, _, _ = unstructured.NestedSlice(obj.Object, "spec", "template", "tolerations")
 	assert.Equal(t, []any{want, map[string]any{"key": "dedicated", "operator": "Equal", "value": "llm", "effect": "NoExecute"}}, tols)

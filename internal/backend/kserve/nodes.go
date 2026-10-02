@@ -48,12 +48,16 @@ type nodeBudget struct {
 	Allocatable  int64
 	// Capacity is the node's memory capacity: the memory the kernel
 	// reports (MemTotal), which a unified-memory GPU shares.
-	Capacity     int64
-	GPUCount     int64
-	GPUMemory    int64
-	GPUProduct   string
-	Budget       int64
-	BudgetSource string
+	Capacity int64
+	GPUCount int64
+	// GPUAllocatable is the node's allocatable accelerator devices (the
+	// configured GPU resource, time-sliced replicas included); 0 when the
+	// node reports none, and then no device count is judged against it.
+	GPUAllocatable int64
+	GPUMemory      int64
+	GPUProduct     string
+	Budget         int64
+	BudgetSource   string
 	// Message notes a budget derivation problem (an ignored annotation).
 	Message string
 	// Eligible says whether a model can be served on the node right now;
@@ -157,7 +161,7 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 		nb.GPUCount = q.Value()
 	}
 	if q, ok := n.Status.Allocatable[corev1.ResourceName(gpuResource)]; ok && q.Value() > 0 {
-		nb.GPUCount = q.Value()
+		nb.GPUCount, nb.GPUAllocatable = q.Value(), q.Value()
 	}
 	if v, err := strconv.ParseInt(n.Labels[labelGPUCount], 10, 64); err == nil && v > 0 {
 		nb.GPUCount = v
