@@ -161,11 +161,13 @@ func (f *fakeBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 
 // fakeWirer records ModelConfigs in memory: refs holds model-manager's own
 // (keyed by backend and model reference), foreign holds ModelConfigs created
-// by others.
+// by others, notOwned the refs another model-manager instance created, which
+// Remove leaves.
 type fakeWirer struct {
-	mu      sync.Mutex
-	refs    map[string]wiring.ModelConfigRef
-	foreign []wiring.ModelConfigRef
+	mu       sync.Mutex
+	refs     map[string]wiring.ModelConfigRef
+	foreign  []wiring.ModelConfigRef
+	notOwned map[string]*wiring.NotOwnedError
 	// noThink stands for a kagent whose ModelConfig has no spec.ollama.think:
 	// Writable drops it and the apiserver prunes it from every write.
 	noThink bool
@@ -224,6 +226,9 @@ func (w *fakeWirer) Writable(_ context.Context, ep backend.AgentEndpoint) (backe
 func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if left, ok := w.notOwned[refKey(b, model)]; ok {
+		return left
+	}
 	delete(w.refs, refKey(b, model))
 	return nil
 }

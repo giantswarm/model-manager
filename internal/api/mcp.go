@@ -266,7 +266,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.listNodes)
 
 	s.AddTool(mcp.NewTool(ToolUnloadModel,
-		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays. On kserve the serving object is deleted and its ModelConfig unwired within the call, whatever the cache scan would take; the answer's inventory says whether the cache is rescanned in the background or why it cannot be, and next says what list_loaded_models shows meanwhile."),
+		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays. On kserve the serving object is deleted and its ModelConfig unwired within the call — only one this model-manager created; any other is left and named in modelConfigLeft — whatever the cache scan would take; the answer's inventory says whether the cache is rescanned in the background or why it cannot be, and next says what list_loaded_models shows meanwhile."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		dryRunArg("the plan: on kserve the serving objects the unload would delete (manifests) and the ModelConfig it would unwire (wiring), elsewhere whether the model is loaded; nothing is unloaded"),

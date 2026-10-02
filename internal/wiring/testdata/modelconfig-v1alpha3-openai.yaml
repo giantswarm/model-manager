@@ -6,6 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: model-manager
     model-manager.giantswarm.io/backend: lemonade
+    model-manager.giantswarm.io/instance: kagent-model-manager
   name: qwen3-4b-flm
   namespace: kagent
 spec:

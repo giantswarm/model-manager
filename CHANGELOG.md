@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Unload, unwire, delete with `unwire` and `remove_backend` delete only a ModelConfig this model-manager created. Each instance has a name (`--instance`, `MODEL_MANAGER_INSTANCE`; the chart sets `<release namespace>-<release name>`, the default is the host name), written as the label `model-manager.giantswarm.io/instance` when it creates a ModelConfig. A ModelConfig of another instance, or one without the label (written before it existed, or by hand with model-manager's labels), is left in place: the unload answers `modelConfigLeft`, unwire and delete answer `conflict`. A wire onto another instance's ModelConfig answers `conflict`, nothing written; one without the label is adopted but never marked as created here. `ModelConfigRef.createdBy` and `get_info`'s `wiring.instance` report the names.
+
 ### Added
 
 - kserve: `list_presets` reports a preset's provenance: `runtimeImage`, the image a load runs (the preset's `template.containers[main].image`, else the well-known template's), and `chartVersion`, the version of the chart that published the preset ConfigMap (its `agent-platform.giantswarm.io/chart-version` annotation). A load records the chart version on the LLMInferenceService (`model-manager.giantswarm.io/preset-chart-version`), and `list_loaded_models` and a model's `running` report both for the serving object, on the REST API and over MCP. The well-known template's image is read once with the control plane's discovery, no longer on every split load.

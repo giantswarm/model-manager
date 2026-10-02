@@ -62,6 +62,12 @@ const (
 	// ModelAnnotation carries the exact model reference (label values cannot
 	// hold ':' or '/').
 	ModelAnnotation = "model-manager.giantswarm.io/model"
+	// InstanceLabel names the model-manager instance that created the
+	// ModelConfig. It is written only when the ModelConfig is created, and
+	// only that instance deletes it: ManagedByLabel is shared by every
+	// model-manager and copied with a manifest, so it marks what
+	// model-manager writes, not who may delete it.
+	InstanceLabel = "model-manager.giantswarm.io/instance"
 
 	// KagentGroup / ModelConfigResource identify the CRD.
 	KagentGroup         = "kagent.dev"
@@ -119,6 +125,10 @@ type ModelConfigRef struct {
 	// placeholder Secret or the caller's own. At most one is set.
 	APIKeyPassthrough bool   `json:"apiKeyPassthrough,omitempty"`
 	APIKeySecret      string `json:"apiKeySecret,omitempty"`
+	// CreatedBy is the model-manager instance that created the ModelConfig
+	// (InstanceLabel), the only one that deletes it. Empty on a ModelConfig
+	// without the label: model-manager adopts it but never deletes it.
+	CreatedBy string `json:"createdBy,omitempty"`
 	// Backend is the driver that produced the ModelConfig (the
 	// model-manager.giantswarm.io/backend label); together with Model it
 	// identifies the ModelConfig when one model-manager runs several
@@ -141,6 +151,23 @@ func (r ModelConfigRef) Carries(ep backend.AgentEndpoint) bool {
 	return r.ContextLength == ep.ContextLength && sameThink
 }
 
+// NotOwnedError is a managed ModelConfig this model-manager instance did not
+// create: another instance created it (CreatedBy), or it carries no
+// InstanceLabel (CreatedBy empty: written before the label existed, and
+// adopted by a wire since). Remove leaves it in place and Ensure does not
+// write another instance's. It is a backend.ErrConflict.
+type NotOwnedError struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	Message   string `json:"message"`
+}
+
+func (e *NotOwnedError) Error() string { return e.Message }
+
+// Unwrap makes a NotOwnedError a backend.ErrConflict.
+func (e *NotOwnedError) Unwrap() error { return backend.ErrConflict }
+
 // Wirer manages the agent-facing configuration for models. A ModelConfig is
 // identified by (backend, model): the backend label plus the model
 // annotation, so the same reference on two backends is two ModelConfigs.
@@ -149,8 +176,9 @@ type Wirer interface {
 	// (idempotent); one Flux applies from git is refused (ErrGitOpsOwned).
 	Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error)
 	// Remove deletes the ModelConfig for model on backend b; absent is not an
-	// error. Only model-manager's own ModelConfigs are ever deleted, and never
-	// one Flux applies from git (ErrGitOpsOwned).
+	// error. Only a ModelConfig this instance created is deleted (any other is
+	// a *NotOwnedError, left in place), and never one Flux applies from git
+	// (ErrGitOpsOwned).
 	Remove(ctx context.Context, b backend.Name, model string) error
 	// Lookup returns the ModelConfig for model on backend b, or nil when none
 	// exists.
@@ -166,7 +194,8 @@ type Wirer interface {
 	// written. A dry run shows it, commit mode lands it in git.
 	Render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error)
 	// Removal returns what Remove would delete for model on backend b; no
-	// objects when nothing is wired. Nothing is deleted.
+	// objects when nothing is wired, or when the ModelConfig is one Remove
+	// leaves (Rendered.Left). Nothing is deleted.
 	Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error)
 	// Writable returns ep as Ensure writes it: without the settings the
 	// served ModelConfig schema lacks, which the apiserver would prune — so
@@ -182,6 +211,8 @@ type Kagent struct {
 	openAPI   openapi.ClientWithContext
 	namespace string
 	prefix    string
+	// instance is the InstanceLabel value this process writes and deletes by.
+	instance string
 	// discover, when set, re-discovers the served version after a call
 	// misses it (WithDiscovery).
 	discover func() (string, error)
@@ -195,12 +226,14 @@ type Kagent struct {
 // NewKagent builds a Wirer writing into namespace with the given API version.
 // The backend a ModelConfig belongs to comes with every AgentEndpoint, so one
 // wirer serves every backend of the process. openAPI is the apiserver's
-// OpenAPI v3, which tells the ModelConfig fields it serves.
-func NewKagent(client dynamic.Interface, openAPI openapi.ClientWithContext, namespace, apiVersion, prefix string) *Kagent {
+// OpenAPI v3, which tells the ModelConfig fields it serves. instance names
+// this model-manager among those writing into the namespace (InstanceLabel,
+// made a valid label value by InstanceName); it must not be empty.
+func NewKagent(client dynamic.Interface, openAPI openapi.ClientWithContext, namespace, apiVersion, prefix, instance string) *Kagent {
 	if apiVersion == "" {
 		apiVersion = DefaultAPIVersion
 	}
-	k := &Kagent{client: client, openAPI: openAPI, namespace: namespace, prefix: prefix}
+	k := &Kagent{client: client, openAPI: openAPI, namespace: namespace, prefix: prefix, instance: InstanceName(instance)}
 	k.setVersion(apiVersion)
 	return k
 }
@@ -289,6 +322,41 @@ func (k *Kagent) dyn(ctx context.Context) dynamic.Interface {
 // Namespace returns the target namespace.
 func (k *Kagent) Namespace() string { return k.namespace }
 
+// Instance returns the InstanceLabel value this wirer writes and deletes by.
+func (k *Kagent) Instance() string { return k.instance }
+
+// InstanceName makes an instance name a label value: the DNS-label form
+// ModelConfigName derives, so "kagent/model-manager" becomes
+// "kagent-model-manager".
+func InstanceName(name string) string { return ModelConfigName("", name) }
+
+// createdHere reports whether this instance created obj.
+func (k *Kagent) createdHere(obj *unstructured.Unstructured) bool {
+	labels := obj.GetLabels()
+	return labels[ManagedByLabel] == ManagedByValue && labels[InstanceLabel] == k.instance
+}
+
+// Tails of a NotOwnedError: what happened to the ModelConfig instead.
+const (
+	leftInPlace = "it is left in place: model-manager only deletes the ModelConfigs it created; delete it with kubectl once nothing references it"
+	notWritten  = "nothing was written: only the instance that created it writes it"
+)
+
+// notOwned is the *NotOwnedError for obj, a managed ModelConfig this
+// instance did not create; outcome says what happened to it instead.
+func (k *Kagent) notOwned(obj *unstructured.Unstructured, outcome string) *NotOwnedError {
+	e := &NotOwnedError{Namespace: obj.GetNamespace(), Name: obj.GetName(), CreatedBy: obj.GetLabels()[InstanceLabel]}
+	if e.Namespace == "" {
+		e.Namespace = k.namespace
+	}
+	who := "model-manager instance " + e.CreatedBy + " created it"
+	if e.CreatedBy == "" {
+		who = "it carries no " + InstanceLabel + " label (written before model-manager recorded its creator, or by hand)"
+	}
+	e.Message = fmt.Sprintf("ModelConfig %s/%s was not created by this model-manager (instance %s): %s; %s", e.Namespace, e.Name, k.instance, who, outcome)
+	return e
+}
+
 // APIVersion returns the CRD version in use.
 func (k *Kagent) APIVersion() string { return k.resource().Version }
 
@@ -334,12 +402,14 @@ func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 // removal, the objects it deletes. Name is the ModelConfig's name, GitOps the
 // Flux object that applies the ModelConfig as it exists now (nil: none, or
 // written live). Replaces names an older ModelConfig of the same model the
-// write removes (the backend-chosen name converging, Ensure).
+// write removes (the backend-chosen name converging, Ensure). Left is the
+// ModelConfig a removal leaves because this instance did not create it.
 type Rendered struct {
 	Name     string
 	Objects  []*unstructured.Unstructured
 	GitOps   *gitops.Owner
 	Replaces string
+	Left     *NotOwnedError
 }
 
 // ModelConfig is the rendered ModelConfig, nil for a removal with nothing to
@@ -421,14 +491,15 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	// plain or suffixed — so a repeated Ensure never deletes and recreates
 	// it. Only a backend-chosen name (ep.Name, the kserve LLMInferenceService
 	// rule) converges an older derived name onto the new one, replacing it,
-	// never duplicating it.
+	// never duplicating it — and only one this instance created, since the
+	// replacement deletes it.
 	p := &wirePlan{name: target}
 	old, err := k.find(ctx, ep.Backend, model)
 	if err != nil {
 		return nil, err
 	}
 	if old != nil {
-		if ep.Name != "" && old.GetName() != target {
+		if ep.Name != "" && old.GetName() != target && k.createdHere(old) {
 			p.replaces = old
 		} else {
 			p.name = old.GetName()
@@ -447,6 +518,16 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	}
 	if existing.GetLabels()[ManagedByLabel] != ManagedByValue {
 		return nil, fmt.Errorf("%w: ModelConfig %s/%s exists but is not managed by %s", backend.ErrConflict, k.namespace, p.name, ManagedByValue)
+	}
+	// Another instance's ModelConfig is its own to write; one without the
+	// label is adopted — written, but never marked as created here.
+	if creator := existing.GetLabels()[InstanceLabel]; creator != "" && creator != k.instance {
+		return nil, k.notOwned(existing, notWritten)
+	}
+	if !k.createdHere(existing) {
+		labels := p.desired.GetLabels()
+		delete(labels, InstanceLabel)
+		p.desired.SetLabels(labels)
 	}
 	p.existing = existing
 	return p, nil
@@ -570,6 +651,11 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Re
 	if err != nil || obj == nil {
 		return &Rendered{}, err
 	}
+	// One Flux applies from git is removed in git (commit mode), whoever
+	// rendered it; a live one only by the instance that created it.
+	if gitops.OwnerOf(obj.GetLabels()) == nil && !k.createdHere(obj) {
+		return &Rendered{Name: obj.GetName(), Left: k.notOwned(obj, leftInPlace)}, nil
+	}
 	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: gitops.OwnerOf(obj.GetLabels())}
 	sec, err := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
 	switch {
@@ -582,7 +668,8 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Re
 }
 
 // Remove implements Wirer. A ModelConfig Flux applies from git is never
-// deleted live: the answer is ErrGitOpsOwned.
+// deleted live: the answer is ErrGitOpsOwned. One this instance did not
+// create is left: the answer is its *NotOwnedError.
 func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error {
 	_, err := retried(k, func() (struct{}, error) { return struct{}{}, k.remove(ctx, b, model) })
 	return err
@@ -599,10 +686,14 @@ func (k *Kagent) remove(ctx context.Context, b backend.Name, model string) error
 	if err := refuseGitOps(obj); err != nil {
 		return err
 	}
+	if !k.createdHere(obj) {
+		return k.notOwned(obj, leftInPlace)
+	}
 	return k.removeObj(ctx, obj.GetName())
 }
 
-// removeObj deletes an owned ModelConfig and its placeholder Secret.
+// removeObj deletes a ModelConfig this instance created and its placeholder
+// Secret.
 func (k *Kagent) removeObj(ctx context.Context, name string) error {
 	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
@@ -777,7 +868,7 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 		spec["apiKeySecret"] = placeholderSecretName(name)
 		spec["apiKeySecretKey"] = placeholderSecretKey
 	}
-	labels := map[string]any{ManagedByLabel: ManagedByValue}
+	labels := map[string]any{ManagedByLabel: ManagedByValue, InstanceLabel: k.instance}
 	if ep.Backend != "" {
 		labels[BackendLabel] = string(ep.Backend)
 	}
@@ -855,6 +946,7 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	ref.Managed = obj.GetLabels()[ManagedByLabel] == ManagedByValue
 	ref.GitOps = gitops.OwnerOf(obj.GetLabels())
 	ref.Backend = backend.Name(obj.GetLabels()[BackendLabel])
+	ref.CreatedBy = obj.GetLabels()[InstanceLabel]
 	if u, _, _ := unstructured.NestedString(obj.Object, "spec", "openAI", "baseUrl"); u != "" {
 		ref.Endpoint = u
 	} else if h, _, _ := unstructured.NestedString(obj.Object, "spec", "ollama", "host"); h != "" {

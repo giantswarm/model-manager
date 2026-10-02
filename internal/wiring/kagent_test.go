@@ -40,7 +40,7 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 		testGVR:   "ModelConfigList",
 		secretGVR: "SecretList",
 	}, objs...)
-	return NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, ""), client
+	return NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "", testInstance), client
 }
 
 // kagentOllamaFields are the spec.ollama fields of the ModelConfig kagent
@@ -557,7 +557,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	assert.Empty(t, list.Items)
 
 	// A prefix still applies to backend-chosen names.
-	kp := NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "mm")
+	kp := NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "mm", testInstance)
 	pref, err := kp.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "mm-qwen3-8-27b", pref.Name)
@@ -734,7 +734,7 @@ func TestDiscoverAPIVersionFollowsWhatTheClusterServes(t *testing.T) {
 // fails (cmd/serve falls back to DefaultAPIVersion) or is bypassed.
 func TestDefaultAPIVersionIsTheV2One(t *testing.T) {
 	assert.Equal(t, "v1alpha3", DefaultAPIVersion)
-	k := NewKagent(nil, nil, "kagent", "", "")
+	k := NewKagent(nil, nil, "kagent", "", "", testInstance)
 	assert.Equal(t, DefaultAPIVersion, k.APIVersion())
 }
 
@@ -848,7 +848,7 @@ func (c *cutOver) flip(served string) {
 func TestWiringFollowsACRDVersionCutOver(t *testing.T) {
 	ctx := context.Background()
 	c := newCutOver("v1alpha2")
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "").
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
 		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
 	ep := ollamaEndpoint("smollm2:135m")
 	ep.Think = nil
@@ -873,7 +873,7 @@ func TestWiringFollowsACRDVersionCutOver(t *testing.T) {
 
 func TestWiringRediscoversWhenTheSchemaVersionIsGone(t *testing.T) {
 	c := newCutOver("v1alpha3")
-	k := NewKagent(c.client, servedOpenAPI("v1alpha3", kagentOllamaFields...), "kagent", "v1alpha2", "").
+	k := NewKagent(c.client, servedOpenAPI("v1alpha3", kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
 		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
 
 	ep, err := k.Writable(context.Background(), ollamaEndpoint("qwen3:0.6b"))
@@ -884,7 +884,7 @@ func TestWiringRediscoversWhenTheSchemaVersionIsGone(t *testing.T) {
 
 func TestAnExplicitAPIVersionNeverRediscovers(t *testing.T) {
 	c := newCutOver("v1alpha3")
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "")
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance)
 
 	_, err := k.List(context.Background())
 	require.Error(t, err)
@@ -895,7 +895,7 @@ func TestAnExplicitAPIVersionNeverRediscovers(t *testing.T) {
 func TestARediscoveryOfTheSameVersionKeepsTheError(t *testing.T) {
 	c := newCutOver("v1alpha2")
 	calls := 0
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "").
+	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
 		WithDiscovery(func() (string, error) { calls++; return "v1alpha2", nil }, nil)
 	c.served = "none"
 

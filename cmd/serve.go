@@ -64,6 +64,7 @@ type serveOptions struct {
 	kagentNamespace   string
 	kagentAPIVersion  string
 	modelConfigPrefix string
+	instance          string
 	autoWire          bool
 	defaultKeepAlive  string
 	reconcileInterval time.Duration
@@ -190,6 +191,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.kagentNamespace, "kagent-namespace", envOr("KAGENT_NAMESPACE", "kagent"), "Namespace where ModelConfigs are created (KAGENT_NAMESPACE)")
 	f.StringVar(&o.kagentAPIVersion, "kagent-api-version", envOr("KAGENT_API_VERSION", "auto"), "kagent.dev API version for ModelConfigs; auto discovers the server's preferred version (KAGENT_API_VERSION)")
 	f.StringVar(&o.modelConfigPrefix, "modelconfig-prefix", envOr("MODELCONFIG_PREFIX", ""), "Prefix for generated ModelConfig names (MODELCONFIG_PREFIX)")
+	f.StringVar(&o.instance, "instance", envOr("MODEL_MANAGER_INSTANCE", hostname()), "Name of this model-manager among those writing ModelConfigs into the kagent namespace: written as the model-manager.giantswarm.io/instance label on every ModelConfig it creates, and only ModelConfigs carrying it are deleted on unload or unwire. Defaults to the host name; the chart sets <release namespace>-<release name>. Give each process on one host its own (MODEL_MANAGER_INSTANCE)")
 	f.BoolVar(&o.autoWire, "auto-wire", envBool("MODEL_MANAGER_AUTO_WIRE", true), "Create a ModelConfig when a pull completes or a model is loaded (kserve: in the load call, before the served model is ready, refreshed when it is; a served model model-manager manages that has none is wired by the caller's reads) (MODEL_MANAGER_AUTO_WIRE)")
 	f.StringVar(&o.defaultKeepAlive, "default-keep-alive", envOr("MODEL_MANAGER_DEFAULT_KEEP_ALIVE", ollama.DefaultKeepAlive), "Default keep-alive for load requests (ollama; on lemonade only -1 has a meaning: it pins the model) (MODEL_MANAGER_DEFAULT_KEEP_ALIVE)")
 	f.DurationVar(&o.reconcileInterval, "reconcile-interval", envDuration("MODEL_MANAGER_RECONCILE_INTERVAL", 30*time.Second), "How often served models are checked for a missing ModelConfig on backends that wire on readiness; 0 disables (MODEL_MANAGER_RECONCILE_INTERVAL)")
@@ -241,6 +243,10 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}()
 	if o.downstreamOAuth && !o.oauthEnabled {
 		return fmt.Errorf("--downstream-oauth needs --enable-oauth: without OAuth there is no caller token to present to the Kubernetes API")
+	}
+
+	if !o.wiringDisabled && strings.TrimSpace(o.instance) == "" {
+		return fmt.Errorf("--instance is empty: agent wiring records the instance that creates a ModelConfig, so it deletes only its own; name this model-manager or set --disable-wiring")
 	}
 
 	if o.githubAuthorizationServer != "" && !o.oauthEnabled {
@@ -321,7 +327,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 				apiVersion = wiring.DefaultAPIVersion
 			}
 		}
-		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix).
+		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix, o.instance).
 			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
 		if auto {
 			// A CRD version cut-over under the running process is followed
@@ -329,8 +335,8 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			k.WithDiscovery(discover, log)
 		}
 		wirer = k
-		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion()}
-		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "autoWire", o.autoWire)
+		wiringInfo = &service.WiringInfo{Namespace: k.Namespace(), APIVersion: k.APIVersion(), Instance: k.Instance()}
+		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "instance", k.Instance(), "autoWire", o.autoWire)
 	}
 
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
@@ -477,6 +483,13 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// hostname is the host's name, the default --instance; empty when the OS
+// does not tell.
+func hostname() string {
+	h, _ := os.Hostname()
+	return h
 }
 
 func envOr(key, def string) string {

@@ -61,7 +61,7 @@ Lemonade-backend ADR in the team's decision log.
 | Loaded / running models (kserve: each with its `modelConfig`; a served model model-manager manages that has none is wired by the read, `wiring: {wired, reason: "wired on read", modelConfig}`) | `GET /api/v1/loaded[?backend=]` | `list_loaded_models` |
 | Pull / import (returns a job; on `backend`, else the default backend) | `POST /api/v1/models/pull {"model","backend?","wire?","preset?","node?"}` | `pull_model` |
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
-| Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call, never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
+| Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call — only a ModelConfig this model-manager created, any other is reported as `modelConfigLeft` — never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
 | Every write tool takes `dryRun` (MCP): it answers the plan and changes nothing — `pull_model` whether the model is there, the kserve fit verdict and the ModelConfig it would wire; `load_model` the loaded state, the keep-alive, the kserve fit verdict and serving object (`manifests`) or `alreadyServing`, the ModelConfig the auto-wire would ensure (`wiring`); `unload_model` the kserve serving objects it would delete and the ModelConfig it would unwire; `delete_model` the loaded state and the ModelConfig it would unwire; `cancel_job` the job | — | `pull_model`, `load_model`, `unload_model`, `delete_model`, `cancel_job` |
 | Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused; MCP `dryRun: true` returns the `manifests` it would write or delete, writing nothing) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
@@ -87,6 +87,28 @@ reconciler and the unload, unwire and delete paths leave such a ModelConfig
 alone. `forbidden` (403) means the cluster refused the caller: model-manager
 acts as the caller, so their own Kubernetes RBAC decides; retrying does not
 help, and `backend_error` (502) stays for a backend that failed.
+
+**model-manager only deletes what it created.** Every model-manager writing
+ModelConfigs into a kagent namespace has an instance name (`--instance`,
+`MODEL_MANAGER_INSTANCE`; the chart sets `<release namespace>-<release name>`,
+a process outside the chart defaults to its host name — give each process on
+one host its own). A ModelConfig it creates carries the label
+`model-manager.giantswarm.io/instance: <instance>`, written once at creation;
+`app.kubernetes.io/managed-by: model-manager` alone is shared by every
+instance and copied with a manifest, so it never grants a deletion. The unload,
+unwire, delete and `remove_backend` paths delete only a ModelConfig carrying
+their own instance label. Any other is left in place: the unload answers
+`modelConfigLeft: {namespace, name, createdBy?, message}` (its dry run
+`wiring.left`), `remove_backend` leaves it, and `unwire_model` and
+`delete_model` with `unwire` answer `conflict` (409) with that message, nothing
+deleted. A wire onto a ModelConfig another instance created answers `conflict`
+naming it, nothing written; one with `managed-by: model-manager` but no
+instance label (written before the label existed, or by hand) is adopted —
+its spec written, never marked as created here — and so is never deleted by
+model-manager either; `kubectl delete` removes it once nothing references it.
+A ModelConfig without `managed-by: model-manager` is never written or deleted.
+`ModelConfigRef.createdBy` reports the instance label, and `get_info`'s
+`wiring.instance` this process's name.
 
 **Several backends in one process.** Every `Model`, `LoadedModel`, `Job`,
 `NodeInfo`, `Preset`, `FitResult` and `ModelConfigRef` carries `backend`. Reads

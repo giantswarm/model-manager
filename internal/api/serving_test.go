@@ -922,3 +922,29 @@ func TestServingLoadOfAServedModelStartsNoLoadJob(t *testing.T) {
 	assert.Equal(t, []any{"n1"}, body["servingNodes"])
 	assert.Len(t, loadJobs(), 1, "no second load job follows a model this call did not start")
 }
+
+// unload of a model whose ModelConfig another model-manager instance created:
+// the serving object goes, the ModelConfig stays, and the answer names it.
+func TestServingUnloadLeavesAModelConfigItDidNotCreate(t *testing.T) {
+	f := newServingFixture(t)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	ref, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok, "wired on load")
+	f.wirer.mu.Lock()
+	f.wirer.notOwned = map[string]*wiring.NotOwnedError{refKey(backend.NameKServe, "org/tiny"): {
+		Namespace: ref.Namespace, Name: ref.Name, CreatedBy: "laptop-benchmark", Message: "left in place",
+	}}
+	f.wirer.mu.Unlock()
+
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	left, ok := body["modelConfigLeft"].(map[string]any)
+	require.True(t, ok, "the answer names the ModelConfig left: %v", body)
+	assert.Equal(t, ref.Name, left["name"])
+	assert.Equal(t, "laptop-benchmark", left["createdBy"])
+	assert.Equal(t, 1, f.wirer.count(), "the ModelConfig stays")
+	loaded, err := f.backend.ListLoaded(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, loaded, "the serving object is gone")
+}
