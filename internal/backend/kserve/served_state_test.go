@@ -27,7 +27,7 @@ import (
 // ready.
 func (f *fixture) pendingLLMISVC(ctx context.Context, preset string) *unstructured.Unstructured {
 	f.t.Helper()
-	obj := f.b.composeLLM(mustPreset(f.t, f, preset), f.b.cfg.settings(ctx), "")
+	obj := f.b.composeLLM(mustPreset(f.t, f, preset), f.b.cfg.settings(ctx), "", referenceShape(mustPreset(f.t, f, preset)))
 	obj.Object["status"] = map[string]any{"conditions": []any{
 		map[string]any{"type": "Ready", "status": "False", "reason": "HTTPRoutesNotReady", "message": "HTTPRoute is not ready"},
 		map[string]any{"type": "WorkloadsReady", "status": "False", "reason": "WorkloadsNotReady", "message": "Deployment has 0 ready replicas"},

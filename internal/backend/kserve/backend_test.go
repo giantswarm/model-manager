@@ -229,7 +229,7 @@ func TestListModelsMergesCacheAndServed(t *testing.T) {
 		cacheEntry{Dir: "xet", Bytes: 99, Files: 4},
 	)
 	// A served model whose weights are not cached.
-	require.NoError(t, f.b.createServing(ctx, f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")))
+	require.NoError(t, f.b.createServing(ctx, f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "", referenceShape(mustPreset(t, f, "big")))))
 
 	models, err := f.b.ListModels(ctx)
 	require.NoError(t, err)
@@ -379,7 +379,7 @@ func TestLoadUnloadLifecycle(t *testing.T) {
 	// One the portal created from a preset (preset label, managed-by
 	// backstage) is manageable: loading it again is a no-op, unload deletes it.
 	require.NoError(t, llmisvcs.Delete(ctx, "big", metav1.DeleteOptions{}))
-	portal := f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "")
+	portal := f.b.composeLLM(mustPreset(t, f, "big"), f.b.cfg.settings(ctx), "", referenceShape(mustPreset(t, f, "big")))
 	portal.SetLabels(map[string]string{ManagedByLabel: "backstage", PresetLabel: "big"})
 	portal.SetAnnotations(nil)
 	_, err = llmisvcs.Create(ctx, portal, metav1.CreateOptions{})

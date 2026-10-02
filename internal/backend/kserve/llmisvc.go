@@ -57,15 +57,15 @@ func workloadService(name string) string { return name + "-kserve-workload-svc" 
 // the only baseRefs case. No image — the container runs the one the
 // well-known template names unless the preset's template overrides
 // containers[main].image.
-func (b *Backend) composeLLM(p *servingPreset, s settings, node string) *unstructured.Unstructured {
+func (b *Backend) composeLLM(p *servingPreset, s settings, node string, sh servingShape) *unstructured.Unstructured {
 	main := map[string]any{"name": llmisvcMainContainer}
-	if args := append(slices.Clone(p.Spec.Args), servedNameArgs(p, s.Namespace)...); len(args) > 0 {
+	if args := append(slices.Clone(shapeArgs(p, sh)), servedNameArgs(p, s.Namespace)...); len(args) > 0 {
 		main["args"] = toAnySlice(args)
 	}
 	if env := p.env(); len(env) > 0 {
 		main["env"] = mapsToAny(env)
 	}
-	if res := p.resources(s); len(res) > 0 {
+	if res := p.resources(s, sh.Devices); len(res) > 0 {
 		main["resources"] = res
 	}
 	template := map[string]any{}
@@ -187,12 +187,13 @@ func newServingObject(p *servingPreset, namespace string) *unstructured.Unstruct
 	}}
 }
 
-// resources is the preset's requests/limits with the accelerator count
-// added under the discovery's resource name; empty when there is nothing.
-func (p *servingPreset) resources(s settings) map[string]any {
+// resources is the preset's requests/limits with the accelerator count of
+// its shape (devices) added under the discovery's resource name; empty when
+// there is nothing.
+func (p *servingPreset) resources(s settings, devices int64) map[string]any {
 	requests := copyResourceMap(p.Spec.Resources.Requests)
 	limits := copyResourceMap(p.Spec.Resources.Limits)
-	if gpus := p.gpus(); gpus > 0 && s.GPUResourceName != "" {
+	if gpus := devices; gpus > 0 && s.GPUResourceName != "" {
 		requests[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
 		limits[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
 	}

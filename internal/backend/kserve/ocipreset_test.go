@@ -254,7 +254,7 @@ func TestComposeOCIPresetCarriesTheModelcarEnvironment(t *testing.T) {
 	t.Run("an oci:// preset with no env: the modelcar environment", func(t *testing.T) {
 		p, err := parsePreset([]byte(ociPresetDoc()), "shipped")
 		require.NoError(t, err)
-		obj := f.b.composeLLM(p, s, "")
+		obj := f.b.composeLLM(p, s, "", referenceShape(p))
 		schema.assertValid(t, obj)
 		assert.Equal(t, modelcar, mainContainer(obj)["env"])
 	})
@@ -266,7 +266,7 @@ func TestComposeOCIPresetCarriesTheModelcarEnvironment(t *testing.T) {
 `
 		p, err := parsePreset([]byte(doc), "shipped")
 		require.NoError(t, err)
-		obj := f.b.composeLLM(p, s, "")
+		obj := f.b.composeLLM(p, s, "", referenceShape(p))
 		schema.assertValid(t, obj)
 		env := mainContainer(obj)["env"].([]any)
 		assert.Equal(t, map[string]any{"name": "USER", "value": "runtime"}, env[0])
@@ -283,7 +283,7 @@ func TestComposeOCIPresetCarriesTheModelcarEnvironment(t *testing.T) {
 	t.Run("an hf:// preset: its env as written", func(t *testing.T) {
 		p, err := parsePreset([]byte(presetDoc("tiny", tinyRepo, 1, "")), "shipped")
 		require.NoError(t, err)
-		_, hasEnv := mainContainer(f.b.composeLLM(p, s, ""))["env"]
+		_, hasEnv := mainContainer(f.b.composeLLM(p, s, "", referenceShape(p)))["env"]
 		assert.False(t, hasEnv)
 	})
 }
