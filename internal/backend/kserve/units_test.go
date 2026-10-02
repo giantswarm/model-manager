@@ -49,7 +49,7 @@ func TestParsePresetAndResolve(t *testing.T) {
 	assert.EqualValues(t, 1, p.gpus())
 	assert.Equal(t, gib/2, p.weightsBytes())
 	assert.Equal(t, gib, p.overheadBytes(30))
-	v := p.view(30)
+	v := p.view(30, "")
 	assert.Equal(t, gib/2+gib, v.RequiredBytes)
 	assert.Equal(t, "shipped", v.Source)
 

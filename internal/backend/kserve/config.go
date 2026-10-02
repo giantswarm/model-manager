@@ -218,6 +218,10 @@ type settings struct {
 	LLMServed    bool
 	ControlPlane string
 	ServingError string
+	// TemplateImage is the runtime image of the well-known template's main
+	// container: what a predictor runs unless its preset names an image.
+	// Empty without the control plane or when the template names none.
+	TemplateImage string
 	// DiscoveryFound reports whether the discovery ConfigMap was read.
 	DiscoveryFound bool
 	DiscoveryError string
@@ -565,7 +569,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 	}
 	s.LLMServed = served
 	if served {
-		s.ControlPlane, err = c.controlPlane(ctx)
+		s.ControlPlane, s.TemplateImage, err = c.controlPlane(ctx)
 		if err != nil {
 			s.ServingError = err.Error()
 			errs = append(errs, err)
@@ -611,12 +615,13 @@ func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
 
 // controlPlane looks for the llm-d controller by the well-known
 // LLMInferenceServiceConfig it composes from (wellKnownTemplateConfig) and
-// returns the namespace holding it, "" when no namespace does. The controller
+// returns the namespace holding it and the runtime image its main container
+// names, "" when no namespace does. The controller
 // reads its configs from the object's namespace, then from its own, so the
 // lookup is cluster-wide and takes the first client that answers; an error
 // from every client means the answer is unknown, never that the controller
 // is absent.
-func (c *config) controlPlane(ctx context.Context) (string, error) {
+func (c *config) controlPlane(ctx context.Context) (namespace, image string, err error) {
 	var errs []error
 	for _, dyn := range c.dynamics(ctx) {
 		list, err := dyn.Resource(llmisvcConfigGVR).List(ctx, metav1.ListOptions{FieldSelector: "metadata.name=" + wellKnownTemplateConfig})
@@ -625,16 +630,16 @@ func (c *config) controlPlane(ctx context.Context) (string, error) {
 			continue
 		}
 		for i := range list.Items {
-			if list.Items[i].GetName() == wellKnownTemplateConfig {
-				return list.Items[i].GetNamespace(), nil
+			if item := &list.Items[i]; item.GetName() == wellKnownTemplateConfig {
+				return item.GetNamespace(), containerImage(mainContainer(item)), nil
 			}
 		}
-		return "", nil
+		return "", "", nil
 	}
 	if len(errs) == 0 {
-		return "", nil
+		return "", "", nil
 	}
-	return "", fmt.Errorf("list %s: %w", llmisvcConfigGVR.Resource, errors.Join(errs...))
+	return "", "", fmt.Errorf("list %s: %w", llmisvcConfigGVR.Resource, errors.Join(errs...))
 }
 
 // apiServed reports whether the API server serves gvr. The first client whose
