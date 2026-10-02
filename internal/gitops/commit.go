@@ -392,9 +392,9 @@ func (c *Committer) namespaceOwner(ctx context.Context, part Part) (*Owner, erro
 // through the Kustomization that applies it.
 func (c *Committer) resolve(ctx context.Context, owner *Owner, part Part) (location, error) {
 	if owner.Kind == KindHelmRelease {
-		hr, err := c.dyn(ctx).Resource(HelmReleaseGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		hr, err := c.owner(ctx, HelmReleaseGVR, owner, part)
 		if err != nil {
-			return location{}, fmt.Errorf("get %s: %w", owner, err)
+			return location{}, err
 		}
 		next := OwnerOf(hr.GetLabels())
 		if next == nil || next.Kind != KindKustomization {
@@ -402,9 +402,9 @@ func (c *Committer) resolve(ctx context.Context, owner *Owner, part Part) (locat
 		}
 		owner = next
 	}
-	ks, err := c.dyn(ctx).Resource(KustomizationGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	ks, err := c.owner(ctx, KustomizationGVR, owner, part)
 	if err != nil {
-		return location{}, fmt.Errorf("get %s: %w", owner, err)
+		return location{}, err
 	}
 	return c.locationOf(ctx, owner, ks, part)
 }
@@ -419,18 +419,18 @@ func (c *Committer) resolveRemote(ctx context.Context, owner *Owner, part Part) 
 	dyn := c.dyn(ctx)
 	elsewhere := fmt.Sprintf("pass repository, branch and path of a directory a Flux Kustomization applies to %s", part.on())
 	if owner.Kind == KindKustomization {
-		ks, err := dyn.Resource(KustomizationGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		ks, err := c.owner(ctx, KustomizationGVR, owner, part)
 		if err != nil {
-			return location{}, fmt.Errorf("get %s: %w", owner, err)
+			return location{}, err
 		}
 		if kubeConfigSecret(ks) == "" {
 			return location{}, fmt.Errorf("%w: %s applies to model-manager's own cluster, not to %s (no spec.kubeConfig): its files would land there — %s", backend.ErrInvalid, owner, part.on(), elsewhere)
 		}
 		return c.locationOf(ctx, owner, ks, part)
 	}
-	hr, err := dyn.Resource(HelmReleaseGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	hr, err := c.owner(ctx, HelmReleaseGVR, owner, part)
 	if err != nil {
-		return location{}, fmt.Errorf("get %s: %w", owner, err)
+		return location{}, err
 	}
 	secret := kubeConfigSecret(hr)
 	if secret == "" {
@@ -454,6 +454,20 @@ func (c *Committer) resolveRemote(ctx context.Context, owner *Owner, part Part) 
 	}
 	ks := matches[0]
 	return c.locationOf(ctx, &Owner{Kind: KindKustomization, Namespace: ks.GetNamespace(), Name: ks.GetName()}, ks, part)
+}
+
+// owner reads the Flux object owner names on model-manager's own cluster. One
+// that does not exist is a stale provenance label — a namespace left behind by
+// a removed release — and refused: the label no longer says where the files go.
+func (c *Committer) owner(ctx context.Context, gvr schema.GroupVersionResource, owner *Owner, part Part) (*unstructured.Unstructured, error) {
+	obj, err := c.dyn(ctx).Resource(gvr).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("%w: namespace %s on %s is labelled as applied by %s, which does not exist on model-manager's own cluster (a leftover of a removed release): commit mode needs the repository — pass repository, branch and path, or use mode apply", backend.ErrInvalid, part.Namespace, part.on(), owner)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get %s: %w", owner, err)
+	}
+	return obj, nil
 }
 
 // kubeConfigSecret is the Secret a Flux object's spec.kubeConfig names, ""
