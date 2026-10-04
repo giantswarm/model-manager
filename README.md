@@ -73,7 +73,7 @@ Lemonade-backend ADR in the team's decision log.
 
 Model references may contain `/` and `:` (`smollm2:135m`, `hf.co/org/repo:Q4_K_M`,
 `Qwen/Qwen3-14B`); path parameters capture the rest of the path. Errors are
-`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|forbidden|does_not_fit|backend_error","message":"…"}}`;
+`{"error":{"code":"not_found|invalid_request|unsupported|conflict|gitops_owned|auth_required|repository_unavailable|forbidden|does_not_fit|backend_error","message":"…"}}`;
 `unsupported` (501) means the matching capability flag is false, `does_not_fit`
 (412) that the kserve fit check refused a pull or load, `conflict` (409) also
 that an unqualified reference exists on several backends — repeat the request
@@ -84,7 +84,10 @@ its `app.kubernetes.io/managed-by` says — and a live change would be reverted
 on the next reconciliation; the message names the Flux object. Nothing was
 written. A ModelConfig reports that owner as `gitops`, and the wiring
 reconciler and the unload, unwire and delete paths leave such a ModelConfig
-alone. `forbidden` (403) means the cluster refused the caller: model-manager
+alone. `repository_unavailable` (412) means a `mode: commit` call targets a
+repository model-manager's GitHub App is not installed on (see
+[Commit mode](#commit-mode-the-pull-request-as-the-person)); the message names
+the repository and the App, and nothing was written. `forbidden` (403) means the cluster refused the caller: model-manager
 acts as the caller, so their own Kubernetes RBAC decides; retrying does not
 help, and `backend_error` (502) stays for a backend that failed.
 
@@ -928,7 +931,17 @@ call answers `auth_required` (401), naming the consent
 (`core_auth_login server=model-manager`). A server without the pin answers
 `unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
 `capabilities.commit`. The App has to be installed, with contents and
-pull-request write, on every repository a commit may target.
+pull-request write, on every repository a commit may target. On a kserve
+backend with a remote target that is two repositories: the one owning the
+serving namespace on the target (typically the workload cluster's fleet
+repository) and the one owning the kagent namespace on model-manager's own
+cluster. Before anything is written, model-manager checks each repository
+with the person's App user token (`GET /repos/{owner}/{repo}`; GitHub answers
+404 for a repository the App is not installed on). One it does not reach
+answers `repository_unavailable` (412), naming the repository, which part
+lands there and the App to install; `dryRun` reports the same as
+`commit.unavailable` (and `commit.also[].unavailable`), with no files for that
+repository.
 
 ## Helm chart
 

@@ -55,27 +55,24 @@ type Target struct {
 // Empty reports whether no field is set.
 func (t Target) Empty() bool { return t.Repository == "" && t.Branch == "" && t.Path == "" }
 
-// Remote is what a commit needs of GitHub, acting as the person: the pull
-// request seams and the reads of the base.
-type Remote interface {
-	commit.Remote
-	commit.Reader
-}
-
 // RemoteFor builds the remote from the person's App user token.
 type RemoteFor func(token string) (Remote, error)
 
 // Committer lands rendered objects in the repository that owns their
 // namespace, as one pull request opened as the person.
 type Committer struct {
+	app    string
 	remote RemoteFor
 	dyn    func(ctx context.Context) dynamic.Interface
 }
 
-// NewCommitter builds a Committer; dyn is the Kubernetes client of the call
-// (the caller's own under downstream OAuth), which reads the Flux objects.
-func NewCommitter(remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
-	return &Committer{remote: remote, dyn: dyn}
+// NewCommitter builds a Committer; app is the GitHub App whose user token
+// opens the pull request (https://github.com/apps/giantswarm-model-manager),
+// named in a refusal of a repository it is not installed on; dyn is the
+// Kubernetes client of the call (the caller's own under downstream OAuth),
+// which reads the Flux objects.
+func NewCommitter(app string, remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
+	return &Committer{app: app, remote: remote, dyn: dyn}
 }
 
 // Result is the pull request a commit opened — or, dry run, would open —
@@ -97,6 +94,9 @@ type Result struct {
 	Number      int    `json:"number,omitempty"`
 	// Author is the GitHub login the pull request is opened as.
 	Author string `json:"author,omitempty"`
+	// Unavailable is, on a dry run, why the commit would be refused here: the
+	// App's token does not reach the repository. Nothing is planned for it.
+	Unavailable string `json:"unavailable,omitempty"`
 	// LiveSteps are what the merge alone does not do on the installation.
 	LiveSteps []string `json:"liveSteps,omitempty"`
 	// Cluster is the remote cluster the files land on, empty for
@@ -189,7 +189,8 @@ type planned struct {
 // Commit plans the request against the base branch and opens the pull
 // request as the caller (or, dry run, answers what it would open): one per
 // repository the parts land in. Every refusal is decided before anything is
-// written.
+// written; a repository the App's token does not reach is one, reported per
+// part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	gh, ok := identity.GitHubFromContext(ctx)
 	if !ok {
@@ -198,6 +199,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	var remote Remote
 	branch := "model-manager/" + req.Verb + "-" + req.Subject
 	var plans []planned
+	reached := map[commit.Repository]bool{}
 	for i, part := range req.parts() {
 		target := Target{}
 		if i == 0 {
@@ -211,6 +213,18 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 			if remote, err = c.remote(gh.Token); err != nil {
 				return nil, commitError(err)
 			}
+		}
+		ok, err := reachable(ctx, remote, reached, loc.Repository)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			refusal := c.unreachable(loc, part)
+			if !req.DryRun {
+				return nil, refusal
+			}
+			plans = append(plans, planned{loc: loc, res: c.result(loc, part, branch, gh.Login, refusal)})
+			continue
 		}
 		p, err := c.plan(ctx, remote, loc, part)
 		if err != nil {
@@ -228,7 +242,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	}
 	var changes []commit.Change
 	for _, p := range plans {
-		if p.plan.Changed() {
+		if p.plan != nil && p.plan.Changed() {
 			changes = append(changes, p.plan.Change())
 		}
 	}
@@ -241,7 +255,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 		}
 		for _, p := range plans {
 			for _, pr := range prs {
-				if pr.Repository.String() == p.res.Repository && p.plan.Changed() {
+				if pr.Repository.String() == p.res.Repository && p.plan != nil && p.plan.Changed() {
 					p.res.PullRequest, p.res.Number = pr.URL, pr.Number
 				}
 			}
@@ -251,6 +265,48 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 		out.Also = append(out.Also, *p.res)
 	}
 	return out, nil
+}
+
+// reachable reports whether the App's token reaches repo; reached caches
+// the answer per repository.
+func reachable(ctx context.Context, remote Remote, reached map[commit.Repository]bool, repo commit.Repository) (bool, error) {
+	if ok, seen := reached[repo]; seen {
+		return ok, nil
+	}
+	ok, err := remote.Reachable(ctx, repo)
+	if err != nil {
+		return false, commitError(err)
+	}
+	reached[repo] = ok
+	return ok, nil
+}
+
+// unreachable is the refusal of a part whose repository the App's token
+// does not reach: the repository, which of the request's parts lands there,
+// and the App to install on it.
+func (c *Committer) unreachable(loc location, part Part) error {
+	app := "model-manager's GitHub App"
+	if c.app != "" {
+		app = "the GitHub App " + c.app
+	}
+	return fmt.Errorf("%w: %s is not installed on %s, where the %s for %s go (GitHub answers 404 for a repository the App's token does not reach, or that you cannot see): an owner of %s installs the App on %s with contents and pull requests read and write, then call again",
+		ErrRepositoryUnavailable, app, loc.Repository, part.what(), part.on(), loc.Repository.Owner, loc.Repository)
+}
+
+// result is a part's answer at its location, before its files; refusal, on a
+// dry run, why the commit would be refused there.
+func (c *Committer) result(loc location, part Part, branch, login string, refusal error) *Result {
+	res := &Result{
+		Repository: loc.Repository.String(), Base: loc.Branch, Directory: loc.directory().Path(),
+		Kustomization: loc.kustomization, Prune: loc.prune, Branch: branch, Author: login,
+	}
+	if part.Cluster != nil {
+		res.Cluster = part.Cluster.Name
+	}
+	if refusal != nil {
+		res.Unavailable = refusal.Error()
+	}
+	return res
 }
 
 // plan is one part's layout plan at its location, after the refusals that
@@ -276,13 +332,7 @@ func (c *Committer) plan(ctx context.Context, remote Remote, loc location, part 
 	if err != nil {
 		return planned{}, commitError(err)
 	}
-	res := &Result{
-		Repository: loc.Repository.String(), Base: loc.Branch, Directory: dir.Path(),
-		Kustomization: loc.kustomization, Prune: loc.prune,
-	}
-	if part.Cluster != nil {
-		res.Cluster = part.Cluster.Name
-	}
+	res := c.result(loc, part, "", "", nil)
 	if len(part.Remove) > 0 && !loc.prune && loc.kustomization != "" {
 		res.LiveSteps = append(res.LiveSteps, fmt.Sprintf("Flux does not prune Kustomization %s (spec.prune false): after the merge the objects stay on the installation — delete them by hand", loc.kustomization))
 	}
@@ -331,6 +381,14 @@ func (p Part) firstKind() string {
 		}
 	}
 	return ""
+}
+
+// what names a part's files in a refusal after the kind they are about.
+func (p Part) what() string {
+	if kind := p.firstKind(); kind != "" {
+		return kind + " files"
+	}
+	return "files"
 }
 
 // on names the cluster a part lands on in a refusal.

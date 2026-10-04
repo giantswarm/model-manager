@@ -77,7 +77,7 @@ func TestCommitModeRefusals(t *testing.T) {
 	text, _ = callTool(t, srv, ToolGetBackend, nil)
 	assert.Contains(t, text, `"commit": false`)
 
-	svc.WithCommitter(gitops.NewCommitter(func(string) (gitops.Remote, error) { return commit.NewFake(), nil }, func(context.Context) dynamic.Interface { return nil }))
+	svc.WithCommitter(gitops.NewCommitter("", func(string) (gitops.Remote, error) { return gitops.FakeRemote{Fake: commit.NewFake()}, nil }, func(context.Context) dynamic.Interface { return nil }))
 	text, _ = callTool(t, srv, ToolGetBackend, nil)
 	assert.Contains(t, text, `"commit": true`)
 
@@ -123,7 +123,7 @@ func TestOperationalDryRunsDoNothing(t *testing.T) {
 		require.True(t, isErr, tool)
 		assert.Contains(t, text, "unsupported: ", tool)
 	}
-	svc.WithCommitter(gitops.NewCommitter(func(string) (gitops.Remote, error) { return commit.NewFake(), nil }, func(context.Context) dynamic.Interface { return nil }))
+	svc.WithCommitter(gitops.NewCommitter("", func(string) (gitops.Remote, error) { return gitops.FakeRemote{Fake: commit.NewFake()}, nil }, func(context.Context) dynamic.Interface { return nil }))
 	text, isErr := callTool(t, srv, ToolLoadModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
 	require.True(t, isErr)
 	assert.Contains(t, text, "only kserve")
