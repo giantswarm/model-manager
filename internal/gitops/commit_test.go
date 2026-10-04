@@ -55,8 +55,13 @@ func cluster(extra ...runtime.Object) dynamic.Interface {
 	}, objs...)
 }
 
-func committer(dyn dynamic.Interface, fake *commit.Fake) *Committer {
-	return NewCommitter(func(string) (Remote, error) { return fake, nil }, func(context.Context) dynamic.Interface { return dyn })
+// testApp is the GitHub App the committer's refusals name.
+const testApp = "https://github.com/apps/giantswarm-model-manager"
+
+// committer commits through fake, whose unreachable repositories the
+// person's token does not reach.
+func committer(dyn dynamic.Interface, fake *commit.Fake, unreachable ...commit.Repository) *Committer {
+	return NewCommitter(testApp, func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) dynamic.Interface { return dyn })
 }
 
 func asPerson() context.Context {
@@ -279,6 +284,46 @@ func TestCommitOnARemoteTarget(t *testing.T) {
 	assert.Len(t, fake.PullRequests(), 2)
 	assert.Contains(t, string(fake.Files(fleet, "model-manager/serve-qwen3")["clusters/wc/wc-out-of-band/model-manager/qwen3-llminferenceservice.yaml"]), "kind: LLMInferenceService")
 	assert.Contains(t, string(fake.Files(repo, "model-manager/serve-qwen3")["platform/model-manager/qwen3.yaml"]), "kind: ModelConfig")
+}
+
+// TestCommitRefusesARepositoryTheAppIsNotInstalledOn is a remote target
+// whose fleet repository the App's token does not reach: the live commit
+// answers the refusal naming that repository, the serving part and the App
+// before any branch; the dry run reports it on the serving part and plans
+// the ModelConfig's part.
+func TestCommitRefusesARepositoryTheAppIsNotInstalledOn(t *testing.T) {
+	local, target := remoteClusters(wcKustomization("wc-out-of-band", "wc-kubeconfig"))
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("resources: []\n")})
+	fake.AddBranch(fleet, "main", map[string][]byte{"clusters/wc/wc-out-of-band/kustomization.yaml": []byte("resources: []\n")})
+	c := committer(local, fake, fleet)
+
+	_, err := c.Commit(asPerson(), servingRequest(target))
+	require.ErrorIs(t, err, ErrRepositoryUnavailable)
+	for _, want := range []string{testApp, "not installed on giantswarm/lab-fleet", "LLMInferenceService files for cluster wc", "an owner of giantswarm installs the App on giantswarm/lab-fleet with contents and pull requests read and write"} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.Empty(t, fake.PullRequests())
+	assert.Nil(t, fake.Files(fleet, "model-manager/serve-qwen3"), "no branch is created")
+	assert.Nil(t, fake.Files(repo, "model-manager/serve-qwen3"), "no branch is created")
+
+	dry := servingRequest(target)
+	dry.DryRun = true
+	plan, err := c.Commit(asPerson(), dry)
+	require.NoError(t, err)
+	assert.Equal(t, "giantswarm/lab-fleet", plan.Repository)
+	assert.Equal(t, "wc", plan.Cluster)
+	assert.Contains(t, plan.Unavailable, "not installed on giantswarm/lab-fleet")
+	assert.Empty(t, plan.Files)
+	require.Len(t, plan.Also, 1)
+	assert.Empty(t, plan.Also[0].Unavailable)
+	assert.NotEmpty(t, plan.Also[0].Files)
+
+	// The ModelConfig's repository unreachable instead: commit.also says so.
+	plan, err = committer(local, fake, repo).Commit(asPerson(), dry)
+	require.NoError(t, err)
+	assert.Empty(t, plan.Unavailable)
+	assert.Contains(t, plan.Also[0].Unavailable, "ModelConfig files for model-manager's own cluster")
 }
 
 func TestCommitOnARemoteTargetNeedsOneKustomizationApplyingThere(t *testing.T) {

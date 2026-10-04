@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/giantswarm/gitops-commit/commit"
 
 	"github.com/giantswarm/mcp-toolkit/metrics"
 	"github.com/giantswarm/mcp-toolkit/tracing"
@@ -349,11 +348,8 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		// App user token the pinned registration carries; the Flux objects
 		// that name the repository are read as the caller.
 		apiURL := o.githubAPIURL
-		svc.WithCommitter(gitops.NewCommitter(func(token string) (gitops.Remote, error) {
-			if apiURL == server.DefaultGitHubAPIURL {
-				return commit.NewGitHub(token)
-			}
-			return commit.NewGitHub(token, commit.WithBaseURL(apiURL))
+		svc.WithCommitter(gitops.NewCommitter(o.githubAuthorizationServer, func(token string) (gitops.Remote, error) {
+			return gitops.NewGitHub(token, apiURL)
 		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic }))
 	}
 

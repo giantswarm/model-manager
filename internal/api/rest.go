@@ -367,6 +367,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusNotImplemented, "unsupported"
 	case errors.Is(err, gitops.ErrAuthRequired):
 		return http.StatusUnauthorized, "auth_required"
+	case errors.Is(err, gitops.ErrRepositoryUnavailable):
+		return http.StatusPreconditionFailed, "repository_unavailable"
 	case errors.Is(err, backend.ErrGitOpsOwned):
 		return http.StatusConflict, "gitops_owned"
 	case errors.Is(err, backend.ErrConflict):
