@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- kserve: a serving pod's CPU and memory requests are the preset's capped at what the node has left beside the requests of its other pods, so a preset written for a larger node (16 CPUs for a 48-vCPU `g6e.12xlarge`) schedules on a 20-core GB10 instead of staying Pending. `check_fit` answers `cpuRequestMillis` and `memoryRequestBytes`, names a capped request in `reason`, and answers `fits: false` when the node has nothing left of a request; a split and copies request the least any of their nodes leaves. A request the node holds is composed as written. The chart's ClusterRole lists pods to read what a node's other pods request.
+
 ### Changed
 
 - kserve: a serving preset's `resources.gpus` and `--tensor-parallel-size` describe its reference shape; `check_fit` and `load_model` derive the shape from the node the model is placed on, so one preset serves every accelerator. On a unified-memory node (one GPU without memory of its own, a GB10, time-sliced or not) each pod requests one device with tensor parallel 1; on a node whose GPUs have memory of their own, the smallest power of two whose cards hold the weights and overhead. A split requests that per-node count on every pod and runs tensor parallel over devices × nodes (it used to request the preset's count on every pod, which left it Pending on GB10s). `check_fit` answers `devicesPerPod`, `tensorParallel` and `gpuMemoryUtilization`, names a shape that differs from the reference in `reason`, and answers `fits: false` when the node's allocatable GPUs cannot hold the devices per pod. Copies on nodes that need different device counts are refused. A preset on its reference node is composed as written; a pipeline-parallel preset keeps its shape.

@@ -52,7 +52,7 @@ cache-tool pods that scan and clean the cache claim; the claim itself; the
 cache index ConfigMap model-manager writes (create cannot be limited to a
 name, update and patch are); the optional hub-token Secret. In the discovery / preset namespace: the
 ModelServingConfig and ServingPreset ConfigMaps. Cluster-wide: nodes (memory
-budgets, GPU labels), PersistentVolumes (which node holds the cache), the
+budgets, GPU labels), pods (what the other pods of a node request), PersistentVolumes (which node holds the cache), the
 LLMInferenceServiceConfigs the llm-d controller composes from (whether a
 controller is there to reconcile what a load creates) and
 Karpenter's NodeClaims (whether the node a predictor waits for launched). In
@@ -162,6 +162,11 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # The pods of a node, for the CPU and memory its other pods request: a
+  # serving pod's requests are capped at what the node has left.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
   - apiGroups: ["serving.kserve.io"]
     resources: ["llminferenceserviceconfigs"]
     verbs: ["get", "list", "watch"]

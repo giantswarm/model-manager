@@ -1,6 +1,7 @@
 package kserve
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"strconv"
@@ -34,6 +35,10 @@ type servingShape struct {
 	Devices        int64
 	TensorParallel int64
 	Utilization    float64
+	// CPU (millicores) and Memory (bytes) are each pod's requests: the
+	// preset's, capped at what the node has left (requests.go); 0 where
+	// the preset requests none.
+	CPU, Memory int64
 }
 
 // referenceShape is the preset's own shape.
@@ -169,18 +174,28 @@ func pipelineParallel(p *servingPreset) bool {
 // applyShape writes the shape into a fit answer: the figures, a refusal when
 // node n cannot schedule its devices, and a note when it is not the preset's
 // reference shape.
-func applyShape(res *backend.FitResult, p *servingPreset, sh servingShape, n nodeBudget) {
-	if p == nil || p.cpu() {
+func applyShape(res *backend.FitResult, p *servingPreset, sh servingShape, n nodeBudget, room podRoom) {
+	if p == nil {
 		return
 	}
-	res.DevicesPerPod, res.TensorParallel, res.GPUMemoryUtilization = sh.Devices, sh.TensorParallel, sh.Utilization
-	if clause := devicesClause(sh.Devices, n); clause != "" && res.Fits {
+	refusal := sh.fitRequests(p, n, room)
+	res.CPURequestMillis, res.MemoryRequestBytes = sh.CPU, sh.Memory
+	if !p.cpu() {
+		res.DevicesPerPod, res.TensorParallel, res.GPUMemoryUtilization = sh.Devices, sh.TensorParallel, sh.Utilization
+		refusal = cmp.Or(refusal, devicesClause(sh.Devices, n))
+	}
+	if refusal != "" && res.Fits {
 		res.Fits = false
-		res.Reason += ", but " + clause
+		res.Reason += ", but " + refusal
 		return
 	}
-	if note := shapeNote(p, sh); note != "" {
-		res.Reason += "; " + note
+	for _, note := range []string{shapeNote(p, sh), requestsNote(p, sh, n.Name)} {
+		if note != "" {
+			res.Reason += "; " + note
+		}
+	}
+	if !room.Known && room.Why != "" {
+		res.Reason += "; the CPU and memory " + n.Name + " has left are not checked: " + room.Why
 	}
 }
 
@@ -205,8 +220,10 @@ func plural(n int64, noun string) string {
 // shapeOf is the shape a fit answer judged for the preset: its figures, the
 // preset's reference shape when it judged no node.
 func shapeOf(p *servingPreset, res backend.FitResult) servingShape {
-	if res.DevicesPerPod <= 0 {
-		return referenceShape(p)
+	sh := referenceShape(p)
+	if res.DevicesPerPod > 0 {
+		sh = servingShape{Devices: res.DevicesPerPod, TensorParallel: res.TensorParallel, Utilization: res.GPUMemoryUtilization}
 	}
-	return servingShape{Devices: res.DevicesPerPod, TensorParallel: res.TensorParallel, Utilization: res.GPUMemoryUtilization}
+	sh.CPU, sh.Memory = res.CPURequestMillis, res.MemoryRequestBytes
+	return sh
 }

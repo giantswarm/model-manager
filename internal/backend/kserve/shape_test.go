@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -33,23 +35,38 @@ spec:
     - --gpu-memory-utilization=0.90
   resources:
     gpus: 4
+    requests: {cpu: "16", memory: 96Gi}
   requirements:
     weightsGiB: %[2]v
     overheadGiB: %[3]v
 `, name, weightsGiB, overheadGiB))
 }
 
-// g6e12xlarge is a g6e.12xlarge: four 48 GB L40S cards.
+// g6e12xlarge is a g6e.12xlarge: four 48 GB L40S cards, 48 vCPUs.
 func g6e12xlarge(name string) *corev1.Node {
-	return withGPUs(node(name, "360Gi", map[string]string{labelGPUPresent: "true", labelGPUCount: "4", labelGPUMemory: "46068", labelGPUProduct: "NVIDIA-L40S"}), 4)
+	return withCPUs(withGPUs(node(name, "360Gi", map[string]string{labelGPUPresent: "true", labelGPUCount: "4", labelGPUMemory: "46068", labelGPUProduct: "NVIDIA-L40S"}), 4), "48")
 }
 
-func shapeFixture(t *testing.T, nodes ...*corev1.Node) *fixture {
-	t.Helper()
-	objs := []runtime.Object{fourCardPreset("gpt-oss-120b", 61, 40), fourCardPreset("mistral-small-4", 66, 60)}
-	for _, n := range nodes {
-		objs = append(objs, n)
+// spark is a GB10 node with its 20 cores.
+func spark(name string) *corev1.Node { return withCPUs(gb10Node(name), "20") }
+
+func withCPUs(n *corev1.Node, cpus string) *corev1.Node {
+	n.Status.Allocatable[corev1.ResourceCPU] = resource.MustParse(cpus)
+	return n
+}
+
+// systemPod is a running pod on node requesting cpu.
+func systemPod(name, node, cpu string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system"},
+		Spec:       corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)}}}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+}
+
+func shapeFixture(t *testing.T, extra ...runtime.Object) *fixture {
+	t.Helper()
+	objs := append([]runtime.Object{fourCardPreset("gpt-oss-120b", 61, 40), fourCardPreset("mistral-small-4", 66, 60)}, extra...)
 	f := newFixture(t, objs...)
 	f.b.cfg.opts.FastLinks = []backend.FastLink{{Name: "sparks", Nodes: []string{"gb10-a", "gb10-b"}}}
 	f.resetSettings()
@@ -82,7 +99,7 @@ func templateGPUs(tpl map[string]any) any {
 // device per pod, tensor parallel 1, the utilization sized to their weights
 // and overhead.
 func TestShapeOnAUnifiedMemoryNode(t *testing.T) {
-	f := shapeFixture(t, gb10Node("gb10-a"), gb10Node("gb10-b"))
+	f := shapeFixture(t, spark("gb10-a"), spark("gb10-b"))
 	ctx := context.Background()
 
 	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-120b", Node: "gb10-a"})
@@ -106,7 +123,7 @@ func TestShapeOnAUnifiedMemoryNode(t *testing.T) {
 // A split of both presets across two GB10s requests one device on each pod
 // and runs tensor parallel over the two.
 func TestShapeOfASplitAcrossUnifiedMemoryNodes(t *testing.T) {
-	f := shapeFixture(t, gb10Node("gb10-a"), gb10Node("gb10-b"))
+	f := shapeFixture(t, spark("gb10-a"), spark("gb10-b"))
 	ctx := context.Background()
 
 	for preset, utilization := range map[string]string{"gpt-oss-120b": "0.58", "mistral-small-4": "0.77"} {
@@ -169,7 +186,7 @@ func TestShapeRefusesMoreDevicesThanAllocatable(t *testing.T) {
 // Copies share one pod template: nodes that need different device counts
 // cannot carry copies of one model.
 func TestCopiesRefuseNodesOfDifferentShapes(t *testing.T) {
-	f := shapeFixture(t, gb10Node("gb10-a"), g6e12xlarge("g6e"))
+	f := shapeFixture(t, spark("gb10-a"), g6e12xlarge("g6e"))
 
 	res, err := f.b.FitCheck(context.Background(), backend.FitRequest{Preset: "gpt-oss-120b", Placement: backend.PlacementCopies, Nodes: []string{"gb10-a", "g6e"}})
 	require.NoError(t, err)
@@ -197,4 +214,34 @@ func TestDevicesOn(t *testing.T) {
 	} {
 		assert.Equal(t, tc.want, devicesOn(p, tc.node, tc.share), tc.name)
 	}
+}
+
+// A preset's CPU request is its reference node's: on a GB10 whose other pods
+// already request 5.4 of its 20 cores, the pod requests the 14.6 left; with
+// none left, the fit is refused.
+func TestShapeCapsRequestsAtWhatTheNodeHasLeft(t *testing.T) {
+	f := shapeFixture(t, spark("gb10-a"), spark("gb10-b"), systemPod("busy", "gb10-a", "5400m"), systemPod("full", "gb10-b", "20"))
+	ctx := context.Background()
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-120b", Node: "gb10-a"})
+	require.NoError(t, err)
+	require.True(t, res.Fits, res.Reason)
+	assert.Equal(t, int64(14600), res.CPURequestMillis)
+	assert.Equal(t, gibToBytes(96), res.MemoryRequestBytes)
+	assert.Contains(t, res.Reason, "requests 14600m CPU there, capped from the preset's 16 to what gb10-a has left")
+
+	obj := dryRun(t, f, backend.LoadRequest{Preset: "gpt-oss-120b", Node: "gb10-a"})
+	requests := templateMain(obj.Object["spec"].(map[string]any)["template"].(map[string]any))["resources"].(map[string]any)["requests"].(map[string]any)
+	assert.Equal(t, "14600m", requests["cpu"])
+	assert.Equal(t, "96Gi", requests["memory"], "a request the node holds stays as written")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-120b", Node: "gb10-b"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "each serving pod requests 16 CPU and gb10-b has 0 left beside the requests of its other pods")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gpt-oss-120b", Placement: backend.PlacementSplit})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "gb10-b has 0 left")
 }

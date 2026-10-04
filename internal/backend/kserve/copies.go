@@ -137,6 +137,8 @@ func (b *Backend) judgeCopies(ctx context.Context, plan *fitPlan, idx presetInde
 		if u := per.Result.GPUMemoryUtilization; u > 0 {
 			res.GPUMemoryUtilization = min(res.GPUMemoryUtilization, u)
 		}
+		res.CPURequestMillis = min(res.CPURequestMillis, per.Result.CPURequestMillis)
+		res.MemoryRequestBytes = min(res.MemoryRequestBytes, per.Result.MemoryRequestBytes)
 	}
 	switch {
 	case res.Fits && len(shapes) > 1:

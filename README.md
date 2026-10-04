@@ -634,8 +634,11 @@ scheduling by the registered backend document (`docs/backends.md`).
   split requests that count on every pod and runs tensor parallel over devices × nodes. A shape
   that differs from the reference is named in `reason`; more devices per pod than the node has
   allocatable answer `fits: false`, and copies on nodes of different device counts are refused.
-  The composed object carries the derived device count, `--tensor-parallel-size` and
-  `--gpu-memory-utilization`; on its reference node a preset is composed as written.
+  The preset's CPU and memory requests are capped at what the node has left beside the
+  requests of its other pods (`cpuRequestMillis`, `memoryRequestBytes`); a node with nothing left
+  of one answers `fits: false`. The composed object carries the derived device count,
+  `--tensor-parallel-size`, `--gpu-memory-utilization` and any capped request; on its reference
+  node a preset is composed as written.
 - **Serve / stop** — `load` composes the serving object from the preset
   after the fit check `fit-check` answers (the node's free budget, the KV cache); `unload` deletes it and
   unwires within the caller's deadline — the object is found by repository,

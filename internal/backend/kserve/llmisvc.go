@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -65,7 +66,7 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string, sh servi
 	if env := p.env(); len(env) > 0 {
 		main["env"] = mapsToAny(env)
 	}
-	if res := p.resources(s, sh.Devices); len(res) > 0 {
+	if res := p.resources(s, sh); len(res) > 0 {
 		main["resources"] = res
 	}
 	template := map[string]any{}
@@ -188,12 +189,20 @@ func newServingObject(p *servingPreset, namespace string) *unstructured.Unstruct
 }
 
 // resources is the preset's requests/limits with the accelerator count of
-// its shape (devices) added under the discovery's resource name; empty when
-// there is nothing.
-func (p *servingPreset) resources(s settings, devices int64) map[string]any {
+// its shape added under the discovery's resource name, and its CPU and
+// memory requests where the shape capped them below the preset's; empty
+// when there is nothing.
+func (p *servingPreset) resources(s settings, sh servingShape) map[string]any {
 	requests := copyResourceMap(p.Spec.Resources.Requests)
 	limits := copyResourceMap(p.Spec.Resources.Limits)
-	if gpus := devices; gpus > 0 && s.GPUResourceName != "" {
+	cpu, mem := presetRequests(p)
+	if sh.CPU > 0 && sh.CPU < cpu {
+		requests["cpu"] = milliCPU(sh.CPU)
+	}
+	if sh.Memory > 0 && sh.Memory < mem {
+		requests["memory"] = resource.NewQuantity(sh.Memory, resource.BinarySI).String()
+	}
+	if gpus := sh.Devices; gpus > 0 && s.GPUResourceName != "" {
 		requests[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
 		limits[s.GPUResourceName] = strconv.FormatInt(gpus, 10)
 	}

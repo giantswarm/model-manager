@@ -197,6 +197,7 @@ func (v splitVerdict) apply(res *backend.FitResult) {
 	res.Cached, res.CacheSource = v.cached, v.cacheSource
 	if v.fits && v.shape.Devices > 0 {
 		res.DevicesPerPod, res.TensorParallel, res.GPUMemoryUtilization = v.shape.Devices, v.shape.TensorParallel, v.shape.Utilization
+		res.CPURequestMillis, res.MemoryRequestBytes = v.shape.CPU, v.shape.Memory
 	}
 }
 
@@ -251,11 +252,16 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, uv.clause())
 			return v
 		}
+		if refusal := nodeShape.fitRequests(plan.Preset, node, b.roomOn(ctx, node, plan.Preset)); refusal != "" {
+			v.reason = fmt.Sprintf("a split across %s fits the weights, but %s", strings.Join(link.Nodes, ", "), refusal)
+			return v
+		}
 		if len(judged) == 0 {
 			sh = nodeShape
 		}
 		sh.Devices = max(sh.Devices, nodeShape.Devices)
 		sh.Utilization = min(sh.Utilization, nodeShape.Utilization)
+		sh.CPU, sh.Memory = min(sh.CPU, nodeShape.CPU), min(sh.Memory, nodeShape.Memory)
 		judged = append(judged, node)
 		cached, source := b.cacheVerdict(ctx, name, plan, loc)
 		if name == link.Nodes[0] || !cached {
@@ -281,8 +287,13 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 	v.fits, v.required = true, share
 	v.reason = fmt.Sprintf("split across %s (fast link %s): %s of weights and %s overhead per node fit within %s on the tightest node %s (%s%s)",
 		strings.Join(link.Nodes, ", "), link.Name, humanBytes(ceilDiv(res.WeightsBytes, n)), humanBytes(res.OverheadBytes), humanBytes(v.limit), v.tight.Name, v.tight.BudgetSource, reservedNote(v.reserved))
-	if p := plan.Preset; p != nil && sh.Utilization > 0 && sh.Utilization != p.utilization() {
-		v.reason += fmt.Sprintf("; %s=%s, sized down from the preset's %s so the unified-memory nodes keep their host headroom", flagGPUMemoryUtilization, trimFloat2(sh.Utilization), trimFloat2(p.utilization()))
+	if p := plan.Preset; p != nil {
+		if sh.Utilization > 0 && sh.Utilization != p.utilization() {
+			v.reason += fmt.Sprintf("; %s=%s, sized down from the preset's %s so the unified-memory nodes keep their host headroom", flagGPUMemoryUtilization, trimFloat2(sh.Utilization), trimFloat2(p.utilization()))
+		}
+		if note := requestsNote(p, sh, "the tightest node"); note != "" {
+			v.reason += "; " + note
+		}
 	}
 	return v
 }
