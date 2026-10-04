@@ -427,7 +427,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	sh, uv := b.shapeOn(p, best, running, res.RequiredBytes, 1)
 	applyUnified(res, uv)
-	applyShape(res, p, sh, best)
+	applyShape(res, p, sh, best, b.roomOn(ctx, best, p))
 	applyKV(res, plan.KV.shaped(sh).judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"

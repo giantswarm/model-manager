@@ -614,6 +614,12 @@ type FitResult struct {
 	// preset's resources.gpus and arguments describe its reference shape
 	// (giantswarm/model-manager#223). Zero when no node was judged (a GPU
 	// pool with no node yet, a CPU preset): the preset's own shape then.
+	// CPURequestMillis and MemoryRequestBytes are each serving pod's CPU
+	// and memory requests there: the preset's, capped at what the node has
+	// left beside the requests of its other pods; a node with nothing left
+	// of one the preset requests answers fits false.
+	CPURequestMillis     int64   `json:"cpuRequestMillis,omitempty"`
+	MemoryRequestBytes   int64   `json:"memoryRequestBytes,omitempty"`
 	DevicesPerPod        int64   `json:"devicesPerPod,omitempty"`
 	TensorParallel       int64   `json:"tensorParallel,omitempty"`
 	GPUMemoryUtilization float64 `json:"gpuMemoryUtilization,omitempty"`
