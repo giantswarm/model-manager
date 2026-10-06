@@ -443,7 +443,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if forServe {
 		running = res.ReservedBytes
 	}
-	sh, uv := b.shapeOn(p, best, running, res.RequiredBytes, 1)
+	sh, uv := b.shapeOn(p, best, running, p.residentBytes(res.WeightsBytes)+res.OverheadBytes, 1)
 	applyUnified(res, uv)
 	applyShape(res, p, sh, best, b.roomOn(ctx, best, p))
 	applyKV(res, plan.KV.shaped(sh).judgeOn(best))
@@ -734,8 +734,10 @@ func vllmClaim(p *servingPreset, n nodeBudget) (claim, memory int64, ok bool) {
 // unifiedVerdict is the check of vLLM's claim on a unified-memory node: the
 // claim (vllmClaim) must fit what the node leaves models — its budget, at
 // most its memory less the host headroom — less what running models
-// reserve there. On a refusal Fit is the highest --gpu-memory-utilization
-// that would fit and still holds the weights and overhead (0: none).
+// reserve there, and hold the weights and overhead it serves (Need). On a
+// refusal Fit is the --gpu-memory-utilization that would fit and hold them:
+// the highest for a claim the node cannot leave, the lowest for one short of
+// the need (0: none).
 type unifiedVerdict struct {
 	Checked     bool
 	Fits        bool
@@ -749,8 +751,15 @@ type unifiedVerdict struct {
 	Available int64
 	Reserved  int64
 	Fit       float64
-	// Need is the weights and overhead the claim must hold.
-	Need int64
+	// Need is the weights and overhead the claim must hold, and Holds the
+	// lowest utilization whose claim does (0: none of the node's memory).
+	Need  int64
+	Holds float64
+}
+
+// short reports a claim that fits the node but cannot hold the need.
+func (v unifiedVerdict) short() bool {
+	return v.Checked && v.Claim <= v.Available && v.Claim < v.Need
 }
 
 // unifiedClaimOn judges the preset's claim on node n, beside reserved bytes
@@ -764,10 +773,18 @@ func (b *Backend) unifiedClaimOn(p *servingPreset, n nodeBudget, reserved, need 
 	headroom := gibToBytes(b.opts.UnifiedHostHeadroomGiB)
 	v := unifiedVerdict{Checked: true, Utilization: p.utilization(), Claim: claim, Memory: memory, Headroom: headroom, Reserved: reserved, Need: need}
 	v.Available = max(min(n.Budget, memory-headroom)-reserved, 0)
-	v.Fits = claim <= v.Available
-	if !v.Fits {
+	v.Fits = claim <= v.Available && claim >= need
+	switch {
+	case claim > v.Available:
 		if u := math.Floor(float64(v.Available)/float64(memory)*100) / 100; u > 0 && int64(u*float64(memory)) >= need {
 			v.Fit = u
+		}
+	case claim < need:
+		if u := math.Ceil(float64(need)/float64(memory)*100) / 100; u <= 1 {
+			v.Holds = u
+			if int64(u*float64(memory)) <= v.Available {
+				v.Fit = u
+			}
 		}
 	}
 	return v
@@ -784,6 +801,16 @@ func (v unifiedVerdict) clause() string {
 	left := fmt.Sprintf("the %s the node leaves models beside its %s host headroom%s", humanBytes(v.Available), humanBytes(v.Headroom), reservedNote(v.Reserved))
 	if v.Fits {
 		return claim + ", within " + left
+	}
+	if v.short() {
+		out := claim + ", less than the " + humanBytes(v.Need) + " of weights and overhead it must hold"
+		switch {
+		case v.Fit > 0:
+			return out + fmt.Sprintf(": %s=%s holds them", flagGPUMemoryUtilization, trimFloat2(v.Fit))
+		case v.Holds > 0:
+			return out + fmt.Sprintf(": %s=%s would, more than %s", flagGPUMemoryUtilization, trimFloat2(v.Holds), left)
+		}
+		return out + ", more than the node's memory"
 	}
 	out := claim + ", more than " + left
 	if v.Fit > 0 {

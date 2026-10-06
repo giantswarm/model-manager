@@ -65,6 +65,10 @@ type presetSpec struct {
 	Requirements struct {
 		WeightsGiB  float64  `json:"weightsGiB"`
 		OverheadGiB *float64 `json:"overheadGiB"`
+		// ResidentWeightsGiB is what of the weights the runtime holds in
+		// memory when part of them stays on disk (an embedding table read
+		// from there); nil: all of them.
+		ResidentWeightsGiB *float64 `json:"residentWeightsGiB"`
 	} `json:"requirements"`
 	Scheduling struct {
 		NodeSelector map[string]string `json:"nodeSelector"`
@@ -161,6 +165,16 @@ func (p *servingPreset) utilization() float64 {
 
 func (p *servingPreset) weightsBytes() int64 {
 	return gibToBytes(p.Spec.Requirements.WeightsGiB)
+}
+
+// residentBytes is what of weights bytes the runtime holds in memory: the
+// preset's requirements.residentWeightsGiB when it declares one, weights
+// otherwise and for a bare model reference.
+func (p *servingPreset) residentBytes(weights int64) int64 {
+	if p == nil || p.Spec.Requirements.ResidentWeightsGiB == nil {
+		return weights
+	}
+	return gibToBytes(*p.Spec.Requirements.ResidentWeightsGiB)
 }
 
 func (p *servingPreset) overheadBytes(defaultGiB float64) int64 {
