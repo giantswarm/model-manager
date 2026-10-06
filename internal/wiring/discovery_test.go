@@ -22,9 +22,25 @@ import (
 func TestDiscoverAPIVersionPrefersAPIKagentDev(t *testing.T) {
 	cases := map[string]struct {
 		served  []*metav1.APIResourceList
+		version string
 		want    string
 		wantErr string
 	}{
+		"a set version, both groups serving it: the new group wins": {
+			served:  []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha3", "modelconfigs"), apiResources("api.kagent.dev/v1alpha3", "modelconfigs")},
+			version: "v1alpha3",
+			want:    "api.kagent.dev/v1alpha3",
+		},
+		"a set version only the old group serves": {
+			served:  []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha3", "modelconfigs")},
+			version: "v1alpha3",
+			want:    "kagent.dev/v1alpha3",
+		},
+		"a set version no group serves": {
+			served:  []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha2", "modelconfigs")},
+			version: "v1alpha3",
+			wantErr: "has no modelconfigs resource at v1alpha3",
+		},
 		"kagent 1.3 without the old CRD": {
 			served: []*metav1.APIResourceList{apiResources("api.kagent.dev/v1alpha3", "agents", "modelconfigs")},
 			want:   "api.kagent.dev/v1alpha3",
@@ -61,7 +77,7 @@ func TestDiscoverAPIVersionPrefersAPIKagentDev(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			dc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: tc.served}}
-			got, err := DiscoverAPIVersion(dc)
+			got, err := DiscoverAPIVersion(dc, tc.version)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
@@ -81,6 +97,29 @@ func TestParseAPIVersion(t *testing.T) {
 	for _, v := range []string{"v1alpha3", "kagent.io/v1alpha3", "api.kagent.dev/", "api.kagent.dev/v1/x"} {
 		_, err := ParseAPIVersion(v)
 		require.Error(t, err, v)
+	}
+}
+
+func TestParseAPIVersionSetting(t *testing.T) {
+	cases := map[string]struct {
+		want     APIVersionSetting
+		fallback string
+	}{
+		"":                        {APIVersionSetting{}, DefaultAPIVersion},
+		"auto":                    {APIVersionSetting{}, DefaultAPIVersion},
+		"v1alpha3":                {APIVersionSetting{Version: "v1alpha3"}, "api.kagent.dev/v1alpha3"},
+		"kagent.dev/v1alpha3":     {APIVersionSetting{Pinned: "kagent.dev/v1alpha3"}, "kagent.dev/v1alpha3"},
+		"api.kagent.dev/v1alpha3": {APIVersionSetting{Pinned: "api.kagent.dev/v1alpha3"}, "api.kagent.dev/v1alpha3"},
+	}
+	for in, tc := range cases {
+		got, err := ParseAPIVersionSetting(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, tc.want, got, in)
+		assert.Equal(t, tc.fallback, got.Fallback(), in)
+	}
+	for _, in := range []string{"alpha3", "v0", "kagent.io/v1alpha3", "v1alpha3 "} {
+		_, err := ParseAPIVersionSetting(in)
+		require.Error(t, err, in)
 	}
 }
 
@@ -135,7 +174,7 @@ func (c *cluster) serve(served ...string) {
 
 func (c *cluster) discover() (string, error) {
 	c.discoveries++
-	return DiscoverAPIVersion(c.discovery)
+	return DiscoverAPIVersion(c.discovery, "")
 }
 
 func (c *cluster) wirer(apiVersion string) *Kagent {
@@ -183,6 +222,28 @@ func TestWiringMovesToTheNewGroupOnceItAppears(t *testing.T) {
 		require.Len(t, refs, 1, "the live kagent.dev ModelConfigs are not part of the view")
 		assert.Equal(t, testAPIVersion, refs[0].APIVersion)
 		assert.Equal(t, 1, c.discoveries, "the next discovery waits for discoveryTTL")
+	})
+}
+
+// TestASetVersionStillDiscoversTheGroup: the platform sets the version
+// (v1alpha3) and leaves the group to discovery, so a process started before
+// kagent 1.3 moves to api.kagent.dev like one on auto.
+func TestASetVersionStillDiscoversTheGroup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newCluster(legacyAPIVersion)
+		setting, err := ParseAPIVersionSetting("v1alpha3")
+		require.NoError(t, err)
+		discover := func() (string, error) { c.discoveries++; return DiscoverAPIVersion(c.discovery, setting.Version) }
+		start, err := discover()
+		require.NoError(t, err)
+		k := NewKagent(c.client, servedOpenAPI(testAPIVersion, kagentOllamaFields...), "kagent", start, "", testInstance).WithDiscovery(discover, nil)
+		assert.Equal(t, legacyAPIVersion, k.APIVersion())
+
+		c.serve(legacyAPIVersion, testAPIVersion)
+		time.Sleep(discoveryTTL)
+		ref, err := k.Ensure(t.Context(), "qwen3:0.6b", keylessOllama("qwen3:0.6b"))
+		require.NoError(t, err)
+		assert.Equal(t, testAPIVersion, ref.APIVersion)
 	})
 }
 

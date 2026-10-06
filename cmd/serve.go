@@ -189,7 +189,7 @@ environment variable named next to it; flags win over the environment.`,
 	f.BoolVar(&o.inCluster, "in-cluster", envBool("KUBERNETES_IN_CLUSTER", false), "Force in-cluster Kubernetes auth (KUBERNETES_IN_CLUSTER)")
 	f.BoolVar(&o.wiringDisabled, "disable-wiring", envBool("MODEL_MANAGER_DISABLE_WIRING", false), "Do not touch kagent ModelConfigs at all; the wire capability reports false (MODEL_MANAGER_DISABLE_WIRING)")
 	f.StringVar(&o.kagentNamespace, "kagent-namespace", envOr("KAGENT_NAMESPACE", "kagent"), "Namespace where ModelConfigs are created (KAGENT_NAMESPACE)")
-	f.StringVar(&o.kagentAPIVersion, "kagent-api-version", envOr("KAGENT_API_VERSION", "auto"), "ModelConfig group/version (api.kagent.dev/v1alpha3, kagent.dev/v1alpha3); auto discovers it: api.kagent.dev when the cluster serves ModelConfigs there, else kagent.dev, re-discovered every minute (KAGENT_API_VERSION)")
+	f.StringVar(&o.kagentAPIVersion, "kagent-api-version", envOr("KAGENT_API_VERSION", "auto"), "ModelConfig API version: auto discovers group and version, a bare version (v1alpha3) discovers the group serving it, a group/version (api.kagent.dev/v1alpha3) pins both. Discovery prefers api.kagent.dev over kagent.dev and re-runs every minute (KAGENT_API_VERSION)")
 	f.StringVar(&o.modelConfigPrefix, "modelconfig-prefix", envOr("MODELCONFIG_PREFIX", ""), "Prefix for generated ModelConfig names (MODELCONFIG_PREFIX)")
 	f.StringVar(&o.instance, "instance", envOr("MODEL_MANAGER_INSTANCE", hostname()), "Name of this model-manager among those writing ModelConfigs into the kagent namespace: written as the model-manager.giantswarm.io/instance label on every ModelConfig it creates, and only ModelConfigs carrying it are deleted on unload or unwire. Defaults to the host name; the chart sets <release namespace>-<release name>. Give each process on one host its own (MODEL_MANAGER_INSTANCE)")
 	f.BoolVar(&o.autoWire, "auto-wire", envBool("MODEL_MANAGER_AUTO_WIRE", true), "Create a ModelConfig when a pull completes or a model is loaded (kserve: in the load call, before the served model is ready, refreshed when it is; a served model model-manager manages that has none is wired by the caller's reads) (MODEL_MANAGER_AUTO_WIRE)")
@@ -317,24 +317,22 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	case clients == nil:
 		// Already warned above.
 	default:
-		apiVersion := o.kagentAPIVersion
-		auto := apiVersion == "" || apiVersion == "auto"
-		discover := func() (string, error) { return wiring.DiscoverAPIVersion(clients.Discovery) }
-		if !auto {
-			if _, err := wiring.ParseAPIVersion(apiVersion); err != nil {
-				return fmt.Errorf("--kagent-api-version: %w", err)
-			}
+		setting, err := wiring.ParseAPIVersionSetting(o.kagentAPIVersion)
+		if err != nil {
+			return fmt.Errorf("--kagent-api-version: %w", err)
 		}
-		if auto {
+		discover := func() (string, error) { return wiring.DiscoverAPIVersion(clients.Discovery, setting.Version) }
+		apiVersion := setting.Pinned
+		if apiVersion == "" {
 			apiVersion, err = discover()
 			if err != nil {
-				log.Warn("kagent API discovery failed, using default", "default", wiring.DefaultAPIVersion, "error", err)
-				apiVersion = wiring.DefaultAPIVersion
+				log.Warn("kagent API discovery failed, using the fallback", "fallback", setting.Fallback(), "error", err)
+				apiVersion = setting.Fallback()
 			}
 		}
 		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix, o.instance).
 			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
-		if auto {
+		if setting.Pinned == "" {
 			// A group or version cut-over under the running process is
 			// followed within a minute, and at once by a call that misses the
 			// version in use.

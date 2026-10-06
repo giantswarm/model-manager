@@ -39,6 +39,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"maps"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -262,6 +263,46 @@ func ParseAPIVersion(apiVersion string) (schema.GroupVersion, error) {
 	return gv, nil
 }
 
+// APIVersionSetting is how the ModelConfig group/version is chosen: Pinned,
+// a full group/version used as is, or discovered — at Version only when it
+// is set (the group still discovered), else at the group's preferred one.
+type APIVersionSetting struct {
+	Pinned  string
+	Version string
+}
+
+// ParseAPIVersionSetting reads a setting: `auto` (or empty) discovers group
+// and version, a bare version such as `v1alpha3` discovers the group serving
+// it, a group/version ParseAPIVersion accepts pins both.
+func ParseAPIVersionSetting(s string) (APIVersionSetting, error) {
+	switch {
+	case s == "" || s == "auto":
+		return APIVersionSetting{}, nil
+	case strings.Contains(s, "/"):
+		if _, err := ParseAPIVersion(s); err != nil {
+			return APIVersionSetting{}, err
+		}
+		return APIVersionSetting{Pinned: s}, nil
+	case !kubeVersion.MatchString(s):
+		return APIVersionSetting{}, fmt.Errorf("kagent API version %q: want auto, a version such as v1alpha3, or %s/<version>", s, KagentGroup)
+	}
+	return APIVersionSetting{Version: s}, nil
+}
+
+// Fallback is the group/version used when discovery fails.
+func (s APIVersionSetting) Fallback() string {
+	switch {
+	case s.Pinned != "":
+		return s.Pinned
+	case s.Version != "":
+		return KagentGroup + "/" + s.Version
+	}
+	return DefaultAPIVersion
+}
+
+// kubeVersion is a Kubernetes API version: v1, v1alpha3, v2beta1.
+var kubeVersion = regexp.MustCompile(`^v[1-9][0-9]*((alpha|beta)[1-9][0-9]*)?$`)
+
 // WithDiscovery makes the wirer follow the API version the apiserver serves.
 // A call re-runs discover once the last discovery is discoveryTTL old, so a
 // group kagent starts serving under the running process (api.kagent.dev
@@ -429,13 +470,13 @@ func (k *Kagent) APIVersion() string { return k.resource().GroupVersion().String
 
 // DiscoverAPIVersion returns the group/version the API server serves
 // ModelConfigs in: api.kagent.dev when it serves them, else kagent.dev —
-// within the group, its preferred version when it has the resource, else the
-// first other version that does. So kagent 1.3 yields api.kagent.dev/v1alpha3
-// (whether or not the kagent.dev CRD is still there), kagent API v2 before
-// 1.3 kagent.dev/v1alpha3 and kagent 0.x kagent.dev/v1alpha2. Without either
-// (kagent not installed, discovery unreachable) it errs and the caller falls
-// back to DefaultAPIVersion.
-func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
+// within the group, version when it is set, else its preferred version when
+// it has the resource, else the first other version that does. So kagent 1.3
+// yields api.kagent.dev/v1alpha3 (whether or not the kagent.dev CRD is still
+// there), kagent API v2 before 1.3 kagent.dev/v1alpha3 and kagent 0.x
+// kagent.dev/v1alpha2. Without either (kagent not installed, discovery
+// unreachable) it errs and the caller falls back to DefaultAPIVersion.
+func DiscoverAPIVersion(dc discovery.DiscoveryInterface, version string) (string, error) {
 	groups, err := dc.ServerGroups()
 	if err != nil {
 		return "", fmt.Errorf("discover API groups: %w", err)
@@ -447,10 +488,13 @@ func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 				continue
 			}
 			found = append(found, name)
-			if v := servedVersion(dc, g); v != "" {
+			if v := servedVersion(dc, g, version); v != "" {
 				return name + "/" + v, nil
 			}
 		}
+	}
+	if len(found) > 0 && version != "" {
+		return "", fmt.Errorf("API group %s has no %s resource at %s", strings.Join(found, ", "), ModelConfigResource, version)
 	}
 	if len(found) > 0 {
 		return "", fmt.Errorf("API group %s has no %s resource", strings.Join(found, ", "), ModelConfigResource)
@@ -459,13 +503,16 @@ func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 }
 
 // servedVersion is the version of g that serves ModelConfigs, preferred
-// first; empty when none does.
-func servedVersion(dc discovery.DiscoveryInterface, g metav1.APIGroup) string {
+// first, or only want when it is set; empty when none does.
+func servedVersion(dc discovery.DiscoveryInterface, g metav1.APIGroup, want string) string {
 	candidates := []string{g.PreferredVersion.Version}
 	for _, v := range g.Versions {
 		if v.Version != g.PreferredVersion.Version {
 			candidates = append(candidates, v.Version)
 		}
+	}
+	if want != "" {
+		candidates = []string{want}
 	}
 	for _, v := range candidates {
 		res, err := dc.ServerResourcesForGroupVersion(g.Name + "/" + v)
