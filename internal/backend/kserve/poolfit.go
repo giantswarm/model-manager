@@ -12,7 +12,7 @@ import (
 
 // The fit of a model against a GPU pool that has no node yet. Karpenter
 // launches the smallest size of the pool the pending predictor fits — or
-// none, in its own log, when no size does: on gazelle a predictor requesting
+// none, in its own log, when no size does: a predictor requesting
 // 4 vCPU / 16 GiB sat Pending for ten minutes on a pool of g6.xlarge nodes
 // (giantswarm/agent-platform#502). With the pool's shapes in the backend
 // document (backend.GPUPool.Instances, written by cluster-manager) the fit

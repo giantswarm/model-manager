@@ -18,7 +18,7 @@ import (
 // The g6 family's L4 sizes as cluster-manager lists them: nominal shape, one
 // 24 GiB GPU on the small sizes, and what a node leaves a predictor after the
 // kubelet's reservations and the fleet's daemonsets (usable = vcpu − 1,
-// memory × 0.95 − 3.3, the node model measured on gazelle).
+// memory × 0.95 − 3.3, the node model measured on a production cluster).
 var (
 	shapeXLarge  = backend.InstanceShape{InstanceType: "g6.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 16, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 3, UsableMemoryGiB: 11.9}
 	shape2XLarge = backend.InstanceShape{InstanceType: "g6.2xlarge", Size: "2xlarge", VCPU: 8, MemoryGiB: 32, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 7, UsableMemoryGiB: 27.1}
@@ -35,7 +35,7 @@ var (
 
 const fatRepo = "org/fat"
 
-// fatPresetDoc is a preset requesting what the gazelle predictor of
+// fatPresetDoc is a preset requesting what the predictor of
 // giantswarm/agent-platform#502 did — 4 vCPU / 16 GiB — for a model the hub
 // does not know, so the preset's requirements size it.
 func fatPresetDoc() string {
