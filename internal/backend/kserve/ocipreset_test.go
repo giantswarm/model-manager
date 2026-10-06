@@ -367,7 +367,7 @@ func TestImageOnNode(t *testing.T) {
 }
 
 // TestModelImageReadRetriesAHangingRegistry (giantswarm/model-manager#249):
-// a registry request left hanging — the ping (/v2/) timed out on gazelle —
+// a registry request left hanging — the ping (/v2/) timing out —
 // fails after the request timeout and is retried within the fit check's
 // budget; a registry that keeps hanging is reported as not answering.
 func TestModelImageReadRetriesAHangingRegistry(t *testing.T) {
