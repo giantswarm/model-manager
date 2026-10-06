@@ -134,10 +134,12 @@ lmstudio:
 kagent:
   # -- Namespace where kagent ModelConfigs are created (RBAC is scoped here).
   namespace: kagent
-  # -- kagent.dev API version for ModelConfigs; `auto` discovers the server's
-  # preferred version, and re-discovers it when a call fails NotFound (a CRD
-  # version cut-over).
-  apiVersion: auto
+  # -- ModelConfig group/version, such as `api.kagent.dev/v1alpha3` (kagent
+  # 1.3 and later) or `kagent.dev/v1alpha3`; `auto` discovers it:
+  # `api.kagent.dev` when the cluster serves ModelConfigs there, else
+  # `kagent.dev`. `auto` re-discovers every minute and when a call fails
+  # NotFound, so a running process follows a kagent upgrade.
+  apiVersion: auto  # @schema pattern: ^(auto|(api\.)?kagent\.dev/v[0-9a-z]+)$
   # -- Prefix for generated ModelConfig names (empty: the sanitized model name,
   # e.g. smollm2:135m -> smollm2-135m).
   modelConfigPrefix: ""

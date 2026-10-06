@@ -68,7 +68,7 @@ make build
 curl -s localhost:18080/api/v1/backend
 curl -s -X POST localhost:18080/api/v1/models/pull -d '{"model":"smollm2:135m"}'
 curl -s localhost:18080/api/v1/jobs/<id>
-kubectl -n kagent get modelconfigs.kagent.dev smollm2-135m
+kubectl -n kagent get modelconfigs.api.kagent.dev smollm2-135m  # modelconfigs.kagent.dev before kagent 1.3
 curl -s -X POST localhost:18080/api/v1/models/load -d '{"model":"smollm2:135m","keepAlive":"10m"}'
 curl -s -X POST localhost:18080/api/v1/models/unload -d '{"model":"smollm2:135m"}'
 curl -s -X DELETE localhost:18080/api/v1/models/smollm2:135m

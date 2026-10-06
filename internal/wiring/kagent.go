@@ -9,9 +9,12 @@
 // without a key even when the endpoint never checks it). apiKeyPassthrough
 // and apiKeySecret are mutually exclusive on the ModelConfig.
 //
-// The ModelConfig is written in the kagent.dev API version the apiserver
-// serves — kagent API v2 serves v1alpha3 only (no v1alpha2, no conversion
-// webhook). apiKeyPassthrough exists in v1alpha3 only; the other spec fields
+// The ModelConfig is written in the API group and version the apiserver
+// serves: api.kagent.dev from kagent 1.3 on, kagent.dev before it. The
+// cut-over to api.kagent.dev leaves the kagent.dev CRD in place, so the
+// wirer prefers api.kagent.dev whenever it serves ModelConfigs. kagent API v2
+// serves v1alpha3 only (no v1alpha2, no conversion webhook).
+// apiKeyPassthrough exists in v1alpha3 only; the other spec fields
 // model-manager writes (provider, model, ollama.host, ollama.options,
 // openAI.baseUrl, apiKeySecret/apiKeySecretKey) are the same in v1alpha2 and
 // v1alpha3. The status is not: v1alpha3 reports Accepted (the spec is valid)
@@ -35,6 +38,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,12 +73,17 @@ const (
 	// model-manager writes, not who may delete it.
 	InstanceLabel = "model-manager.giantswarm.io/instance"
 
-	// KagentGroup / ModelConfigResource identify the CRD.
-	KagentGroup         = "kagent.dev"
+	// KagentGroup is the API group kagent serves ModelConfigs in from 1.3 on;
+	// LegacyKagentGroup the one before it, which the cut-over leaves served.
+	KagentGroup         = "api.kagent.dev"
+	LegacyKagentGroup   = "kagent.dev"
 	ModelConfigResource = "modelconfigs"
-	// DefaultAPIVersion is used when discovery is unavailable: the version
-	// kagent API v2 serves.
-	DefaultAPIVersion = "v1alpha3"
+	// DefaultAPIVersion is used when discovery is unavailable.
+	DefaultAPIVersion = KagentGroup + "/v1alpha3"
+	// discoveryTTL is how long a discovered API version holds: a group that
+	// appears under the running process is used within it. A miss of the
+	// version in use re-discovers at once.
+	discoveryTTL = time.Minute
 
 	placeholderSecretKey   = "OPENAI_API_KEY" // #nosec G101 -- env var name, not a credential
 	placeholderSecretValue = "placeholder"
@@ -204,7 +213,7 @@ type Wirer interface {
 	Writable(ctx context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error)
 }
 
-// Kagent is the Wirer over the kagent.dev ModelConfig CRD.
+// Kagent is the Wirer over kagent's ModelConfig CRD.
 type Kagent struct {
 	client    dynamic.Interface
 	clientFor func(ctx context.Context) dynamic.Interface
@@ -213,17 +222,19 @@ type Kagent struct {
 	prefix    string
 	// instance is the InstanceLabel value this process writes and deletes by.
 	instance string
-	// discover, when set, re-discovers the served version after a call
-	// misses it (WithDiscovery).
+	// discover, when set, re-discovers the served version every
+	// discoveryTTL and after a call misses it (WithDiscovery).
 	discover func() (string, error)
 	log      *slog.Logger
 
-	mu     sync.RWMutex
-	gvr    schema.GroupVersionResource
-	schema *servedSchema
+	mu         sync.RWMutex
+	gvr        schema.GroupVersionResource
+	schema     *servedSchema
+	discovered time.Time
 }
 
-// NewKagent builds a Wirer writing into namespace with the given API version.
+// NewKagent builds a Wirer writing into namespace with the given API version,
+// a group/version ParseAPIVersion accepts (empty: DefaultAPIVersion).
 // The backend a ModelConfig belongs to comes with every AgentEndpoint, so one
 // wirer serves every backend of the process. openAPI is the apiserver's
 // OpenAPI v3, which tells the ModelConfig fields it serves. instance names
@@ -238,24 +249,47 @@ func NewKagent(client dynamic.Interface, openAPI openapi.ClientWithContext, name
 	return k
 }
 
-// WithDiscovery makes the wirer follow the version the apiserver serves: a
-// call that fails NotFound — the version it uses is no longer served, as
-// after a kagent CRD version cut-over — re-runs discover and, when the
-// served version changed, is retried once at the new one. Without it (an
-// explicit version) the version never changes.
+// ParseAPIVersion validates a ModelConfig API version: a kagent group and a
+// version, such as api.kagent.dev/v1alpha3 or kagent.dev/v1alpha2.
+func ParseAPIVersion(apiVersion string) (schema.GroupVersion, error) {
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return schema.GroupVersion{}, fmt.Errorf("kagent API version %q: %w", apiVersion, err)
+	}
+	if (gv.Group != KagentGroup && gv.Group != LegacyKagentGroup) || gv.Version == "" {
+		return schema.GroupVersion{}, fmt.Errorf("kagent API version %q: want %s/<version> or %s/<version>", apiVersion, KagentGroup, LegacyKagentGroup)
+	}
+	return gv, nil
+}
+
+// WithDiscovery makes the wirer follow the API version the apiserver serves.
+// A call re-runs discover once the last discovery is discoveryTTL old, so a
+// group kagent starts serving under the running process (api.kagent.dev
+// next to a kagent.dev CRD the cut-over leaves) is used within it. A call
+// that fails NotFound — the version it uses is no longer served — re-runs
+// discover at once and, when the served version changed, is retried once at
+// the new one. Without it (an explicit version) the version never changes.
 func (k *Kagent) WithDiscovery(discover func() (string, error), log *slog.Logger) *Kagent {
 	if log == nil {
 		log = slog.Default()
 	}
-	k.discover, k.log = discover, log
+	k.mu.Lock()
+	k.discover, k.log, k.discovered = discover, log, time.Now()
+	k.mu.Unlock()
 	return k
 }
 
-func (k *Kagent) setVersion(v string) {
+// setVersion switches to apiVersion; one ParseAPIVersion refuses is a bug
+// of the caller's.
+func (k *Kagent) setVersion(apiVersion string) {
+	gv, err := ParseAPIVersion(apiVersion)
+	if err != nil {
+		panic(err)
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.gvr = schema.GroupVersionResource{Group: KagentGroup, Version: v, Resource: ModelConfigResource}
-	k.schema = &servedSchema{client: k.openAPI, version: v, now: time.Now}
+	k.gvr = gv.WithResource(ModelConfigResource)
+	k.schema = &servedSchema{client: k.openAPI, gv: gv, now: time.Now}
 }
 
 // resource is the ModelConfig resource in the version in use.
@@ -278,13 +312,44 @@ func (k *Kagent) rediscovered(err error) bool {
 	if k.discover == nil || !missed {
 		return false
 	}
+	k.mu.Lock()
+	k.discovered = time.Now()
+	k.mu.Unlock()
+	return k.rediscover()
+}
+
+// refresh re-discovers the served version once the last discovery is
+// discoveryTTL old. One call in a window does it; the others go on at the
+// version in use.
+func (k *Kagent) refresh() {
+	if k.discover == nil {
+		return
+	}
+	k.mu.Lock()
+	due := time.Since(k.discovered) >= discoveryTTL
+	if due {
+		k.discovered = time.Now()
+	}
+	k.mu.Unlock()
+	if due {
+		k.rediscover()
+	}
+}
+
+// rediscover runs discover and switches to the version it finds; it reports
+// whether that changed the version in use.
+func (k *Kagent) rediscover() bool {
 	old := k.APIVersion()
-	v, derr := k.discover()
-	if derr != nil {
-		k.log.Warn("kagent API re-discovery failed", "apiVersion", old, "error", derr)
+	v, err := k.discover()
+	if err != nil {
+		k.log.Warn("kagent API re-discovery failed", "apiVersion", old, "error", err)
 		return false
 	}
 	if v == old {
+		return false
+	}
+	if _, err := ParseAPIVersion(v); err != nil {
+		k.log.Warn("kagent API re-discovery found an unusable version", "apiVersion", old, "error", err)
 		return false
 	}
 	k.setVersion(v)
@@ -292,8 +357,10 @@ func (k *Kagent) rediscovered(err error) bool {
 	return true
 }
 
-// retried runs call, and once more after a re-discovery its error caused.
+// retried runs call at the version discovery holds current, and once more
+// after a re-discovery its error caused.
 func retried[T any](k *Kagent, call func() (T, error)) (T, error) {
+	k.refresh()
 	v, err := call()
 	if err != nil && k.rediscovered(err) {
 		return call()
@@ -357,44 +424,61 @@ func (k *Kagent) notOwned(obj *unstructured.Unstructured, outcome string) *NotOw
 	return e
 }
 
-// APIVersion returns the CRD version in use.
-func (k *Kagent) APIVersion() string { return k.resource().Version }
+// APIVersion returns the ModelConfig group/version in use.
+func (k *Kagent) APIVersion() string { return k.resource().GroupVersion().String() }
 
-// DiscoverAPIVersion returns the kagent.dev version the API server serves
-// ModelConfigs in: the group's preferred version when it has the resource,
-// else the first other version that does. So a kagent 0.x cluster yields
-// v1alpha2 and a kagent API v2 cluster v1alpha3; without the group (kagent
-// not installed, discovery unreachable) it errs and the caller falls back to
-// DefaultAPIVersion.
+// DiscoverAPIVersion returns the group/version the API server serves
+// ModelConfigs in: api.kagent.dev when it serves them, else kagent.dev —
+// within the group, its preferred version when it has the resource, else the
+// first other version that does. So kagent 1.3 yields api.kagent.dev/v1alpha3
+// (whether or not the kagent.dev CRD is still there), kagent API v2 before
+// 1.3 kagent.dev/v1alpha3 and kagent 0.x kagent.dev/v1alpha2. Without either
+// (kagent not installed, discovery unreachable) it errs and the caller falls
+// back to DefaultAPIVersion.
 func DiscoverAPIVersion(dc discovery.DiscoveryInterface) (string, error) {
 	groups, err := dc.ServerGroups()
 	if err != nil {
 		return "", fmt.Errorf("discover API groups: %w", err)
 	}
-	for _, g := range groups.Groups {
-		if g.Name != KagentGroup {
-			continue
-		}
-		candidates := []string{g.PreferredVersion.Version}
-		for _, v := range g.Versions {
-			if v.Version != g.PreferredVersion.Version {
-				candidates = append(candidates, v.Version)
-			}
-		}
-		for _, v := range candidates {
-			res, err := dc.ServerResourcesForGroupVersion(KagentGroup + "/" + v)
-			if err != nil {
+	var found []string
+	for _, name := range []string{KagentGroup, LegacyKagentGroup} {
+		for _, g := range groups.Groups {
+			if g.Name != name {
 				continue
 			}
-			for _, r := range res.APIResources {
-				if r.Name == ModelConfigResource {
-					return v, nil
-				}
+			found = append(found, name)
+			if v := servedVersion(dc, g); v != "" {
+				return name + "/" + v, nil
 			}
 		}
-		return "", fmt.Errorf("group %s has no %s resource", KagentGroup, ModelConfigResource)
 	}
-	return "", fmt.Errorf("API group %s not found (is kagent installed?)", KagentGroup)
+	if len(found) > 0 {
+		return "", fmt.Errorf("API group %s has no %s resource", strings.Join(found, ", "), ModelConfigResource)
+	}
+	return "", fmt.Errorf("API groups %s and %s not found (is kagent installed?)", KagentGroup, LegacyKagentGroup)
+}
+
+// servedVersion is the version of g that serves ModelConfigs, preferred
+// first; empty when none does.
+func servedVersion(dc discovery.DiscoveryInterface, g metav1.APIGroup) string {
+	candidates := []string{g.PreferredVersion.Version}
+	for _, v := range g.Versions {
+		if v.Version != g.PreferredVersion.Version {
+			candidates = append(candidates, v.Version)
+		}
+	}
+	for _, v := range candidates {
+		res, err := dc.ServerResourcesForGroupVersion(g.Name + "/" + v)
+		if err != nil {
+			continue
+		}
+		for _, r := range res.APIResources {
+			if r.Name == ModelConfigResource {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // Rendered is what a wiring write lands: the objects it creates or updates
@@ -437,14 +521,16 @@ func (k *Kagent) render(ctx context.Context, model string, ep backend.AgentEndpo
 }
 
 // wirePlan is one Ensure decided against the cluster: the name, the desired
-// objects, the ModelConfig as it exists (nil: none) and the older one a
-// backend-chosen name replaces.
+// objects, the ModelConfig as it exists (nil: none), the older one a
+// backend-chosen name replaces, and the one Flux applies at kagent.dev that
+// the desired one moves to api.kagent.dev (legacyGitOps).
 type wirePlan struct {
 	name     string
 	desired  *unstructured.Unstructured
 	secret   *unstructured.Unstructured
 	existing *unstructured.Unstructured
 	replaces *unstructured.Unstructured
+	legacy   *unstructured.Unstructured
 }
 
 func (p *wirePlan) rendered() *Rendered {
@@ -452,8 +538,11 @@ func (p *wirePlan) rendered() *Rendered {
 	if p.secret != nil {
 		r.Objects = append(r.Objects, p.secret)
 	}
-	if p.existing != nil {
+	switch {
+	case p.existing != nil:
 		r.GitOps = gitops.OwnerOf(p.existing.GetLabels())
+	case p.legacy != nil:
+		r.GitOps = gitops.OwnerOf(p.legacy.GetLabels())
 	}
 	if p.replaces != nil {
 		r.Replaces = p.replaces.GetName()
@@ -498,7 +587,11 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	if err != nil {
 		return nil, err
 	}
-	if old != nil {
+	switch {
+	case old != nil && old.GetAPIVersion() != k.APIVersion():
+		// Its file in git moves to the version in use under the name it has.
+		p.legacy, p.name = old, old.GetName()
+	case old != nil:
 		if ep.Name != "" && old.GetName() != target && k.createdHere(old) {
 			p.replaces = old
 		} else {
@@ -545,7 +638,7 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	if err != nil {
 		return nil, err
 	}
-	for _, obj := range []*unstructured.Unstructured{p.existing, p.replaces} {
+	for _, obj := range []*unstructured.Unstructured{p.existing, p.replaces, p.legacy} {
 		if err := refuseGitOps(obj); err != nil {
 			return nil, err
 		}
@@ -583,17 +676,13 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	desired.SetResourceVersion(existing.GetResourceVersion())
 	desired.SetUID(existing.GetUID())
 	labels := existing.GetLabels()
-	for key, v := range desired.GetLabels() {
-		labels[key] = v
-	}
+	maps.Copy(labels, desired.GetLabels())
 	desired.SetLabels(labels)
 	annotations := existing.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	for key, v := range desired.GetAnnotations() {
-		annotations[key] = v
-	}
+	maps.Copy(annotations, desired.GetAnnotations())
 	desired.SetAnnotations(annotations)
 	updated, err := res.Update(ctx, desired, metav1.UpdateOptions{FieldManager: ManagedByValue})
 	if err != nil {
@@ -750,9 +839,13 @@ func (k *Kagent) list(ctx context.Context) ([]ModelConfigRef, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
-	out := make([]ModelConfigRef, 0, len(list.Items))
-	for i := range list.Items {
-		ref := toRef(&list.Items[i])
+	items, err := k.withLegacyGitOps(ctx, list.Items, ManagedByLabel+"="+ManagedByValue)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ModelConfigRef, 0, len(items))
+	for i := range items {
+		ref := toRef(&items[i])
 		if ref.Model == "" {
 			continue
 		}
@@ -771,9 +864,13 @@ func (k *Kagent) listAll(ctx context.Context) ([]ModelConfigRef, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
-	out := make([]ModelConfigRef, 0, len(list.Items))
-	for i := range list.Items {
-		out = append(out, *toRef(&list.Items[i]))
+	items, err := k.withLegacyGitOps(ctx, list.Items, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ModelConfigRef, 0, len(items))
+	for i := range items {
+		out = append(out, *toRef(&items[i]))
 	}
 	return out, nil
 }
@@ -787,27 +884,88 @@ func (k *Kagent) prefixed(name string) string {
 }
 
 // find returns the owned ModelConfig for model on backend b, matching the
-// annotation first and the derived name second. A ModelConfig without the
-// backend label (written before the label existed) matches any backend; an
-// empty b matches any label.
+// annotation first and the derived name second, in the version in use and
+// then among the kagent.dev ones Flux applies (legacyGitOps). A ModelConfig
+// without the backend label (written before the label existed) matches any
+// backend; an empty b matches any label.
 func (k *Kagent) find(ctx context.Context, b backend.Name, model string) (*unstructured.Unstructured, error) {
-	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
-	list, err := res.List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue})
+	selector := ManagedByLabel + "=" + ManagedByValue
+	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
-	for i := range list.Items {
-		if list.Items[i].GetAnnotations()[ModelAnnotation] == model && backendMatches(&list.Items[i], b) {
-			return &list.Items[i], nil
+	if obj := k.match(list.Items, b, model); obj != nil {
+		return obj, nil
+	}
+	legacy, err := k.legacyGitOps(ctx, selector)
+	if err != nil {
+		return nil, err
+	}
+	return k.match(legacy, b, model), nil
+}
+
+func (k *Kagent) match(items []unstructured.Unstructured, b backend.Name, model string) *unstructured.Unstructured {
+	for i := range items {
+		if items[i].GetAnnotations()[ModelAnnotation] == model && backendMatches(&items[i], b) {
+			return &items[i]
 		}
 	}
 	name := ModelConfigName(k.prefix, model)
-	for i := range list.Items {
-		if list.Items[i].GetName() == name && backendMatches(&list.Items[i], b) {
-			return &list.Items[i], nil
+	for i := range items {
+		if items[i].GetName() == name && backendMatches(&items[i], b) {
+			return &items[i]
 		}
 	}
-	return nil, nil
+	return nil
+}
+
+// legacyGitOps returns the kagent.dev ModelConfigs Flux applies from git
+// while the wirer writes api.kagent.dev, matching selector. kagent 1.3 reads
+// none of them, but the cut-over leaves them in place, and a live twin in
+// api.kagent.dev would shadow a file in git: each is changed in git (mode
+// commit), where the write moves it to api.kagent.dev under the same name.
+// The kagent.dev CRD is read at the version in use, the one the API v2 line
+// serves there; none when the wirer writes kagent.dev, the CRD is gone, or
+// the client may not read it (a caller whose RBAC has api.kagent.dev only).
+func (k *Kagent) legacyGitOps(ctx context.Context, selector string) ([]unstructured.Unstructured, error) {
+	gvr := k.resource()
+	if gvr.Group != KagentGroup {
+		return nil, nil
+	}
+	gvr.Group = LegacyKagentGroup
+	list, err := k.dyn(ctx).Resource(gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	switch {
+	case errors.IsNotFound(err), errors.IsForbidden(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("list %s ModelConfigs in %s: %w", LegacyKagentGroup, k.namespace, err)
+	}
+	var out []unstructured.Unstructured
+	for _, item := range list.Items {
+		if gitops.OwnerOf(item.GetLabels()) != nil {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+// withLegacyGitOps is items followed by the legacyGitOps ModelConfigs whose
+// name items do not hold.
+func (k *Kagent) withLegacyGitOps(ctx context.Context, items []unstructured.Unstructured, selector string) ([]unstructured.Unstructured, error) {
+	legacy, err := k.legacyGitOps(ctx, selector)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]bool, len(items))
+	for i := range items {
+		names[items[i].GetName()] = true
+	}
+	for _, item := range legacy {
+		if !names[item.GetName()] {
+			items = append(items, item)
+		}
+	}
+	return items, nil
 }
 
 // backendMatches reports whether obj belongs to backend b: its backend label
