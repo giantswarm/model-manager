@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,12 @@ const (
 	labelZone       = "topology.kubernetes.io/zone"
 	labelZoneLegacy = "failure-domain.beta.kubernetes.io/zone"
 	mib             = int64(1 << 20)
+
+	// startupWindow is how long after its creation a node that is not
+	// ready, or carries start-up taints only, counts as capacity arriving
+	// (starting): a GPU node's drivers, device plugin and CSI agents come up
+	// within it. Past it, the node is broken, not starting.
+	startupWindow = 15 * time.Minute
 
 	// BudgetAnnotation on a Node overrides its memory budget for fit checks,
 	// in GiB (decimals allowed), whatever the configured budget source: the
@@ -70,6 +77,10 @@ type nodeBudget struct {
 	// can be served on the node: every rule but the cache claim's, which
 	// such a preset never mounts (giantswarm/model-manager#189).
 	ModelImageEligible bool
+	// Created is the node's creation time; Starting says the node is no
+	// serving target only because it is still starting (see starting).
+	Created  time.Time
+	Starting bool
 	// Images are the images the node's kubelet reports it holds.
 	Images []string
 }
@@ -128,6 +139,44 @@ func servingReasons(n nodeBudget, s settings) []string {
 	return reasons
 }
 
+// startupTaintKeys are the taints a node carries while it starts and its
+// controllers lift once it is up: the kubelet's and the cloud provider's,
+// Karpenter's registration taint; a CSI or CNI agent's (<driver>/agent-not-ready,
+// ebs.csi.aws.com, cilium) matches by suffix. node.kubernetes.io/unreachable
+// is no start-up taint: it marks a node that went away.
+var startupTaintKeys = map[string]bool{
+	"node.kubernetes.io/not-ready":                   true,
+	"node.cloudprovider.kubernetes.io/uninitialized": true,
+	"karpenter.sh/unregistered":                      true,
+}
+
+const startupTaintSuffix = "/agent-not-ready"
+
+func isStartupTaint(t corev1.Taint) bool {
+	return startupTaintKeys[t.Key] || strings.HasSuffix(t.Key, startupTaintSuffix)
+}
+
+// starting reports whether an ineligible node is capacity arriving: created
+// within startupWindow, and a serving target but for being not ready and
+// carrying start-up taints (isStartupTaint). A fit treats a pool whose nodes
+// all start as a pool without a node yet (placeModel), so a serve right after
+// a node launch waits for it instead of being refused
+// (giantswarm/model-manager#243).
+func starting(n nodeBudget, s settings, loc cacheLocation, now time.Time) bool {
+	if n.Eligible || n.Created.IsZero() || now.Sub(n.Created) > startupWindow {
+		return false
+	}
+	settled := n
+	settled.Ready, settled.Taints = true, nil
+	for _, t := range n.Taints {
+		if !isStartupTaint(t) {
+			settled.Taints = append(settled.Taints, t)
+		}
+	}
+	ok, _ := eligibility(settled, s, loc)
+	return ok
+}
+
 // formatSelector renders a node selector as "k=v, k2=v2" in key order.
 func formatSelector(sel map[string]string) string {
 	keys := make([]string, 0, len(sel))
@@ -147,7 +196,7 @@ func formatSelector(sel map[string]string) string {
 // memory (unified-memory nodes, or nodes without feature-discovery labels).
 // A valid BudgetAnnotation replaces the result of either source.
 func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
-	nb := nodeBudget{Name: n.Name, Labels: n.Labels, Taints: n.Spec.Taints, Architecture: n.Status.NodeInfo.Architecture}
+	nb := nodeBudget{Name: n.Name, Labels: n.Labels, Taints: n.Spec.Taints, Architecture: n.Status.NodeInfo.Architecture, Created: n.CreationTimestamp.Time}
 	for _, c := range n.Status.Conditions {
 		if c.Type == corev1.NodeReady {
 			nb.Ready = c.Status == corev1.ConditionTrue
@@ -227,6 +276,7 @@ func (b *Backend) nodes(ctx context.Context, loc cacheLocation, p *servingPreset
 	if cpu {
 		source = budgetSourceAllocatable
 	}
+	now := b.cfg.now()
 	out := make([]nodeBudget, 0, len(list.Items))
 	for i := range list.Items {
 		n := &list.Items[i]
@@ -236,6 +286,9 @@ func (b *Backend) nodes(ctx context.Context, loc cacheLocation, p *servingPreset
 		nb := budgetOf(n, s.GPUResourceName, source)
 		nb.Eligible, nb.EligibilityReason = eligibility(nb, s, loc)
 		nb.ModelImageEligible = len(servingReasons(nb, s)) == 0
+		if nb.Starting = starting(nb, s, loc, now); nb.Starting {
+			nb.EligibilityReason += fmt.Sprintf("; starting (created %s ago): a model waits for it", now.Sub(nb.Created).Round(time.Second))
+		}
 		out = append(out, nb)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -349,6 +402,29 @@ func pvAffinityValues(pv *corev1.PersistentVolume, key string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// settledNodes are the nodes that are not starting: what a pool has beside
+// the capacity still arriving.
+func settledNodes(nodes []nodeBudget) []nodeBudget {
+	out := make([]nodeBudget, 0, len(nodes))
+	for _, n := range nodes {
+		if !n.Starting {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// startingIn are the starting nodes that carry every label of the selector.
+func startingIn(nodes []nodeBudget, selector map[string]string) []nodeBudget {
+	var out []nodeBudget
+	for _, n := range nodes {
+		if n.Starting && matchesSelector(n.Labels, selector) {
+			out = append(out, n)
+		}
+	}
 	return out
 }
 

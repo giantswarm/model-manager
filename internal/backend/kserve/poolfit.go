@@ -99,17 +99,21 @@ func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
 	return out
 }
 
-// placeOnPool writes the verdict for a pool with no node into the plan.
+// placeOnPool writes the verdict for a pool with no node into the plan — or
+// with only nodes still starting, which the reason names (starting).
 // Without instance shapes the answer is yes and says the fit is unverified;
 // with them, the smallest size hosting the predictor is the node it will
 // come as, and when none does the answer is no, naming what the predictor
 // asks and what the pool's largest size leaves it. The GPU memory budget on
 // either verdict is that of the GPUs the predictor requests on the size; a
 // preset whose declared weights the Hub contradicts hears so on both.
-func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
+func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, starting []nodeBudget) error {
 	res := &plan.Result
 	res.BudgetSource = budgetSourcePoolScaleFromZero
 	where := fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero", formatSelector(pool.NodeSelector))
+	if len(starting) > 0 {
+		where = fmt.Sprintf("no ready node in the GPU pool yet (%s): %s", formatSelector(pool.NodeSelector), describeStarting(starting))
+	}
 	need := weightsNeed(res)
 	if len(pool.Instances) == 0 {
 		res.Fits = true
@@ -144,6 +148,25 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool) error {
 		humanBytes(res.BudgetBytes), requestedGPUs(needs), need, declarationNote(plan))
 	applyKV(res, plan.KV.judge(shapeGPUMemory(largest), ""))
 	return nil
+}
+
+// describeStarting names the starting nodes and what each still waits on:
+// "node pool1 is starting (not ready, ebs.csi.aws.com/agent-not-ready:NoExecute)".
+func describeStarting(nodes []nodeBudget) string {
+	parts := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		var waits []string
+		if !n.Ready {
+			waits = append(waits, "not ready")
+		}
+		for _, t := range n.Taints {
+			if isStartupTaint(t) {
+				waits = append(waits, formatTaint(t))
+			}
+		}
+		parts = append(parts, fmt.Sprintf("node %s is starting (%s)", n.Name, strings.Join(waits, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // declarationNote is the clause the verdict carries when the weights the Hub

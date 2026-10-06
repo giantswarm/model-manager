@@ -358,21 +358,25 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// and unverified. An explicit node, a pool with nodes that do not
 		// fit, or no pool at all keep the refusal — and a CPU preset knows
 		// no pool (settings.forPreset): its refusal names the nodes.
+		// A pool whose nodes are all still starting (start-up taints, not
+		// ready yet: starting) is such a pool too: the predictor waits for
+		// the node arriving (giantswarm/model-manager#243).
 		s := b.cfg.settings(ctx).forPreset(p)
-		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
+		settled := settledNodes(nodes)
+		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(settled, pool.NodeSelector) {
 			// The claim may hold the weights from an earlier serve
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
-			return b.placeOnPool(plan, pool)
+			return b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector))
 		}
-		if name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node); err != nil || ok {
+		if name, pool, ok, err := emptyPoolFor(plan, s, settled, req.Node); err != nil || ok {
 			if err != nil {
 				return err
 			}
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 			res.Pool = name
-			return b.placeOnPool(plan, pool)
+			return b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector))
 		}
 		res.Fits = false
 		res.Reason = why
@@ -442,7 +446,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		return nil
 	}
 	// The best node does not fit; a pool that has no node yet may.
-	name, pool, ok, err := emptyPoolFor(plan, s, nodes, req.Node)
+	name, pool, ok, err := emptyPoolFor(plan, s, settledNodes(nodes), req.Node)
 	if err != nil || !ok {
 		return err
 	}
@@ -450,7 +454,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	res.Node, res.ReservedBytes = "", 0
 	res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 	res.Pool = name
-	if err := b.placeOnPool(plan, pool); err != nil {
+	if err := b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector)); err != nil {
 		return err
 	}
 	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
@@ -462,7 +466,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 const labelMachinePool = "giantswarm.io/machine-pool"
 
 // emptyPoolFor picks, among the cluster's pools (settings.GPUPools) that
-// have no node yet, the one the model goes to: the pool whose smallest
+// have no node yet — the caller passes the nodes that are not starting — the one the model goes to: the pool whose smallest
 // hosting size is the smallest (by vCPU, then memory), the pool named by
 // name order on a tie. ok is false with an explicit node, while a pool
 // selector pins every predictor, or when no such pool has a size that hosts
