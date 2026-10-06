@@ -201,3 +201,17 @@ func TestSplitClaimHoldsItsShareOnUnifiedMemory(t *testing.T) {
 		}
 	}
 }
+
+// The KV cache is what the claim leaves beside the weights held in memory:
+// weights a preset keeps on disk leave it room.
+func TestKVCheckCountsResidentWeights(t *testing.T) {
+	cm := residentPreset("ngram", 100, 74, 20, "0.80")
+	p, err := parsePreset([]byte(cm.Data[presetConfigKey]), "shipped")
+	require.NoError(t, err)
+	f := newFixture(t, gb10Node("gb10"))
+	plan := &fitPlan{Preset: p}
+	plan.Result.WeightsBytes = gibToBytes(98.6)
+	assert.Equal(t, gibToBytes(74), f.b.kvCheckFor(context.Background(), plan).Weights)
+	plan.Preset = nil
+	assert.Equal(t, gibToBytes(98.6), f.b.kvCheckFor(context.Background(), plan).Weights)
+}

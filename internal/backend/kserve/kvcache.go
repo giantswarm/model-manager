@@ -389,7 +389,7 @@ func humanReadableInt(s string) (int64, error) {
 }
 
 // kvCheck is the KV cache check of one fit: the layout, the preset's
-// arguments and the weights; Skip says why the KV cache is not checked
+// arguments and the weights the runtime holds in memory (residentBytes); Skip says why the KV cache is not checked
 // (the flat overhead is then all the fit judges).
 type kvCheck struct {
 	Layout  kvLayout
@@ -599,8 +599,8 @@ func trimFloat2(f float64) string {
 // size (the preset's requirements stood in) has no config.json to read, and
 // says so.
 func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
-	k := &kvCheck{Weights: plan.Result.WeightsBytes}
 	p := plan.Preset
+	k := &kvCheck{Weights: p.residentBytes(plan.Result.WeightsBytes)}
 	var err error
 	switch {
 	case p == nil:
