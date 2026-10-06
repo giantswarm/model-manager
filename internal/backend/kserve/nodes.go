@@ -405,18 +405,6 @@ func pvAffinityValues(pv *corev1.PersistentVolume, key string) []string {
 	return out
 }
 
-// settledNodes are the nodes that are not starting: what a pool has beside
-// the capacity still arriving.
-func settledNodes(nodes []nodeBudget) []nodeBudget {
-	out := make([]nodeBudget, 0, len(nodes))
-	for _, n := range nodes {
-		if !n.Starting {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
 // startingIn are the starting nodes that carry every label of the selector.
 func startingIn(nodes []nodeBudget, selector map[string]string) []nodeBudget {
 	var out []nodeBudget

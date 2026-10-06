@@ -166,6 +166,14 @@ not being ready and by start-up taints (`<driver>/agent-not-ready` such as
 `node.cloudprovider.kubernetes.io/uninitialized`, `karpenter.sh/unregistered`) — is judged the same
 way: the reason names the node and what it still waits on, and the predictor schedules once the
 taints are lifted. An older node with those taints is broken, not starting, and keeps the refusal.
+With the pool's shapes known, a pool that has nodes is judged against its sizes too whenever **none
+of its nodes takes the predictor**: every node is starting or no serving target (a node Karpenter
+disrupts: not ready, `karpenter.sh/disrupted`), or has fewer GPUs than the preset requests (a
+one-GPU node for a four-GPU preset). The predictor would sit Pending beside those nodes, and
+Karpenter launches a size for it; the reason names each node and what keeps it from taking the
+predictor (`no node of the GPU pool (…) takes the predictor (node … has 1 GPU, the predictor
+requests 4): the pool launches one — the node comes as 12xlarge …`), followed by the ready node's
+own verdict. A preset a node takes is judged against that node, as before.
 Without shapes, Karpenter is
 then the first to know whether any size of the pool can host the predictor, in its own log. With
 the pool's **instance shapes** — `gpuPool.instances`, the same list on the document and on the

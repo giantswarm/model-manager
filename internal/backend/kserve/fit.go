@@ -203,13 +203,13 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 // leaves the download unknown and the preset's numbers standing, and says so.
 func (b *Backend) sizeModelImage(ctx context.Context, plan *fitPlan) (string, error) {
 	res, p := &plan.Result, plan.Preset
-	ictx, _, cancel := b.hubContext(ctx)
+	ictx, budget, cancel := b.hubContext(ctx)
 	defer cancel()
 	var note string
 	img, err := b.modelImage(ictx, p.Spec.Model.StorageURI)
 	if err != nil {
 		b.log.Warn("reading the model image failed", "model", plan.Repo, "image", p.Spec.Model.StorageURI, "error", err)
-		note = "the download size is unknown: " + err.Error()
+		note = "the download size is unknown: " + describeRegistryFailure(err, budget)
 	} else {
 		plan.Image = &img
 		res.DownloadBytes = img.Bytes
@@ -366,15 +366,17 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 			return b.placeOnPool(plan, pool, nil)
 		}
-		// A pool whose nodes all still start competes as a pool with no node
-		// yet: its node is arriving.
-		if name, pool, ok, err := emptyPoolFor(plan, s, settledNodes(nodes), req.Node); err != nil || ok {
+		// A pool whose nodes all still start, or are no serving target (a
+		// node the autoscaler disrupts), launches the node of one of its
+		// sizes: judged as a pool with no node yet
+		// (giantswarm/model-manager#249).
+		if name, pool, ok, err := launchingPool(plan, s, nodes, req.Node); err != nil || ok {
 			if err != nil {
 				return err
 			}
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 			res.Pool = name
-			return b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector))
+			return b.placeOnPool(plan, pool, inPool(nodes, pool.NodeSelector))
 		}
 		// A node that is no serving target only because it still starts
 		// (start-up taints, not ready yet: starting) is capacity arriving,
@@ -452,23 +454,24 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	res.Cached, res.CacheSource = b.cacheVerdict(ctx, best.Name, plan, loc)
 	s := b.cfg.settings(ctx).forPreset(p)
-	if len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
-		return nil
+	if len(s.GPUPool.NodeSelector) == 0 && len(s.GPUPools) > 0 {
+		res.Pool = best.Labels[labelMachinePool]
 	}
-	res.Pool = best.Labels[labelMachinePool]
 	if res.Fits {
 		return nil
 	}
-	// The best node does not fit; a pool that has no node yet may.
-	name, pool, ok, err := emptyPoolFor(plan, s, settledNodes(nodes), req.Node)
+	// The best node does not fit; a pool none of whose nodes takes the
+	// predictor launches one of its sizes for it — a pool with no node yet,
+	// or one whose nodes have fewer GPUs than the preset requests
+	// (giantswarm/model-manager#249).
+	name, pool, ok, err := launchingPool(plan, s, nodes, req.Node)
 	if err != nil || !ok {
 		return err
 	}
 	node, why := res.Node, res.Reason
-	res.Node, res.ReservedBytes = "", 0
 	res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 	res.Pool = name
-	if err := b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector)); err != nil {
+	if err := b.placeOnPool(plan, pool, inPool(nodes, pool.NodeSelector)); err != nil {
 		return err
 	}
 	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
@@ -479,15 +482,27 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 // pool's release name, giantswarm.io/machine-pool=<cluster>-<pool>.
 const labelMachinePool = "giantswarm.io/machine-pool"
 
-// emptyPoolFor picks, among the cluster's pools (settings.GPUPools) that
-// have no node yet — the caller passes the nodes that are not starting — the one the model goes to: the pool whose smallest
-// hosting size is the smallest (by vCPU, then memory), the pool named by
-// name order on a tie. ok is false with an explicit node, while a pool
-// selector pins every predictor, or when no such pool has a size that hosts
-// the model — the caller's verdict then stands. The pool comes back with
-// its label as the selector and the slice's taint.
-func emptyPoolFor(plan *fitPlan, s settings, nodes []nodeBudget, explicit string) (string, backend.GPUPool, bool, error) {
-	if explicit != "" || len(s.GPUPool.NodeSelector) > 0 || len(s.GPUPools) == 0 {
+// launchingPool picks the pool whose node the autoscaler launches for the
+// predictor: a pool none of whose nodes takes it (takes: it has none yet,
+// they all start or are no serving target, or they have fewer GPUs than the
+// predictor requests), judged by its sizes. While a pool selector pins
+// every predictor, that pool is the one once its sizes are known: its
+// verdict names the largest when none hosts the model. Among the cluster's
+// pools (settings.GPUPools) it is the one whose smallest hosting size is the
+// smallest (by vCPU, then memory), the pool named by name order on a tie.
+// ok is false with an explicit node, without pools, or when no pool
+// qualifies: the caller's verdict then stands. A pool of GPUPools comes back
+// with its label as the selector and the slice's taint; the name is empty
+// for the pinning pool.
+func launchingPool(plan *fitPlan, s settings, nodes []nodeBudget, explicit string) (string, backend.GPUPool, bool, error) {
+	if explicit != "" {
+		return "", backend.GPUPool{}, false, nil
+	}
+	gpus := plannedGPUs(plan)
+	if pool := s.GPUPool; len(pool.NodeSelector) > 0 {
+		return "", pool, len(pool.Instances) > 0 && !anyTakes(inPool(nodes, pool.NodeSelector), gpus), nil
+	}
+	if len(s.GPUPools) == 0 {
 		return "", backend.GPUPool{}, false, nil
 	}
 	needs, err := needsOf(plan)
@@ -502,7 +517,7 @@ func emptyPoolFor(plan *fitPlan, s settings, nodes []nodeBudget, explicit string
 	var bestName string
 	var bestShape *backend.InstanceShape
 	for _, name := range names {
-		if anyNodeMatches(nodes, map[string]string{labelMachinePool: name}) {
+		if anyTakes(inPool(nodes, map[string]string{labelMachinePool: name}), gpus) {
 			continue
 		}
 		for _, shape := range sortedShapes(s.GPUPools[name].Instances) {
@@ -522,6 +537,17 @@ func emptyPoolFor(plan *fitPlan, s settings, nodes []nodeBudget, explicit string
 	pool.NodeSelector = map[string]string{labelMachinePool: bestName}
 	pool.Taint = s.GPUPool.Taint
 	return bestName, pool, true, nil
+}
+
+// anyTakes says whether one of the nodes takes a predictor requesting gpus
+// GPUs (takes).
+func anyTakes(nodes []nodeBudget, gpus int) bool {
+	for _, n := range nodes {
+		if takes(n, gpus) {
+			return true
+		}
+	}
+	return false
 }
 
 // smallerShape orders sizes smallest first: by vCPU, then memory.

@@ -2,10 +2,13 @@ package kserve
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -45,7 +48,13 @@ func ociPresetDoc() string {
 // config is nil), a layer standing for the weights, and the weights label.
 func serveModelImage(t *testing.T, repoTag string, weights int64, config []byte) string {
 	t.Helper()
-	reg := httptest.NewServer(registry.New())
+	return serveModelImageThrough(t, func(h http.Handler) http.Handler { return h }, repoTag, weights, config)
+}
+
+// serveModelImageThrough is serveModelImage with the registry behind wrap.
+func serveModelImageThrough(t *testing.T, wrap func(http.Handler) http.Handler, repoTag string, weights int64, config []byte) string {
+	t.Helper()
+	reg := httptest.NewServer(wrap(registry.New()))
 	t.Cleanup(reg.Close)
 	files := map[string][]byte{"models/tokenizer_config.json": []byte("{}")}
 	if config != nil {
@@ -355,4 +364,47 @@ func TestImageOnNode(t *testing.T) {
 	assert.False(t, imageOnNode(uri, []string{"gsoci.azurecr.io/giantswarm/models/qwen3-5-4b:other"}), "another tag")
 	assert.False(t, imageOnNode(uri, []string{"gsoci.azurecr.io/giantswarm/models/qwen3-5-9b:851bf6e806ef"}), "another repository")
 	assert.False(t, imageOnNode(uri, nil))
+}
+
+// TestModelImageReadRetriesAHangingRegistry (giantswarm/model-manager#249):
+// a registry request left hanging — the ping (/v2/) timed out on gazelle —
+// fails after the request timeout and is retried within the fit check's
+// budget; a registry that keeps hanging is reported as not answering.
+func TestModelImageReadRetriesAHangingRegistry(t *testing.T) {
+	prev := registryRequestTimeout
+	registryRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { registryRequestTimeout = prev })
+	var hang, pings atomic.Int32
+	image := serveModelImageThrough(t, func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v2/" {
+				pings.Add(1)
+			}
+			if hang.Add(-1) >= 0 {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	}, "models/tiny-clone:abc123", 9*gib, nil)
+	ctx := context.Background()
+
+	hang.Store(1)
+	pings.Store(0)
+	rctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	img, err := readModelImage(rctx, image)
+	require.NoError(t, err, "the hanging ping is retried")
+	assert.Equal(t, 9*gib, img.WeightsBytes)
+	assert.Equal(t, int32(2), pings.Load(), "the ping, then its retry")
+
+	hang.Store(1000)
+	start := time.Now()
+	_, err = readModelImage(rctx, image)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 2*time.Second, "bounded by the request timeout and the retries, not the budget")
+	assert.Contains(t, describeRegistryFailure(err, 4*time.Second), "the registry did not answer within 4s, timed-out requests retried (")
 }
