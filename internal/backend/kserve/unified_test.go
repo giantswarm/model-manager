@@ -3,6 +3,7 @@ package kserve
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,4 +126,78 @@ func TestPresetReserveIsOfTheUnifiedMemoryCapacity(t *testing.T) {
 	capacity := resource.MustParse("127598748Ki")
 	assert.Equal(t, int64(0.6*float64(capacity.Value())),
 		presetReserve(reservePreset("--gpu-memory-utilization=0.60"), budgetOf(gb10Node("gb10"), DefaultGPUResourceName, DefaultBudgetSource), 30))
+}
+
+// residentPreset is utilizationPreset with part of its weights left on disk:
+// requirements.residentWeightsGiB is what the runtime holds in memory.
+func residentPreset(name string, weightsGiB, residentGiB, overheadGiB float64, utilization string) *corev1.ConfigMap {
+	cm := utilizationPreset(name, weightsGiB, overheadGiB, utilization)
+	cm.Data[presetConfigKey] += fmt.Sprintf("    residentWeightsGiB: %v\n", residentGiB)
+	return cm
+}
+
+// A claim the node leaves but that cannot hold the weights and overhead it
+// serves is refused, naming the utilization that holds them — never sized
+// up behind the preset's back, and load_model refuses it too. Weights held on
+// disk do not count against the claim.
+func TestFitCheckRefusesAUnifiedClaimShortOfItsNeed(t *testing.T) {
+	f := newFixture(t,
+		gb10Node("gb10"),
+		utilizationPreset("kolibri", 73.4, 34, "0.60"),
+		utilizationPreset("short", 60, 20, "0.60"),
+		residentPreset("ngram", 100, 74, 20, "0.80"),
+	)
+	ctx := context.Background()
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "kolibri", Node: "gb10"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "vLLM claims 73.0 GiB at start (--gpu-memory-utilization=0.6 of the node's 121.7 GiB unified memory), less than the 107.4 GiB of weights and overhead it must hold: --gpu-memory-utilization=0.89 would, more than the 105.7 GiB the node leaves models")
+	assert.Zero(t, res.FitGPUMemoryUtilization, "0.89 claims more than the node leaves")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "short", Node: "gb10"})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "less than the 80.0 GiB of weights and overhead it must hold: --gpu-memory-utilization=0.66 holds them")
+	assert.InDelta(t, 0.66, res.FitGPUMemoryUtilization, 1e-9)
+	assert.InDelta(t, 0.6, res.GPUMemoryUtilization, 1e-9, "the preset's own utilization stands")
+
+	err = f.b.Load(ctx, backend.LoadRequest{Name: "short", Preset: "short", Node: "gb10"})
+	require.ErrorIs(t, err, backend.ErrUnfit)
+	assert.Contains(t, err.Error(), "--gpu-memory-utilization=0.66 holds them")
+	list, err := f.b.listServed(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, list, "no LLMInferenceService")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "ngram", Node: "gb10"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Contains(t, res.Reason, "vLLM claims 97.4 GiB at start (--gpu-memory-utilization=0.8 of the node's 121.7 GiB unified memory), within")
+}
+
+// A split's claim on each unified-memory node is judged against that node's
+// share: half the weights beside the whole overhead.
+func TestSplitClaimHoldsItsShareOnUnifiedMemory(t *testing.T) {
+	ctx := context.Background()
+	link := backend.FastLink{Name: "sparks", Nodes: []string{"gb10-a", "gb10-b"}}
+	for _, tc := range []struct {
+		overhead float64
+		fits     bool
+	}{
+		{34, true},  // 36.7 + 34 = 70.7 GiB within the 0.60 claim of 73.0 GiB
+		{40, false}, // 36.7 + 40 = 76.7 GiB, more than the claim
+	} {
+		kolibri := utilizationPreset("kolibri", 73.4, tc.overhead, "0.60")
+		kolibri.Data[presetConfigKey] = strings.Replace(kolibri.Data[presetConfigKey], "storageUri: hf://", "storageUri: oci://registry.example/", 1)
+		f := newFixture(t, gb10Node("gb10-a"), gb10Node("gb10-b"), kolibri)
+		f.b.cfg.opts.FastLinks = []backend.FastLink{link}
+		f.resetSettings()
+
+		res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "kolibri", Placement: backend.PlacementSplit})
+		require.NoError(t, err)
+		assert.Equal(t, tc.fits, res.Fits, res.Reason)
+		if !tc.fits {
+			assert.Contains(t, res.Reason, "less than the 76.7 GiB of weights and overhead it must hold: --gpu-memory-utilization=0.64 holds them")
+		}
+	}
 }

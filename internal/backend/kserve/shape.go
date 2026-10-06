@@ -121,12 +121,13 @@ func (k *kvCheck) shaped(sh servingShape) *kvCheck {
 	return &c
 }
 
-// sized is the verdict with the utilization sized from the weights and
+// sized is the verdict with the utilization sized down from the weights and
 // overhead against the node's memory — the smallest fraction, in hundredths,
-// that holds them — when the preset's own claim does not fit and that one
-// does; the verdict as it is otherwise.
+// that holds them — when the preset's own claim is more than the node leaves
+// and that one fits; the verdict as it is otherwise. A claim short of the
+// need is never sized up: the preset is refused, naming the utilization.
 func (v unifiedVerdict) sized() unifiedVerdict {
-	if !v.Checked || v.Fits || v.Memory <= 0 {
+	if !v.Checked || v.Fits || v.short() || v.Memory <= 0 {
 		return v
 	}
 	u := math.Ceil(float64(v.Need)/float64(v.Memory)*100) / 100
@@ -139,7 +140,7 @@ func (v unifiedVerdict) sized() unifiedVerdict {
 }
 
 // shapeOn derives the shape of preset p on node n for a pod holding share
-// bytes, one of nodes pods of a split (1: a single copy), beside reserved
+// bytes in memory (its resident weights and overhead), one of nodes pods of a split (1: a single copy), beside reserved
 // bytes of running models, and returns the unified-memory verdict at the
 // sized utilization. A bare model reference, a CPU preset and a preset that
 // runs pipeline parallel keep the reference shape.

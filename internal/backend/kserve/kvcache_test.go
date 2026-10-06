@@ -309,8 +309,9 @@ func TestFitCheckJudgesTheKVCacheOnAUnifiedMemoryNode(t *testing.T) {
 
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "small"})
 	require.NoError(t, err)
-	assert.False(t, res.Fits, "the weights and overhead fit 44.5 GiB, one 8k sequence of KV cache does not: %s", res.Reason)
-	assert.Contains(t, res.Reason, ", but the KV cache of one 8192-token sequence needs 6.9 GiB, more than the")
+	assert.False(t, res.Fits, "the weights and overhead fit 44.5 GiB, neither the 0.92 claim nor one 8k sequence of KV cache holds them: %s", res.Reason)
+	assert.Contains(t, res.Reason, "less than the 44.0 GiB of weights and overhead it must hold")
+	assert.Contains(t, res.Reason, "the KV cache of one 8192-token sequence needs 6.9 GiB, more than the")
 	assert.Contains(t, res.Reason, "left on the node's 44.5 GiB unified memory")
 
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "gemma-8k", Node: "twin"})

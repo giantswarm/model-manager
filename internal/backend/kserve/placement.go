@@ -246,7 +246,7 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 		if forServe {
 			running = reserved[name]
 		}
-		nodeShape, uv := b.shapeOn(plan.Preset, node, running, share, n)
+		nodeShape, uv := b.shapeOn(plan.Preset, node, running, ceilDiv(plan.Preset.residentBytes(res.WeightsBytes), n)+res.OverheadBytes, n)
 		if uv.Checked && !uv.Fits {
 			v.tight, v.reserved, v.limit, v.required = node, reserved[name], limit, share
 			v.reason = fmt.Sprintf("a split across %s fits the weights, but on %s %s", strings.Join(link.Nodes, ", "), name, uv.clause())

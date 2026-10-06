@@ -624,7 +624,12 @@ scheduling by the registered backend document (`docs/backends.md`).
   the utilization its weights and overhead need there (`gpuMemoryUtilization`, in hundredths):
   a preset at 0.90 sized for a 24 GB GPU (21.8 GiB) runs at 0.18 on a 121.7 GiB GB10. Only
   when that does not fit either is `fits` false, `load_model` refuses, and `reason` names the
-  claim and the utilization. A dedicated GPU is judged as before.
+  claim and the utilization. The claim must also hold the weights (a split's share) and overhead:
+  a preset whose claim is short of them is refused, never sized up, and `reason` names the
+  utilization that holds them (`fitGpuMemoryUtilization` when the node leaves it). Weights the
+  runtime keeps on disk (an n-gram table read from there) do not count against the claim: a
+  preset declares what it holds in memory as `requirements.residentWeightsGiB`. A dedicated GPU
+  is judged as before.
   **Serving shape** — a preset's `resources.gpus` and `--tensor-parallel-size` describe its
   reference shape, the node it is written for; the fit derives the shape from the node the
   model is placed on (`devicesPerPod`, `tensorParallel`, `gpuMemoryUtilization`). On a

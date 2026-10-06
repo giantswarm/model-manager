@@ -603,8 +603,11 @@ type FitResult struct {
 	// what running models reserve. A preset whose own utilization claims more
 	// is sized down to the highest utilization that fits and still holds the
 	// weights and overhead (GPUMemoryUtilization); when none does, the fit is
-	// refused and FitGPUMemoryUtilization is 0. Zero on a node whose GPUs have
-	// memory of their own.
+	// refused and FitGPUMemoryUtilization is 0. It must also hold the weights
+	// (requirements.residentWeightsGiB when part stays on disk; a split's
+	// share) and overhead: a claim short of them is refused, never sized up,
+	// and FitGPUMemoryUtilization is the lowest utilization that holds them
+	// and fits (0: none). Zero on a node whose GPUs have memory of their own.
 	UnifiedReservationBytes int64   `json:"unifiedReservationBytes,omitempty"`
 	HostHeadroomBytes       int64   `json:"hostHeadroomBytes,omitempty"`
 	FitGPUMemoryUtilization float64 `json:"fitGpuMemoryUtilization,omitempty"`
