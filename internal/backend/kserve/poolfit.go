@@ -111,8 +111,11 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, starting []no
 	res := &plan.Result
 	res.BudgetSource = budgetSourcePoolScaleFromZero
 	where := fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero", formatSelector(pool.NodeSelector))
-	if len(starting) > 0 {
+	switch {
+	case len(starting) > 0 && len(pool.NodeSelector) > 0:
 		where = fmt.Sprintf("no ready node in the GPU pool yet (%s): %s", formatSelector(pool.NodeSelector), describeStarting(starting))
+	case len(starting) > 0:
+		where = "no ready node yet: " + describeStarting(starting)
 	}
 	need := weightsNeed(res)
 	if len(pool.Instances) == 0 {

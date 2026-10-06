@@ -300,3 +300,27 @@ func TestFitCheckWaitsForAStartingPoolNode(t *testing.T) {
 	assert.False(t, res.Fits, "an hour-old node is not starting")
 	assert.Contains(t, res.Reason, "no eligible node: ")
 }
+
+// Without a GPU pool configured, the cluster's only accelerator node right
+// after its launch is waited for too: the reason names it, Load proceeds.
+func TestFitCheckWaitsForAStartingNodeWithoutAPool(t *testing.T) {
+	ctx := context.Background()
+	n := startingPoolNode(time.Minute)
+	n.Spec.Taints = n.Spec.Taints[1:] // only the start-up taints, no pool taint
+	f := newFixture(t, n)
+	for _, name := range []string{testGPUNode, testCacheNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, name, metav1.DeleteOptions{}))
+	}
+	f.setDiscoveryOpts(ctx, discoveryOpts{redirectPolicy: false})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Contains(t, res.Reason, "no ready node yet: node "+poolNode+" is starting (not ready, ebs.csi.aws.com/agent-not-ready:NoExecute, node.kubernetes.io/not-ready:NoSchedule)")
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo, Node: poolNode})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "an explicit node is judged as it is")
+}

@@ -358,25 +358,39 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// and unverified. An explicit node, a pool with nodes that do not
 		// fit, or no pool at all keep the refusal — and a CPU preset knows
 		// no pool (settings.forPreset): its refusal names the nodes.
-		// A pool whose nodes are all still starting (start-up taints, not
-		// ready yet: starting) is such a pool too: the predictor waits for
-		// the node arriving (giantswarm/model-manager#243).
 		s := b.cfg.settings(ctx).forPreset(p)
-		settled := settledNodes(nodes)
-		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(settled, pool.NodeSelector) {
+		if pool := s.GPUPool; req.Node == "" && len(pool.NodeSelector) > 0 && !anyNodeMatches(nodes, pool.NodeSelector) {
 			// The claim may hold the weights from an earlier serve
 			// (giantswarm/model-manager#110): a shared claim is asked
 			// without a node, a pinned one on its node.
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
-			return b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector))
+			return b.placeOnPool(plan, pool, nil)
 		}
-		if name, pool, ok, err := emptyPoolFor(plan, s, settled, req.Node); err != nil || ok {
+		// A pool whose nodes all still start competes as a pool with no node
+		// yet: its node is arriving.
+		if name, pool, ok, err := emptyPoolFor(plan, s, settledNodes(nodes), req.Node); err != nil || ok {
 			if err != nil {
 				return err
 			}
 			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
 			res.Pool = name
 			return b.placeOnPool(plan, pool, startingIn(nodes, pool.NodeSelector))
+		}
+		// A node that is no serving target only because it still starts
+		// (start-up taints, not ready yet: starting) is capacity arriving,
+		// not a refusal: the predictor waits for it, judged like a pool with
+		// no node yet (giantswarm/model-manager#243).
+		if arriving := startingIn(nodes, presetSelector(p)); req.Node == "" && len(arriving) > 0 {
+			pool := s.GPUPool
+			if name := arriving[0].Labels[labelMachinePool]; len(pool.NodeSelector) == 0 && name != "" {
+				if known, ok := s.GPUPools[name]; ok {
+					pool, res.Pool = known, name
+					pool.NodeSelector, pool.Taint = map[string]string{labelMachinePool: name}, s.GPUPool.Taint
+					arriving = startingIn(arriving, pool.NodeSelector)
+				}
+			}
+			res.Cached, res.CacheSource = b.cacheVerdict(ctx, "", plan, loc)
+			return b.placeOnPool(plan, pool, arriving)
 		}
 		res.Fits = false
 		res.Reason = why
@@ -576,13 +590,9 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 		}
 		return nil, fmt.Sprintf("node %q not found: it does not exist or is not an accelerator node (no %s resource, no %s label)", explicit, s.GPUResourceName, labelGPUPresent)
 	}
-	presetSelector := map[string]string{}
-	if p != nil {
-		presetSelector = p.Spec.Scheduling.NodeSelector
-	}
 	var eligible []nodeBudget
 	for _, n := range nodes {
-		if n.Eligible && matchesSelector(n.Labels, presetSelector) {
+		if n.Eligible && matchesSelector(n.Labels, presetSelector(p)) {
 			eligible = append(eligible, n)
 		}
 	}
@@ -597,7 +607,7 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 		for _, n := range nodes {
 			reason := n.EligibilityReason
 			if reason == "" {
-				reason = "outside the preset's node selector (" + formatSelector(presetSelector) + ")"
+				reason = "outside the preset's node selector (" + formatSelector(presetSelector(p)) + ")"
 			}
 			why = append(why, n.Name+": "+reason)
 		}
@@ -615,6 +625,15 @@ func (b *Backend) candidateNodes(ctx context.Context, nodes []nodeBudget, explic
 		}
 	}
 	return eligible, ""
+}
+
+// presetSelector is the node selector of the preset's own scheduling; empty
+// without a preset.
+func presetSelector(p *servingPreset) map[string]string {
+	if p == nil {
+		return nil
+	}
+	return p.Spec.Scheduling.NodeSelector
 }
 
 // reservedByNode sums what the running LLMInferenceServices need per node, from

@@ -160,7 +160,7 @@ reports the input as `gpuPool`. Unset on both sides, nothing changes.
 A pool the autoscaler runs at scale-to-zero has no node until a predictor is Pending — so
 `check_fit` has no node to judge against. Without more, it answers `fits: true`,
 `budgetSource: pool-scale-from-zero` and a reason that says the fit is unverified. A pool whose
-nodes are all still **starting** — created within the last 15 minutes and kept from serving only by
+nodes are all still **starting**, or a cluster whose only matching nodes are, — created within the last 15 minutes and kept from serving only by
 not being ready and by start-up taints (`<driver>/agent-not-ready` such as
 `ebs.csi.aws.com/agent-not-ready`, `node.kubernetes.io/not-ready`,
 `node.cloudprovider.kubernetes.io/uninitialized`, `karpenter.sh/unregistered`) — is judged the same
