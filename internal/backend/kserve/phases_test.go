@@ -25,7 +25,7 @@ import (
 )
 
 // The proof-1 timeline of a fresh serve on a scale-to-zero L4 pool
-// (gazelle, 2026-09-17): the pod is created, Karpenter nominates a NodeClaim,
+// (a production cluster): the pod is created, Karpenter nominates a NodeClaim,
 // the node binds ≈ 3.5 min later, the initializer downloads 8 GB in 72 s,
 // the runtime image pulls for ≈ 4 min, vLLM loads for ≈ 1 min, the route
 // resolves, the endpoint answers ≈ 12 min after the load.
@@ -47,7 +47,7 @@ var (
 )
 
 // predictorFixture is a KServe LLMInferenceService predictor pod on llm-d as
-// gazelle runs it: init container storage-initializer, main container the
+// production runs it: init container storage-initializer, main container the
 // llm-d-cuda runtime with a startup probe, one GPU requested.
 func predictorFixture(name string) *corev1.Pod {
 	gpu := resource.MustParse("1")
