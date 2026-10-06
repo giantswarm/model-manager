@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -35,6 +39,48 @@ const (
 	// larger than this and no weight file is ever fetched.
 	modelImageSmallFile = 16 << 20
 )
+
+// registryRequestTimeout bounds each step of one registry request — the
+// connection, the TLS handshake, the response headers — so a request the
+// registry leaves hanging fails in time to be retried within a fit check's
+// budget (the hub's, a few seconds) instead of spending all of it
+// (giantswarm/model-manager#249). A variable for the tests.
+var registryRequestTimeout = 1500 * time.Millisecond
+
+// registryBackoff spaces the retries of a failed registry request: short,
+// since the fit check's budget is seconds.
+var registryBackoff = remote.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 3}
+
+// registryTransport is the transport model images are read through: the
+// default one with every step of a request bounded (registryRequestTimeout).
+func registryTransport() http.RoundTripper {
+	t := remote.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: registryRequestTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = registryRequestTimeout
+	t.ResponseHeaderTimeout = registryRequestTimeout
+	return t
+}
+
+// retryRegistry says which failed registry requests are retried: a timeout
+// of one request — the registry's ping (/v2/) included — and a connection
+// the registry dropped.
+func retryRegistry(err error) bool {
+	var ne net.Error
+	return (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+// describeRegistryFailure words a failed model image read: a registry that
+// did not answer within the budget — its timed-out requests retried
+// (retryRegistry) — is named as such; every other error is given as it is.
+// The registry client joins the errors of its ping (https, then http) into
+// one that does not unwrap, so a timeout is also recognised by its message.
+func describeRegistryFailure(err error, budget time.Duration) string {
+	msg := err.Error()
+	if ne := net.Error(nil); (errors.As(err, &ne) && ne.Timeout()) || strings.Contains(msg, "timeout") || strings.Contains(msg, context.DeadlineExceeded.Error()) {
+		return fmt.Sprintf("the registry did not answer within %s, timed-out requests retried (%s)", budget, msg)
+	}
+	return msg
+}
 
 // modelImage is what a preset served from a model image says about itself,
 // read from its registry — never from the Hugging Face Hub, which is not
@@ -81,7 +127,8 @@ func readModelImage(ctx context.Context, storageURI string) (modelImage, error) 
 	if err != nil {
 		return modelImage{}, fmt.Errorf("parse %s: %w", storageURI, err)
 	}
-	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(authn.Anonymous), remote.WithPlatform(modelImagePlatform))
+	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(authn.Anonymous), remote.WithPlatform(modelImagePlatform),
+		remote.WithTransport(registryTransport()), remote.WithRetryPredicate(retryRegistry), remote.WithRetryBackoff(registryBackoff))
 	if err != nil {
 		return modelImage{}, fmt.Errorf("read the manifest of %s: %w", ref, err)
 	}

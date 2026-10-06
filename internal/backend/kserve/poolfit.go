@@ -12,7 +12,7 @@ import (
 
 // The fit of a model against a GPU pool that has no node yet. Karpenter
 // launches the smallest size of the pool the pending predictor fits — or
-// none, in its own log, when no size does: on gazelle a predictor requesting
+// none, in its own log, when no size does: a predictor requesting
 // 4 vCPU / 16 GiB sat Pending for ten minutes on a pool of g6.xlarge nodes
 // (giantswarm/agent-platform#502). With the pool's shapes in the backend
 // document (backend.GPUPool.Instances, written by cluster-manager) the fit
@@ -99,24 +99,24 @@ func sortedShapes(shapes []backend.InstanceShape) []backend.InstanceShape {
 	return out
 }
 
-// placeOnPool writes the verdict for a pool with no node into the plan — or
-// with only nodes still starting, which the reason names (starting).
-// Without instance shapes the answer is yes and says the fit is unverified;
-// with them, the smallest size hosting the predictor is the node it will
-// come as, and when none does the answer is no, naming what the predictor
-// asks and what the pool's largest size leaves it. The GPU memory budget on
-// either verdict is that of the GPUs the predictor requests on the size; a
-// preset whose declared weights the Hub contradicts hears so on both.
-func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, starting []nodeBudget) error {
+// placeOnPool writes the pool's verdict into the plan: the node the model
+// goes to is one the pool launches, since it has none yet, its nodes all
+// still start, or none of them takes the predictor (nodes, the pool's; see
+// takes) — the reason names which. Nothing of a node the model does not go
+// to stands in the verdict: the predictor is composed with the preset's own
+// shape. Without instance shapes the answer is yes and says the fit is
+// unverified; with them, the smallest size hosting the predictor is the node
+// it will come as, and when none does the answer is no, naming what the
+// predictor asks and what the pool's largest size leaves it. The GPU memory
+// budget on either verdict is that of the GPUs the predictor requests on the
+// size; a preset whose declared weights the Hub contradicts hears so on both.
+func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, nodes []nodeBudget) error {
 	res := &plan.Result
+	res.Node, res.InstanceType, res.ReservedBytes, res.FreeBytes = "", "", 0, 0
+	res.UnifiedReservationBytes, res.HostHeadroomBytes, res.FitGPUMemoryUtilization = 0, 0, 0
+	res.CPURequestMillis, res.MemoryRequestBytes, res.DevicesPerPod, res.TensorParallel, res.GPUMemoryUtilization = 0, 0, 0, 0, 0
 	res.BudgetSource = budgetSourcePoolScaleFromZero
-	where := fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero", formatSelector(pool.NodeSelector))
-	switch {
-	case len(starting) > 0 && len(pool.NodeSelector) > 0:
-		where = fmt.Sprintf("no ready node in the GPU pool yet (%s): %s", formatSelector(pool.NodeSelector), describeStarting(starting))
-	case len(starting) > 0:
-		where = "no ready node yet: " + describeStarting(starting)
-	}
+	where := poolWhere(pool, nodes, plannedGPUs(plan))
 	need := weightsNeed(res)
 	if len(pool.Instances) == 0 {
 		res.Fits = true
@@ -151,6 +151,88 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, starting []no
 		humanBytes(res.BudgetBytes), requestedGPUs(needs), need, declarationNote(plan))
 	applyKV(res, plan.KV.judge(shapeGPUMemory(largest), ""))
 	return nil
+}
+
+// poolWhere words why the pool launches the predictor's node: it has none
+// yet, its nodes all still start, or none of them takes a predictor
+// requesting gpus GPUs.
+func poolWhere(pool backend.GPUPool, nodes []nodeBudget, gpus int) string {
+	selector := formatSelector(pool.NodeSelector)
+	switch {
+	case len(nodes) == 0:
+		return fmt.Sprintf("no node in the GPU pool yet (%s): the pool scales from zero", selector)
+	case !allStarting(nodes):
+		return fmt.Sprintf("no node of the GPU pool (%s) takes the predictor (%s): the pool launches one", selector, describeHeld(nodes, gpus))
+	case len(pool.NodeSelector) > 0:
+		return fmt.Sprintf("no ready node in the GPU pool yet (%s): %s", selector, describeStarting(nodes))
+	}
+	return "no ready node yet: " + describeStarting(nodes)
+}
+
+func allStarting(nodes []nodeBudget) bool {
+	for _, n := range nodes {
+		if !n.Starting {
+			return false
+		}
+	}
+	return true
+}
+
+// describeHeld names what keeps each of a pool's nodes from taking a
+// predictor requesting gpus GPUs: "node a has 1 GPU, the predictor requests
+// 4; node b: not ready".
+func describeHeld(nodes []nodeBudget, gpus int) string {
+	parts := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		switch {
+		case n.Starting:
+			parts = append(parts, describeStarting([]nodeBudget{n}))
+		case !n.Eligible:
+			parts = append(parts, fmt.Sprintf("node %s: %s", n.Name, n.EligibilityReason))
+		default:
+			parts = append(parts, fmt.Sprintf("node %s has %s, the predictor requests %d", n.Name, plural(gpuDevices(n), "GPU"), gpus))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// takes reports whether node n schedules a predictor requesting gpus GPUs:
+// a serving target with that many devices. A node whose device count is
+// unknown is taken at its word. A pool none of whose nodes takes the
+// predictor leaves it pending, and the autoscaler launches one of the pool's
+// sizes for it.
+func takes(n nodeBudget, gpus int) bool {
+	devices := gpuDevices(n)
+	return n.Eligible && (devices == 0 || devices >= int64(gpus))
+}
+
+// gpuDevices is the node's accelerator devices: allocatable, else the
+// feature-discovery count; 0 when it reports neither.
+func gpuDevices(n nodeBudget) int64 {
+	if n.GPUAllocatable > 0 {
+		return n.GPUAllocatable
+	}
+	return n.GPUCount
+}
+
+// inPool are the nodes that carry every label of the pool's selector.
+func inPool(nodes []nodeBudget, selector map[string]string) []nodeBudget {
+	var out []nodeBudget
+	for _, n := range nodes {
+		if matchesSelector(n.Labels, selector) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// plannedGPUs is the GPUs the predictor is scheduled with: the preset's, at
+// least one.
+func plannedGPUs(plan *fitPlan) int {
+	if plan.Preset == nil {
+		return 1
+	}
+	return max(int(plan.Preset.gpus()), 1)
 }
 
 // describeStarting names the starting nodes and what each still waits on:
