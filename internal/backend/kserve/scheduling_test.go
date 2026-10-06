@@ -3,6 +3,7 @@ package kserve
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,4 +220,107 @@ func TestFitCheckPoolScalesFromZero(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, poolNode, res.Node)
 	assert.NotEqual(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+}
+
+// startingPoolNode is the pool's node right after its launch: created age
+// ago, not ready yet, carrying the CSI agent's start-up taint beside the
+// pool's own.
+func startingPoolNode(age time.Duration) *corev1.Node {
+	n := taintedPoolNode()
+	n.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
+	n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
+	n.Spec.Taints = append(n.Spec.Taints,
+		corev1.Taint{Key: "ebs.csi.aws.com/agent-not-ready", Effect: corev1.TaintEffectNoExecute},
+		corev1.Taint{Key: "node.kubernetes.io/not-ready", Effect: corev1.TaintEffectNoSchedule})
+	return n
+}
+
+// A node is starting while it is young and only start-up taints and its
+// readiness keep it from serving; any other reason, or an old node, is not.
+func TestStartingNodeCarriesOnlyStartupTaints(t *testing.T) {
+	now := time.Now()
+	s := settings{GPUPool: *poolInput()}
+	young := budgetOf(startingPoolNode(2*time.Minute), DefaultGPUResourceName, "")
+	young.Eligible, _ = eligibility(young, s, cacheLocation{})
+	require.False(t, young.Eligible)
+	assert.True(t, starting(young, s, cacheLocation{}, now), "start-up taints and not ready on a young node")
+
+	old := budgetOf(startingPoolNode(time.Hour), DefaultGPUResourceName, "")
+	assert.False(t, starting(old, s, cacheLocation{}, now), "past the start-up window the node is broken, not starting")
+
+	other := budgetOf(startingPoolNode(time.Minute), DefaultGPUResourceName, "")
+	other.Taints = append(other.Taints, corev1.Taint{Key: "dedicated", Value: "web", Effect: corev1.TaintEffectNoSchedule})
+	assert.False(t, starting(other, s, cacheLocation{}, now), "a taint the pool does not tolerate is no start-up taint")
+
+	gone := budgetOf(startingPoolNode(time.Minute), DefaultGPUResourceName, "")
+	gone.Taints = append(gone.Taints, corev1.Taint{Key: "node.kubernetes.io/unreachable", Effect: corev1.TaintEffectNoExecute})
+	assert.False(t, starting(gone, s, cacheLocation{}, now), "an unreachable node went away")
+
+	assert.False(t, starting(young, settings{}, cacheLocation{}, now), "without the pool's toleration the pool taint stays a reason")
+}
+
+// TestFitCheckWaitsForAStartingPoolNode: the pool's only node was just
+// launched and still carries its start-up taints (giantswarm/model-manager#243).
+// The fit is the pool's, as at scale-from-zero, naming the node it waits
+// for; Load creates the serving object without a node pin. An old node with
+// the same taints keeps the refusal.
+func TestFitCheckWaitsForAStartingPoolNode(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, startingPoolNode(2*time.Minute))
+	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput(), redirectPolicy: false})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Equal(t, budgetSourcePoolScaleFromZero, res.BudgetSource)
+	assert.Contains(t, res.Reason, "no ready node in the GPU pool yet ("+poolLabel+"="+poolName+"): node "+poolNode+" is starting (not ready, ebs.csi.aws.com/agent-not-ready:NoExecute, node.kubernetes.io/not-ready:NoSchedule)")
+
+	nodes, err := f.b.ListNodes(ctx)
+	require.NoError(t, err)
+	for _, n := range nodes {
+		if n.Name == poolNode {
+			assert.False(t, n.Eligible)
+			assert.Contains(t, n.EligibilityReason, "; starting (created 2m")
+		}
+	}
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	llmisvcs, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, llmisvcs.Items, 1, "the serving object exists and waits for the starting node")
+	selector, _, _ := unstructured.NestedMap(llmisvcs.Items[0].Object, "spec", "template", "nodeSelector")
+	assert.NotContains(t, selector, labelHostname, "no node pin: the pool decides")
+	assert.Equal(t, poolName, selector[poolLabel])
+
+	stale := newFixture(t, startingPoolNode(time.Hour))
+	stale.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput(), redirectPolicy: false})
+	res, err = stale.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "an hour-old node is not starting")
+	assert.Contains(t, res.Reason, "no eligible node: ")
+}
+
+// Without a GPU pool configured, the cluster's only accelerator node right
+// after its launch is waited for too: the reason names it, Load proceeds.
+func TestFitCheckWaitsForAStartingNodeWithoutAPool(t *testing.T) {
+	ctx := context.Background()
+	n := startingPoolNode(time.Minute)
+	n.Spec.Taints = n.Spec.Taints[1:] // only the start-up taints, no pool taint
+	f := newFixture(t, n)
+	for _, name := range []string{testGPUNode, testCacheNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, name, metav1.DeleteOptions{}))
+	}
+	f.setDiscoveryOpts(ctx, discoveryOpts{redirectPolicy: false})
+
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Contains(t, res.Reason, "no ready node yet: node "+poolNode+" is starting (not ready, ebs.csi.aws.com/agent-not-ready:NoExecute, node.kubernetes.io/not-ready:NoSchedule)")
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Model: tinyRepo, Node: poolNode})
+	require.NoError(t, err)
+	assert.False(t, res.Fits, "an explicit node is judged as it is")
 }

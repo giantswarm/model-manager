@@ -552,7 +552,8 @@ type FitResult struct {
 	ServingNodes []string `json:"servingNodes,omitempty"`
 	// Node is the node the check was made against; BudgetSource says how its
 	// budget was derived (gpu-labels, allocatable, annotation, or
-	// pool-scale-from-zero when the GPU pool has no node yet). InstanceType
+	// pool-scale-from-zero when the GPU pool has no node yet, or only nodes
+	// still starting). InstanceType
 	// is then the size of the pool the node will come as (g6.xlarge), when
 	// the pool's instance shapes are known and one of them hosts the model,
 	// and BudgetBytes the memory of the GPUs the predictor requests on it.
