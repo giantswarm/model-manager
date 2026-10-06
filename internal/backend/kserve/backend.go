@@ -14,6 +14,7 @@ package kserve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -733,8 +734,8 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		if err := stoppable(sv); err != nil {
 			return nil, err
 		}
-		if sv.GitOps != nil {
-			return nil, fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(kindLLMInferenceService, sv.Namespace, sv.Name, sv.GitOps))
+		if err := b.applied(ctx, sv); err != nil {
+			return nil, err
 		}
 	}
 	for _, sv := range matches {
@@ -762,33 +763,57 @@ func stoppable(sv served) error {
 	return nil
 }
 
-// StopPlan implements backend.StopPlanner.
-func (b *Backend) StopPlan(ctx context.Context, name string) (string, []*unstructured.Unstructured, error) {
+// applied is ErrGitOpsOwned for a serving object Flux applies from git: one
+// its Kustomization still lists. One the Kustomization dropped — a removal
+// merged while it does not prune leaves the object on the cluster, labels
+// and all — is model-manager's to delete, and the answer is nil.
+func (b *Backend) applied(ctx context.Context, sv served) error {
+	if sv.GitOps == nil {
+		return nil
+	}
+	obj, err := b.getServing(ctx, sv.Namespace, sv.Name)
+	if err != nil || obj == nil {
+		return err
+	}
+	return gitops.Refuse(ctx, b.dynamic(ctx), obj)
+}
+
+// StopPlan implements backend.StopPlanner: Stop's decision without the
+// deletion, the refusal of a GitOps-owned object on the plan.
+func (b *Backend) StopPlan(ctx context.Context, name string) (*backend.StopPlan, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
+		return nil, fmt.Errorf("%w: empty model name", backend.ErrInvalid)
 	}
 	matches, err := b.servedFor(ctx, name)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	if len(matches) == 0 {
-		return "", nil, fmt.Errorf("%w: no %s serves %s", backend.ErrNotFound, kindLLMInferenceService, name)
+		return nil, fmt.Errorf("%w: no %s serves %s", backend.ErrNotFound, kindLLMInferenceService, name)
 	}
-	var out []*unstructured.Unstructured
+	plan := &backend.StopPlan{Model: matches[0].Model}
 	for _, sv := range matches {
 		if err := stoppable(sv); err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		obj, err := b.getServing(ctx, sv.Namespace, sv.Name)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
-		if obj != nil {
-			out = append(out, obj)
+		if obj == nil {
+			continue
+		}
+		plan.Objects = append(plan.Objects, obj)
+		switch err := gitops.Refuse(ctx, b.dynamic(ctx), obj); {
+		case err == nil:
+		case !errors.Is(err, backend.ErrGitOpsOwned):
+			return nil, err
+		case plan.Refusal == nil:
+			plan.Refusal = err
 		}
 	}
-	return matches[0].Model, out, nil
+	return plan, nil
 }
 
 // servedFor finds the LLMInferenceServices serving a model (by repository id,

@@ -712,13 +712,21 @@ type Stopper interface {
 	Stop(ctx context.Context, name string) (*UnloadResult, error)
 }
 
-// StopPlanner is a Stopper that tells which serving objects a Stop deletes,
-// and the model they serve (the reference its ModelConfig is unwired by),
-// without deleting them: a dry run's answer and commit mode's removal. The
-// refusals are Stop's, but an object Flux applies from git is listed (commit
-// mode removes it in git).
+// StopPlanner is a Stopper that tells what a Stop would do without doing
+// it: a dry run's answer and commit mode's removal.
 type StopPlanner interface {
-	StopPlan(ctx context.Context, name string) (string, []*unstructured.Unstructured, error)
+	StopPlan(ctx context.Context, name string) (*StopPlan, error)
+}
+
+// StopPlan is what a Stop would do: the model the serving objects serve (the
+// reference its ModelConfig is unwired by), the objects it deletes and, for
+// an object Flux applies from git, the refusal Stop answers instead
+// (ErrGitOpsOwned) — which a dry run in mode apply repeats, and mode commit
+// sets aside: it removes the object in git. The other refusals are Stop's.
+type StopPlan struct {
+	Model   string
+	Objects []*unstructured.Unstructured
+	Refusal error
 }
 
 // NodeInfo is one node's serving budget and cache state.

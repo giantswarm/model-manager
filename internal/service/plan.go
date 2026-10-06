@@ -36,6 +36,11 @@ type OpPlan struct {
 	Commit *gitops.Result `json:"commit,omitempty"`
 
 	objects []*unstructured.Unstructured
+	// refusal is why the live call in mode apply would refuse what the plan
+	// lists (a serving object Flux applies from git, ErrGitOpsOwned); nil
+	// when it would do it. The dry run answers it, mode commit sets it
+	// aside.
+	refusal error
 }
 
 func (p *OpPlan) add(objs ...*unstructured.Unstructured) {
@@ -156,16 +161,31 @@ func (s *Service) PlanLoad(ctx context.Context, opts LoadOptions) (*OpPlan, erro
 }
 
 // PlanUnload is unload_model's dry run: on kserve the serving objects the
-// unload would delete and the ModelConfig it would unwire; elsewhere the
+// unload would delete and the ModelConfig it would unwire, refused as the
+// unload is for a serving object Flux applies from git; elsewhere the
 // loaded state. Nothing is unloaded.
 func (s *Service) PlanUnload(ctx context.Context, name, ref string) (*OpPlan, error) {
-	if b, model, objs, ok, err := s.stopPlan(ctx, name, ref); ok || err != nil {
+	plan, err := s.planUnload(ctx, name, ref)
+	if err != nil {
+		return nil, err
+	}
+	if plan.refusal != nil {
+		return nil, plan.refusal
+	}
+	return plan, nil
+}
+
+// planUnload is PlanUnload with the refusal of a GitOps-owned serving object
+// kept on the plan rather than answered: mode commit removes the object in
+// git.
+func (s *Service) planUnload(ctx context.Context, name, ref string) (*OpPlan, error) {
+	if b, stop, ok, err := s.stopPlan(ctx, name, ref); ok || err != nil {
 		if err != nil {
 			return nil, err
 		}
-		plan := &OpPlan{Backend: b.Name(), Model: model, Present: true, Loaded: true, Manifests: []map[string]any{}}
-		plan.add(objs...)
-		if plan.Wiring, err = s.unwiring(ctx, b.Name(), model); err != nil {
+		plan := &OpPlan{Backend: b.Name(), Model: stop.Model, Present: true, Loaded: true, Manifests: []map[string]any{}, refusal: stop.Refusal}
+		plan.add(stop.Objects...)
+		if plan.Wiring, err = s.unwiring(ctx, b.Name(), stop.Model); err != nil {
 			return nil, err
 		}
 		return plan, nil
@@ -183,25 +203,25 @@ func (s *Service) PlanUnload(ctx context.Context, name, ref string) (*OpPlan, er
 }
 
 // stopPlan asks a StopPlanner — named by the caller, or the only backend,
-// as stop addresses a Stopper — for the objects an unload deletes; ok false
-// when the unload is not a StopPlanner's.
-func (s *Service) stopPlan(ctx context.Context, name, ref string) (backend.Backend, string, []*unstructured.Unstructured, bool, error) {
+// as stop addresses a Stopper — what an unload would do; ok false when the
+// unload is not a StopPlanner's.
+func (s *Service) stopPlan(ctx context.Context, name, ref string) (backend.Backend, *backend.StopPlan, bool, error) {
 	if strings.TrimSpace(name) == "" && len(s.all()) != 1 {
-		return nil, "", nil, false, nil
+		return nil, nil, false, nil
 	}
 	b, err := s.named(name)
 	if err != nil {
-		return nil, "", nil, false, err
+		return nil, nil, false, err
 	}
 	sp, ok := b.(backend.StopPlanner)
 	if !ok {
-		return nil, "", nil, false, nil
+		return nil, nil, false, nil
 	}
 	if err := unloadable(b); err != nil {
-		return nil, "", nil, true, err
+		return nil, nil, true, err
 	}
-	model, objs, err := sp.StopPlan(ctx, ref)
-	return b, model, objs, true, err
+	stop, err := sp.StopPlan(ctx, ref)
+	return b, stop, true, err
 }
 
 // PlanDelete is delete_model's dry run: whether the model is loaded and the
@@ -310,12 +330,13 @@ func splitForTarget(req *gitops.Request, b backend.Backend, serving, wiring []*u
 }
 
 // CommitUnload is unload_model in mode commit (kserve): the removing pull
-// request of the serving object's file and its ModelConfig's.
+// request of the serving object's file and its ModelConfig's. The serving
+// object being applied from git is the case here, no refusal.
 func (s *Service) CommitUnload(ctx context.Context, name, ref string, target gitops.Target, dryRun bool) (*OpPlan, error) {
 	if s.commit == nil {
 		return nil, ErrCommitUnavailable
 	}
-	plan, err := s.PlanUnload(ctx, name, ref)
+	plan, err := s.planUnload(ctx, name, ref)
 	if err != nil {
 		return nil, err
 	}
