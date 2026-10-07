@@ -584,6 +584,10 @@ type FitResult struct {
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`
 	FreeBytes     int64  `json:"freeBytes"`
+	// FreeGPUs is, on a node whose GPUs have memory of their own (kserve),
+	// the devices the predictors running there leave free: a predictor
+	// needs its GPUs free beside the memory. Absent elsewhere.
+	FreeGPUs *int64 `json:"freeGpus,omitempty"`
 	// MaxModelLen is the preset's --max-model-len and KVCacheBytes the KV
 	// cache vLLM needs on each GPU for one sequence of that length, from the
 	// checkpoint's config.json; KVCacheAvailableBytes is what vLLM leaves the
@@ -771,6 +775,9 @@ type NodeInfo struct {
 	// ReservedBytes is what the models already served on the node need.
 	ReservedBytes int64 `json:"reservedBytes"`
 	FreeBytes     int64 `json:"freeBytes"`
+	// FreeGPUs is, on a node whose GPUs have memory of their own (kserve),
+	// the devices the predictors running there leave free. Absent elsewhere.
+	FreeGPUs *int64 `json:"freeGpus,omitempty"`
 	// Cache describes the download cache on this node; nil when the node
 	// holds no cache (always on ollama; lemonade: the model store).
 	Cache *NodeCache `json:"cache,omitempty"`

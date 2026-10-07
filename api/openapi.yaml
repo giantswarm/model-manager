@@ -1147,6 +1147,7 @@ components:
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
         reservedBytes: { type: integer, format: int64, description: "needed by the models already served on the node (the preset being loaded not counted); check_fit and load judge against freeBytes, pull against budgetBytes" }
         freeBytes: { type: integer, format: int64 }
+        freeGpus: { type: integer, format: int64, description: "on a node whose GPUs have memory of their own (kserve): the GPUs the predictors running there leave free; a serve needs the preset's GPUs free beside freeBytes" }
         maxModelLen: { type: integer, format: int64, description: "the preset's --max-model-len; absent when the KV cache was not checked (reason says why)" }
         kvCacheBytes: { type: integer, format: int64, description: "the KV cache vLLM needs on each GPU for one sequence of maxModelLen tokens, from the checkpoint's config.json (per layer: full attention holds the sequence, sliding attention its window and one prefill chunk, MLA its latent; linear-attention and Mamba layers none)" }
         kvCacheAvailableBytes: { type: integer, format: int64, description: "what vLLM leaves the KV cache on each GPU: --gpu-memory-utilization of its memory less the weights and vLLM's reserve" }
@@ -1183,6 +1184,7 @@ components:
         message: { type: string, description: "a budget derivation note — an ignored, unparsable budget annotation (kserve); what the host figures mean, whether /proc/meminfo could be read and whether an operator override applied or was ignored (ollama)" }
         reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps; lemonade: Σ catalog sizes of the loaded models)" }
         freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
+        freeGpus: { type: integer, format: int64, description: "on a node whose GPUs have memory of their own (kserve): the GPUs the predictors running there leave free" }
         cache:
           type: object
           description: the download cache on this node; absent when the node holds none (always on ollama; lemonade — the model store)

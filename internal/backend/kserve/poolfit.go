@@ -190,20 +190,45 @@ func describeHeld(nodes []nodeBudget, gpus int) string {
 		case !n.Eligible:
 			parts = append(parts, fmt.Sprintf("node %s: %s", n.Name, n.EligibilityReason))
 		default:
-			parts = append(parts, fmt.Sprintf("node %s has %s, the predictor requests %d", n.Name, plural(gpuDevices(n), "GPU"), gpus))
+			parts = append(parts, fmt.Sprintf("node %s has %s, the predictor requests %d", n.Name, describeDevices(n), gpus))
 		}
 	}
 	return strings.Join(parts, "; ")
 }
 
 // takes reports whether node n schedules a predictor requesting gpus GPUs:
-// a serving target with that many devices. A node whose device count is
-// unknown is taken at its word. A pool none of whose nodes takes the
-// predictor leaves it pending, and the autoscaler launches one of the pool's
-// sizes for it.
+// a serving target with that many devices free (freeGPUs). A node whose
+// device count is unknown is taken at its word. A pool none of whose nodes
+// takes the predictor leaves it pending, and the autoscaler launches one of
+// the pool's sizes for it.
 func takes(n nodeBudget, gpus int) bool {
-	devices := gpuDevices(n)
-	return n.Eligible && (devices == 0 || devices >= int64(gpus))
+	return n.Eligible && (gpuDevices(n) == 0 || freeGPUs(n) >= int64(gpus))
+}
+
+// discreteGPUs says whether the node's GPUs have memory of their own (the
+// GPU memory label): only there does a running predictor hold its devices
+// apart from the memory judgement. A unified-memory node keeps the memory
+// judgement alone.
+func discreteGPUs(n nodeBudget) bool {
+	return n.GPUMemory > 0 && gpuDevices(n) > 0
+}
+
+// freeGPUs is the node's devices the running predictors leave (GPUsTaken,
+// recorded for a serve); on a node without discrete GPUs every device.
+func freeGPUs(n nodeBudget) int64 {
+	if !discreteGPUs(n) {
+		return gpuDevices(n)
+	}
+	return max(gpuDevices(n)-n.GPUsTaken, 0)
+}
+
+// describeDevices is a node's devices as a refusal names them: "1 GPU", or
+// "0 of 1 GPU free" when running predictors hold some.
+func describeDevices(n nodeBudget) string {
+	if free := freeGPUs(n); free < gpuDevices(n) {
+		return fmt.Sprintf("%d of %s free", free, plural(gpuDevices(n), "GPU"))
+	}
+	return plural(gpuDevices(n), "GPU")
 }
 
 // gpuDevices is the node's accelerator devices: allocatable, else the
