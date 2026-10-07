@@ -664,7 +664,12 @@ scheduling by the registered backend document (`docs/backends.md`).
   names the permission: `get`/`list` on `llminferenceserviceconfigs`
   cluster-wide, which the chart's ClusterRole grants). `get_backend` /
   `GET /api/v1/backends` carry the same reason in `message` before anyone
-  tries. The verdict is taken on the cluster as it is at the load: settings
+  tries. While the
+  llmisvc admission webhook has no ready endpoint (the minute or two after the
+  serving slice is installed: `no route to host`, `connection refused`, `no
+  endpoints available`) the create is retried every poll interval for up to
+  two minutes within the call's deadline; a webhook still unreachable then is
+  `503 unavailable` naming the webhook, with nothing created. The verdict is taken on the cluster as it is at the load: settings
   resolved without the control plane stand for five seconds, not the minute
   the settings cache keeps otherwise, and a load about to be refused resolves
   them once more first — the serving slice's CRD and runtime-configs children

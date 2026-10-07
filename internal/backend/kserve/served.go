@@ -681,7 +681,7 @@ func (b *Backend) getServing(ctx context.Context, namespace, name string) (*unst
 	return obj, nil
 }
 
-func (b *Backend) createServing(ctx context.Context, obj *unstructured.Unstructured) error {
+func (b *Backend) createOnce(ctx context.Context, obj *unstructured.Unstructured) error {
 	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
 		return fmt.Errorf("create %s %s/%s: %w", obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
