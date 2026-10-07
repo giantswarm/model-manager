@@ -433,9 +433,21 @@ person | cluster-manager`, plus `invalid` when documents failed the schema.
 ## Zero backends and static backends
 
 With neither `backend` nor `backends` set (the chart default) the process starts with no backend:
-`list_backends` answers an empty list and every backend-scoped tool answers
-`no_backend: no backend registered: register one with add_backend (kind
-ollama|lmstudio|lemonade|kserve) or configure --backends` (HTTP 412). Static values keep working:
+`list_backends` answers an empty list and every backend-scoped tool (`check_fit`, `load_model`,
+`list_models`, …) answers `no_backend` (HTTP 412) naming the instance that answered (its
+`--instance` and version), the namespace it watches for backend documents with how many are there
+(0 valid, plus the invalid ones `list_backends` lists) and both ways to register one:
+
+```
+no_backend: no backend registered on model-manager <instance> <version>: 0 valid backend documents
+in namespace <namespace> (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true);
+register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers
+model-backend-kserve with the first GPU node pool it creates) or add_backend
+kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends
+```
+
+With runtime registration off (`--namespace` empty) the answer says so and names `--backends` as
+the only way. Static values keep working:
 `--backends=ollama,lemonade` (chart `backends`) or `--backend=ollama` lists those with `source:
 static`, in the operator's order, the first being the default backend; registered backends follow,
 sorted by name. A document naming a static kind is refused and reported — the chart values win;

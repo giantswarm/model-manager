@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -113,4 +114,54 @@ func TestDocumentRenderRoundTripAndConfigMap(t *testing.T) {
 	assert.Equal(t, "true", cm.Labels[DocumentLabel])
 	assert.Equal(t, SourcePerson, cm.Labels[DocumentSourceLabel])
 	assert.True(t, strings.Contains(cm.Data[DocumentKey], "kind: lemonade"))
+}
+
+func TestNoBackendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  NoBackendError
+		want []string
+		not  []string
+	}{
+		{
+			name: "registration on",
+			err:  NoBackendError{Instance: "model-manager-model-manager", Version: "0.80.0", Namespace: "model-manager"},
+			want: []string{
+				"no backend registered on model-manager model-manager-model-manager 0.80.0: ",
+				"0 valid backend documents in namespace model-manager (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true); ",
+				"register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers model-backend-kserve with the first GPU node pool it creates) ",
+				"or add_backend kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends",
+			},
+			not: []string{"invalid"},
+		},
+		{
+			name: "invalid documents",
+			err:  NoBackendError{Instance: "mm", Namespace: "ns", Invalid: 2},
+			want: []string{"on model-manager mm: ", "in namespace ns (", ", 2 invalid (list_backends names the problem); register one"},
+		},
+		{
+			name: "registration off",
+			err:  NoBackendError{Instance: "mm", Version: "1.0.0"},
+			want: []string{"no backend registered on model-manager mm 1.0.0: runtime registration is off (--namespace is empty); configure --backends"},
+			not:  []string{"add_backend"},
+		},
+		{
+			name: "anonymous",
+			err:  NoBackendError{},
+			want: []string{"no backend registered: runtime registration is off"},
+			not:  []string{" on model-manager"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := tt.err.Error()
+			for _, w := range tt.want {
+				assert.Contains(t, msg, w)
+			}
+			for _, n := range tt.not {
+				assert.NotContains(t, msg, n)
+			}
+			assert.True(t, errors.Is(&tt.err, ErrNoBackend))
+		})
+	}
 }
