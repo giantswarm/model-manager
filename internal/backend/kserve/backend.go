@@ -996,7 +996,8 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	reserved, _ := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
+	reserved, _, taken := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
+	withTaken(nodes, taken)
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache

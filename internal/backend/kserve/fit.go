@@ -334,7 +334,10 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved, own := b.reservedByNode(ctx, idx, p, nodes)
+	reserved, own, taken := b.reservedByNode(ctx, idx, p, nodes)
+	if forServe {
+		withTaken(nodes, taken)
+	}
 	plan.Nodes, plan.Own = nodes, own
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
@@ -344,6 +347,9 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// above all.
 		if nodes, err = b.nodes(ctx, loc, p); err != nil {
 			return err
+		}
+		if forServe {
+			withTaken(nodes, taken)
 		}
 		plan.Nodes = nodes
 		candidates, why = b.candidateNodes(ctx, nodes, req.Node, loc, p)
@@ -449,7 +455,8 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 // smallest — the least budget, so a model a small GPU holds leaves a larger
 // one free and never waits for a larger pool's capacity — the one with the
 // most free budget among equals; when none hosts it, the one with the most
-// free budget, whose verdict names why.
+// free budget, whose verdict names why. A node whose devices the running
+// predictors hold hosts nothing more for a serve (judgeNode).
 func (b *Backend) chooseNode(ctx context.Context, plan *fitPlan, candidates []nodeBudget, reserved map[string]int64, forServe bool) (nodeBudget, backend.FitResult) {
 	free := func(i int) int64 { return candidates[i].Budget - reserved[candidates[i].Name] }
 	most, fit := 0, -1
@@ -475,7 +482,10 @@ func (b *Backend) chooseNode(ctx context.Context, plan *fitPlan, candidates []no
 // judgeNode is the verdict of serving the planned model on node n, reserved
 // being what the running models hold there: its budget, whether the weights
 // and overhead fit within it (within what is free for a serve), and the
-// shape, requests and KV cache it would run with.
+// shape, requests and KV cache it would run with. For a serve on a
+// discrete-GPU node the predictor also needs its GPUs free of the running
+// predictors' (freeGPUs): a device they hold leaves it Pending, whatever
+// memory is left.
 func (b *Backend) judgeNode(ctx context.Context, plan *fitPlan, n nodeBudget, reserved int64, forServe bool) backend.FitResult {
 	res, p := plan.Result, plan.Preset
 	res.Node = n.Name
@@ -508,6 +518,15 @@ func (b *Backend) judgeNode(ctx context.Context, plan *fitPlan, n nodeBudget, re
 	applyUnified(&res, uv)
 	applyShape(&res, p, sh, n, b.roomOn(ctx, n, p))
 	applyKV(&res, plan.KV.shaped(sh).judgeOn(n))
+	if forServe && discreteGPUs(n) && !p.cpu() {
+		free := freeGPUs(n)
+		res.FreeGPUs = &free
+		if gpus := int64(plannedGPUs(plan)); free < gpus {
+			res.Fits = false
+			res.Reason = fmt.Sprintf("node %s has %s free of its %s (%s taken by running models), the predictor requests %d; ",
+				n.Name, plural(free, "GPU"), plural(gpuDevices(n), "GPU"), plural(n.GPUsTaken, "GPU"), gpus) + res.Reason
+		}
+	}
 	return res
 }
 
@@ -700,10 +719,12 @@ func presetSelector(p *servingPreset) map[string]string {
 // nodes, a split's share on each of its — and on a unified-memory node — GPUs
 // that report no memory of their own, the node's memory being theirs — at
 // least the share vLLM claims at start, --gpu-memory-utilization of the
-// node's budget, whatever the requests say. The preset being (re)loaded is not
-// counted against itself: what it holds is own, per node it serves on.
-func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) (reserved, own map[string]int64) {
-	out, own := map[string]int64{}, map[string]int64{}
+// node's budget, whatever the requests say. taken is the GPUs their
+// predictors request per node, whether or not their preset is known. The
+// preset being (re)loaded is not counted against itself: what it holds is
+// own, per node it serves on, and its GPUs are not taken.
+func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) (reserved, own, taken map[string]int64) {
+	out, own, taken := map[string]int64{}, map[string]int64{}, map[string]int64{}
 	byName := make(map[string]nodeBudget, len(nodes))
 	for _, n := range nodes {
 		byName[n.Name] = n
@@ -711,7 +732,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 	servedList, err := b.listServed(ctx)
 	if err != nil {
 		b.log.Warn("listing LLMInferenceServices for the fit check failed", "error", err)
-		return out, own
+		return out, own, taken
 	}
 	for _, sv := range servedList {
 		on := sv.onNodes()
@@ -728,6 +749,9 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 			}
 			continue
 		}
+		for _, n := range on {
+			taken[n] += sv.GPUs
+		}
 		p, ok := idx.byName[sv.Preset]
 		if !ok {
 			if matches := idx.forModel(sv.Model); len(matches) == 1 {
@@ -741,7 +765,15 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 			out[n] += presetShare(p, byName[n], b.opts.DefaultOverheadGiB, parts, sv.Utilization)
 		}
 	}
-	return out, own
+	return out, own, taken
+}
+
+// withTaken records on each node the GPUs the running predictors there
+// request (reservedByNode's taken), for the device judgement of a serve.
+func withTaken(nodes []nodeBudget, taken map[string]int64) {
+	for i := range nodes {
+		nodes[i].GPUsTaken = taken[nodes[i].Name]
+	}
 }
 
 // presetReserve is what one served preset holds on its node: its weights and

@@ -138,7 +138,7 @@ func (b *Backend) placeSplit(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved, own := b.reservedByNode(ctx, idx, p, nodes)
+	reserved, own, _ := b.reservedByNode(ctx, idx, p, nodes)
 	plan.Nodes, plan.Own = nodes, own
 	var refusals []string
 	for _, link := range links {

@@ -65,8 +65,11 @@ type nodeBudget struct {
 	GPUAllocatable int64
 	GPUMemory      int64
 	GPUProduct     string
-	Budget         int64
-	BudgetSource   string
+	// GPUsTaken is the devices the predictors running on the node request
+	// (withTaken); judged on a discrete-GPU node only (freeGPUs).
+	GPUsTaken    int64
+	Budget       int64
+	BudgetSource string
 	// Message notes a budget derivation problem (an ignored annotation).
 	Message string
 	// Eligible says whether a model can be served on the node right now;
@@ -447,6 +450,10 @@ func nodeView(nb nodeBudget, reserved int64, cache *backend.NodeCache) backend.N
 	}
 	if info.FreeBytes < 0 {
 		info.FreeBytes = 0
+	}
+	if discreteGPUs(nb) {
+		free := freeGPUs(nb)
+		info.FreeGPUs = &free
 	}
 	return info
 }
