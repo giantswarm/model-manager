@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -262,18 +261,27 @@ func (n *computeNeed) judgeNode(nb nodeBudget) computeVerdict {
 	return n.judge(major+"."+minor, gpu)
 }
 
-// judgeShape runs the check against the GPU of a pool size, from its
-// instance family (awsGPUFamilies).
+// judgeShape runs the check against the GPU of a pool size: the compute
+// capability the shape declares (what cluster-manager knows of the
+// accelerator it sized the pool with), else its instance family's
+// (awsGPUFamilies). The family names the GPU in the verdict as long as it
+// agrees with the declared value.
 func (n *computeNeed) judgeShape(s backend.InstanceShape) computeVerdict {
 	if v, done := n.skipped(); done {
 		return v
 	}
 	family, _, _ := strings.Cut(s.InstanceType, ".")
-	gen, ok := awsGPUFamilies[family]
-	if !ok {
+	gen, known := awsGPUFamilies[family]
+	named := fmt.Sprintf("the %s of a %s (%s)", gen.GPU, s.InstanceType, gen.Architecture)
+	switch {
+	case s.ComputeCapability == "" && !known:
 		return n.unknown(fmt.Sprintf("the GPU generation of a %s is unknown to the check", s.InstanceType))
+	case s.ComputeCapability == "":
+		return n.judge(gen.Capability, named)
+	case known && gen.Capability == s.ComputeCapability:
+		return n.judge(s.ComputeCapability, named)
 	}
-	return n.judge(gen.Capability, fmt.Sprintf("the %s of a %s (%s)", gen.GPU, s.InstanceType, gen.Architecture))
+	return n.judge(s.ComputeCapability, "the GPU of a "+s.InstanceType)
 }
 
 // unknown is the verdict of a GPU whose generation the check cannot tell:
@@ -306,19 +314,11 @@ func (n *computeNeed) judge(capability, gpu string) computeVerdict {
 // parseCapability turns "8.6" into a number that orders generations
 // (8.6 < 8.9 < 10.0).
 func parseCapability(s string) (float64, error) {
-	major, minor, ok := strings.Cut(s, ".")
-	if !ok {
-		minor = "0"
-	}
-	a, err := strconv.Atoi(major)
+	major, minor, err := backend.ParseComputeCapability(s)
 	if err != nil {
 		return 0, err
 	}
-	b, err := strconv.Atoi(minor)
-	if err != nil {
-		return 0, err
-	}
-	return float64(a) + float64(b)/100, nil
+	return float64(major) + float64(minor)/100, nil
 }
 
 // clause words a verdict for the fit's reason; empty when the weights need

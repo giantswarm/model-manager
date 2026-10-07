@@ -294,8 +294,12 @@ func discoveryDocYAML(o discoveryOpts) string {
 		if len(p.Instances) > 0 {
 			selector += "    instances:\n"
 			for _, s := range p.Instances {
-				selector += fmt.Sprintf("      - {instanceType: %q, size: %q, vcpu: %d, memoryGiB: %d, gpus: %d, gpuMemoryGiB: %d, usableVcpu: %v, usableMemoryGiB: %v}\n",
-					s.InstanceType, s.Size, s.VCPU, s.MemoryGiB, s.GPUs, s.GPUMemoryGiB, s.UsableVCPU, s.UsableMemoryGiB)
+				capability := ""
+				if s.ComputeCapability != "" {
+					capability = fmt.Sprintf(", computeCapability: %q", s.ComputeCapability)
+				}
+				selector += fmt.Sprintf("      - {instanceType: %q, size: %q, vcpu: %d, memoryGiB: %d, gpus: %d, gpuMemoryGiB: %d, usableVcpu: %v, usableMemoryGiB: %v%s}\n",
+					s.InstanceType, s.Size, s.VCPU, s.MemoryGiB, s.GPUs, s.GPUMemoryGiB, s.UsableVCPU, s.UsableMemoryGiB, capability)
 			}
 		}
 	}
