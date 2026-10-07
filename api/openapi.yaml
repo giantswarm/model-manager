@@ -1112,6 +1112,7 @@ components:
         capabilities: { type: array, items: { type: string } }
         license: { type: string }
         gpus: { type: integer, format: int64 }
+        minComputeCapability: { type: string, example: "8.9", description: "the GPU generation the preset declares it needs (requirements.minComputeCapability); absent when it declares none" }
         weightsBytes: { type: integer, format: int64 }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64, description: weights + overhead }
@@ -1142,7 +1143,8 @@ components:
         model: { type: string }
         backend: { $ref: "#/components/schemas/BackendName" }
         fits: { type: boolean }
-        reason: { type: string, description: "human-readable explanation of the numbers; when weightsSource is preset, also why the preset stands in for the hub (it did not answer within the lookup timeout, refused the repository, or failed)" }
+        reason: { type: string, description: "human-readable explanation of the numbers; when weightsSource is preset, also why the preset stands in for the hub (it did not answer within the lookup timeout, refused the repository, or failed); with verdict unverified it opens with the no_backend answer (the instance and how to register a backend) and ends with what the preset declares" }
+        verdict: { type: string, enum: [unverified], description: "unverified when no backend judged the model: no backend is registered and the numbers are what the preset declares, read from the catalog the platform chart publishes where model-manager runs; fits is then false and no backend is named. Absent when a backend judged the model" }
         preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
         presets: { type: array, items: { type: string }, description: every preset serving the model }
         weightsBytes: { type: integer, format: int64 }

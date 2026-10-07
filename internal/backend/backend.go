@@ -462,10 +462,14 @@ type Preset struct {
 	// claims at start (vLLM's --gpu-memory-utilization, 0.9 by default); on
 	// a unified-memory node it is a share of the whole node. Absent for a
 	// CPU preset.
-	GPUMemoryUtilization float64           `json:"gpuMemoryUtilization,omitempty"`
-	WeightsBytes         int64             `json:"weightsBytes"`
-	OverheadBytes        int64             `json:"overheadBytes"`
-	RequiredBytes        int64             `json:"requiredBytes"`
+	GPUMemoryUtilization float64 `json:"gpuMemoryUtilization,omitempty"`
+	WeightsBytes         int64   `json:"weightsBytes"`
+	OverheadBytes        int64   `json:"overheadBytes"`
+	RequiredBytes        int64   `json:"requiredBytes"`
+	// MinComputeCapability is the GPU generation the preset declares it
+	// needs (requirements.minComputeCapability, "8.9"); empty when it
+	// declares none.
+	MinComputeCapability string            `json:"minComputeCapability,omitempty"`
 	Args                 []string          `json:"args,omitempty"`
 	NodeSelector         map[string]string `json:"nodeSelector,omitempty"`
 	ChatTemplate         string            `json:"chatTemplate,omitempty"`
@@ -529,6 +533,11 @@ type FitResult struct {
 	// (the slice is still installing), so the same call answers
 	// differently in a moment.
 	Retryable bool `json:"retryable,omitempty"`
+	// Verdict is VerdictUnverified when nothing judged the model — no
+	// backend is registered, and the numbers are what the preset declares
+	// (its catalog is read without one); Fits is then false and Reason
+	// starts with no_backend. Empty when a backend judged the model.
+	Verdict string `json:"verdict,omitempty"`
 	// Preset is the preset the check used for overhead (and weights when the
 	// hub could not tell); Presets lists every preset serving the model.
 	Preset  string   `json:"preset,omitempty"`
@@ -639,7 +648,8 @@ type FitResult struct {
 	// --gpu-memory-utilization it runs with, derived from the node: the
 	// preset's resources.gpus and arguments describe its reference shape
 	// (giantswarm/model-manager#223). Zero when no node was judged (a GPU
-	// pool with no node yet, a CPU preset): the preset's own shape then.
+	// pool with no node yet, a CPU preset): the preset's own shape then —
+	// which an unverified answer without a backend carries here itself.
 	// CPURequestMillis and MemoryRequestBytes are each serving pod's CPU
 	// and memory requests there: the preset's, capped at what the node has
 	// left beside the requests of its other pods; a node with nothing left
@@ -666,6 +676,10 @@ type FitResult struct {
 	Cached      bool   `json:"cached"`
 	CacheSource string `json:"cacheSource,omitempty"`
 }
+
+// VerdictUnverified is FitResult.Verdict when no backend judged the model:
+// the answer is the preset's declaration.
+const VerdictUnverified = "unverified"
 
 // NodeFit is the verdict of one copy of a model on one node.
 type NodeFit struct {

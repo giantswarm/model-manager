@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -225,6 +226,7 @@ func (p *servingPreset) view(defaultOverheadGiB float64, templateImage string) b
 		GPUMemoryUtilization: p.utilization(),
 		WeightsBytes:         p.weightsBytes(),
 		OverheadBytes:        p.overheadBytes(defaultOverheadGiB),
+		MinComputeCapability: p.Spec.Requirements.MinComputeCapability,
 		Args:                 p.Spec.Args,
 		NodeSelector:         p.Spec.Scheduling.NodeSelector,
 		RuntimeImage:         cmp.Or(p.image(), templateImage),
@@ -266,11 +268,25 @@ func parsePreset(raw []byte, source string) (*servingPreset, error) {
 }
 
 // presets lists the published presets from the preset namespace, sorted by
-// name. Unparseable ConfigMaps are skipped and reported through the returned
-// warnings so one bad preset does not hide the rest.
+// name, and remembers them for the callers without a context. Unparseable
+// ConfigMaps are skipped and reported through the returned warnings so one
+// bad preset does not hide the rest.
 func (b *Backend) presets(ctx context.Context) ([]*servingPreset, []string, error) {
-	s := b.cfg.settings(ctx)
-	list, err := b.k8s(ctx).CoreV1().ConfigMaps(s.PresetNamespace).List(ctx, metav1.ListOptions{LabelSelector: s.PresetSelector})
+	out, warnings, err := listPresets(ctx, b.k8s(ctx), b.cfg.settings(ctx))
+	if err != nil {
+		return nil, nil, err
+	}
+	b.mu.Lock()
+	b.presetCache = out
+	b.mu.Unlock()
+	return out, warnings, nil
+}
+
+// listPresets reads the published presets of s's preset namespace with cs,
+// sorted by name: the backend's read on its serving target, the catalog's on
+// the local cluster.
+func listPresets(ctx context.Context, cs kubernetes.Interface, s settings) ([]*servingPreset, []string, error) {
+	list, err := cs.CoreV1().ConfigMaps(s.PresetNamespace).List(ctx, metav1.ListOptions{LabelSelector: s.PresetSelector})
 	if err != nil {
 		return nil, nil, fmt.Errorf("list presets in %s (%s): %w", s.PresetNamespace, s.PresetSelector, err)
 	}
@@ -292,9 +308,6 @@ func (b *Backend) presets(ctx context.Context) ([]*servingPreset, []string, erro
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name() < out[j].name() })
-	b.mu.Lock()
-	b.presetCache = out
-	b.mu.Unlock()
 	return out, warnings, nil
 }
 

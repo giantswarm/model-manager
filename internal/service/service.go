@@ -183,9 +183,19 @@ type Service struct {
 	jobs   *jobs.Manager
 	wirer  wiring.Wirer
 	commit *gitops.Committer // nil: commit mode not offered
-	wiring *WiringInfo
-	cfg    Config
-	log    *slog.Logger
+	// catalog answers a kserve preset's declaration while no backend is
+	// registered (FitCheck); nil without Kubernetes access.
+	catalog backend.FitChecker
+	wiring  *WiringInfo
+	cfg     Config
+	log     *slog.Logger
+}
+
+// WithCatalog gives the service the preset catalog FitCheck answers from
+// while no backend is registered.
+func (s *Service) WithCatalog(c backend.FitChecker) *Service {
+	s.catalog = c
+	return s
 }
 
 // New builds a Service over the static backends, in the operator's order:
@@ -1190,10 +1200,18 @@ func (s *Service) Search(ctx context.Context, name, query string, limit int) ([]
 }
 
 // FitCheck sizes a model against node budgets (capability fitCheck) on the
-// named backend, else on the one backend that offers fit checks.
+// named backend, else on the one backend that offers fit checks. With no
+// backend registered, a kserve preset is answered from the catalog
+// (catalogFit) instead of no_backend alone.
 func (s *Service) FitCheck(ctx context.Context, name string, req backend.FitRequest) (*backend.FitResult, error) {
+	if strings.TrimSpace(req.Model) == "" && strings.TrimSpace(req.Preset) == "" {
+		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+	}
 	targets, err := s.targetsWith(name, func(c backend.Capabilities) bool { return c.FitCheck }, "fit check")
 	if err != nil {
+		if errors.Is(err, backend.ErrNoBackend) && s.catalog != nil && catalogBackend(name) {
+			return s.catalogFit(ctx, req, err)
+		}
 		return nil, err
 	}
 	if len(targets) > 1 {
@@ -1204,14 +1222,41 @@ func (s *Service) FitCheck(ctx context.Context, name string, req backend.FitRequ
 	if !ok {
 		return nil, fmt.Errorf("%w: fit check on %s", backend.ErrUnsupported, b.Name())
 	}
-	if strings.TrimSpace(req.Model) == "" && strings.TrimSpace(req.Preset) == "" {
-		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
-	}
 	res, err := fc.FitCheck(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	res.Backend = b.Name()
+	return res, nil
+}
+
+// catalogBackend reports whether a fit check naming backend name may be
+// answered from the kserve preset catalog: no name, or kserve.
+func catalogBackend(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "" || backend.Name(name) == backend.NameKServe
+}
+
+// catalogFit answers a fit check from the preset catalog while no backend is
+// registered: the preset's declaration with verdict unverified, the reason
+// opening with the no_backend answer (noBackend) a person registers a
+// backend from — so what the preset needs is learned before a GPU pool
+// exists (giantswarm/model-manager#274). What the catalog cannot answer — no
+// preset published, a model no preset serves, a catalog it could not read —
+// is the no_backend answer, naming why.
+func (s *Service) catalogFit(ctx context.Context, req backend.FitRequest, noBackend error) (*backend.FitResult, error) {
+	res, err := s.catalog.FitCheck(ctx, req)
+	switch {
+	case errors.Is(err, backend.ErrNoBackend):
+		return nil, fmt.Errorf("%w; %s", noBackend, strings.TrimPrefix(err.Error(), backend.ErrNoBackend.Error()+": "))
+	case errors.Is(err, backend.ErrNotFound), errors.Is(err, backend.ErrInvalid):
+		return nil, err
+	case err != nil:
+		return nil, fmt.Errorf("%w; the preset catalog could not be read: %v", noBackend, err)
+	}
+	res.Fits = false
+	res.Verdict = backend.VerdictUnverified
+	res.Reason = "no_backend: " + noBackend.Error() + " — " + res.Reason
 	return res, nil
 }
 

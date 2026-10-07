@@ -269,6 +269,9 @@ type discoveryOpts struct {
 	// cacheDisabled renders spec.cache.enabled: false — the serving layer
 	// without a cache claim.
 	cacheDisabled bool
+	// presetNamespace is spec.presets.namespace; the platform namespace
+	// when empty.
+	presetNamespace string
 }
 
 // discoveryDocYAML renders the ModelServingConfig document.
@@ -307,6 +310,10 @@ func discoveryDocYAML(o discoveryOpts) string {
 	if o.gateway != "" {
 		gateway = fmt.Sprintf("  gateway:\n    enabled: true\n    name: models\n    namespace: agent-platform\n    endpoint: %s\n    pathConvention: /<namespace>/<model>/v1\n", o.gateway)
 	}
+	presetNamespace := o.presetNamespace
+	if presetNamespace == "" {
+		presetNamespace = testPlatformNS
+	}
 	return fmt.Sprintf(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ModelServingConfig
 spec:
@@ -322,10 +329,10 @@ spec:
     mountPath: /mnt/models
     redirectPolicy: %t
 %s  presets:
-    namespace: agent-platform
+    namespace: %s
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway)
+`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway, presetNamespace)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings
