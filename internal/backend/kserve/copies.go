@@ -52,6 +52,7 @@ func (b *Backend) copiesCheck(ctx context.Context, req backend.FitRequest, forSe
 		return nil, err
 	}
 	plan.KV = b.kvCheckFor(ctx, plan)
+	plan.Compute = b.computeNeedFor(ctx, plan)
 	sized := *plan
 	if len(req.Nodes) > 0 {
 		err = b.judgeCopies(ctx, plan, idx, req.Nodes, forServe)

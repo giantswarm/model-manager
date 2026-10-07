@@ -42,6 +42,12 @@ type fitPlan struct {
 	CacheLocal bool
 	// KV is the KV cache check the placement runs on each GPU it judges.
 	KV *kvCheck
+	// Compute is the GPU generation the checkpoint's weights need, judged
+	// on each GPU beside KV. Config is the checkpoint's config.json both
+	// read, ConfigSkip why there is none (checkpointConfig).
+	Compute    *computeNeed
+	Config     []byte
+	ConfigSkip string
 	// Image is the model image of a preset served from one, as its registry
 	// described it; nil for every other model, or when it did not answer.
 	Image *modelImage
@@ -79,6 +85,7 @@ func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, 
 		return err
 	}
 	plan.KV = b.kvCheckFor(ctx, plan)
+	plan.Compute = b.computeNeedFor(ctx, plan)
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
 		return err
 	}
@@ -518,6 +525,7 @@ func (b *Backend) judgeNode(ctx context.Context, plan *fitPlan, n nodeBudget, re
 	applyUnified(&res, uv)
 	applyShape(&res, p, sh, n, b.roomOn(ctx, n, p))
 	applyKV(&res, plan.KV.shaped(sh).judgeOn(n))
+	applyCompute(&res, plan.Compute.judgeNode(n))
 	if forServe && discreteGPUs(n) && !p.cpu() {
 		free := freeGPUs(n)
 		res.FreeGPUs = &free
@@ -583,7 +591,14 @@ func launchingPool(plan *fitPlan, s settings, nodes []nodeBudget, explicit strin
 		}
 	}
 	if bestShape == nil {
-		return "", backend.GPUPool{}, false, nil
+		// No size of any pool hosts the predictor: the verdict is worded
+		// against the pool that comes closest (the most GPU memory per
+		// size, name order on a tie), so the refusal says what no size
+		// gives it — the GPU memory, the KV cache or the GPU generation —
+		// instead of "no accelerator node".
+		if bestName = closestPool(s.GPUPools, names, nodes, gpus); bestName == "" {
+			return "", backend.GPUPool{}, false, nil
+		}
 	}
 	pool := s.GPUPools[bestName]
 	pool.NodeSelector = map[string]string{labelMachinePool: bestName}

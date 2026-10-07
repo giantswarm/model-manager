@@ -333,6 +333,7 @@ func (b *Backend) splitCheck(ctx context.Context, req backend.FitRequest, forSer
 		return nil, err
 	}
 	plan.KV = b.kvCheckFor(ctx, plan)
+	plan.Compute = b.computeNeedFor(ctx, plan)
 	if err := b.placeSplit(ctx, plan, idx, req, forServe); err != nil {
 		return nil, err
 	}
