@@ -615,11 +615,14 @@ scheduling by the registered backend document (`docs/backends.md`).
   and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
   `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
   named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
-  The GPU generation is judged the same way, from the same `config.json`: the weights' need —
-  FP8 (`quant_method: fp8`, compressed-tensors 8-bit float, ModelOpt FP8) needs compute
-  capability 8.9 (Ada, Hopper, Blackwell: below it vLLM falls back to the weight-only FP8
-  Marlin kernel, which answers wrong for such a checkpoint), NVFP4 10.0, bf16 8.0 (the preset's
-  `--dtype` decides unquantized weights) — against a node's `nvidia.com/gpu.compute.major`/
+  The GPU generation is judged the same way, from the same `config.json` (a mistral-format
+  checkpoint's `params.json`): the weights' need — FP8 (`quant_method: fp8`, compressed-tensors
+  8-bit float, ModelOpt FP8) needs compute capability 8.9 (Ada, Hopper, Blackwell: below it vLLM
+  falls back to the weight-only FP8 Marlin kernel, which answers wrong for such a checkpoint),
+  NVFP4 (compressed-tensors 4-bit float, ModelOpt NVFP4, ModelOpt mixed precision read from its
+  `config_groups`) 8.9 (native on Blackwell, vLLM's weight-only FP4 Marlin kernel on Ada and
+  Hopper; nothing below is proven), bf16 8.0 (the preset's `--dtype` decides unquantized
+  weights); a preset whose `requirements.minComputeCapability` differs is named — against a node's `nvidia.com/gpu.compute.major`/
   `minor` labels or the GPU of a pool size's instance family (g4dn T4 7.5, g5 A10G 8.6, g6 L4
   8.9, g6e L40S 8.9); a GPU below it is a refusal naming both (`computeCapabilityRequired`,
   `computeCapability`), and among several pools one whose GPU is below the need is skipped for

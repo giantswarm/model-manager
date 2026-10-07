@@ -54,12 +54,19 @@ func serveModelImage(t *testing.T, repoTag string, weights int64, config []byte)
 // serveModelImageThrough is serveModelImage with the registry behind wrap.
 func serveModelImageThrough(t *testing.T, wrap func(http.Handler) http.Handler, repoTag string, weights int64, config []byte) string {
 	t.Helper()
-	reg := httptest.NewServer(wrap(registry.New()))
-	t.Cleanup(reg.Close)
 	files := map[string][]byte{"models/tokenizer_config.json": []byte("{}")}
 	if config != nil {
 		files[modelImageConfigPath] = config
 	}
+	return serveModelImageFiles(t, wrap, repoTag, weights, files)
+}
+
+// serveModelImageFiles is serveModelImageThrough with the small layer's
+// files as given (a mistral-format checkpoint's params.json).
+func serveModelImageFiles(t *testing.T, wrap func(http.Handler) http.Handler, repoTag string, weights int64, files map[string][]byte) string {
+	t.Helper()
+	reg := httptest.NewServer(wrap(registry.New()))
+	t.Cleanup(reg.Close)
 	small, err := crane.Layer(files)
 	require.NoError(t, err)
 	weightsLayer, err := random.Layer(4096, types.OCIUncompressedLayer)

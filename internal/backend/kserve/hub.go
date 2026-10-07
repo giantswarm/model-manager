@@ -337,15 +337,26 @@ func escapeRepo(repo string) string {
 // ModelConfig reads the checkpoint's config.json; nil and no error when the
 // repository has none (a Mistral-format checkpoint ships params.json).
 func (c *hubClient) ModelConfig(ctx context.Context, repo, revision string, files []hubFile) (json.RawMessage, error) {
-	const config = "config.json"
-	if !slices.ContainsFunc(files, func(f hubFile) bool { return f.Path == config }) {
+	return c.modelJSON(ctx, repo, revision, files, "config.json")
+}
+
+// ModelParams reads a Mistral-format checkpoint's params.json; nil and no
+// error when the repository has none.
+func (c *hubClient) ModelParams(ctx context.Context, repo, revision string, files []hubFile) (json.RawMessage, error) {
+	return c.modelJSON(ctx, repo, revision, files, "params.json")
+}
+
+// modelJSON reads the JSON file the repository holds at its top level; nil
+// and no error when the listing has no such file.
+func (c *hubClient) modelJSON(ctx context.Context, repo, revision string, files []hubFile, file string) (json.RawMessage, error) {
+	if !slices.ContainsFunc(files, func(f hubFile) bool { return f.Path == file }) {
 		return nil, nil
 	}
 	if revision == "" {
 		revision = "main"
 	}
 	var doc json.RawMessage
-	if err := c.getJSON(ctx, "/"+escapeRepo(repo)+"/resolve/"+url.PathEscape(revision)+"/"+config, &doc); err != nil {
+	if err := c.getJSON(ctx, "/"+escapeRepo(repo)+"/resolve/"+url.PathEscape(revision)+"/"+file, &doc); err != nil {
 		return nil, mapHubErr(err, repo)
 	}
 	return doc, nil
