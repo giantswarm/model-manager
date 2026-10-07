@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- kserve: `load_model` and `POST /api/v1/models/load` take `tracing` (default `false`): `true` composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the served model's spans land under the caller's trace. The served model reports it as `running.tracing` / `tracing` in the loaded list. A preset already served with the other setting is refused with `conflict`: switching tracing restarts the model, so it is stopped and served again.
+
 ### Fixed
 
 - kserve: `load_model` right after a serving slice is installed waits for the llmisvc admission webhook instead of answering `backend_error` (giantswarm/model-manager#241). The slice's HelmReleases are Ready a minute or two before the webhook Service has a ready endpoint, and the create failed with `failed calling webhook … connect: no route to host`. A create the API server refuses because it cannot reach a webhook (`no route to host`, `connection refused`, `no endpoints available`) is retried every poll interval for up to two minutes within the call's deadline; a webhook still unreachable then answers `503 unavailable` (`serving is still starting: the admission webhook … has no ready endpoint yet`) with nothing created. A webhook's own denial is answered as before.

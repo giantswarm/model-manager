@@ -80,7 +80,10 @@ type served struct {
 	Nodes     []string
 	// Pool is the GPU pool the predictor is pinned to: the pool label in
 	// the object's template nodeSelector (giantswarm/model-manager#152).
-	Pool     string
+	Pool string
+	// Tracing says the object carries spec.tracing: the served model exports
+	// traces (llmisvc.go).
+	Tracing  bool
 	Created  time.Time
 	Deleting bool
 	// ReadyAt is when the Ready condition last turned True; Failed says the
@@ -469,6 +472,7 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
 	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)
 	sv.Placement, sv.Nodes = servedPlacement(obj)
+	sv.Tracing = tracingOn(obj)
 	if main := mainContainer(obj); main != nil {
 		sv.GPUs = gpusOf(main["resources"], s.GPUResourceName)
 		sv.Utilization = argsUtilization(main["args"])
