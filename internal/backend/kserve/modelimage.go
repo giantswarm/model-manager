@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,9 @@ const (
 	// modelImageConfigPath is the checkpoint's config.json inside a model
 	// image: KServe's modelcar contract puts the checkpoint under /models.
 	modelImageConfigPath = "models/config.json"
+	// modelImageParamsPath is a mistral-format checkpoint's params.json,
+	// which it ships in place of config.json.
+	modelImageParamsPath = "models/params.json"
 	// modelImageSmallFile bounds the files read past in search of
 	// config.json: a model image's tar layers carry the checkpoint's small
 	// files ahead of the weights (a layer of their own, or the head of the
@@ -92,6 +96,9 @@ type modelImage struct {
 	WeightsBytes int64
 	// Config is the checkpoint's config.json; nil when no small layer holds it.
 	Config []byte
+	// Params is a mistral-format checkpoint's params.json; nil when no small
+	// layer holds it.
+	Params []byte
 }
 
 // modelImage is readModelImage, remembered per storage URI once read: a
@@ -120,8 +127,9 @@ func (b *Backend) modelImage(ctx context.Context, storageURI string) (modelImage
 // readModelImage reads a model image anonymously from its registry: the
 // manifest of the one platform (giantswarm/model-manager#150), the config
 // blob for the labels, and the head of each layer until config.json turns up
-// — streamed, stopped at the first weight file (fileInLayer). An error reading
-// config.json leaves Config nil: the size and the weights stand on their own.
+// (params.json read on the way) — streamed, stopped at the first weight file
+// (filesInLayer). An error reading them leaves Config and Params nil: the
+// size and the weights stand on their own.
 func readModelImage(ctx context.Context, storageURI string) (modelImage, error) {
 	ref, err := name.ParseReference(strings.TrimPrefix(storageURI, "oci://"))
 	if err != nil {
@@ -150,7 +158,14 @@ func readModelImage(ctx context.Context, storageURI string) (modelImage, error) 
 		return out, nil
 	}
 	for _, l := range layers {
-		if raw, err := fileInLayer(l, modelImageConfigPath); err == nil && raw != nil {
+		found, err := filesInLayer(l, modelImageConfigPath, modelImageParamsPath)
+		if err != nil {
+			continue
+		}
+		if raw := found[modelImageParamsPath]; raw != nil && out.Params == nil {
+			out.Params = raw
+		}
+		if raw := found[modelImageConfigPath]; raw != nil {
 			out.Config = raw
 			break
 		}
@@ -158,32 +173,39 @@ func readModelImage(ctx context.Context, storageURI string) (modelImage, error) 
 	return out, nil
 }
 
-// fileInLayer returns the file at want in the layer's tar, nil when the
-// layer does not hold it ahead of its first file larger than
-// modelImageSmallFile: the stream is closed there, so what is read is the
-// tar headers and the small files before it.
-func fileInLayer(l v1.Layer, want string) ([]byte, error) {
+// filesInLayer returns the files at want the layer's tar holds ahead of its
+// first file larger than modelImageSmallFile: the stream is closed there, so
+// what is read is the tar headers and the small files before it.
+func filesInLayer(l v1.Layer, want ...string) (map[string][]byte, error) {
 	rc, err := l.Uncompressed()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
 	tr := tar.NewReader(rc)
-	for {
+	found := map[string][]byte{}
+	for len(found) < len(want) {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil, nil
+			break
 		}
 		if err != nil {
-			return nil, err
+			return found, err
 		}
 		if h.Size > modelImageSmallFile {
-			return nil, nil
+			break
 		}
-		if h.Typeflag == tar.TypeReg && strings.TrimPrefix(path.Clean("/"+h.Name), "/") == want {
-			return io.ReadAll(tr)
+		name := strings.TrimPrefix(path.Clean("/"+h.Name), "/")
+		if h.Typeflag != tar.TypeReg || !slices.Contains(want, name) {
+			continue
 		}
+		raw, err := io.ReadAll(tr)
+		if err != nil {
+			return found, err
+		}
+		found[name] = raw
 	}
+	return found, nil
 }
 
 // imageOnNode reports whether the node's kubelet lists the image the storage

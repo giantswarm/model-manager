@@ -16,19 +16,63 @@ import (
 // answers wrong: an FP8 W8A8 checkpoint of the Qwen3.5 lineage served on an
 // A10G (Ampere, 8.6) answered gibberish at temperature 0 while the same
 // preset answered on an L4 (giantswarm/model-manager#264). NVFP4 weights
-// need a Blackwell GPU (10.0); bf16 weights a GPU of 8.0 (a T4 has
-// neither). The fit refuses a GPU below what the weights need, so nothing
-// composes a predictor whose answers are wrong.
+// run natively on Blackwell (10.0) and through vLLM's weight-only FP4 Marlin
+// kernel on Ada and Hopper — the path the L40S presets serve; vLLM's
+// quantization matrix lists that kernel from Turing, but nothing below 8.9
+// is proven and its FP8 sibling answers wrong there, so NVFP4 needs 8.9 as
+// FP8 does. bf16 weights need a GPU of 8.0 (a T4 has neither). The fit
+// refuses a GPU below what the weights need, so nothing composes a
+// predictor whose answers are wrong.
+
+// skipNoConfig is why a checkpoint without a config.json is not read from
+// one: a mistral-format checkpoint's params.json stands in for it.
+const skipNoConfig = "the checkpoint has no config.json"
 
 // GPU feature-discovery labels naming the GPU's compute capability.
 const (
 	labelGPUComputeMajor = "nvidia.com/gpu.compute.major"
 	labelGPUComputeMinor = "nvidia.com/gpu.compute.minor"
-
-	computeCapabilityBF16 = "8.0"
-	computeCapabilityFP8  = "8.9"
-	computeCapabilityFP4  = "10.0"
 )
+
+// weightPrecision is what of the weights the GPU generation is judged by,
+// ordered by what the check says of it: a checkpoint mixing precisions
+// needs its highest.
+type weightPrecision int
+
+const (
+	precisionBF16 weightPrecision = iota + 1
+	precisionFP8
+	precisionFP4
+)
+
+// capability is the compute capability the precision needs.
+func (p weightPrecision) capability() string {
+	switch p {
+	case precisionBF16:
+		return "8.0"
+	case precisionFP8, precisionFP4:
+		return "8.9"
+	}
+	return ""
+}
+
+// remedy is what a refusal for the precision says after the capabilities.
+func (p weightPrecision) remedy() string {
+	switch p {
+	case precisionFP8:
+		return "without native FP8 vLLM falls back to the weight-only FP8 Marlin kernel, which answers wrong for such a checkpoint; serve it on a GPU of 8.9 or above (Ada, Hopper, Blackwell) or serve a BF16 checkpoint here"
+	case precisionFP4:
+		return "NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel on Ada and Hopper, which is proven from 8.9 and not below it; serve it on a GPU of 8.9 or above or serve a BF16 checkpoint here"
+	case precisionBF16:
+		return "bf16 needs a GPU of 8.0 or above; set --dtype=float16 for this GPU or serve it on a newer one"
+	}
+	return ""
+}
+
+// need is the computeNeed of weights of the precision, why naming them.
+func (p weightPrecision) need(why string) computeNeed {
+	return computeNeed{Capability: p.capability(), Precision: p, Why: why}
+}
 
 // gpuGeneration is the GPU of an EC2 instance family and its compute
 // capability.
@@ -54,13 +98,17 @@ var awsGPUFamilies = map[string]gpuGeneration{
 }
 
 // computeNeed is the compute capability the checkpoint's weights need of each
-// GPU, read from its config.json and the preset's --dtype: Capability (8.9)
-// and Why (what needs it: "FP8 weights (compressed-tensors)"). Skip says why
-// nothing is required or the precision could not be read; the GPU generation
-// is then not judged.
+// GPU, read from its config.json (a mistral-format checkpoint's params.json)
+// and the preset's --dtype: Capability (8.9), Precision (what the refusal
+// says) and Why (what needs it: "FP8 weights (compressed-tensors)").
+// Declared is the preset's requirements.minComputeCapability, named where it
+// differs. Skip says why nothing is required or the precision could not be
+// read; the GPU generation is then not judged.
 type computeNeed struct {
 	Capability string
+	Precision  weightPrecision
 	Why        string
+	Declared   string
 	Skip       string
 }
 
@@ -82,18 +130,53 @@ type hfQuantization struct {
 }
 
 // computeNeedFor reads what the planned model's weights need of the GPU
-// (computeNeedOf) from the checkpoint's config.json (checkpointConfig); the
-// preset's --dtype decides the dtype of unquantized weights.
+// (computeNeedOf) from the checkpoint's config.json (checkpointConfig), or
+// from the params.json of a mistral-format checkpoint, which has none
+// (computeNeedOfParams); the preset's --dtype decides the dtype of
+// unquantized weights.
 func (b *Backend) computeNeedFor(ctx context.Context, plan *fitPlan) *computeNeed {
 	if plan.Preset.cpu() {
 		return &computeNeed{Skip: "the preset requests no GPU"}
 	}
-	raw, skip := b.checkpointConfig(ctx, plan)
-	if skip != "" {
-		return &computeNeed{Skip: skip}
+	var need computeNeed
+	switch raw, skip := b.checkpointConfig(ctx, plan); {
+	case raw != nil:
+		need = computeNeedOf(raw, presetDType(plan.Preset))
+	default:
+		need = computeNeed{Skip: skip}
+		if params := b.checkpointParams(ctx, plan); params != nil {
+			need = computeNeedOfParams(params, presetDType(plan.Preset))
+		}
 	}
-	need := computeNeedOf(raw, presetDType(plan.Preset))
+	if plan.Preset != nil {
+		need.Declared = strings.TrimSpace(plan.Preset.Spec.Requirements.MinComputeCapability)
+	}
 	return &need
+}
+
+// checkpointParams is a mistral-format checkpoint's params.json, read where
+// the checkpoint has no config.json: the model image's, else the hub's within
+// the lookup budget. nil when there is none or it could not be read — the
+// check then says why there is no config.json.
+func (b *Backend) checkpointParams(ctx context.Context, plan *fitPlan) []byte {
+	switch p := plan.Preset; {
+	case plan.ConfigSkip != skipNoConfig:
+		return nil
+	case p != nil && !p.storesInCache():
+		if plan.Image == nil {
+			return nil
+		}
+		return plan.Image.Params
+	case plan.Hub == nil:
+		return nil
+	}
+	hctx, _, cancel := b.hubContext(ctx)
+	defer cancel()
+	raw, err := b.hub.ModelParams(hctx, plan.Repo, plan.Revision, plan.Files)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // checkpointConfig is the checkpoint's config.json for the checks that read
@@ -126,7 +209,7 @@ func (b *Backend) checkpointConfig(ctx context.Context, plan *fitPlan) ([]byte, 
 		plan.Config = raw
 	}
 	if plan.Config == nil {
-		plan.ConfigSkip = "the checkpoint has no config.json"
+		plan.ConfigSkip = skipNoConfig
 	}
 	return plan.Config, plan.ConfigSkip
 }
@@ -152,7 +235,7 @@ func presetDType(p *servingPreset) string {
 // dtype of unquantized weights (auto or empty: the checkpoint's own).
 func computeNeedOf(raw []byte, dtypeFlag string) computeNeed {
 	if len(raw) == 0 {
-		return computeNeed{Skip: "the checkpoint has no config.json"}
+		return computeNeed{Skip: skipNoConfig}
 	}
 	var cfg struct {
 		DType              string          `json:"dtype"`
@@ -165,24 +248,60 @@ func computeNeedOf(raw []byte, dtypeFlag string) computeNeed {
 	if need, ok := quantizedNeed(cfg.QuantizationConfig); ok {
 		return need
 	}
+	return dtypeNeed(dtypeFlag, firstNonEmpty(cfg.DType, cfg.TorchDType), "config.json")
+}
+
+// computeNeedOfParams reads what a mistral-format checkpoint's weights need
+// from its params.json: its quantization_config (compressed-tensors shaped,
+// read as config.json's is) or its quantization's qformat_weight; dtypeFlag
+// decides the dtype of unquantized weights, which params.json does not name.
+func computeNeedOfParams(raw []byte, dtypeFlag string) computeNeed {
+	var params struct {
+		QuantizationConfig json.RawMessage `json:"quantization_config"`
+		Quantization       *struct {
+			QFormatWeight string `json:"qformat_weight"`
+		} `json:"quantization"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return computeNeed{Skip: fmt.Sprintf("params.json does not parse: %v", err)}
+	}
+	if need, ok := quantizedNeed(params.QuantizationConfig); ok {
+		return need
+	}
+	if params.Quantization != nil {
+		switch f := strings.ToLower(params.Quantization.QFormatWeight); {
+		case strings.Contains(f, "fp4"):
+			return precisionFP4.need("FP4 weights (params.json qformat_weight " + f + ")")
+		case strings.HasPrefix(f, "fp8"):
+			return precisionFP8.need("FP8 weights (params.json qformat_weight " + f + ")")
+		}
+	}
+	return dtypeNeed(dtypeFlag, "", "params.json")
+}
+
+// dtypeNeed is the need of unquantized weights: the preset's --dtype, else
+// (auto or empty) the checkpoint's own, which source names.
+func dtypeNeed(dtypeFlag, checkpointDType, source string) computeNeed {
 	dtype := strings.ToLower(strings.TrimSpace(dtypeFlag))
 	if dtype == "" || dtype == "auto" {
-		dtype = strings.ToLower(firstNonEmpty(cfg.DType, cfg.TorchDType))
+		dtype = strings.ToLower(checkpointDType)
 	}
 	switch dtype {
 	case "":
-		return computeNeed{Skip: "config.json names no dtype"}
+		return computeNeed{Skip: source + " names no dtype"}
 	case "bfloat16", "bf16":
-		return computeNeed{Capability: computeCapabilityBF16, Why: "bf16 weights"}
+		return precisionBF16.need("bf16 weights")
 	}
 	return computeNeed{Skip: dtype + " weights need no particular GPU generation"}
 }
 
 // quantizedNeed is the need of quantized weights: FP8 (vLLM's fp8 method,
 // compressed-tensors' 8-bit float, ModelOpt's FP8), NVFP4 (compressed-tensors'
-// 4-bit float, ModelOpt's NVFP4). false for unquantized weights, or a
-// scheme whose precision the dtype decides (int4, int8, MXFP4: vLLM
-// dequantizes them on any GPU it supports).
+// 4-bit float, ModelOpt's NVFP4); a checkpoint mixing them needs the highest.
+// ModelOpt's config_groups (mixed precision since ModelOpt 0.43) are read as
+// compressed-tensors' are, its quant_algo and quantized_layers where it has
+// none. false for unquantized weights, or a scheme whose precision the dtype
+// decides (int4, int8, MXFP4: vLLM dequantizes them on any GPU it supports).
 func quantizedNeed(raw json.RawMessage) (computeNeed, bool) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return computeNeed{}, false
@@ -194,36 +313,24 @@ func quantizedNeed(raw json.RawMessage) (computeNeed, bool) {
 	method := strings.ToLower(q.QuantMethod)
 	switch {
 	case method == "fp8":
-		return computeNeed{Capability: computeCapabilityFP8, Why: "FP8 weights (quant_method fp8)"}, true
+		return precisionFP8.need("FP8 weights (quant_method fp8)"), true
 	case method == "compressed-tensors":
-		for _, g := range q.ConfigGroups {
-			if g.Weights == nil || strings.ToLower(g.Weights.Type) != "float" {
-				continue
-			}
-			switch g.Weights.NumBits {
-			case 8:
-				return computeNeed{Capability: computeCapabilityFP8, Why: "FP8 weights (compressed-tensors)"}, true
-			case 4:
-				return computeNeed{Capability: computeCapabilityFP4, Why: "FP4 weights (compressed-tensors)"}, true
-			}
+		switch q.floatGroups() {
+		case precisionFP8:
+			return precisionFP8.need("FP8 weights (compressed-tensors)"), true
+		case precisionFP4:
+			return precisionFP4.need("FP4 weights (compressed-tensors)"), true
 		}
-		return computeNeed{}, false
 	case strings.HasPrefix(method, quantMethodModelOptPrefix):
-		algos := []string{q.QuantAlgo}
-		for _, l := range q.QuantizedLayers {
-			algos = append(algos, l.QuantAlgo)
+		p := q.floatGroups()
+		if p == 0 {
+			p = q.modelOptAlgos()
 		}
-		var fp8 bool
-		for _, a := range algos {
-			switch a = strings.ToUpper(a); {
-			case strings.Contains(a, "FP4"):
-				return computeNeed{Capability: computeCapabilityFP4, Why: "NVFP4 weights (ModelOpt)"}, true
-			case a == "FP8":
-				fp8 = true
-			}
-		}
-		if fp8 {
-			return computeNeed{Capability: computeCapabilityFP8, Why: "FP8 weights (ModelOpt)"}, true
+		switch p {
+		case precisionFP8:
+			return precisionFP8.need("FP8 weights (ModelOpt)"), true
+		case precisionFP4:
+			return precisionFP4.need("NVFP4 weights (ModelOpt)"), true
 		}
 		if strings.EqualFold(q.QuantAlgo, "MIXED_PRECISION") {
 			return computeNeed{Skip: "the ModelOpt checkpoint quantizes its layers in mixed precision and config.json does not say to what"}, true
@@ -232,14 +339,54 @@ func quantizedNeed(raw json.RawMessage) (computeNeed, bool) {
 	return computeNeed{}, false
 }
 
+// floatGroups is the highest float precision of the config_groups' weights
+// (8-bit: FP8, 4-bit: FP4); 0 when no group quantizes its weights to a float.
+func (q hfQuantization) floatGroups() weightPrecision {
+	var p weightPrecision
+	for _, g := range q.ConfigGroups {
+		if g.Weights == nil || strings.ToLower(g.Weights.Type) != "float" {
+			continue
+		}
+		switch g.Weights.NumBits {
+		case 8:
+			p = max(p, precisionFP8)
+		case 4:
+			p = max(p, precisionFP4)
+		}
+	}
+	return p
+}
+
+// modelOptAlgos is the highest precision of ModelOpt's quant_algo and the
+// quantized_layers' algorithms; 0 when none names FP8 or FP4.
+func (q hfQuantization) modelOptAlgos() weightPrecision {
+	var p weightPrecision
+	algos := []string{q.QuantAlgo}
+	for _, l := range q.QuantizedLayers {
+		algos = append(algos, l.QuantAlgo)
+	}
+	for _, a := range algos {
+		switch a = strings.ToUpper(a); {
+		case strings.Contains(a, "FP4"):
+			p = max(p, precisionFP4)
+		case a == "FP8":
+			p = max(p, precisionFP8)
+		}
+	}
+	return p
+}
+
 // computeVerdict is the check of one GPU: what the weights need (Required,
-// Why), what the GPU has (Capability) and how it is named (GPU: "the A10G of
-// a g5.xlarge (Ampere)"); Skip says why it is not judged.
+// Precision, Why; Declared the preset's own floor), what the GPU has
+// (Capability) and how it is named (GPU: "the A10G of a g5.xlarge
+// (Ampere)"); Skip says why it is not judged.
 type computeVerdict struct {
 	Skip       string
 	Fits       bool
 	Required   string
+	Precision  weightPrecision
 	Why        string
+	Declared   string
 	Capability string
 	GPU        string
 }
@@ -287,7 +434,7 @@ func (n *computeNeed) judgeShape(s backend.InstanceShape) computeVerdict {
 // unknown is the verdict of a GPU whose generation the check cannot tell:
 // the need stands in the answer, judged against nothing.
 func (n *computeNeed) unknown(why string) computeVerdict {
-	return computeVerdict{Skip: why, Required: n.Capability, Why: n.Why}
+	return computeVerdict{Skip: why, Required: n.Capability, Precision: n.Precision, Why: n.Why, Declared: n.Declared}
 }
 
 // skipped is the verdict of a need that judges nothing: none read, or none
@@ -308,7 +455,7 @@ func (n *computeNeed) judge(capability, gpu string) computeVerdict {
 		return n.unknown(fmt.Sprintf("%s names compute capability %q, which does not parse", gpu, capability))
 	}
 	need, _ := parseCapability(n.Capability)
-	return computeVerdict{Fits: have >= need, Required: n.Capability, Why: n.Why, Capability: capability, GPU: gpu}
+	return computeVerdict{Fits: have >= need, Required: n.Capability, Precision: n.Precision, Why: n.Why, Declared: n.Declared, Capability: capability, GPU: gpu}
 }
 
 // parseCapability turns "8.6" into a number that orders generations
@@ -324,25 +471,38 @@ func parseCapability(s string) (float64, error) {
 // clause words a verdict for the fit's reason; empty when the weights need
 // nothing the check reads (nothing to say).
 func (v computeVerdict) clause() string {
-	if v.Skip != "" {
-		if v.Required == "" {
-			return ""
+	var out string
+	switch {
+	case v.Skip != "" && v.Required == "":
+		return ""
+	case v.Skip != "":
+		out = fmt.Sprintf("its %s need compute capability %s; %s", v.Why, v.Required, v.Skip)
+	case v.Fits:
+		out = fmt.Sprintf("its %s need compute capability %s and %s has %s", v.Why, v.Required, v.GPU, v.Capability)
+	default:
+		out = fmt.Sprintf("its %s need compute capability %s and %s has %s", v.Why, v.Required, v.GPU, v.Capability)
+		if r := v.Precision.remedy(); r != "" {
+			out += ": " + r
 		}
-		return fmt.Sprintf("its %s need compute capability %s; %s", v.Why, v.Required, v.Skip)
 	}
-	if v.Fits {
-		return fmt.Sprintf("its %s need compute capability %s and %s has %s", v.Why, v.Required, v.GPU, v.Capability)
+	return out + v.declaredDiffers()
+}
+
+// declaredDiffers names the preset's requirements.minComputeCapability where
+// it differs from what the checkpoint needs, as a weights discrepancy is
+// named: the checkpoint is what the check judges by.
+func (v computeVerdict) declaredDiffers() string {
+	if v.Declared == "" {
+		return ""
 	}
-	out := fmt.Sprintf("its %s need compute capability %s and %s has %s", v.Why, v.Required, v.GPU, v.Capability)
-	switch v.Required {
-	case computeCapabilityFP8:
-		out += ": without native FP8 vLLM falls back to the weight-only FP8 Marlin kernel, which answers wrong for such a checkpoint; serve it on a GPU of 8.9 or above (Ada, Hopper, Blackwell) or serve a BF16 checkpoint here"
-	case computeCapabilityFP4:
-		out += ": NVFP4 runs on Blackwell GPUs; serve it there or serve an FP8 or BF16 checkpoint here"
-	case computeCapabilityBF16:
-		out += ": bf16 needs a GPU of 8.0 or above; set --dtype=float16 for this GPU or serve it on a newer one"
+	declared, err := parseCapability(v.Declared)
+	if err != nil {
+		return fmt.Sprintf(" (the preset declares requirements.minComputeCapability %q, which does not parse)", v.Declared)
 	}
-	return out
+	if need, _ := parseCapability(v.Required); need == declared {
+		return ""
+	}
+	return fmt.Sprintf(" (the preset declares requirements.minComputeCapability %s; the checkpoint needs %s)", v.Declared, v.Required)
 }
 
 // applyCompute writes a GPU generation verdict into a fit answer: the

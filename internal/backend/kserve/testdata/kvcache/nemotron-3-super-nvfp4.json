@@ -12,6 +12,42 @@
   "hybrid_override_pattern": "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME",
   "max_position_embeddings": 262144,
   "quantization_config": {
+    "config_groups": {
+      "group_0": {
+        "input_activations": {
+          "dynamic": false,
+          "num_bits": 8,
+          "type": "float"
+        },
+        "weights": {
+          "dynamic": false,
+          "num_bits": 8,
+          "type": "float"
+        },
+        "targets": [
+          "backbone.layers.0.mixer.in_proj",
+          "backbone.layers.0.mixer.out_proj"
+        ]
+      },
+      "group_1": {
+        "input_activations": {
+          "dynamic": false,
+          "num_bits": 4,
+          "type": "float",
+          "group_size": 16
+        },
+        "weights": {
+          "dynamic": false,
+          "num_bits": 4,
+          "type": "float",
+          "group_size": 16
+        },
+        "targets": [
+          "backbone.layers.1.mixer.experts.0.down_proj",
+          "backbone.layers.1.mixer.experts.0.up_proj"
+        ]
+      }
+    },
     "quant_method": "modelopt",
     "quant_algo": "MIXED_PRECISION",
     "kv_cache_scheme": {

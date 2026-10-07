@@ -69,6 +69,10 @@ type presetSpec struct {
 		// memory when part of them stays on disk (an embedding table read
 		// from there); nil: all of them.
 		ResidentWeightsGiB *float64 `json:"residentWeightsGiB"`
+		// MinComputeCapability is the GPU generation the preset declares it
+		// needs ("8.9"); the GPU generation check judges by the checkpoint
+		// and names this one where the two differ.
+		MinComputeCapability string `json:"minComputeCapability"`
 	} `json:"requirements"`
 	Scheduling struct {
 		NodeSelector map[string]string `json:"nodeSelector"`
