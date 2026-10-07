@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- kserve: a pool's instance size may declare its GPU's compute capability — `spec.kserve.gpuPool.instances[].computeCapability` and `spec.kserve.gpuPools.<pool>.instances[].computeCapability`, `major.minor` (`"8.6"`), what cluster-manager knows of the accelerator it sized the pool with (giantswarm/model-manager#266). The fit check judges the GPU generation a model's weights need against the declared value and keeps the instance-family table for a size without one; a value that is not `major.minor` is refused naming the field. Until now a document carrying the key failed the strict parse, and with it the fit check on every cluster.
 - kserve: `load_model` and `POST /api/v1/models/load` take `tracing` (default `false`): `true` composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the served model's spans land under the caller's trace. The served model reports it as `running.tracing` / `tracing` in the loaded list. A preset already served with the other setting is refused with `conflict`: switching tracing restarts the model, so it is stopped and served again.
 
 ### Fixed

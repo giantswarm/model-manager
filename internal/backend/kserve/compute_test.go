@@ -80,6 +80,26 @@ func TestComputeJudgesTheShapeAndTheNode(t *testing.T) {
 	assert.Equal(t, "the GPU generation of a g7.xlarge is unknown to the check", v.Skip)
 	assert.Equal(t, "its FP8 weights (compressed-tensors) need compute capability 8.9; the GPU generation of a g7.xlarge is unknown to the check", v.clause())
 
+	// A shape declaring its compute capability is judged by it, over the
+	// family table and for a family the table does not know.
+	declared := func(instanceType, capability string) backend.InstanceShape {
+		s := shape(instanceType)
+		s.ComputeCapability = capability
+		return s
+	}
+	v = fp8.judgeShape(declared("g5.xlarge", "8.9"))
+	assert.True(t, v.Fits, "the declared value wins over the family table's 8.6")
+	assert.Equal(t, "its FP8 weights (compressed-tensors) need compute capability 8.9 and the GPU of a g5.xlarge has 8.9", v.clause(), "a table that disagrees names nothing")
+	v = fp8.judgeShape(declared("g5.xlarge", "8.6"))
+	assert.False(t, v.Fits)
+	assert.Contains(t, v.clause(), "the A10G of a g5.xlarge (Ampere) has 8.6", "a table that agrees names the GPU")
+	v = fp8.judgeShape(declared("g7.xlarge", "9.0"))
+	assert.True(t, v.Fits)
+	assert.Equal(t, "its FP8 weights (compressed-tensors) need compute capability 8.9 and the GPU of a g7.xlarge has 9.0", v.clause())
+	v = fp8.judgeShape(declared("g7.xlarge", "ampere"))
+	assert.Equal(t, `the GPU of a g7.xlarge names compute capability "ampere", which does not parse`, v.Skip, "a value the document's validation would refuse is not judged")
+	assert.Equal(t, "8.9", v.Required)
+
 	a10g := nodeBudget{Name: "a10g", GPUProduct: "NVIDIA-A10G", Labels: map[string]string{labelGPUComputeMajor: "8", labelGPUComputeMinor: "6"}}
 	v = fp8.judgeNode(a10g)
 	assert.False(t, v.Fits)
@@ -169,6 +189,17 @@ func TestFitCheckRefusesFP8WeightsOnAnAmperePool(t *testing.T) {
 	assert.Equal(t, "g6.xlarge", res.InstanceType)
 	assert.Equal(t, "8.9", res.ComputeCapability)
 	assert.Contains(t, res.Reason, "; its FP8 weights (compressed-tensors) need compute capability 8.9 and the L4 of a g6.xlarge (Ada) has 8.9")
+
+	// The pool's document declares the size's compute capability: the fit
+	// judges by it, not by the family table (giantswarm/model-manager#266).
+	a10g.ComputeCapability = "8.9"
+	f.setPool(ctx, a10g)
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "qwen3-5-9b-fp8"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "g5.xlarge", res.InstanceType)
+	assert.Equal(t, "8.9", res.ComputeCapability)
+	assert.Contains(t, res.Reason, "; its FP8 weights (compressed-tensors) need compute capability 8.9 and the GPU of a g5.xlarge has 8.9")
 }
 
 // On nodes: the A10G's compute capability labels refuse the FP8 preset
