@@ -487,6 +487,77 @@ func TestFitCheckPlacesOnThePoolThatHostsIt(t *testing.T) {
 	assert.Contains(t, res.Reason, "the ready node l4-1 does not host it")
 }
 
+// TestFitCheckPrefersTheSmallestLiveNodeThatHostsIt
+// (giantswarm/model-manager#254): an L4 and an L40S pool. A live L4 node
+// that hosts a small preset is its placement while the L40S pool has no
+// node, and stays it once an L40S node with more free budget is up: the
+// smallest fitting live node, never a larger pool's capacity. A preset only
+// the L40S node hosts goes there; with no live node hosting it, the pool
+// with no node yet whose size does, as before.
+func TestFitCheckPrefersTheSmallestLiveNodeThatHostsIt(t *testing.T) {
+	ctx := context.Background()
+	oci := func(name string, weightsGiB float64, requests string) *corev1.ConfigMap {
+		doc := presetDoc(name, "org/"+name, weightsGiB, "")
+		doc = strings.Replace(doc, "storageUri: hf://org/"+name, "storageUri: oci://127.0.0.1:1/models/"+name+":t", 1)
+		return presetConfigMap(name, strings.Replace(doc, `requests: {cpu: "2", memory: 8Gi}`, requests, 1))
+	}
+	f := newFixture(t, oci("small", 8, `requests: {cpu: "2", memory: 8Gi}`), oci("large", 30, `requests: {cpu: 4, memory: 32Gi}`))
+	for _, n := range []string{testCacheNode, testGPUNode} {
+		require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, n, metav1.DeleteOptions{}))
+	}
+	const l4, l40s = "wc1-gpu-l4", "wc1-gpu-l40s"
+	pools := map[string]backend.GPUPool{
+		l4:   {Instances: []backend.InstanceShape{shape2XLarge, shapeXLarge}},
+		l40s: {Instances: []backend.InstanceShape{shapeL40S2XLarge}},
+	}
+	f.b.opts.GPUPools, f.b.cfg.opts.GPUPools = pools, pools
+	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: &backend.GPUPool{Taint: poolInput().Taint}})
+	addNode := func(name, memory, pool, gpuMiB, product string) {
+		t.Helper()
+		n := node(name, memory, map[string]string{poolLabel: pool, labelGPUCount: "1", labelGPUMemory: gpuMiB, labelGPUProduct: product})
+		n.Spec.Taints = []corev1.Taint{{Key: poolTaintKey, Effect: corev1.TaintEffectNoSchedule}}
+		_, err := f.cs.CoreV1().Nodes().Create(ctx, withGPUs(n, 1), metav1.CreateOptions{})
+		require.NoError(t, err)
+		f.b.inv.invalidate()
+	}
+
+	addNode("l4-1", "32Gi", l4, "24576", "NVIDIA-L4")
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "small"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "l4-1", res.Node, "the live L4 node, not the empty L40S pool")
+	assert.Equal(t, l4, res.Pool)
+	assert.Empty(t, res.InstanceType, "no capacity to wait for")
+
+	addNode("l40s-1", "64Gi", l40s, "49152", "NVIDIA-L40S")
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "small"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "l4-1", res.Node, "the smallest live node that hosts it, though the L40S node has more free budget")
+	assert.Equal(t, l4, res.Pool)
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "small"}))
+	obj, err := f.dyn.Resource(llmisvcGVR).Namespace(testServingNS).Get(ctx, "small", metav1.GetOptions{})
+	require.NoError(t, err)
+	selector, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "nodeSelector")
+	assert.Equal(t, map[string]string{poolLabel: l4}, selector, "pinned to the L4 pool")
+
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "large"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, "l40s-1", res.Node, "only the L40S node hosts it")
+	assert.Equal(t, l40s, res.Pool)
+
+	require.NoError(t, f.cs.CoreV1().Nodes().Delete(ctx, "l40s-1", metav1.DeleteOptions{}))
+	f.b.inv.invalidate()
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "large"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Empty(t, res.Node)
+	assert.Equal(t, l40s, res.Pool, "no live node hosts it: the pool whose size does")
+	assert.Equal(t, "g6e.2xlarge", res.InstanceType)
+	assert.Contains(t, res.Reason, "the ready node l4-1 does not host it")
+}
+
 // l40sPoolNode is a ready g6e.2xlarge of the pool: one 48 GiB L40S.
 func l40sPoolNode() *corev1.Node {
 	n := node(poolNode, "64Gi", map[string]string{poolLabel: poolName, labelGPUCount: "1", labelGPUMemory: "49152", labelGPUProduct: "NVIDIA-L40S"})

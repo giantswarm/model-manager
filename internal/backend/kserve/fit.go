@@ -310,9 +310,9 @@ func describeHubFailure(err error, timeout time.Duration) string {
 }
 
 // placeModel picks the node the model is checked against and writes the
-// verdict into the plan: the explicit node, else the eligible node with the
-// most free budget, cache nodes first; a GPU pool at scale-to-zero answers
-// without a node. With several pools and none pinning every predictor
+// verdict into the plan: the explicit node, else the smallest eligible node
+// that hosts it, cache nodes first (chooseNode); a GPU pool at scale-to-zero
+// answers without a node. With several pools and none pinning every predictor
 // (settings.GPUPools), the verdict names the pool the model goes to — the
 // chosen node's, or a pool with no node yet whose size hosts the model when
 // no node does — and load_model pins the predictor there
@@ -410,45 +410,11 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		}
 		return nil
 	}
-	best := candidates[0]
-	bestFree := best.Budget - reserved[best.Name]
-	for _, n := range candidates[1:] {
-		if free := n.Budget - reserved[n.Name]; free > bestFree {
-			best, bestFree = n, free
-		}
-	}
-	res.Node = best.Name
-	res.BudgetBytes = best.Budget
-	res.BudgetSource = best.BudgetSource
-	res.ReservedBytes = reserved[best.Name]
-	res.FreeBytes = best.Budget - res.ReservedBytes
-	if res.FreeBytes < 0 {
-		res.FreeBytes = 0
-	}
+	best, verdict := b.chooseNode(ctx, plan, candidates, reserved, forServe)
+	*res = verdict
 	if best.Budget <= 0 {
-		res.Reason = fmt.Sprintf("node %s reports no memory budget (%s)", best.Name, best.BudgetSource)
 		return nil
 	}
-	limit := res.BudgetBytes
-	if forServe {
-		limit = res.FreeBytes
-	}
-	res.Fits = res.RequiredBytes <= limit
-	if res.Fits {
-		res.Reason = fmt.Sprintf("%s fit within %s on %s (%s%s)",
-			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, reservedNote(res.ReservedBytes))
-	} else {
-		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
-			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
-	}
-	running := int64(0)
-	if forServe {
-		running = res.ReservedBytes
-	}
-	sh, uv := b.shapeOn(p, best, running, p.residentBytes(res.WeightsBytes)+res.OverheadBytes, 1)
-	applyUnified(res, uv)
-	applyShape(res, p, sh, best, b.roomOn(ctx, best, p))
-	applyKV(res, plan.KV.shaped(sh).judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
@@ -476,6 +442,73 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
 	return nil
+}
+
+// chooseNode picks the live node the model goes to and its verdict
+// (giantswarm/model-manager#254): of the candidates that host it, the
+// smallest — the least budget, so a model a small GPU holds leaves a larger
+// one free and never waits for a larger pool's capacity — the one with the
+// most free budget among equals; when none hosts it, the one with the most
+// free budget, whose verdict names why.
+func (b *Backend) chooseNode(ctx context.Context, plan *fitPlan, candidates []nodeBudget, reserved map[string]int64, forServe bool) (nodeBudget, backend.FitResult) {
+	free := func(i int) int64 { return candidates[i].Budget - reserved[candidates[i].Name] }
+	most, fit := 0, -1
+	verdicts := make([]backend.FitResult, len(candidates))
+	for i, n := range candidates {
+		verdicts[i] = b.judgeNode(ctx, plan, n, reserved[n.Name], forServe)
+		if free(i) > free(most) {
+			most = i
+		}
+		if !verdicts[i].Fits {
+			continue
+		}
+		if fit < 0 || n.Budget < candidates[fit].Budget || (n.Budget == candidates[fit].Budget && free(i) > free(fit)) {
+			fit = i
+		}
+	}
+	if fit < 0 {
+		fit = most
+	}
+	return candidates[fit], verdicts[fit]
+}
+
+// judgeNode is the verdict of serving the planned model on node n, reserved
+// being what the running models hold there: its budget, whether the weights
+// and overhead fit within it (within what is free for a serve), and the
+// shape, requests and KV cache it would run with.
+func (b *Backend) judgeNode(ctx context.Context, plan *fitPlan, n nodeBudget, reserved int64, forServe bool) backend.FitResult {
+	res, p := plan.Result, plan.Preset
+	res.Node = n.Name
+	res.BudgetBytes = n.Budget
+	res.BudgetSource = n.BudgetSource
+	res.ReservedBytes = reserved
+	res.FreeBytes = max(n.Budget-reserved, 0)
+	if n.Budget <= 0 {
+		res.Fits = false
+		res.Reason = fmt.Sprintf("node %s reports no memory budget (%s)", n.Name, n.BudgetSource)
+		return res
+	}
+	limit := res.BudgetBytes
+	if forServe {
+		limit = res.FreeBytes
+	}
+	res.Fits = res.RequiredBytes <= limit
+	if res.Fits {
+		res.Reason = fmt.Sprintf("%s fit within %s on %s (%s%s)",
+			weightsNeed(&res), humanBytes(limit), n.Name, n.BudgetSource, reservedNote(reserved))
+	} else {
+		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
+			weightsNeed(&res), humanBytes(limit), n.Name, n.BudgetSource, humanBytes(n.Budget), reservedNote(reserved))
+	}
+	running := int64(0)
+	if forServe {
+		running = reserved
+	}
+	sh, uv := b.shapeOn(p, n, running, p.residentBytes(res.WeightsBytes)+res.OverheadBytes, 1)
+	applyUnified(&res, uv)
+	applyShape(&res, p, sh, n, b.roomOn(ctx, n, p))
+	applyKV(&res, plan.KV.shaped(sh).judgeOn(n))
+	return res
 }
 
 // labelMachinePool is the node label a GPU pool stamps on its nodes: the
