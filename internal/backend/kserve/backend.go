@@ -93,6 +93,10 @@ type Backend struct {
 	// by storage URI (modelimage.go).
 	imageMu sync.Mutex
 	images  map[string]modelImage
+
+	// webhookWait bounds the create's wait for an admission webhook without a
+	// ready endpoint (webhook.go); tests shorten it.
+	webhookWait time.Duration
 }
 
 // k8s returns the typed client a call should use: the caller's own when ctx
@@ -149,6 +153,8 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		dyn:  opts.Dynamic,
 		inv:  newInventory(),
 		log:  log,
+
+		webhookWait: DefaultWebhookStartWait,
 	}
 	// The client's timeout is the ceiling of one exchange; the interactive
 	// lookups (fit check, search) are bounded by opts.HFTimeout on their

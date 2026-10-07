@@ -310,7 +310,11 @@ paths:
         `LLMInferenceService` from the preset (the only way to serve on kserve)
         and creates it — refused with `503 unavailable` and nothing created
         where the llm-d control plane is not installed (the API not served, or
-        the CRDs without the controller); the response has `loaded=true` with
+        the CRDs without the controller); a create the llmisvc admission
+        webhook cannot take yet (no ready endpoint right after the serving
+        slice is installed) is retried for up to two minutes within the call's
+        deadline, then refused with `503 unavailable` naming the webhook and
+        nothing created; the response has `loaded=true` with
         `running.status` `Pending` until the workload is ready, and a `load` job (see
         `GET /api/v1/jobs`) follows readiness and wires the model into kagent.
         Loading an already-served preset again is a no-op. lemonade: `POST
