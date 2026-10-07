@@ -245,6 +245,20 @@ wins). A shape that switches it on needs the Inference Extension enabled on the 
 (giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
 keeps its shape until it is unloaded and loaded again.
 
+### Tracing
+
+A served model exports no traces unless its load asks for them: `load_model` (`POST
+/api/v1/models/load`) takes `tracing: true`, which composes `spec.tracing: {}` on the
+`LLMInferenceService`. KServe's controller appends its tracing `LLMInferenceServiceConfig`
+(`kserve-config-llm-tracing`) to an object whose spec carries `tracing`, whatever the spec says, so
+the exporter, the platform's OTLP endpoint, the sampler and the pod labels the OTLP gateway routes
+by are the platform's, never a value of the caller's: the model's spans land in the platform's trace
+store under the caller's trace. Off by default — detailed vLLM traces cost throughput. The served
+model reports the switch as `running.tracing` (`list_loaded_models`: `tracing`). It is composed at
+load like the rest of the shape: a preset already served with the other setting is refused with
+`conflict` (`already serves with tracing off, not on; stop it first`), since switching it restarts
+the model.
+
 ### The API interfaces of a served model
 
 Which APIs a served model answers is read from its running server, never declared: once each time

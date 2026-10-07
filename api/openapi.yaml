@@ -359,6 +359,10 @@ paths:
                 node:
                   type: string
                   description: "kserve — pin the workload to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no LLMInferenceService is created."
+                tracing:
+                  type: boolean
+                  default: false
+                  description: "kserve — export the served model's traces: composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the model's spans appear under the caller's trace. Off by default: detailed vLLM traces cost throughput. Reported as `running.tracing`. A preset already served with the other setting answers 409 conflict: stop it first, switching tracing restarts the model."
       responses:
         "200":
           description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; lemonade with `device` and `pinned`; kserve with `status` Pending)
@@ -973,6 +977,7 @@ components:
         preset: { type: string, description: kserve — preset the LLMInferenceService was created from }
         gpus: { type: integer, format: int64, description: kserve — accelerators the workload requests }
         managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the LLMInferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
+        tracing: { type: boolean, description: "kserve — the served model exports traces (the LLMInferenceService carries spec.tracing); absent when it does not" }
         device: { type: string, example: npu, description: "lemonade — where the model runs as Lemonade reports it: npu, gpu, cpu, or several such as `gpu npu`" }
         pinned: { type: boolean, description: lemonade — exempt from slot eviction (loaded with keepAlive -1) }
         runtime: { $ref: "#/components/schemas/Runtime" }

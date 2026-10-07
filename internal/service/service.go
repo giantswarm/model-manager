@@ -153,6 +153,9 @@ type LoadOptions struct {
 	// of a fast link, or copies (the default).
 	Placement string
 	Nodes     []string
+	// Tracing switches the served model's trace export on (kserve); off by
+	// default.
+	Tracing bool
 }
 
 // Errors are the per-backend failures of an aggregate read, keyed by backend
@@ -826,7 +829,7 @@ func (s *Service) loadTarget(ctx context.Context, opts LoadOptions) (backend.Bac
 	if keepAlive == "" {
 		keepAlive = s.cfg.DefaultKeepAlive
 	}
-	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes), Tracing: opts.Tracing}
 	// Loaded at the context window agents will ask for, so their first turn
 	// does not reload the model at another size.
 	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength

@@ -66,6 +66,7 @@ const (
 	argNode              = "node"
 	argPlacement         = "placement"
 	argNodes             = "nodes"
+	argTracing           = "tracing"
 	argQuery             = "query"
 	argLimit             = "limit"
 )
@@ -229,6 +230,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argNode, mcp.Description("kserve: pin the workload to this node")),
 		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: how the model is placed — copies (default: one copy on each of nodes, else one on node or the node the fit check picks; serving an already-served model on more nodes adds copies there) or split: one model across the nodes of one fast link, tensor parallel over the link (refused where the nodes share no fast link; never over the cluster network). check_fit's recommended names the placement to use")),
 		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: placement split, the nodes to split across, in rank order (the first serves the API; default: the first fast link whose nodes all host the model); placement copies, the nodes to run one copy each on, behind the one endpoint (check_fit's copies say which nodes host one)")),
+		mcp.WithBoolean(argTracing, mcp.Description("kserve: export the served model's traces — spec.tracing on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the model's spans appear under the caller's trace. Default false: detailed vLLM traces cost throughput. The served model reports it as running.tracing. A preset already served with the other setting is refused with `conflict`: stop it first, switching tracing restarts the model")),
 		dryRunArg("the plan: whether the model is loaded (loaded), the keep-alive a load would set (ollama), on kserve the fit verdict (fit) and the serving object it would create (manifests) or where it serves already (alreadyServing, servingNodes), and the ModelConfig the auto-wire would ensure (wiring); nothing is loaded, created or wired"),
 		commitArgs("the serving object and its ModelConfig (kserve; mode commit answers unsupported on the other backends, which serve no manifest)"),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -422,7 +424,7 @@ func (t *tools) load(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if name == "" && preset == "" {
 		return errResult(fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)), nil
 	}
-	opts := service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil)}
+	opts := service.LoadOptions{Backend: req.GetString(argBackend, ""), Model: name, KeepAlive: req.GetString(argKeepAlive, ""), Preset: preset, Node: req.GetString(argNode, ""), Placement: req.GetString(argPlacement, ""), Nodes: req.GetStringSlice(argNodes, nil), Tracing: req.GetBool(argTracing, false)}
 	mode, err := modeOf(req)
 	switch {
 	case err != nil:

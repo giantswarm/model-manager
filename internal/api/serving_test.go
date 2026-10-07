@@ -923,6 +923,32 @@ func TestServingLoadOfAServedModelStartsNoLoadJob(t *testing.T) {
 	assert.Len(t, loadJobs(), 1, "no second load job follows a model this call did not start")
 }
 
+// The tracing switch reaches the backend's load request from both APIs, off
+// by default, and the loaded entry reports it.
+func TestServingLoadTracingSwitch(t *testing.T) {
+	f := newServingFixture(t)
+	f.backend.setReady("org/tiny")
+	tracing := func(body map[string]any) any { return body["running"].(map[string]any)["tracing"] }
+
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.False(t, f.backend.loadTracing["org/tiny"], "off by default")
+	assert.Nil(t, tracing(body), "absent while off")
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny", "tracing": true})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.True(t, f.backend.loadTracing["org/tiny"], "REST: the switch reaches the backend")
+	assert.Equal(t, true, tracing(body), "the served model reports it")
+
+	srv := NewMCPServer(f.svc, buildinfo.Info{Version: "test"})
+	out, isErr := callTool(t, srv, ToolLoadModel, map[string]any{argPreset: "tiny"})
+	require.False(t, isErr, out)
+	assert.False(t, f.backend.loadTracing["org/tiny"], "MCP: off by default")
+	out, isErr = callTool(t, srv, ToolLoadModel, map[string]any{argPreset: "tiny", argTracing: true})
+	require.False(t, isErr, out)
+	assert.True(t, f.backend.loadTracing["org/tiny"], "MCP: the switch reaches the backend")
+	assert.Contains(t, out, `"tracing": true`)
+}
+
 // unload of a model whose ModelConfig another model-manager instance created:
 // the serving object goes, the ModelConfig stays, and the answer names it.
 func TestServingUnloadLeavesAModelConfigItDidNotCreate(t *testing.T) {

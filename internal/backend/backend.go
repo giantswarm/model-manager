@@ -248,6 +248,9 @@ type LoadedModel struct {
 	// ManagedBy is the app.kubernetes.io/managed-by label of the serving
 	// object (kserve: model-manager, backstage, ...; empty when unlabelled).
 	ManagedBy string `json:"managedBy,omitempty"`
+	// Tracing is true when the served model exports traces (kserve: the
+	// serving object carries spec.tracing).
+	Tracing bool `json:"tracing,omitempty"`
 	// Device is where the model runs as the backend reports it (lemonade:
 	// npu, gpu, cpu, or several such as "gpu npu"). Absent when the backend
 	// does not say (ollama: VRAMBytes tells; kserve: GPUs).
@@ -427,6 +430,13 @@ type LoadRequest struct {
 	// (AgentEndpoint.ContextLength), so an agent's first turn does not
 	// reload the model at another size. 0: the server's default.
 	ContextLength int64 `json:"contextLength,omitempty"`
+	// Tracing switches the served model's trace export on (kserve:
+	// spec.tracing on the LLMInferenceService, which the controller completes
+	// from its tracing preset — the platform's OTLP endpoint and tenant). Off
+	// by default: detailed vLLM traces cost throughput. A preset served with
+	// the other setting is a conflict: switching restarts the model, so it is
+	// stopped and served again.
+	Tracing bool `json:"tracing,omitempty"`
 	// DryRun composes what the load would create and creates nothing (a
 	// Server answers the objects in LoadResult.Manifests).
 	DryRun bool `json:"-"`
