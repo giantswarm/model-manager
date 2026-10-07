@@ -447,7 +447,32 @@ kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends
 ```
 
 With runtime registration off (`--namespace` empty) the answer says so and names `--backends` as
-the only way. Static values keep working:
+the only way.
+
+**`check_fit` of a preset without a backend** answers what the preset declares instead, so a person
+learns what it needs — and sizes the GPU pool — before the pool, and with it the backend, exists.
+The presets are read from the **catalog** the agent-platform connectivity chart publishes where
+model-manager runs (the ServingPreset ConfigMaps of the preset namespace: chart value
+`kserve.presets.namespace`, else the discovery document's `spec.presets.namespace`, else
+model-manager's namespace), with the caller's client first and the ServiceAccount's second, as the
+discovery document is read. The answer carries the declaration in the fields a judged answer uses —
+`weightsBytes` / `declaredWeightsBytes` (`weightsSource: preset`), `overheadBytes`, `requiredBytes`,
+`computeCapabilityRequired` (`requirements.minComputeCapability`), `devicesPerPod` /
+`tensorParallel` (the preset's own GPUs), `gpuMemoryUtilization`, `maxModelLen`,
+`cacheSource: unknown` — with `verdict: unverified`, `fits: false` (nothing judged the model, and a
+load has nothing to compose onto), `retryable: true`, no `backend`, and a `reason` that opens with
+the `no_backend` answer above and ends with the declaration: `no_backend: no backend registered on
+model-manager <instance> <version>: … or configure --backends — the fit of preset qwen3-8-27b is
+unverified until a backend is registered: it declares 1 GPU, 16.0 GiB of weights and 4.0 GiB of
+overhead (20.0 GiB required), compute capability 8.9 or newer, --max-model-len 32768`. The preset
+is resolved as a backend resolves it: by `preset`, or the single preset serving `model`. An unknown
+preset is `not_found` naming the published ones; a model no preset serves (its weights are the hub's
+to size, which a backend asks), a cluster with no preset published (the chart renders the catalog
+only where model serving is on) and a catalog the caller cannot read stay `no_backend`, naming
+why. A registered backend answers as before, the catalog has no say; `backend: ollama` (or any
+other name) is never answered from it.
+
+Static values keep working:
 `--backends=ollama,lemonade` (chart `backends`) or `--backend=ollama` lists those with `source:
 static`, in the operator's order, the first being the default backend; registered backends follow,
 sorted by name. A document naming a static kind is refused and reported — the chart values win;
