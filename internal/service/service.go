@@ -44,6 +44,12 @@ type Config struct {
 	// neither adopts running downloads nor reconciles wiring, since both run
 	// without a caller.
 	CallerOnly bool
+	// Instance, Version and DocumentNamespace name this model-manager in
+	// the no_backend answer: its --instance, its build and the namespace
+	// it watches for backend documents (empty: runtime registration off).
+	Instance          string
+	Version           string
+	DocumentNamespace string
 }
 
 // BackendResponse is one backend's identity plus effective capabilities.
@@ -185,7 +191,7 @@ type Service struct {
 // New builds a Service over the static backends, in the operator's order:
 // the first is the default backend. The list may be empty — backends are
 // then registered at runtime (RegisterDocument) and every backend-scoped call
-// answers backend.ErrNoBackend until one is. wirer may be nil (wiring
+// answers backend.ErrNoBackend (a backend.NoBackendError) until one is. wirer may be nil (wiring
 // disabled).
 func New(backends []backend.Backend, jm *jobs.Manager, wirer wiring.Wirer, info *WiringInfo, cfg Config, log *slog.Logger) *Service {
 	if log == nil {
@@ -362,15 +368,22 @@ func (s *Service) named(name string) (backend.Backend, error) {
 		if b := s.Default(); b != nil {
 			return b, nil
 		}
-		return nil, backend.ErrNoBackend
+		return nil, s.noBackend()
 	}
 	if b, ok := s.lookup(backend.Name(name)); ok {
 		return b, nil
 	}
 	if len(s.all()) == 0 {
-		return nil, backend.ErrNoBackend
+		return nil, s.noBackend()
 	}
 	return nil, fmt.Errorf("%w: unknown backend %q (configured: %s)", backend.ErrInvalid, name, joinNames(s.Names()))
+}
+
+// noBackend is backend.ErrNoBackend naming this instance and the fix.
+func (s *Service) noBackend() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &backend.NoBackendError{Instance: s.cfg.Instance, Version: s.cfg.Version, Namespace: s.cfg.DocumentNamespace, Invalid: len(s.problems)}
 }
 
 // targets are the backends a read addresses: the named one, or all of them.
@@ -378,7 +391,7 @@ func (s *Service) targets(name string) ([]backend.Backend, error) {
 	if strings.TrimSpace(name) == "" {
 		all := s.all()
 		if len(all) == 0 {
-			return nil, backend.ErrNoBackend
+			return nil, s.noBackend()
 		}
 		return all, nil
 	}

@@ -64,7 +64,7 @@ func newRegistrationFixtureBuilding(t *testing.T, build registry.Builder, static
 	t.Helper()
 	client := kubefake.NewSimpleClientset()
 	fw := newFakeWirer()
-	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
+	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: testNamespace}, nil)
 	reg := registry.New(client, testNamespace, build, svc, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
@@ -93,9 +93,17 @@ func TestZeroBackends(t *testing.T) {
 	for _, tool := range []string{ToolGetBackend, ToolListModels, ToolListLoadedModels} {
 		text, isErr := callTool(t, f.srv, tool, nil)
 		assert.True(t, isErr, tool)
-		assert.Contains(t, text, "no_backend: no backend registered: register one with add_backend", tool)
+		assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3", tool)
 	}
-	text, isErr := callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
+	// check_fit names the instance, the watched namespace and both ways a
+	// kserve backend comes to exist.
+	text, isErr := callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace "+testNamespace)
+	assert.Contains(t, text, "add_backend kind=kserve servingNamespace=<namespace>")
+	assert.Contains(t, text, "cluster-manager registers model-backend-kserve with the first GPU node pool it creates")
+	assert.Contains(t, text, "add_backend kind=ollama|lmstudio|lemonade endpoint=<url>")
+	text, isErr = callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "no backend registered")
 }
