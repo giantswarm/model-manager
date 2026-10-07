@@ -615,6 +615,15 @@ scheduling by the registered backend document (`docs/backends.md`).
   and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
   `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
   named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
+  The GPU generation is judged the same way, from the same `config.json`: the weights' need —
+  FP8 (`quant_method: fp8`, compressed-tensors 8-bit float, ModelOpt FP8) needs compute
+  capability 8.9 (Ada, Hopper, Blackwell: below it vLLM falls back to the weight-only FP8
+  Marlin kernel, which answers wrong for such a checkpoint), NVFP4 10.0, bf16 8.0 (the preset's
+  `--dtype` decides unquantized weights) — against a node's `nvidia.com/gpu.compute.major`/
+  `minor` labels or the GPU of a pool size's instance family (g4dn T4 7.5, g5 A10G 8.6, g6 L4
+  8.9, g6e L40S 8.9); a GPU below it is a refusal naming both (`computeCapabilityRequired`,
+  `computeCapability`), and among several pools one whose GPU is below the need is skipped for
+  one that is not.
   On a unified-memory node (GPUs without memory of their own, a GB10) vLLM claims
   `--gpu-memory-utilization × the node's whole memory` at start, outside the pod's memory limit
   and the kubelet's accounting: that claim (`unifiedReservationBytes`) must fit the node's
