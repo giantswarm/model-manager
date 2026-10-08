@@ -153,7 +153,11 @@ func (s *Service) PlanLoad(ctx context.Context, opts LoadOptions) (*OpPlan, erro
 		}
 	}
 	if s.cfg.AutoWire && !plan.AlreadyServing {
-		if plan.Wiring, err = s.planWiring(ctx, b, m.Name); err != nil {
+		ref := m.Name
+		if isServer {
+			ref = servedRef(m.Name, req.Preset) // the serving object the load creates
+		}
+		if plan.Wiring, err = s.planWiring(ctx, b, ref); err != nil {
 			return nil, err
 		}
 	}

@@ -171,8 +171,11 @@ func (f *fakeServing) Load(ctx context.Context, req backend.LoadRequest) error {
 	}
 	return f.fakeBackend.Load(ctx, req)
 }
+
+// AgentEndpoint resolves a preset name to its model, as GetModel does: the
+// fake names a served object after its model.
 func (f *fakeServing) AgentEndpoint(model string) backend.AgentEndpoint {
-	name := strings.ReplaceAll(model, "/", "-")
+	name := strings.ReplaceAll(f.repoOf(model), "/", "-")
 	f.mu.Lock()
 	routed := f.gateway != ""
 	f.mu.Unlock()
