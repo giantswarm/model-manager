@@ -184,6 +184,17 @@ if helm template mm "$CHART" --show-only templates/rbac.yaml --set 'backends={ol
   fail "backends list without kserve renders kserve RBAC"
 fi
 
+# The Kustomization inventory read (gitops_owned on a live unload or unwire)
+# renders with every RBAC set, wiring on or off, and not under downstream
+# OAuth, where the caller's RBAC governs.
+helm template mm "$CHART" --show-only templates/rbac.yaml --set kagent.disableWiring=true \
+  | grep -q -- '^  name: mm-model-manager-flux-inventory$' \
+  || fail "the flux-inventory ClusterRole must render with wiring off"
+if helm template mm "$CHART" --show-only templates/rbac.yaml "${DEX[@]}" --set oauth.downstream.enabled=true 2>/dev/null \
+  | grep -q -- 'flux-inventory'; then
+  fail "downstream OAuth renders the flux-inventory ClusterRole"
+fi
+
 # The one-backend form is untouched: `backend: ollama` renders --backend=ollama
 # and no --backends.
 got=$(args --set backend=ollama)

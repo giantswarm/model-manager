@@ -69,11 +69,11 @@ func (s *Service) PlanUnwire(ctx context.Context, name, ref string) (*WirePlan, 
 		return nil, err
 	}
 	plan := &WirePlan{Model: ref, Manifests: []map[string]any{}}
-	if b == nil {
+	if b == "" {
 		return plan, nil
 	}
-	plan.Backend = b.Name()
-	r, err := s.wirer.Removal(ctx, b.Name(), ref)
+	plan.Backend = b
+	r, err := s.wirer.Removal(ctx, b, ref)
 	if err != nil {
 		return nil, err
 	}

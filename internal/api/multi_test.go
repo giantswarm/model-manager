@@ -254,6 +254,58 @@ func TestMultiBackendResolution(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 }
 
+// wiredOn records a ModelConfig model-manager created for model on b, as
+// the wirer finds it on the cluster.
+func wiredOn(fw *fakeWirer, b backend.Name, model string) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	fw.refs[refKey(b, model)] = wiring.ModelConfigRef{Name: wiring.ModelConfigName("", model), Namespace: "kagent", Model: model, Managed: true, Backend: b}
+}
+
+func TestUnwireRemovesTheModelConfigOfABackendNoLongerRegistered(t *testing.T) {
+	// The kserve backend is gone (its last GPU pool deleted, the backend
+	// unregistered); the ModelConfig model-manager wired for its model stays.
+	ollama := newFakeBackend()
+	f := newMultiFixture(t, ollama)
+	wiredOn(f.wirer, backend.NameKServe, "qwen3-8b")
+
+	// Unqualified: found through the ModelConfig's own backend label.
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "kserve", body["backend"])
+	_, ok := f.wirer.get(backend.NameKServe, "qwen3-8b")
+	assert.False(t, ok, "the ModelConfig is removed under the backend its label names")
+
+	// Named: the same, although no backend is registered under the name.
+	wiredOn(f.wirer, backend.NameKServe, "qwen3-8b")
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b", "backend": "kserve"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "kserve", body["backend"])
+	assert.Equal(t, 0, f.wirer.count())
+
+	// An unknown backend with nothing wired under it stays invalid.
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b", "backend": "kserve"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_request", body["error"].(map[string]any)["code"])
+
+	// No backend registered at all: the ModelConfig still goes.
+	fw := newFakeWirer()
+	wiredOn(fw, backend.NameKServe, "qwen3-8b")
+	svc := service.New(nil, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{}, nil)
+	mux := http.NewServeMux()
+	NewREST(svc, nil).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	none := &fixture{srv: srv}
+	status, body = none.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "kserve", body["backend"])
+	assert.Equal(t, 0, fw.count())
+	status, body = none.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Empty(t, body["backend"], "nothing wired anywhere: unwired, idempotent")
+}
+
 func TestMultiBackendPullGoesToTheNamedOrDefaultBackend(t *testing.T) {
 	f := newMultiFixture(t)
 

@@ -334,7 +334,7 @@ func (c *Committer) plan(ctx context.Context, remote Remote, loc location, part 
 	}
 	res := c.result(loc, part, "", "", nil)
 	if len(part.Remove) > 0 && !loc.prune && loc.kustomization != "" {
-		res.LiveSteps = append(res.LiveSteps, fmt.Sprintf("Flux does not prune Kustomization %s (spec.prune false): after the merge the objects stay on the installation — delete them by hand", loc.kustomization))
+		res.LiveSteps = append(res.LiveSteps, fmt.Sprintf("Flux does not prune Kustomization %s (spec.prune false): after the merge the objects stay on the installation, dropped from the Kustomization's inventory — repeat the call in mode apply once the pull request has merged, and model-manager removes them live", loc.kustomization))
 	}
 	return planned{loc: loc, plan: plan, res: res}, nil
 }

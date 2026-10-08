@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1059,71 +1060,77 @@ func (s *Service) Wire(ctx context.Context, name, ref string, opts backend.WireO
 	return s.wireModel(ctx, b, m.Name, opts)
 }
 
-// Unwire removes the ModelConfig for a model (which need not exist anymore)
-// and reports the backend it belonged to. Unqualified, the managed
-// ModelConfigs are consulted first — the model may be gone from its backend.
+// Unwire removes the ModelConfig for a model (which need not exist anymore,
+// nor its backend) and reports the backend it belonged to. Unqualified, the
+// managed ModelConfigs are consulted first — the model may be gone from its
+// backend.
 func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, error) {
 	b, ref, err := s.unwireTarget(ctx, name, ref)
-	if err != nil || b == nil {
+	if err != nil || b == "" {
 		return "", err
 	}
-	if err := s.wirer.Remove(ctx, b.Name(), ref); err != nil {
-		return b.Name(), err
+	if err := s.wirer.Remove(ctx, b, ref); err != nil {
+		return b, err
 	}
-	s.log.Info("model unwired", "backend", b.Name(), "model", ref, identity.LogAttr(ctx))
-	return b.Name(), nil
+	s.log.Info("model unwired", "backend", b, "model", ref, identity.LogAttr(ctx))
+	return b, nil
 }
 
 // unwireTarget is the backend and canonical reference an unwire of ref
-// addresses; a nil backend without error when nothing is wired or
-// downloaded under ref, which counts as unwired.
-func (s *Service) unwireTarget(ctx context.Context, name, ref string) (backend.Backend, string, error) {
+// addresses; an empty backend without error when nothing is wired or
+// downloaded under ref, which counts as unwired. The backend is the one the
+// ModelConfig's label names, registered or not: a ModelConfig model-manager
+// created outlives the backend it was wired for (kserve's, once the last GPU
+// pool is gone), and is removed under that name.
+func (s *Service) unwireTarget(ctx context.Context, name, ref string) (backend.Name, string, error) {
 	if s.wirer == nil {
-		return nil, "", ErrWiringDisabled
+		return "", "", ErrWiringDisabled
 	}
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return nil, "", fmt.Errorf("%w: model name is required", backend.ErrInvalid)
+		return "", "", fmt.Errorf("%w: model name is required", backend.ErrInvalid)
 	}
+	owners, err := s.wiredBackends(ctx, ref)
+	if err != nil {
+		return "", "", err
+	}
+	var target backend.Name
 	var b backend.Backend
-	if strings.TrimSpace(name) != "" || len(s.all()) == 1 {
-		var err error
-		if b, err = s.named(name); err != nil {
-			return nil, "", err
+	switch name = strings.TrimSpace(name); {
+	case name != "":
+		target = backend.Name(name)
+		if b, err = s.named(name); err != nil && !slices.Contains(owners, target) {
+			return "", "", err
 		}
-	} else {
-		owners, err := s.wiredBackends(ctx, ref)
-		if err != nil {
-			return nil, "", err
-		}
-		switch len(owners) {
-		case 1:
-			b, _ = s.lookup(owners[0])
-		case 0:
+	case len(owners) == 1:
+		target = owners[0]
+		b, _ = s.lookup(target)
+	case len(owners) > 1:
+		return "", "", fmt.Errorf("%w: %s is wired on %s; name the backend", backend.ErrConflict, ref, joinNames(owners))
+	default:
+		// Nothing wired: the downloaded model names its backend, and absent
+		// counts as unwired.
+		resolved, _, err := s.resolve(ctx, "", ref)
+		switch {
+		case err == nil:
+			b, target = resolved, resolved.Name()
+		case errors.Is(err, backend.ErrNotFound):
+			return "", "", nil
 		default:
-			return nil, "", fmt.Errorf("%w: %s is wired on %s; name the backend", backend.ErrConflict, ref, joinNames(owners))
-		}
-		if b == nil {
-			resolved, _, err := s.resolve(ctx, "", ref)
-			switch {
-			case err == nil:
-				b = resolved
-			case errors.Is(err, backend.ErrNotFound):
-				// Nothing wired, nothing downloaded: absent counts as success.
-				return nil, "", nil
-			default:
-				return nil, "", err
-			}
+			return "", "", err
 		}
 	}
-	if m, err := b.GetModel(ctx, ref); err == nil {
-		ref = m.Name
+	if b != nil {
+		if m, err := b.GetModel(ctx, ref); err == nil {
+			ref = m.Name
+		}
 	}
-	return b, ref, nil
+	return target, ref, nil
 }
 
-// wiredBackends lists the configured backends holding a managed ModelConfig
-// for ref (a label-less ModelConfig counts for the default backend).
+// wiredBackends lists the backends holding a managed ModelConfig for ref —
+// as their labels name them, registered or not; a label-less ModelConfig
+// counts for the default backend.
 func (s *Service) wiredBackends(ctx context.Context, ref string) ([]backend.Name, error) {
 	refs, err := s.wirer.List(ctx)
 	if err != nil {
@@ -1136,7 +1143,7 @@ func (s *Service) wiredBackends(ctx context.Context, ref string) ([]backend.Name
 			continue
 		}
 		owner := r.Backend
-		if _, ok := s.lookup(owner); !ok {
+		if owner == "" {
 			if d := s.Default(); d != nil {
 				owner = d.Name()
 			}

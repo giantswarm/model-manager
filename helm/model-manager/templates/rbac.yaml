@@ -224,6 +224,40 @@ subjects:
     name: {{ include "model-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
+{{- if $rbac }}
+{{- /*
+Whether Flux still applies an object it labelled: a Kustomization's
+status.inventory decides gitops_owned on a live unload or unwire. A removal
+merged while the Kustomization does not prune leaves the object on the
+cluster, labels and all, and model-manager removes it. Reads only.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "model-manager.fullname" . }}-flux-inventory
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "model-manager.fullname" . }}-flux-inventory
+  labels:
+    {{- include "model-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "model-manager.fullname" . }}-flux-inventory
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "model-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if and $rbac .Values.github.enabled (not .Values.kagent.disableWiring) }}
 {{- /*
 Commit mode follows the kagent namespace to the repository that owns it: the

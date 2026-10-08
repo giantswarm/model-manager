@@ -321,7 +321,7 @@ func atLegacy(obj *unstructured.Unstructured) *unstructured.Unstructured {
 // group.
 func TestAGitOpsModelConfigAtKagentDevMovesInGit(t *testing.T) {
 	ctx := t.Context()
-	k, client := newFakeKagent(t, atLegacy(committed("qwen3-0-6b-gguf", "Qwen3-0.6B-GGUF", kustomizeLabels)))
+	k, client := newFakeKagent(t, atLegacy(committed("qwen3-0-6b-gguf", "Qwen3-0.6B-GGUF", kustomizeLabels)), applying(inventoryID(LegacyKagentGroup, "qwen3-0-6b-gguf")))
 
 	r, err := k.Render(ctx, "Qwen3-0.6B-GGUF", lemonadeEndpoint("Qwen3-0.6B-GGUF"))
 	require.NoError(t, err)
