@@ -205,10 +205,58 @@ func TestRemovalListsTheModelConfigAndItsPlaceholder(t *testing.T) {
 	assert.Empty(t, none.Objects)
 }
 
-func TestToRefReportsTheGitOpsOwner(t *testing.T) {
-	ref := toRef(committed("qwen3-0-6b-gguf", "Qwen3-0.6B-GGUF", kustomizeLabels))
-	require.NotNil(t, ref.GitOps)
-	assert.Equal(t, "flux", ref.GitOps.Name)
-	assert.True(t, ref.Managed)
-	assert.Nil(t, toRef(committed("x", "x", nil)).GitOps)
+// TestListReportsTheOwnerTheWriteToolsActOn: list, list-all and lookup hold
+// the GitOps owner to the Kustomization's inventory, as unwire and wire do.
+func TestListReportsTheOwnerTheWriteToolsActOn(t *testing.T) {
+	for name, tc := range map[string]struct {
+		labels map[string]any
+		ks     []runtime.Object
+		owned  bool
+	}{
+		"listed in the inventory":    {kustomizeLabels, []runtime.Object{applying(inventoryID(KagentGroup, "qwen3-0-6b-gguf"))}, true},
+		"dropped from the inventory": {kustomizeLabels, []runtime.Object{applying(inventoryID(KagentGroup, "other"))}, false},
+		"kustomization gone":         {kustomizeLabels, nil, false},
+		"no inventory recorded yet":  {kustomizeLabels, []runtime.Object{noInventory()}, true},
+		"without flux labels":        {nil, []runtime.Object{applying(inventoryID(KagentGroup, "qwen3-0-6b-gguf"))}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			k, _ := newFakeKagent(t, append([]runtime.Object{committed("qwen3-0-6b-gguf", "Qwen3-0.6B-GGUF", tc.labels)}, tc.ks...)...)
+
+			ref, err := k.Lookup(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+			require.NoError(t, err)
+			refs := []ModelConfigRef{*ref}
+			for _, list := range []func(context.Context) ([]ModelConfigRef, error){k.List, k.ListAll} {
+				got, err := list(ctx)
+				require.NoError(t, err)
+				require.Len(t, got, 1)
+				refs = append(refs, got...)
+			}
+			for _, ref := range refs {
+				assert.True(t, ref.Managed)
+				if !tc.owned {
+					assert.Nil(t, ref.GitOps, "reported as written live")
+					continue
+				}
+				require.NotNil(t, ref.GitOps)
+				assert.Equal(t, gitops.Owner{Kind: gitops.KindKustomization, Namespace: "flux-giantswarm", Name: "flux"}, *ref.GitOps)
+			}
+
+			// The write tools agree: a gitops-owned ModelConfig is refused live.
+			err = k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+			if tc.owned {
+				require.ErrorIs(t, err, backend.ErrGitOpsOwned)
+			} else {
+				require.NotErrorIs(t, err, backend.ErrGitOpsOwned)
+			}
+		})
+	}
+}
+
+// noInventory is the Kustomization flux-giantswarm/flux before it recorded
+// what it applies.
+func noInventory() *unstructured.Unstructured {
+	ks := applying()
+	unstructured.RemoveNestedField(ks.Object, "status")
+	return ks
 }

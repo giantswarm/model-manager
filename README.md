@@ -88,7 +88,9 @@ written. A Kustomization is held to its `status.inventory`: an object it no
 longer lists — its file removed from git while the Kustomization does not
 prune, which leaves the object on the cluster with its labels — or whose
 Kustomization is gone is applied by nothing, and the unload and unwire paths
-remove it live. A ModelConfig reports that owner as `gitops`, and the wiring
+remove it live. A ModelConfig reports the owner that applies it as `gitops`
+(`list_model_configs`, the inventory held the same way: a leftover reports
+none), and the wiring
 reconciler and the unload, unwire and delete paths leave such a ModelConfig
 alone. `repository_unavailable` (412) means a `mode: commit` call targets a
 repository model-manager's GitHub App is not installed on (see
