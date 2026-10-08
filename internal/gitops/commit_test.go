@@ -135,6 +135,56 @@ func TestCommitRemovalOfAnObjectWrittenLiveIsRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "written live")
 }
 
+// keptModelConfig is a ModelConfig the non-pruning Kustomization
+// flux-giantswarm/models labels; inventory is that Kustomization's.
+func keptModelConfig(inventory []string) (*unstructured.Unstructured, dynamic.Interface) {
+	mc := modelConfig("x")
+	mc.SetLabels(map[string]string{LabelKustomizeName: "models", LabelKustomizeNamespace: "flux-giantswarm"})
+	return mc, cluster(kustomization(inventory))
+}
+
+func TestCommitRemovalOfAnObjectANonPruningKustomizationKeptOffersModeApply(t *testing.T) {
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{})
+	mc, dyn := keptModelConfig([]string{"model-serving_tiny_serving.kserve.io_LLMInferenceService"})
+	req := Request{Namespace: "kagent", Remove: []*unstructured.Unstructured{mc}, Verb: "unwire", Subject: "x"}
+
+	_, err := committer(dyn, fake).Commit(asPerson(), req)
+	require.ErrorIs(t, err, backend.ErrConflict)
+	assert.Contains(t, err.Error(), "does not prune Kustomization flux-giantswarm/models (spec.prune false)")
+	assert.Contains(t, err.Error(), "repeat the call in mode apply")
+	assert.NotContains(t, err.Error(), "written live")
+
+	dry := req
+	dry.DryRun = true
+	_, dryErr := committer(dyn, fake).Commit(asPerson(), dry)
+	require.Error(t, dryErr)
+	assert.Equal(t, err.Error(), dryErr.Error(), "the dry run answers as the live call")
+	assert.Empty(t, fake.PullRequests())
+}
+
+func TestCommitRemovalOfAnObjectGitStillDeclaresIsAnsweredAsBefore(t *testing.T) {
+	t.Run("its file in model-manager's directory", func(t *testing.T) {
+		fake := commit.NewFake()
+		fake.AddBranch(repo, "main", map[string][]byte{
+			"platform/model-manager/kustomization.yaml": []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- x.yaml\n"),
+			"platform/model-manager/x.yaml":             []byte("kind: ModelConfig\n"),
+		})
+		mc, dyn := keptModelConfig([]string{})
+		res, err := committer(dyn, fake).Commit(asPerson(), Request{Namespace: "kagent", Remove: []*unstructured.Unstructured{mc}, Verb: "unwire", Subject: "x"})
+		require.NoError(t, err)
+		assert.NotEmpty(t, res.PullRequest)
+	})
+	t.Run("listed in its Kustomization's inventory", func(t *testing.T) {
+		fake := commit.NewFake()
+		fake.AddBranch(repo, "main", map[string][]byte{})
+		mc, dyn := keptModelConfig([]string{"kagent_x_kagent.dev_ModelConfig"})
+		_, err := committer(dyn, fake).Commit(asPerson(), Request{Namespace: "kagent", Remove: []*unstructured.Unstructured{mc}, Verb: "unwire", Subject: "x"})
+		require.ErrorIs(t, err, backend.ErrConflict)
+		assert.Contains(t, err.Error(), "written live")
+	})
+}
+
 func TestCommitRemovesTheFiles(t *testing.T) {
 	fake := commit.NewFake()
 	fake.AddBranch(repo, "main", map[string][]byte{

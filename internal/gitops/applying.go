@@ -28,6 +28,42 @@ func Applying(ctx context.Context, dyn dynamic.Interface, obj *unstructured.Unst
 	if owner == nil || owner.Kind != KindKustomization {
 		return owner, nil
 	}
+	ks, err := labelling(ctx, dyn, owner, obj)
+	if ks == nil || err != nil {
+		return nil, err
+	}
+	if lists, recorded := inventoried(ks, obj); !recorded || lists {
+		return owner, nil
+	}
+	return nil, nil
+}
+
+// Kept is the Kustomization that left obj behind: its labels name it, it does
+// not prune (spec.prune false) and its recorded inventory no longer lists obj.
+// The file was removed from git, and Flux will not delete obj: only a live
+// removal takes it away. nil for any other object, one git still declares
+// included. dyn reads the Kustomization, on the cluster Flux runs on.
+func Kept(ctx context.Context, dyn dynamic.Interface, obj *unstructured.Unstructured) (*Owner, error) {
+	owner := OwnerOf(obj.GetLabels())
+	if owner == nil || owner.Kind != KindKustomization {
+		return nil, nil
+	}
+	ks, err := labelling(ctx, dyn, owner, obj)
+	if ks == nil || err != nil {
+		return nil, err
+	}
+	if prune, _, _ := unstructured.NestedBool(ks.Object, "spec", "prune"); prune {
+		return nil, nil
+	}
+	if lists, recorded := inventoried(ks, obj); !recorded || lists {
+		return nil, nil
+	}
+	return owner, nil
+}
+
+// labelling reads the Kustomization owner that obj's labels name; nil when it
+// is gone.
+func labelling(ctx context.Context, dyn dynamic.Interface, owner *Owner, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	ks, err := dyn.Resource(KustomizationGVR).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
@@ -35,11 +71,14 @@ func Applying(ctx context.Context, dyn dynamic.Interface, obj *unstructured.Unst
 	if err != nil {
 		return nil, fmt.Errorf("read %s for whether it still applies %s %s/%s: %w", owner, obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
+	return ks, nil
+}
+
+// inventoried reports whether the Kustomization ks has recorded an inventory
+// and whether it lists obj.
+func inventoried(ks, obj *unstructured.Unstructured) (lists, recorded bool) {
 	entries, recorded, _ := unstructured.NestedSlice(ks.Object, "status", "inventory", "entries")
-	if !recorded || inventoryLists(entries, obj) {
-		return owner, nil
-	}
-	return nil, nil
+	return recorded && inventoryLists(entries, obj), recorded
 }
 
 // Refuse is ErrGitOpsOwned for an object Flux applies from git (Applying),
