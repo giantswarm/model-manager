@@ -248,6 +248,9 @@ type LoadedModel struct {
 	// ManagedBy is the app.kubernetes.io/managed-by label of the serving
 	// object (kserve: model-manager, backstage, ...; empty when unlabelled).
 	ManagedBy string `json:"managedBy,omitempty"`
+	// Tracing is true when the served model exports traces (kserve: the
+	// serving object carries spec.tracing).
+	Tracing bool `json:"tracing,omitempty"`
 	// Device is where the model runs as the backend reports it (lemonade:
 	// npu, gpu, cpu, or several such as "gpu npu"). Absent when the backend
 	// does not say (ollama: VRAMBytes tells; kserve: GPUs).
@@ -427,6 +430,13 @@ type LoadRequest struct {
 	// (AgentEndpoint.ContextLength), so an agent's first turn does not
 	// reload the model at another size. 0: the server's default.
 	ContextLength int64 `json:"contextLength,omitempty"`
+	// Tracing switches the served model's trace export on (kserve:
+	// spec.tracing on the LLMInferenceService, which the controller completes
+	// from its tracing preset — the platform's OTLP endpoint and tenant). Off
+	// by default: detailed vLLM traces cost throughput. A preset served with
+	// the other setting is a conflict: switching restarts the model, so it is
+	// stopped and served again.
+	Tracing bool `json:"tracing,omitempty"`
 	// DryRun composes what the load would create and creates nothing (a
 	// Server answers the objects in LoadResult.Manifests).
 	DryRun bool `json:"-"`
@@ -452,10 +462,14 @@ type Preset struct {
 	// claims at start (vLLM's --gpu-memory-utilization, 0.9 by default); on
 	// a unified-memory node it is a share of the whole node. Absent for a
 	// CPU preset.
-	GPUMemoryUtilization float64           `json:"gpuMemoryUtilization,omitempty"`
-	WeightsBytes         int64             `json:"weightsBytes"`
-	OverheadBytes        int64             `json:"overheadBytes"`
-	RequiredBytes        int64             `json:"requiredBytes"`
+	GPUMemoryUtilization float64 `json:"gpuMemoryUtilization,omitempty"`
+	WeightsBytes         int64   `json:"weightsBytes"`
+	OverheadBytes        int64   `json:"overheadBytes"`
+	RequiredBytes        int64   `json:"requiredBytes"`
+	// MinComputeCapability is the GPU generation the preset declares it
+	// needs (requirements.minComputeCapability, "8.9"); empty when it
+	// declares none.
+	MinComputeCapability string            `json:"minComputeCapability,omitempty"`
 	Args                 []string          `json:"args,omitempty"`
 	NodeSelector         map[string]string `json:"nodeSelector,omitempty"`
 	ChatTemplate         string            `json:"chatTemplate,omitempty"`
@@ -519,6 +533,11 @@ type FitResult struct {
 	// (the slice is still installing), so the same call answers
 	// differently in a moment.
 	Retryable bool `json:"retryable,omitempty"`
+	// Verdict is VerdictUnverified when nothing judged the model — no
+	// backend is registered, and the numbers are what the preset declares
+	// (its catalog is read without one); Fits is then false and Reason
+	// starts with no_backend. Empty when a backend judged the model.
+	Verdict string `json:"verdict,omitempty"`
 	// Preset is the preset the check used for overhead (and weights when the
 	// hub could not tell); Presets lists every preset serving the model.
 	Preset  string   `json:"preset,omitempty"`
@@ -584,6 +603,18 @@ type FitResult struct {
 	BudgetSource  string `json:"budgetSource,omitempty"`
 	ReservedBytes int64  `json:"reservedBytes"`
 	FreeBytes     int64  `json:"freeBytes"`
+	// FreeGPUs is, on a node whose GPUs have memory of their own (kserve),
+	// the devices the predictors running there leave free: a predictor
+	// needs its GPUs free beside the memory. Absent elsewhere.
+	FreeGPUs *int64 `json:"freeGpus,omitempty"`
+	// ComputeCapabilityRequired is the compute capability the checkpoint's
+	// weights need of the GPU, from its config.json (8.9 for FP8 weights,
+	// 10.0 for NVFP4, 8.0 for bf16), and ComputeCapability what the GPU
+	// judged has: a node's nvidia.com/gpu.compute labels, or the GPU of a
+	// pool size's instance family. Empty when the GPU generation was not
+	// checked — Reason then says why.
+	ComputeCapabilityRequired string `json:"computeCapabilityRequired,omitempty"`
+	ComputeCapability         string `json:"computeCapability,omitempty"`
 	// MaxModelLen is the preset's --max-model-len and KVCacheBytes the KV
 	// cache vLLM needs on each GPU for one sequence of that length, from the
 	// checkpoint's config.json; KVCacheAvailableBytes is what vLLM leaves the
@@ -617,7 +648,8 @@ type FitResult struct {
 	// --gpu-memory-utilization it runs with, derived from the node: the
 	// preset's resources.gpus and arguments describe its reference shape
 	// (giantswarm/model-manager#223). Zero when no node was judged (a GPU
-	// pool with no node yet, a CPU preset): the preset's own shape then.
+	// pool with no node yet, a CPU preset): the preset's own shape then —
+	// which an unverified answer without a backend carries here itself.
 	// CPURequestMillis and MemoryRequestBytes are each serving pod's CPU
 	// and memory requests there: the preset's, capped at what the node has
 	// left beside the requests of its other pods; a node with nothing left
@@ -644,6 +676,10 @@ type FitResult struct {
 	Cached      bool   `json:"cached"`
 	CacheSource string `json:"cacheSource,omitempty"`
 }
+
+// VerdictUnverified is FitResult.Verdict when no backend judged the model:
+// the answer is the preset's declaration.
+const VerdictUnverified = "unverified"
 
 // NodeFit is the verdict of one copy of a model on one node.
 type NodeFit struct {
@@ -771,6 +807,9 @@ type NodeInfo struct {
 	// ReservedBytes is what the models already served on the node need.
 	ReservedBytes int64 `json:"reservedBytes"`
 	FreeBytes     int64 `json:"freeBytes"`
+	// FreeGPUs is, on a node whose GPUs have memory of their own (kserve),
+	// the devices the predictors running there leave free. Absent elsewhere.
+	FreeGPUs *int64 `json:"freeGpus,omitempty"`
 	// Cache describes the download cache on this node; nil when the node
 	// holds no cache (always on ollama; lemonade: the model store).
 	Cache *NodeCache `json:"cache,omitempty"`

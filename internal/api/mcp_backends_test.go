@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +66,7 @@ func newRegistrationFixtureBuilding(t *testing.T, build registry.Builder, static
 	t.Helper()
 	client := kubefake.NewSimpleClientset()
 	fw := newFakeWirer()
-	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
+	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: testNamespace}, nil)
 	reg := registry.New(client, testNamespace, build, svc, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
@@ -93,11 +95,102 @@ func TestZeroBackends(t *testing.T) {
 	for _, tool := range []string{ToolGetBackend, ToolListModels, ToolListLoadedModels} {
 		text, isErr := callTool(t, f.srv, tool, nil)
 		assert.True(t, isErr, tool)
-		assert.Contains(t, text, "no_backend: no backend registered: register one with add_backend", tool)
+		assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3", tool)
 	}
-	text, isErr := callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
+	// check_fit names the instance, the watched namespace and both ways a
+	// kserve backend comes to exist.
+	text, isErr := callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace "+testNamespace)
+	assert.Contains(t, text, "add_backend kind=kserve servingNamespace=<namespace>")
+	assert.Contains(t, text, "cluster-manager registers model-backend-kserve with the first GPU node pool it creates")
+	assert.Contains(t, text, "add_backend kind=ollama|lmstudio|lemonade endpoint=<url>")
+	text, isErr = callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "no backend registered")
+}
+
+// fakeCatalog stands in for the kserve preset catalog: one preset's
+// declaration, or the refusal a catalog answers with.
+type fakeCatalog struct {
+	preset string
+	err    error
+}
+
+func (c *fakeCatalog) FitCheck(_ context.Context, req backend.FitRequest) (*backend.FitResult, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if req.Preset != c.preset {
+		return nil, fmt.Errorf("%w: preset %q not found (available: %s)", backend.ErrNotFound, req.Preset, c.preset)
+	}
+	return &backend.FitResult{Model: "org/" + c.preset, Preset: c.preset, Presets: []string{c.preset}, Fits: true, Retryable: true, WeightsBytes: 100, WeightsSource: "preset", DeclaredWeightsBytes: 100, OverheadBytes: 10, RequiredBytes: 110, ComputeCapabilityRequired: "8.9", DevicesPerPod: 2, Reason: "the fit of preset " + c.preset + " is unverified until a backend is registered: it declares 2 GPUs"}, nil
+}
+
+// With no backend, check_fit of a published preset answers the catalog's
+// declaration: verdict unverified, reason opening with the no_backend answer
+// and its registration paths, the numbers the preset declares, no backend
+// named (giantswarm/model-manager#274). What the catalog cannot answer is the
+// no_backend answer, or the catalog's own not_found.
+func TestZeroBackendsCheckFitAnswersThePresetCatalog(t *testing.T) {
+	f := newRegistrationFixture(t)
+	f.svc.WithCatalog(&fakeCatalog{preset: "qwen3"})
+
+	text, isErr := callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	require.False(t, isErr, text)
+	var res backend.FitResult
+	require.NoError(t, json.Unmarshal([]byte(text), &res))
+	assert.Equal(t, backend.VerdictUnverified, res.Verdict)
+	assert.False(t, res.Fits, "nothing judged the model: never a fit")
+	assert.True(t, res.Retryable)
+	assert.Empty(t, res.Backend)
+	assert.Equal(t, "qwen3", res.Preset)
+	assert.Equal(t, int64(110), res.RequiredBytes)
+	assert.Equal(t, "8.9", res.ComputeCapabilityRequired)
+	assert.Equal(t, int64(2), res.DevicesPerPod)
+	assert.True(t, strings.HasPrefix(res.Reason, "no_backend: no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace "+testNamespace), res.Reason)
+	assert.Contains(t, res.Reason, "add_backend kind=kserve servingNamespace=<namespace>")
+	assert.True(t, strings.HasSuffix(res.Reason, " — the fit of preset qwen3 is unverified until a backend is registered: it declares 2 GPUs"), res.Reason)
+
+	// The same answer when the caller names kserve; another backend's name
+	// is not the catalog's to answer.
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3", argBackend: "kserve"})
+	require.False(t, isErr, text)
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3", argBackend: "ollama"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "no_backend: no backend registered")
+	assert.NotContains(t, text, "unverified")
+
+	// An unknown preset is the catalog's not_found, naming the published
+	// presets; a request naming neither model nor preset is invalid.
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "nope"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, `not_found: model not found: preset "nope" not found (available: qwen3)`)
+	text, isErr = callTool(t, f.srv, ToolCheckFit, nil)
+	assert.True(t, isErr)
+	assert.Contains(t, text, "invalid_request: invalid request: model or preset is required")
+
+	// Nothing published, or a catalog that could not be read, is the
+	// no_backend answer naming why.
+	f.svc.WithCatalog(&fakeCatalog{err: fmt.Errorf("%w: no serving preset is published in namespace agent-platform (ConfigMaps labelled agent-platform.giantswarm.io/serving-preset=true)", backend.ErrNoBackend)})
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3")
+	assert.Contains(t, text, "or configure --backends; no serving preset is published in namespace agent-platform")
+	f.svc.WithCatalog(&fakeCatalog{err: errors.New("configmaps is forbidden")})
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3")
+	assert.Contains(t, text, "; the preset catalog could not be read: configmaps is forbidden")
+
+	// A registered backend answers as before: the catalog has no say.
+	fb := newFakeBackend()
+	fb.name = backend.NameKServe
+	fb.caps.FitCheck = true
+	require.NoError(t, f.svc.RegisterDocument(fb, backend.SourcePerson, "model-backend-kserve"))
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argPreset: "qwen3"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "unsupported: operation not supported: fit check on kserve", "the fake offers no FitChecker: the backend answered, not the catalog")
 }
 
 func TestAddBackendDryRunAndApply(t *testing.T) {

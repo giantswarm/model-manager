@@ -389,7 +389,7 @@ func humanReadableInt(s string) (int64, error) {
 }
 
 // kvCheck is the KV cache check of one fit: the layout, the preset's
-// arguments and the weights; Skip says why the KV cache is not checked
+// arguments and the weights the runtime holds in memory (residentBytes); Skip says why the KV cache is not checked
 // (the flat overhead is then all the fit judges).
 type kvCheck struct {
 	Layout  kvLayout
@@ -599,8 +599,8 @@ func trimFloat2(f float64) string {
 // size (the preset's requirements stood in) has no config.json to read, and
 // says so.
 func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
-	k := &kvCheck{Weights: plan.Result.WeightsBytes}
 	p := plan.Preset
+	k := &kvCheck{Weights: p.residentBytes(plan.Result.WeightsBytes)}
 	var err error
 	switch {
 	case p == nil:
@@ -609,30 +609,14 @@ func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
 	case p.cpu():
 		k.Skip = "the preset requests no GPU"
 		return k
-	case !p.storesInCache() && plan.Image == nil:
-		k.Skip = "the model image's registry did not answer for the checkpoint's config.json"
-		return k
-	case p.storesInCache() && plan.Hub == nil:
-		k.Skip = "the Hugging Face Hub did not answer for the checkpoint's config.json"
-		return k
 	}
 	if k.Args, err = parseVLLMArgs(p.Spec.Args); err != nil {
 		k.Skip = err.Error()
 		return k
 	}
-	var raw []byte
-	if plan.Image != nil {
-		raw = plan.Image.Config
-	} else {
-		hctx, hubBudget, cancel := b.hubContext(ctx)
-		defer cancel()
-		if raw, err = b.hub.ModelConfig(hctx, plan.Repo, plan.Revision, plan.Files); err != nil {
-			k.Skip = "reading config.json failed: " + describeHubFailure(err, hubBudget)
-			return k
-		}
-	}
-	if raw == nil {
-		k.Skip = "the checkpoint has no config.json"
+	raw, skip := b.checkpointConfig(ctx, plan)
+	if skip != "" {
+		k.Skip = skip
 	} else if k.Layout, err = parseKVLayout(raw); err != nil {
 		k.Skip = err.Error()
 	}

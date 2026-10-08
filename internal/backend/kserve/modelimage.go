@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -28,6 +33,9 @@ const (
 	// modelImageConfigPath is the checkpoint's config.json inside a model
 	// image: KServe's modelcar contract puts the checkpoint under /models.
 	modelImageConfigPath = "models/config.json"
+	// modelImageParamsPath is a mistral-format checkpoint's params.json,
+	// which it ships in place of config.json.
+	modelImageParamsPath = "models/params.json"
 	// modelImageSmallFile bounds the files read past in search of
 	// config.json: a model image's tar layers carry the checkpoint's small
 	// files ahead of the weights (a layer of their own, or the head of the
@@ -35,6 +43,48 @@ const (
 	// larger than this and no weight file is ever fetched.
 	modelImageSmallFile = 16 << 20
 )
+
+// registryRequestTimeout bounds each step of one registry request — the
+// connection, the TLS handshake, the response headers — so a request the
+// registry leaves hanging fails in time to be retried within a fit check's
+// budget (the hub's, a few seconds) instead of spending all of it
+// (giantswarm/model-manager#249). A variable for the tests.
+var registryRequestTimeout = 1500 * time.Millisecond
+
+// registryBackoff spaces the retries of a failed registry request: short,
+// since the fit check's budget is seconds.
+var registryBackoff = remote.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 3}
+
+// registryTransport is the transport model images are read through: the
+// default one with every step of a request bounded (registryRequestTimeout).
+func registryTransport() http.RoundTripper {
+	t := remote.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: registryRequestTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = registryRequestTimeout
+	t.ResponseHeaderTimeout = registryRequestTimeout
+	return t
+}
+
+// retryRegistry says which failed registry requests are retried: a timeout
+// of one request — the registry's ping (/v2/) included — and a connection
+// the registry dropped.
+func retryRegistry(err error) bool {
+	var ne net.Error
+	return (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+// describeRegistryFailure words a failed model image read: a registry that
+// did not answer within the budget — its timed-out requests retried
+// (retryRegistry) — is named as such; every other error is given as it is.
+// The registry client joins the errors of its ping (https, then http) into
+// one that does not unwrap, so a timeout is also recognised by its message.
+func describeRegistryFailure(err error, budget time.Duration) string {
+	msg := err.Error()
+	if ne := net.Error(nil); (errors.As(err, &ne) && ne.Timeout()) || strings.Contains(msg, "timeout") || strings.Contains(msg, context.DeadlineExceeded.Error()) {
+		return fmt.Sprintf("the registry did not answer within %s, timed-out requests retried (%s)", budget, msg)
+	}
+	return msg
+}
 
 // modelImage is what a preset served from a model image says about itself,
 // read from its registry — never from the Hugging Face Hub, which is not
@@ -46,6 +96,9 @@ type modelImage struct {
 	WeightsBytes int64
 	// Config is the checkpoint's config.json; nil when no small layer holds it.
 	Config []byte
+	// Params is a mistral-format checkpoint's params.json; nil when no small
+	// layer holds it.
+	Params []byte
 }
 
 // modelImage is readModelImage, remembered per storage URI once read: a
@@ -74,14 +127,16 @@ func (b *Backend) modelImage(ctx context.Context, storageURI string) (modelImage
 // readModelImage reads a model image anonymously from its registry: the
 // manifest of the one platform (giantswarm/model-manager#150), the config
 // blob for the labels, and the head of each layer until config.json turns up
-// — streamed, stopped at the first weight file (fileInLayer). An error reading
-// config.json leaves Config nil: the size and the weights stand on their own.
+// (params.json read on the way) — streamed, stopped at the first weight file
+// (filesInLayer). An error reading them leaves Config and Params nil: the
+// size and the weights stand on their own.
 func readModelImage(ctx context.Context, storageURI string) (modelImage, error) {
 	ref, err := name.ParseReference(strings.TrimPrefix(storageURI, "oci://"))
 	if err != nil {
 		return modelImage{}, fmt.Errorf("parse %s: %w", storageURI, err)
 	}
-	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(authn.Anonymous), remote.WithPlatform(modelImagePlatform))
+	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(authn.Anonymous), remote.WithPlatform(modelImagePlatform),
+		remote.WithTransport(registryTransport()), remote.WithRetryPredicate(retryRegistry), remote.WithRetryBackoff(registryBackoff))
 	if err != nil {
 		return modelImage{}, fmt.Errorf("read the manifest of %s: %w", ref, err)
 	}
@@ -103,7 +158,14 @@ func readModelImage(ctx context.Context, storageURI string) (modelImage, error) 
 		return out, nil
 	}
 	for _, l := range layers {
-		if raw, err := fileInLayer(l, modelImageConfigPath); err == nil && raw != nil {
+		found, err := filesInLayer(l, modelImageConfigPath, modelImageParamsPath)
+		if err != nil {
+			continue
+		}
+		if raw := found[modelImageParamsPath]; raw != nil && out.Params == nil {
+			out.Params = raw
+		}
+		if raw := found[modelImageConfigPath]; raw != nil {
 			out.Config = raw
 			break
 		}
@@ -111,32 +173,39 @@ func readModelImage(ctx context.Context, storageURI string) (modelImage, error) 
 	return out, nil
 }
 
-// fileInLayer returns the file at want in the layer's tar, nil when the
-// layer does not hold it ahead of its first file larger than
-// modelImageSmallFile: the stream is closed there, so what is read is the
-// tar headers and the small files before it.
-func fileInLayer(l v1.Layer, want string) ([]byte, error) {
+// filesInLayer returns the files at want the layer's tar holds ahead of its
+// first file larger than modelImageSmallFile: the stream is closed there, so
+// what is read is the tar headers and the small files before it.
+func filesInLayer(l v1.Layer, want ...string) (map[string][]byte, error) {
 	rc, err := l.Uncompressed()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
 	tr := tar.NewReader(rc)
-	for {
+	found := map[string][]byte{}
+	for len(found) < len(want) {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil, nil
+			break
 		}
 		if err != nil {
-			return nil, err
+			return found, err
 		}
 		if h.Size > modelImageSmallFile {
-			return nil, nil
+			break
 		}
-		if h.Typeflag == tar.TypeReg && strings.TrimPrefix(path.Clean("/"+h.Name), "/") == want {
-			return io.ReadAll(tr)
+		name := strings.TrimPrefix(path.Clean("/"+h.Name), "/")
+		if h.Typeflag != tar.TypeReg || !slices.Contains(want, name) {
+			continue
 		}
+		raw, err := io.ReadAll(tr)
+		if err != nil {
+			return found, err
+		}
+		found[name] = raw
 	}
+	return found, nil
 }
 
 // imageOnNode reports whether the node's kubelet lists the image the storage

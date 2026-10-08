@@ -344,7 +344,21 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 
 	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
-	svc := service.New(backends, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth}, log)
+	// Backend documents are watched in --namespace, given a cluster.
+	documentNamespace := o.namespace
+	if clients == nil {
+		documentNamespace = ""
+	}
+	svc := service.New(backends, jm, wirer, wiringInfo, service.Config{AutoWire: o.autoWire, DefaultKeepAlive: o.defaultKeepAlive, ReconcileInterval: o.reconcileInterval, CallerOnly: o.downstreamOAuth, Instance: o.instance, Version: build.Version, DocumentNamespace: documentNamespace}, log)
+	if clients != nil {
+		// The serving presets published on this cluster answer check_fit
+		// while no backend is registered (giantswarm/model-manager#274).
+		catalog, err := kserve.NewCatalog(opts.KServe)
+		if err != nil {
+			return err
+		}
+		svc.WithCatalog(catalog)
+	}
 
 	if o.githubAuthorizationServer != "" && clients != nil && wirer != nil {
 		// Commit mode: the pull request is opened as the person, with the

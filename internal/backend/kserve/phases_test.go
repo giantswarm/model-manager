@@ -25,7 +25,7 @@ import (
 )
 
 // The proof-1 timeline of a fresh serve on a scale-to-zero L4 pool
-// (gazelle, 2026-09-17): the pod is created, Karpenter nominates a NodeClaim,
+// (a production cluster): the pod is created, Karpenter nominates a NodeClaim,
 // the node binds ≈ 3.5 min later, the initializer downloads 8 GB in 72 s,
 // the runtime image pulls for ≈ 4 min, vLLM loads for ≈ 1 min, the route
 // resolves, the endpoint answers ≈ 12 min after the load.
@@ -47,7 +47,7 @@ var (
 )
 
 // predictorFixture is a KServe LLMInferenceService predictor pod on llm-d as
-// gazelle runs it: init container storage-initializer, main container the
+// production runs it: init container storage-initializer, main container the
 // llm-d-cuda runtime with a startup probe, one GPU requested.
 func predictorFixture(name string) *corev1.Pod {
 	gpu := resource.MustParse("1")
@@ -1302,6 +1302,98 @@ func TestServePhaseCapacityRefusalInEveryZone(t *testing.T) {
 		assert.Equal(t, []string{"eu-central-1a"}, s.RequestedZones)
 		assert.NotContains(t, s.Message, "The way out")
 	})
+}
+
+// giantswarm/model-manager#262: the cloud refuses a fleet's sizes for
+// different reasons, and the step words each size with its own. As a test
+// installation saw it: a pool of g6e.12xlarge, g6e.24xlarge and g6e.48xlarge
+// pinned to no zone, the account's G-instance vCPU quota at 96, the cloud
+// short of g6e.12xlarge in every zone and refusing the larger sizes for the
+// quota — Karpenter's reason InsufficientCapacityError either way. The quota
+// error names no size: the sizes the capacity wording does not name are the
+// quota's.
+func TestServePhaseRefusalReasonPerSize(t *testing.T) {
+	const (
+		pool   = "gpu-l40s"
+		claim  = pool + "-q7x2m"
+		prefix = "creating instance, insufficient capacity, with fleet error(s), "
+		suffix = " (aws-error-code=UnfulfillableCapacity, aws-operation-name=CreateFleet, aws-request-id=743a76bc-6f24-4592-ba84-3f95a68b3257, aws-service-name=EC2, aws-status-code=200)"
+	)
+	zones := []string{"eu-north-1a", "eu-north-1b", "eu-north-1c"}
+	three := []string{"g6e.12xlarge", "g6e.24xlarge", "g6e.48xlarge"}
+	short := func(size, zone string) string {
+		return fmt.Sprintf("InsufficientInstanceCapacity: We currently do not have sufficient %s capacity in the Availability Zone you requested (%s). Our system will be working on provisioning additional capacity. You can currently get %s capacity by not specifying an Availability Zone in your request or choosing %s.", size, zone, size, strings.Join(without(zones, []string{zone}), ", "))
+	}
+	quota := func(limit int) string {
+		return fmt.Sprintf("VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit of %d allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.", limit)
+	}
+	answer := func(errs ...string) string { return prefix + strings.Join(errs, "; ") + suffix }
+	at := func(h, m, s int) time.Time { return time.Date(2026, 9, 29, h, m, s, 0, time.UTC) }
+	sv := notReadyServed("PredictorNotReady", "the predictor is not ready")
+	noClaim := cacheLocation{Claim: DefaultCacheClaim, Missing: true}
+	// step serves the predictor nominated to the claim, which stands refused
+	// with the answer.
+	step := func(t *testing.T, asked constraints, text string) backend.Step {
+		t.Helper()
+		p := predictorFixture("qwen")
+		p.CreationTimestamp = metav1.NewTime(at(7, 40, 0))
+		f := facts(p, []corev1.Event{event(p, eventNominated, "", "Pod should schedule on: nodeclaim/"+claim, at(7, 40, 15), at(7, 40, 15))}, 0)
+		f.Now = at(7, 41, 0)
+		state := &claimState{Created: at(7, 40, 15), Launched: corev1.ConditionFalse, Since: at(7, 40, 17), Reason: "InsufficientCapacityError", Message: text, Asked: asked}
+		f.Launch = launchFacts{Claim: claim, State: state, Pool: asked, Allowed: zones, Cache: noClaim}
+		phase, steps := servePhase(sv, f)
+		require.Equal(t, backend.PhaseScheduling, phase)
+		s := stepByName(steps, backend.PhaseScheduling)
+		assert.Equal(t, reasonCapacityUnavailable, s.Reason)
+		return s
+	}
+	const head = "Karpenter could not launch a node: 1 NodeClaim refused, the last (gpu-l40s-q7x2m) at 2026-09-29T07:40:17Z — InsufficientCapacityError: "
+
+	t.Run("every size refused for the quota: a quota refusal with the provider's limit, no capacity", func(t *testing.T) {
+		s := step(t, constraints{InstanceTypes: three}, answer(quota(64)))
+		assert.Equal(t, head+"g6e.12xlarge, g6e.24xlarge and g6e.48xlarge exceed the account's vCPU quota: its limit is 64 vCPUs for their instance bucket. The way out is a vCPU quota increase for the instance bucket (EC2 Service Quotas) or smaller sizes (a re-run of create_node_pool); Karpenter retries while the pod waits", s.Message)
+		assert.NotContains(t, s.Message, "the cloud has no")
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Empty(t, s.AvailableZones)
+	})
+
+	t.Run("one size short in every zone, the larger ones over the quota: each size with its own reason", func(t *testing.T) {
+		text := answer(short("g6e.12xlarge", "eu-north-1a"), short("g6e.12xlarge", "eu-north-1b"), short("g6e.12xlarge", "eu-north-1c"), quota(96))
+		s := step(t, constraints{InstanceTypes: three}, text)
+		assert.Equal(t, head+"the cloud has no g6e.12xlarge capacity in any zone the pool allows (eu-north-1a, eu-north-1b and eu-north-1c); g6e.24xlarge and g6e.48xlarge exceed the account's vCPU quota: its limit is 96 vCPUs for their instance bucket. No zone is left to move to; the way out is a vCPU quota increase for the instance bucket (EC2 Service Quotas); Karpenter retries while the pod waits", s.Message)
+		assert.Equal(t, three, s.RefusedInstanceTypes)
+		assert.Equal(t, zones, s.RequestedZones)
+		assert.Empty(t, s.AvailableZones)
+	})
+
+	t.Run("a pool pinned to a zone short of one size, the other over the quota: the zone with capacity or the quota", func(t *testing.T) {
+		asked := constraints{InstanceTypes: three[:2], Zones: []string{"eu-north-1b"}}
+		s := step(t, asked, answer(short("g6e.12xlarge", "eu-north-1b"), quota(96)))
+		assert.Equal(t, head+"the cloud has no g6e.12xlarge capacity in eu-north-1b, the zone the pool constrains its nodes to; it has capacity in eu-north-1a and eu-north-1c; g6e.24xlarge exceeds the account's vCPU quota: its limit is 96 vCPUs for its instance bucket. The way out is a pool in eu-north-1a or eu-north-1c (create_node_pool with zones naming it), or a vCPU quota increase for the instance bucket (EC2 Service Quotas); Karpenter retries while the pod waits", s.Message)
+		assert.Equal(t, []string{"eu-north-1a", "eu-north-1c"}, s.AvailableZones)
+	})
+
+	t.Run("a size refused for another fleet error: its code and words beside the capacity", func(t *testing.T) {
+		asked := constraints{InstanceTypes: []string{"g6e.12xlarge", "g6e.48xlarge"}, Zones: []string{"eu-north-1b"}}
+		other := "Unsupported: Your requested instance type (g6e.48xlarge) is not supported in your requested Availability Zone (eu-north-1b)"
+		s := step(t, asked, answer(short("g6e.12xlarge", "eu-north-1b"), other+"."))
+		assert.Equal(t, head+"the cloud has no g6e.12xlarge capacity in eu-north-1b, the zone the pool constrains its nodes to; it has capacity in eu-north-1a and eu-north-1c; the cloud refused g6e.48xlarge with "+other+". The way out is a pool in eu-north-1a or eu-north-1c (create_node_pool with zones naming it); Karpenter retries while the pod waits", s.Message)
+	})
+
+	t.Run("capacity alone keeps its wording", func(t *testing.T) {
+		s := step(t, constraints{InstanceTypes: three}, answer(short("g6e.12xlarge", "eu-north-1a")))
+		assert.Contains(t, s.Message, "the cloud has no g6e.12xlarge, g6e.24xlarge or g6e.48xlarge capacity in any zone the pool allows")
+		assert.NotContains(t, s.Message, "quota")
+	})
+}
+
+func TestFleetErrors(t *testing.T) {
+	got := fleetErrors("creating instance, insufficient capacity, with fleet error(s), InsufficientInstanceCapacity: We currently do not have sufficient g6e.12xlarge capacity in the Availability Zone you requested (eu-north-1a).; VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit of 96 allows. (aws-error-code=UnfulfillableCapacity, aws-service-name=EC2)")
+	assert.Equal(t, []fleetError{
+		{Code: "InsufficientInstanceCapacity", Text: "We currently do not have sufficient g6e.12xlarge capacity in the Availability Zone you requested (eu-north-1a)."},
+		{Code: "VcpuLimitExceeded", Text: "You have requested more vCPU capacity than your current vCPU limit of 96 allows."},
+	}, got)
+	assert.Empty(t, fleetErrors("Node class is not ready"))
 }
 
 // The wiring of giantswarm/model-manager#132: for a pool that pins no zone

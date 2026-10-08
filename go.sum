@@ -183,8 +183,8 @@ github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e h1:y/1nzrdF+RPds
 github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e/go.mod h1:awFzISqLJoZLm+i9QQ4SgMNHDqljH6jWV0B36V5MrUM=
 github.com/getsops/sops/v3 v3.13.3 h1:saYczbT88kD1saNChe1cAbFQe5mrRhTIfEw3TaEcmK0=
 github.com/getsops/sops/v3 v3.13.3/go.mod h1:3mUuUtKnJ63IzIvU4LQoDXdp0ZvorY5s2hEc7UVNfx8=
-github.com/giantswarm/gitops-commit v0.11.0 h1:pzfWP7q7Q71zUcS5uniRrCDabK8DMGCqnxqlrx3MDl4=
-github.com/giantswarm/gitops-commit v0.11.0/go.mod h1:WBHKZ6UyQC0ghHLbmv+kR1GdLGqJciysQeb7w2iEm7o=
+github.com/giantswarm/gitops-commit v0.11.1 h1:6FvT3OM3ltSConbW4gz+dgxTuF5RE3KCcojbFuUI2Fg=
+github.com/giantswarm/gitops-commit v0.11.1/go.mod h1:y+vnZsWYIa5j4Pk0vrGM+iLXRAdyq2JRlUL0ygvuxOU=
 github.com/giantswarm/mcp-oauth v1.7.0 h1:6tgm7OLs8Eo3iksAFrhuFHfdha7hxJqwMq06fDsqUZs=
 github.com/giantswarm/mcp-oauth v1.7.0/go.mod h1:/qsorGcyP82HF68pxavC0slW5Cru0ziIRZ9C8DcS/eg=
 github.com/giantswarm/mcp-toolkit v0.2.15 h1:d1kXCAdeaQEgMe2Bd6B/zn6HSawoAwDira+/6J/ZZm8=

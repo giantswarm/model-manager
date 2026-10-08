@@ -1131,3 +1131,55 @@ func TestServeAnAlreadyServedPreset(t *testing.T) {
 	assert.ErrorIs(t, err, backend.ErrConflict)
 	assert.ErrorContains(t, err, "tiny is stopping; serve it again once it is gone")
 }
+
+// The tracing switch: spec.tracing composed on request and off by default,
+// read back on the served model, and never flipped behind an "already
+// serving" answer — switching restarts the model, so the preset is stopped
+// first.
+func TestServeTracingSwitch(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	schema := loadLLMISVCSchema(t)
+
+	// Composed: an empty spec.tracing, which KServe completes from its
+	// tracing preset; nothing of it without the switch.
+	for _, tracing := range []bool{false, true} {
+		res, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Tracing: tracing, DryRun: true})
+		require.NoError(t, err)
+		require.Len(t, res.Manifests, 1)
+		obj := res.Manifests[0]
+		schema.assertValid(t, obj)
+		spec, has, _ := unstructured.NestedMap(obj.Object, "spec", "tracing")
+		assert.Equal(t, tracing, has, "tracing %v", tracing)
+		assert.Empty(t, spec, "empty: the endpoint and sampler are the controller's preset's, never the caller's")
+		assert.Equal(t, tracing, tracingOn(obj))
+	}
+
+	// Served with tracing: the loaded entry says so, serving it again with
+	// the switch is the no-op, without it a conflict.
+	res, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Tracing: true})
+	require.NoError(t, err)
+	assert.False(t, res.AlreadyServing)
+	loaded, err := f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.True(t, loaded[0].Tracing, "the served model reports the switch")
+	res, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Tracing: true})
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyServing)
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves with tracing on, not off; stop it first")
+
+	// The other way round, from the default.
+	require.NoError(t, f.b.Unload(ctx, tinyRepo))
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny"})
+	require.NoError(t, err)
+	loaded, err = f.b.ListLoaded(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.False(t, loaded[0].Tracing, "off by default")
+	_, err = f.b.Serve(ctx, backend.LoadRequest{Preset: "tiny", Tracing: true})
+	assert.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "tiny already serves with tracing off, not on; stop it first")
+}
