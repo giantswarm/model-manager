@@ -757,6 +757,9 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		if err := b.deleteServing(ctx, sv.Namespace, sv.Name); err != nil {
 			return nil, err
 		}
+		if err := b.deleted(ctx, sv.Namespace, sv.Name); err != nil {
+			return nil, err
+		}
 		b.log.Info("serving object deleted", "name", sv.Name, "namespace", sv.Namespace, "model", sv.Model)
 		// Off the LLM endpoint in the same call: a client sending the public
 		// name gets model_not_found, not a dead upstream.
@@ -768,6 +771,20 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 	}
 	b.forgetStale(ctx, matches)
 	return &backend.UnloadResult{Model: matches[0].Model, Inventory: b.refreshInventory(ctx)}, nil
+}
+
+// deleted reads the serving object back after its delete: nil when it is gone
+// or terminating, otherwise an error naming it, so an unload never answers
+// loaded false for an object that still serves.
+func (b *Backend) deleted(ctx context.Context, namespace, name string) error {
+	obj, err := b.getServing(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("check the delete: %w", err)
+	}
+	if obj == nil || obj.GetDeletionTimestamp() != nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %s %s/%s is still served after its delete (no deletionTimestamp); the model was not unloaded", backend.ErrConflict, kindLLMInferenceService, namespace, name)
 }
 
 // stoppable refuses a serving object model-manager may not delete.
