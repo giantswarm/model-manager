@@ -416,7 +416,7 @@ paths:
                 backend: { $ref: "#/components/schemas/BackendName", description: "the backend to check on; required only when several configured backends offer fit checks (else 409)" }
                 model: { type: string, description: Hugging Face repository owner/name; required unless preset is given }
                 preset: { type: string }
-                node: { type: string, description: "node to check against — must be eligible (GET /api/v1/nodes); default = the eligible node with the most free budget, cache nodes first" }
+                node: { type: string, description: "node to check against — must be eligible (GET /api/v1/nodes); default = of the eligible nodes that host the model, the smallest (the least budget), the one with the most free budget among equals; when none hosts it, the one with the most free budget, whose verdict names why" }
       responses:
         "200":
           description: fit result
