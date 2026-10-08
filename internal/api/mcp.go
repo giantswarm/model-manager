@@ -156,6 +156,11 @@ type Info struct {
 	// Backends names every configured backend in order, the first being the
 	// default; empty on an installation that has registered none yet.
 	Backends []backend.Name `json:"backends"`
+	// BackendsReason says why Backends is empty — the no_backend wording: no
+	// backend is registered on this instance, the namespace it watches for
+	// backend documents and how to register one. Absent while a backend is
+	// configured, so an empty list is never left for the caller to guess at.
+	BackendsReason string `json:"backendsReason,omitempty"`
 	// Wiring describes where ModelConfigs are created; absent when agent
 	// wiring is disabled.
 	Wiring *service.WiringInfo `json:"wiring,omitempty"`
@@ -167,7 +172,7 @@ type Info struct {
 func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("model-manager", build.Version, append(tracingOptions(),
 		mcpserver.WithToolCapabilities(false),
-		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet, and list_backends is then empty. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
+		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet: list_backends and get_info then answer an empty list with backendsReason saying that no backend is registered and how to register one. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)...)
 	t := &tools{svc: svc, build: build}
 	for _, o := range opts {
@@ -176,7 +181,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetInfo,
-		mcp.WithDescription("Report this server's build (version — the release, or dev for a local build —, commit and build time), the names of its tools, the configured backends in order (the first is the default) and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to."),
+		mcp.WithDescription("Report this server's build (version — the release, or dev for a local build —, commit and build time), the names of its tools, the configured backends in order (the first is the default; an empty list comes with backendsReason: no backend is registered on this instance, the namespace it watches for backend documents and how to register one) and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.getInfo)
 
@@ -187,7 +192,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.getBackend)
 
 	s.AddTool(mcp.NewTool(ToolListBackends,
-		mcp.WithDescription("List every serving backend this model-manager runs, in configured order (the first is the default backend an unqualified pull goes to), each with its health, endpoints, load semantics and capability flags."),
+		mcp.WithDescription("List every serving backend this model-manager runs, in configured order (the first is the default backend an unqualified pull goes to), each with its health, endpoints, load semantics and capability flags. An empty list comes with backendsReason: no backend is registered on this instance, the namespace it watches for backend documents and how to register one — a ModelConfig labelled with a backend that is not listed is left over from one that went."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	), t.listBackends)
 
@@ -335,11 +340,12 @@ type tools struct {
 }
 
 func (t *tools) getInfo(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	names := t.svc.Names()
-	if names == nil {
-		names = []backend.Name{}
+	info := Info{Version: t.build.Version, Commit: t.build.Commit, Built: t.build.Date, Tools: ToolNames(), Backends: t.svc.Names(), Wiring: t.svc.Wiring()}
+	if len(info.Backends) == 0 {
+		info.Backends = []backend.Name{}
+		info.BackendsReason = t.svc.NoBackendReason()
 	}
-	return jsonResult(Info{Version: t.build.Version, Commit: t.build.Commit, Built: t.build.Date, Tools: ToolNames(), Backends: names, Wiring: t.svc.Wiring()})
+	return jsonResult(info)
 }
 
 // withErrorsResult adds the per-backend failures of an aggregate read.
@@ -357,7 +363,7 @@ func (t *tools) getBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 
 func (t *tools) listBackends(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	backends, invalid := t.svc.Backends(ctx)
-	out := map[string]any{"backends": backends}
+	out := backendsBody(t.svc, backends)
 	if len(invalid) > 0 {
 		out["invalid"] = invalid
 	}

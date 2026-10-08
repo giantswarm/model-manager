@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -160,6 +161,9 @@ func TestGetInfo(t *testing.T) {
 		assert.Equal(t, "dev", raw["version"])
 		assert.Equal(t, "abcdef1-dirty", raw["commit"])
 		assert.Equal(t, []any{}, raw["backends"], "an installation without backends answers an empty list, not null")
+		reason, _ := raw["backendsReason"].(string)
+		assert.True(t, strings.HasPrefix(reason, "no backend registered"), "the empty list says why (giantswarm/model-manager#284): %q", reason)
+		assert.Contains(t, reason, "configure --backends")
 		assert.NotContains(t, raw, "wiring")
 	})
 }

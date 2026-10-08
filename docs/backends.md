@@ -428,12 +428,16 @@ backend to leave (`deregistered: true`). A static backend cannot be removed here
 document is `not_found`.
 
 **`list_backends`** lists static and registered backends alike, each with `source: static |
-person | cluster-manager`, plus `invalid` when documents failed the schema.
+person | cluster-manager`, plus `invalid` when documents failed the schema. An empty list carries
+`backendsReason`, the `no_backend` wording below, so a caller tells an installation without a
+backend from a read that missed one — a ModelConfig labelled with a backend that is not listed is
+left over from one that went. `get_info` answers the same beside its `backends`.
 
 ## Zero backends and static backends
 
 With neither `backend` nor `backends` set (the chart default) the process starts with no backend:
-`list_backends` answers an empty list and every backend-scoped tool (`check_fit`, `load_model`,
+`list_backends` and `get_info` answer an empty list with `backendsReason` (the wording below), and
+every backend-scoped tool (`check_fit`, `load_model`,
 `list_models`, …) answers `no_backend` (HTTP 412) naming the instance that answered (its
 `--instance` and version), the namespace it watches for backend documents with how many are there
 (0 valid, plus the invalid ones `list_backends` lists) and both ways to register one:

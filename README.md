@@ -292,8 +292,10 @@ restart. `remove_backend` drops the backend's ModelConfigs and the document. One
 `kserve` document carries the **target cluster** (`{cluster, organization, apiServer, caBundle,
 servingNamespace}` — never credentials) the backend acts on, reported as `target` on the backend,
 its models, nodes and presets. Static `--backends` values keep working as `source: static`; a
-document naming a static kind is refused. With no backend at all every backend-scoped call answers
-`no_backend` with the fix — except `check_fit` of a serving preset the platform chart publishes
+document naming a static kind is refused. With no backend at all `list_backends` and `get_info`
+answer an empty list with `backendsReason` (the `no_backend` wording, so a caller tells no backend
+from a read that missed one), and every backend-scoped call answers `no_backend` with the fix —
+except `check_fit` of a serving preset the platform chart publishes
 where model-manager runs, which answers what the preset declares with `verdict: unverified`, so a
 GPU pool is sized before it, and the backend, exists. The contract — the label, keys, schema,
 tools, RBAC and what cluster-manager writes — is [docs/backends.md](docs/backends.md).
