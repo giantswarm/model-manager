@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/openapi"
 )
 
@@ -22,16 +23,16 @@ const schemaTTL = time.Minute
 var errVersionNotServed = errors.New("version not served")
 
 // servedSchema answers which fields the ModelConfig schema the apiserver
-// serves has, from the OpenAPI v3 document it publishes for the kagent.dev
+// serves has, from the OpenAPI v3 document it publishes for the ModelConfig
 // group version. The apiserver prunes a field its CRD lacks from every write,
 // so such a field is left out of the write, and out of the comparison that
 // decides a re-wire, which would otherwise re-wire on every pass. The
 // document is readable by every authenticated identity (system:discovery),
 // so the ServiceAccount reads it in every mode.
 type servedSchema struct {
-	client  openapi.ClientWithContext
-	version string
-	now     func() time.Time
+	client openapi.ClientWithContext
+	gv     schema.GroupVersion
+	now    func() time.Time
 
 	mu      sync.Mutex
 	ollama  map[string]bool
@@ -65,7 +66,7 @@ func (s *servedSchema) ollamaFields(ctx context.Context) (map[string]bool, error
 }
 
 func (s *servedSchema) fetchOllamaFields(ctx context.Context) (map[string]bool, error) {
-	gv := KagentGroup + "/" + s.version
+	gv := s.gv.String()
 	paths, err := s.client.PathsWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read the apiserver's OpenAPI v3 paths: %w", err)
@@ -88,7 +89,7 @@ func (s *servedSchema) fetchOllamaFields(ctx context.Context) (map[string]bool, 
 	}
 	for _, sch := range doc.Components.Schemas {
 		for _, k := range sch.GVK {
-			if k.Group != KagentGroup || k.Version != s.version || k.Kind != "ModelConfig" {
+			if k.Group != s.gv.Group || k.Version != s.gv.Version || k.Kind != "ModelConfig" {
 				continue
 			}
 			fields := map[string]bool{}

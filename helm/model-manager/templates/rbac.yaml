@@ -9,8 +9,9 @@ mounted for the in-cluster API address and CA.
 {{- /*
 Agent wiring: model-manager creates, updates and deletes kagent ModelConfigs
 (and placeholder API-key Secrets for OpenAI-compatible endpoints) in
-kagent.namespace only. Discovery of the preferred kagent.dev API version needs
-no extra permission.
+kagent.namespace only, in both API groups: api.kagent.dev from kagent 1.3 on,
+kagent.dev before it and for the ModelConfigs Flux still applies there after
+the cut-over. Discovery needs no extra permission.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -20,7 +21,7 @@ metadata:
   labels:
     {{- include "model-manager.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["kagent.dev"]
+  - apiGroups: ["api.kagent.dev", "kagent.dev"]
     resources: ["modelconfigs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]

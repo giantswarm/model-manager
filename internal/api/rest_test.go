@@ -43,6 +43,8 @@ type fakeBackend struct {
 	// configured num_ctx); loadContext records each load's ContextLength.
 	contextLength int64
 	loadContext   map[string]int64
+	// loadTracing records each load's Tracing switch.
+	loadTracing map[string]bool
 	// think is the think its AgentEndpoint carries (ollama's configured
 	// think).
 	think *bool
@@ -54,6 +56,7 @@ func newFakeBackend() *fakeBackend {
 		loaded:      map[string]bool{},
 		expires:     map[string]time.Time{},
 		loadContext: map[string]int64{},
+		loadTracing: map[string]bool{},
 		caps:        backend.Capabilities{Pull: true, PullProgress: true, Delete: true, Load: true, Unload: true, LoadedModels: true},
 	}
 }
@@ -99,7 +102,7 @@ func (f *fakeBackend) ListLoaded(context.Context) ([]backend.LoadedModel, error)
 	defer f.mu.Unlock()
 	out := []backend.LoadedModel{}
 	for name := range f.loaded {
-		lm := backend.LoadedModel{Name: name, SizeBytes: f.models[name].SizeBytes, Status: "loaded"}
+		lm := backend.LoadedModel{Name: name, SizeBytes: f.models[name].SizeBytes, Status: "loaded", Tracing: f.loadTracing[name]}
 		if exp, ok := f.expires[name]; ok {
 			lm.ExpiresAt = &exp
 		}
@@ -141,6 +144,7 @@ func (f *fakeBackend) Load(_ context.Context, req backend.LoadRequest) error {
 	defer f.mu.Unlock()
 	f.loaded[req.Name] = true
 	f.loadContext[req.Name] = req.ContextLength
+	f.loadTracing[req.Name] = req.Tracing
 	// A parseable keep-alive yields a deadline as Ollama's /api/ps would
 	// report it; anything else (kserve paths, -1) leaves none.
 	if keepAlive, err := time.ParseDuration(req.KeepAlive); err == nil && keepAlive > 0 {

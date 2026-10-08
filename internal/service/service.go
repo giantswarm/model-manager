@@ -45,6 +45,12 @@ type Config struct {
 	// neither adopts running downloads nor reconciles wiring, since both run
 	// without a caller.
 	CallerOnly bool
+	// Instance, Version and DocumentNamespace name this model-manager in
+	// the no_backend answer: its --instance, its build and the namespace
+	// it watches for backend documents (empty: runtime registration off).
+	Instance          string
+	Version           string
+	DocumentNamespace string
 }
 
 // BackendResponse is one backend's identity plus effective capabilities.
@@ -154,6 +160,9 @@ type LoadOptions struct {
 	// of a fast link, or copies (the default).
 	Placement string
 	Nodes     []string
+	// Tracing switches the served model's trace export on (kserve); off by
+	// default.
+	Tracing bool
 }
 
 // Errors are the per-backend failures of an aggregate read, keyed by backend
@@ -175,15 +184,25 @@ type Service struct {
 	jobs   *jobs.Manager
 	wirer  wiring.Wirer
 	commit *gitops.Committer // nil: commit mode not offered
-	wiring *WiringInfo
-	cfg    Config
-	log    *slog.Logger
+	// catalog answers a kserve preset's declaration while no backend is
+	// registered (FitCheck); nil without Kubernetes access.
+	catalog backend.FitChecker
+	wiring  *WiringInfo
+	cfg     Config
+	log     *slog.Logger
+}
+
+// WithCatalog gives the service the preset catalog FitCheck answers from
+// while no backend is registered.
+func (s *Service) WithCatalog(c backend.FitChecker) *Service {
+	s.catalog = c
+	return s
 }
 
 // New builds a Service over the static backends, in the operator's order:
 // the first is the default backend. The list may be empty — backends are
 // then registered at runtime (RegisterDocument) and every backend-scoped call
-// answers backend.ErrNoBackend until one is. wirer may be nil (wiring
+// answers backend.ErrNoBackend (a backend.NoBackendError) until one is. wirer may be nil (wiring
 // disabled).
 func New(backends []backend.Backend, jm *jobs.Manager, wirer wiring.Wirer, info *WiringInfo, cfg Config, log *slog.Logger) *Service {
 	if log == nil {
@@ -360,15 +379,22 @@ func (s *Service) named(name string) (backend.Backend, error) {
 		if b := s.Default(); b != nil {
 			return b, nil
 		}
-		return nil, backend.ErrNoBackend
+		return nil, s.noBackend()
 	}
 	if b, ok := s.lookup(backend.Name(name)); ok {
 		return b, nil
 	}
 	if len(s.all()) == 0 {
-		return nil, backend.ErrNoBackend
+		return nil, s.noBackend()
 	}
 	return nil, fmt.Errorf("%w: unknown backend %q (configured: %s)", backend.ErrInvalid, name, joinNames(s.Names()))
+}
+
+// noBackend is backend.ErrNoBackend naming this instance and the fix.
+func (s *Service) noBackend() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &backend.NoBackendError{Instance: s.cfg.Instance, Version: s.cfg.Version, Namespace: s.cfg.DocumentNamespace, Invalid: len(s.problems)}
 }
 
 // targets are the backends a read addresses: the named one, or all of them.
@@ -376,7 +402,7 @@ func (s *Service) targets(name string) ([]backend.Backend, error) {
 	if strings.TrimSpace(name) == "" {
 		all := s.all()
 		if len(all) == 0 {
-			return nil, backend.ErrNoBackend
+			return nil, s.noBackend()
 		}
 		return all, nil
 	}
@@ -827,7 +853,7 @@ func (s *Service) loadTarget(ctx context.Context, opts LoadOptions) (backend.Bac
 	if keepAlive == "" {
 		keepAlive = s.cfg.DefaultKeepAlive
 	}
-	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes)}
+	req := backend.LoadRequest{Name: m.Name, KeepAlive: keepAlive, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node), Placement: strings.TrimSpace(opts.Placement), Nodes: trimAll(opts.Nodes), Tracing: opts.Tracing}
 	// Loaded at the context window agents will ask for, so their first turn
 	// does not reload the model at another size.
 	req.ContextLength = b.AgentEndpoint(m.Name).FitTo(*m).ContextLength
@@ -1181,10 +1207,18 @@ func (s *Service) Search(ctx context.Context, name, query string, limit int) ([]
 }
 
 // FitCheck sizes a model against node budgets (capability fitCheck) on the
-// named backend, else on the one backend that offers fit checks.
+// named backend, else on the one backend that offers fit checks. With no
+// backend registered, a kserve preset is answered from the catalog
+// (catalogFit) instead of no_backend alone.
 func (s *Service) FitCheck(ctx context.Context, name string, req backend.FitRequest) (*backend.FitResult, error) {
+	if strings.TrimSpace(req.Model) == "" && strings.TrimSpace(req.Preset) == "" {
+		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
+	}
 	targets, err := s.targetsWith(name, func(c backend.Capabilities) bool { return c.FitCheck }, "fit check")
 	if err != nil {
+		if errors.Is(err, backend.ErrNoBackend) && s.catalog != nil && catalogBackend(name) {
+			return s.catalogFit(ctx, req, err)
+		}
 		return nil, err
 	}
 	if len(targets) > 1 {
@@ -1195,14 +1229,41 @@ func (s *Service) FitCheck(ctx context.Context, name string, req backend.FitRequ
 	if !ok {
 		return nil, fmt.Errorf("%w: fit check on %s", backend.ErrUnsupported, b.Name())
 	}
-	if strings.TrimSpace(req.Model) == "" && strings.TrimSpace(req.Preset) == "" {
-		return nil, fmt.Errorf("%w: model or preset is required", backend.ErrInvalid)
-	}
 	res, err := fc.FitCheck(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	res.Backend = b.Name()
+	return res, nil
+}
+
+// catalogBackend reports whether a fit check naming backend name may be
+// answered from the kserve preset catalog: no name, or kserve.
+func catalogBackend(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "" || backend.Name(name) == backend.NameKServe
+}
+
+// catalogFit answers a fit check from the preset catalog while no backend is
+// registered: the preset's declaration with verdict unverified, the reason
+// opening with the no_backend answer (noBackend) a person registers a
+// backend from — so what the preset needs is learned before a GPU pool
+// exists (giantswarm/model-manager#274). What the catalog cannot answer — no
+// preset published, a model no preset serves, a catalog it could not read —
+// is the no_backend answer, naming why.
+func (s *Service) catalogFit(ctx context.Context, req backend.FitRequest, noBackend error) (*backend.FitResult, error) {
+	res, err := s.catalog.FitCheck(ctx, req)
+	switch {
+	case errors.Is(err, backend.ErrNoBackend):
+		return nil, fmt.Errorf("%w; %s", noBackend, strings.TrimPrefix(err.Error(), backend.ErrNoBackend.Error()+": "))
+	case errors.Is(err, backend.ErrNotFound), errors.Is(err, backend.ErrInvalid):
+		return nil, err
+	case err != nil:
+		return nil, fmt.Errorf("%w; the preset catalog could not be read: %v", noBackend, err)
+	}
+	res.Fits = false
+	res.Verdict = backend.VerdictUnverified
+	res.Reason = "no_backend: " + noBackend.Error() + " — " + res.Reason
 	return res, nil
 }
 

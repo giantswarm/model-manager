@@ -70,13 +70,13 @@ spec:
       taint: {key: nvidia.com/gpu, effect: NoSchedule}
       nodeSelector: {giantswarm.io/machine-pool: c1-gpu01}
       instances:
-        - {instanceType: g6.xlarge, size: xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}
+        - {instanceType: g6.xlarge, size: xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, computeCapability: "8.9"}
         - {instanceType: g6.2xlarge, vcpu: 8, memoryGiB: 32, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 7, usableMemoryGiB: 27.1}
 `
 	d, err := ParseDocument([]byte(raw))
 	require.NoError(t, err)
 	want := []InstanceShape{
-		{InstanceType: "g6.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 16, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 3, UsableMemoryGiB: 11.9},
+		{InstanceType: "g6.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 16, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 3, UsableMemoryGiB: 11.9, ComputeCapability: "8.9"},
 		{InstanceType: "g6.2xlarge", VCPU: 8, MemoryGiB: 32, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 7, UsableMemoryGiB: 27.1},
 	}
 	assert.Equal(t, want, d.Spec.KServe.GPUPool.Instances)
@@ -96,6 +96,9 @@ spec:
 		{`{instanceType: g6.xlarge, vcpu: 0, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9}`, "instances[0].vcpu: must be positive"},
 		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: -1}`, "instances[0].usableMemoryGiB: must be positive"},
 		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, family: g6}`, "unknown field"},
+		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, computeCapability: ada}`, `instances[0].computeCapability: must be a compute capability of the form major.minor (8.6), got "ada"`},
+		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, computeCapability: "8"}`, `instances[0].computeCapability: must be a compute capability of the form major.minor (8.6), got "8"`},
+		{`{instanceType: g6.xlarge, vcpu: 4, memoryGiB: 16, gpus: 1, gpuMemoryGiB: 24, usableVcpu: 3, usableMemoryGiB: 11.9, computeCapability: "8.9.1"}`, `instances[0].computeCapability: must be a compute capability of the form major.minor (8.6), got "8.9.1"`},
 	} {
 		_, err := ParseDocument([]byte(`apiVersion: agent-platform.giantswarm.io/v1alpha1
 kind: ModelBackend

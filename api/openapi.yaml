@@ -310,7 +310,11 @@ paths:
         `LLMInferenceService` from the preset (the only way to serve on kserve)
         and creates it — refused with `503 unavailable` and nothing created
         where the llm-d control plane is not installed (the API not served, or
-        the CRDs without the controller); the response has `loaded=true` with
+        the CRDs without the controller); a create the llmisvc admission
+        webhook cannot take yet (no ready endpoint right after the serving
+        slice is installed) is retried for up to two minutes within the call's
+        deadline, then refused with `503 unavailable` naming the webhook and
+        nothing created; the response has `loaded=true` with
         `running.status` `Pending` until the workload is ready, and a `load` job (see
         `GET /api/v1/jobs`) follows readiness and wires the model into kagent.
         Loading an already-served preset again is a no-op. lemonade: `POST
@@ -355,6 +359,10 @@ paths:
                 node:
                   type: string
                   description: "kserve — pin the workload to this node; must be eligible (GET /api/v1/nodes), else 412 does_not_fit with the eligibility reason and no LLMInferenceService is created."
+                tracing:
+                  type: boolean
+                  default: false
+                  description: "kserve — export the served model's traces: composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the model's spans appear under the caller's trace. Off by default: detailed vLLM traces cost throughput. Reported as `running.tracing`. A preset already served with the other setting answers 409 conflict: stop it first, switching tracing restarts the model."
       responses:
         "200":
           description: the loaded model — `loaded=true`, `running` as the backend reports it right after the load (ollama with `expiresAt`; lemonade with `device` and `pinned`; kserve with `status` Pending)
@@ -869,7 +877,7 @@ components:
           description: present when wire=true
           properties:
             namespace: { type: string }
-            apiVersion: { type: string, example: v1alpha3, description: the kagent.dev API version the ModelConfigs are written in — the one the cluster serves (kagent API v2 serves v1alpha3 only) }
+            apiVersion: { type: string, example: api.kagent.dev/v1alpha3, description: "the group/version the ModelConfigs are written in — the one the cluster serves: api.kagent.dev from kagent 1.3 on, kagent.dev before it" }
             autoWire: { type: boolean }
     Loading:
       type: object
@@ -969,6 +977,7 @@ components:
         preset: { type: string, description: kserve — preset the LLMInferenceService was created from }
         gpus: { type: integer, format: int64, description: kserve — accelerators the workload requests }
         managedBy: { type: string, description: kserve — app.kubernetes.io/managed-by of the LLMInferenceService (model-manager, backstage, ...); unload works for model-manager's and for preset-labelled ones }
+        tracing: { type: boolean, description: "kserve — the served model exports traces (the LLMInferenceService carries spec.tracing); absent when it does not" }
         device: { type: string, example: npu, description: "lemonade — where the model runs as Lemonade reports it: npu, gpu, cpu, or several such as `gpu npu`" }
         pinned: { type: boolean, description: lemonade — exempt from slot eviction (loaded with keepAlive -1) }
         runtime: { $ref: "#/components/schemas/Runtime" }
@@ -1037,7 +1046,7 @@ components:
         name: { type: string, example: smollm2-135m }
         backend: { $ref: "#/components/schemas/BackendName", description: "the backend the ModelConfig belongs to (label model-manager.giantswarm.io/backend); with the model reference it identifies the ModelConfig — the same reference on two backends is two ModelConfigs, the second named <derived>-<backend>. Absent on a ModelConfig without the label." }
         namespace: { type: string, example: kagent }
-        apiVersion: { type: string, example: kagent.dev/v1alpha3 }
+        apiVersion: { type: string, example: api.kagent.dev/v1alpha3, description: "the ModelConfig's group/version; kagent.dev/v1alpha3 on one Flux applies from git at the old group after the move to api.kagent.dev, until its file in git moves (mode commit)" }
         provider: { type: string, example: Ollama }
         model: { type: string, description: the backend's model reference }
         providerModel: { type: string, description: spec.model — the name the provider serves the model under (kserve — the LLMInferenceService's spec.model.name) }
@@ -1103,6 +1112,7 @@ components:
         capabilities: { type: array, items: { type: string } }
         license: { type: string }
         gpus: { type: integer, format: int64 }
+        minComputeCapability: { type: string, example: "8.9", description: "the GPU generation the preset declares it needs (requirements.minComputeCapability); absent when it declares none" }
         weightsBytes: { type: integer, format: int64 }
         overheadBytes: { type: integer, format: int64 }
         requiredBytes: { type: integer, format: int64, description: weights + overhead }
@@ -1133,7 +1143,8 @@ components:
         model: { type: string }
         backend: { $ref: "#/components/schemas/BackendName" }
         fits: { type: boolean }
-        reason: { type: string, description: "human-readable explanation of the numbers; when weightsSource is preset, also why the preset stands in for the hub (it did not answer within the lookup timeout, refused the repository, or failed)" }
+        reason: { type: string, description: "human-readable explanation of the numbers; when weightsSource is preset, also why the preset stands in for the hub (it did not answer within the lookup timeout, refused the repository, or failed); with verdict unverified it opens with the no_backend answer (the instance and how to register a backend) and ends with what the preset declares" }
+        verdict: { type: string, enum: [unverified], description: "unverified when no backend judged the model: no backend is registered and the numbers are what the preset declares, read from the catalog the platform chart publishes where model-manager runs; fits is then false and no backend is named. Absent when a backend judged the model" }
         preset: { type: string, description: preset used for overhead (and weights when the hub could not tell) }
         presets: { type: array, items: { type: string }, description: every preset serving the model }
         weightsBytes: { type: integer, format: int64 }
@@ -1147,10 +1158,13 @@ components:
         budgetSource: { type: string, enum: [gpu-labels, allocatable, annotation], description: how the node budget was derived; `annotation` = the node's memory-budget-gib annotation }
         reservedBytes: { type: integer, format: int64, description: "needed by the models already served on the node (the preset being loaded not counted); check_fit and load judge against freeBytes, pull against budgetBytes" }
         freeBytes: { type: integer, format: int64 }
+        freeGpus: { type: integer, format: int64, description: "on a node whose GPUs have memory of their own (kserve): the GPUs the predictors running there leave free; a serve needs the preset's GPUs free beside freeBytes" }
         maxModelLen: { type: integer, format: int64, description: "the preset's --max-model-len; absent when the KV cache was not checked (reason says why)" }
         kvCacheBytes: { type: integer, format: int64, description: "the KV cache vLLM needs on each GPU for one sequence of maxModelLen tokens, from the checkpoint's config.json (per layer: full attention holds the sequence, sliding attention its window and one prefill chunk, MLA its latent; linear-attention and Mamba layers none)" }
         kvCacheAvailableBytes: { type: integer, format: int64, description: "what vLLM leaves the KV cache on each GPU: --gpu-memory-utilization of its memory less the weights and vLLM's reserve" }
         estimatedMaxModelLen: { type: integer, format: int64, description: "on a refusal for the KV cache, the longest sequence that fits, as vLLM estimates it" }
+        computeCapabilityRequired: { type: string, description: "the compute capability the checkpoint's weights need of the GPU, from its config.json: 8.9 for FP8 weights (native FP8: Ada, Hopper, Blackwell; below it vLLM's weight-only FP8 Marlin fallback answers wrong), 10.0 for NVFP4, 8.0 for bf16; absent when the GPU generation was not checked (reason says why)" }
+        computeCapability: { type: string, description: "the compute capability of the GPU judged: a node's nvidia.com/gpu.compute.major/minor labels, or the GPU of the pool size's instance family (g4dn T4 7.5, g5 A10G 8.6, g6 L4 8.9, g6e L40S 8.9); a GPU below computeCapabilityRequired is a refusal" }
         unifiedReservationBytes: { type: integer, format: int64, description: "on a unified-memory node (GPUs without memory of their own): what vLLM claims at start, --gpu-memory-utilization of the node's whole memory; it must fit the budget, at most the memory less hostHeadroomBytes, less reservedBytes" }
         hostHeadroomBytes: { type: integer, format: int64, description: "on a unified-memory node: the memory kept for the host beside vLLM's claim" }
         fitGpuMemoryUtilization: { type: number, format: double, description: "on a refusal for vLLM's claim on a unified-memory node: the --gpu-memory-utilization that fits and holds the weights and overhead — the highest for a claim more than the node leaves, the lowest for a claim short of them; absent when none does" }
@@ -1183,6 +1197,7 @@ components:
         message: { type: string, description: "a budget derivation note — an ignored, unparsable budget annotation (kserve); what the host figures mean, whether /proc/meminfo could be read and whether an operator override applied or was ignored (ollama)" }
         reservedBytes: { type: integer, format: int64, description: "memory the models served/loaded on the node need (kserve: preset requirements; ollama: Σ `size` over /api/ps; lemonade: Σ catalog sizes of the loaded models)" }
         freeBytes: { type: integer, format: int64, description: budgetBytes − reservedBytes, never negative }
+        freeGpus: { type: integer, format: int64, description: "on a node whose GPUs have memory of their own (kserve): the GPUs the predictors running there leave free" }
         cache:
           type: object
           description: the download cache on this node; absent when the node holds none (always on ollama; lemonade — the model store)

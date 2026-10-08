@@ -54,12 +54,19 @@ func serveModelImage(t *testing.T, repoTag string, weights int64, config []byte)
 // serveModelImageThrough is serveModelImage with the registry behind wrap.
 func serveModelImageThrough(t *testing.T, wrap func(http.Handler) http.Handler, repoTag string, weights int64, config []byte) string {
 	t.Helper()
-	reg := httptest.NewServer(wrap(registry.New()))
-	t.Cleanup(reg.Close)
 	files := map[string][]byte{"models/tokenizer_config.json": []byte("{}")}
 	if config != nil {
 		files[modelImageConfigPath] = config
 	}
+	return serveModelImageFiles(t, wrap, repoTag, weights, files)
+}
+
+// serveModelImageFiles is serveModelImageThrough with the small layer's
+// files as given (a mistral-format checkpoint's params.json).
+func serveModelImageFiles(t *testing.T, wrap func(http.Handler) http.Handler, repoTag string, weights int64, files map[string][]byte) string {
+	t.Helper()
+	reg := httptest.NewServer(wrap(registry.New()))
+	t.Cleanup(reg.Close)
 	small, err := crane.Layer(files)
 	require.NoError(t, err)
 	weightsLayer, err := random.Layer(4096, types.OCIUncompressedLayer)
@@ -104,8 +111,8 @@ func TestPresetStoresInCache(t *testing.T) {
 // TestOCIPresetPlacesOnAnyEligibleNode: the cache claim is pinned to n1 and
 // the redirect policy mounts it into every predictor, so gpu1 is no serving
 // target for an hf:// preset. An oci:// preset never touches the claim: it is
-// placed on gpu1 when the request names it, picked over the cache node when
-// it does not (the larger free budget wins; no cache-node preference), judged
+// placed on gpu1 when the request names it, on gpu1 too when it does not and
+// the cache node is too small for it (no cache-node preference), judged
 // not cached from the oci-image source, and load_model creates its serving
 // object there. The hf:// preset keeps the pin's refusal and the cache node;
 // list_nodes reports the pin and that gpu1 serves model-image presets all
@@ -128,8 +135,28 @@ func TestOCIPresetPlacesOnAnyEligibleNode(t *testing.T) {
 	assert.False(t, res.Cached)
 	assert.Equal(t, backend.CacheSourceOCIImage, res.CacheSource)
 
-	// Unnamed: the eligible node with the most free budget — gpu1's 128 GiB
-	// over the cache node's 64 GiB; the hf:// preset prefers the cache node.
+	// Unnamed: the smallest eligible node that hosts it — the cache node's
+	// 64 GiB under gpu1's 128 GiB (giantswarm/model-manager#254). With the
+	// cache node too small for it, gpu1: no cache-node preference for an
+	// oci:// preset, while the hf:// preset keeps the cache node.
+	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "modelcar"})
+	require.NoError(t, err)
+	assert.True(t, res.Fits, res.Reason)
+	assert.Equal(t, testCacheNode, res.Node, "the smallest node that hosts it")
+	setBudget := func(value string) {
+		t.Helper()
+		n, err := f.cs.CoreV1().Nodes().Get(ctx, testCacheNode, metav1.GetOptions{})
+		require.NoError(t, err)
+		if value == "" {
+			delete(n.Annotations, BudgetAnnotation)
+		} else {
+			metav1.SetMetaDataAnnotation(&n.ObjectMeta, BudgetAnnotation, value)
+		}
+		_, err = f.cs.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		f.b.inv.invalidate()
+	}
+	setBudget("4")
 	res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: "modelcar"})
 	require.NoError(t, err)
 	assert.True(t, res.Fits, res.Reason)
@@ -140,6 +167,7 @@ func TestOCIPresetPlacesOnAnyEligibleNode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testCacheNode, res.Node, "an hf:// preset keeps the cache node")
 	assert.NotEqual(t, backend.CacheSourceOCIImage, res.CacheSource, "the claim answers for an hf:// preset")
+	setBudget("")
 
 	// The hf:// preset keeps the pin's refusal on gpu1, on the fit check and on
 	// load_model, before any object exists.

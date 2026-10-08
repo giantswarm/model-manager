@@ -28,13 +28,15 @@ type predictorNeeds struct {
 	GPUs         int
 	GPUMemoryGiB float64
 	KV           *kvCheck
+	// Compute is the GPU generation the weights need (judged per size).
+	Compute *computeNeed
 }
 
 // needsOf reads the predictor's needs from the plan: the preset's requests
 // when a preset serves the model, the sized weights and overhead in any
 // case. An unparsable request is the preset's error, not the pool's.
 func needsOf(plan *fitPlan) (predictorNeeds, error) {
-	n := predictorNeeds{GPUs: 1, GPUMemoryGiB: float64(plan.Result.RequiredBytes) / float64(gib), KV: plan.KV}
+	n := predictorNeeds{GPUs: 1, GPUMemoryGiB: float64(plan.Result.RequiredBytes) / float64(gib), KV: plan.KV, Compute: plan.Compute}
 	p := plan.Preset
 	if p == nil {
 		return n, nil
@@ -65,12 +67,14 @@ func requestOf(p *servingPreset, name string, as func(resource.Quantity) float64
 }
 
 // hosts reports whether a node of shape s can run a predictor with needs n:
-// its requests, its GPU memory, and one sequence of its KV cache on a GPU of
-// the size (unless the KV cache is not checked).
+// its requests, its GPU memory, one sequence of its KV cache on a GPU of
+// the size (unless the KV cache is not checked), and the GPU generation its
+// weights need (unless it is not checked).
 func hosts(s backend.InstanceShape, n predictorNeeds) bool {
 	kv := n.KV.judge(shapeGPUMemory(s), "")
+	cc := n.Compute.judgeShape(s)
 	return n.VCPU <= s.UsableVCPU && n.MemoryGiB <= s.UsableMemoryGiB &&
-		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= gpuBudgetGiB(s, n) && (kv.Skip != "" || kv.Fits)
+		n.GPUs <= s.GPUs && n.GPUMemoryGiB <= gpuBudgetGiB(s, n) && (kv.Skip != "" || kv.Fits) && (cc.Skip != "" || cc.Fits)
 }
 
 // shapeGPUMemory is the memory of one GPU of a size in bytes: gpuMemoryGiB
@@ -140,6 +144,7 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, nodes []nodeB
 			where, s.SizeName(), s.InstanceType, trimFloat(s.UsableVCPU), trimFloat(s.UsableMemoryGiB), s.GPUs, s.GPUMemoryGiB,
 			need, humanBytes(res.BudgetBytes), requestedGPUs(needs), s.SizeName(), describeNeeds(needs, plan.Preset), declarationNote(plan))
 		applyKV(res, plan.KV.judge(shapeGPUMemory(s), ""))
+		applyCompute(res, needs.Compute.judgeShape(s))
 		return nil
 	}
 	largest := shapes[len(shapes)-1]
@@ -150,6 +155,7 @@ func (b *Backend) placeOnPool(plan *fitPlan, pool backend.GPUPool, nodes []nodeB
 		largest.SizeName(), trimFloat(largest.UsableVCPU), trimFloat(largest.UsableMemoryGiB), largest.GPUs, largest.GPUMemoryGiB,
 		humanBytes(res.BudgetBytes), requestedGPUs(needs), need, declarationNote(plan))
 	applyKV(res, plan.KV.judge(shapeGPUMemory(largest), ""))
+	applyCompute(res, needs.Compute.judgeShape(largest))
 	return nil
 }
 
@@ -190,20 +196,45 @@ func describeHeld(nodes []nodeBudget, gpus int) string {
 		case !n.Eligible:
 			parts = append(parts, fmt.Sprintf("node %s: %s", n.Name, n.EligibilityReason))
 		default:
-			parts = append(parts, fmt.Sprintf("node %s has %s, the predictor requests %d", n.Name, plural(gpuDevices(n), "GPU"), gpus))
+			parts = append(parts, fmt.Sprintf("node %s has %s, the predictor requests %d", n.Name, describeDevices(n), gpus))
 		}
 	}
 	return strings.Join(parts, "; ")
 }
 
 // takes reports whether node n schedules a predictor requesting gpus GPUs:
-// a serving target with that many devices. A node whose device count is
-// unknown is taken at its word. A pool none of whose nodes takes the
-// predictor leaves it pending, and the autoscaler launches one of the pool's
-// sizes for it.
+// a serving target with that many devices free (freeGPUs). A node whose
+// device count is unknown is taken at its word. A pool none of whose nodes
+// takes the predictor leaves it pending, and the autoscaler launches one of
+// the pool's sizes for it.
 func takes(n nodeBudget, gpus int) bool {
-	devices := gpuDevices(n)
-	return n.Eligible && (devices == 0 || devices >= int64(gpus))
+	return n.Eligible && (gpuDevices(n) == 0 || freeGPUs(n) >= int64(gpus))
+}
+
+// discreteGPUs says whether the node's GPUs have memory of their own (the
+// GPU memory label): only there does a running predictor hold its devices
+// apart from the memory judgement. A unified-memory node keeps the memory
+// judgement alone.
+func discreteGPUs(n nodeBudget) bool {
+	return n.GPUMemory > 0 && gpuDevices(n) > 0
+}
+
+// freeGPUs is the node's devices the running predictors leave (GPUsTaken,
+// recorded for a serve); on a node without discrete GPUs every device.
+func freeGPUs(n nodeBudget) int64 {
+	if !discreteGPUs(n) {
+		return gpuDevices(n)
+	}
+	return max(gpuDevices(n)-n.GPUsTaken, 0)
+}
+
+// describeDevices is a node's devices as a refusal names them: "1 GPU", or
+// "0 of 1 GPU free" when running predictors hold some.
+func describeDevices(n nodeBudget) string {
+	if free := freeGPUs(n); free < gpuDevices(n) {
+		return fmt.Sprintf("%d of %s free", free, plural(gpuDevices(n), "GPU"))
+	}
+	return plural(gpuDevices(n), "GPU")
 }
 
 // gpuDevices is the node's accelerator devices: allocatable, else the
@@ -224,6 +255,27 @@ func inPool(nodes []nodeBudget, selector map[string]string) []nodeBudget {
 		}
 	}
 	return out
+}
+
+// closestPool is, among the pools (names, in name order) that would launch
+// a node for a predictor requesting gpus GPUs and whose sizes are known, the
+// one whose largest size carries the most GPU memory: the pool a refusal is
+// worded against when no size of any pool hosts the predictor. Empty when
+// no pool qualifies.
+func closestPool(pools map[string]backend.GPUPool, names []string, nodes []nodeBudget, gpus int) string {
+	var best string
+	var bestMemory int
+	for _, name := range names {
+		shapes := pools[name].Instances
+		if len(shapes) == 0 || anyTakes(inPool(nodes, map[string]string{labelMachinePool: name}), gpus) {
+			continue
+		}
+		largest := sortedShapes(shapes)[len(shapes)-1]
+		if memory := largest.GPUs * largest.GPUMemoryGiB; best == "" || memory > bestMemory {
+			best, bestMemory = name, memory
+		}
+	}
+	return best
 }
 
 // plannedGPUs is the GPUs the predictor is scheduled with: the preset's, at

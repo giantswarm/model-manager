@@ -107,6 +107,44 @@ var (
 	zonesWithCapacity = regexp.MustCompile(`choosing ([a-z][a-z0-9-]*\d[a-z](?:, [a-z][a-z0-9-]*\d[a-z])*)`)
 )
 
+// The cloud's fleet errors as Karpenter quotes them, one per code and
+// message, joined by "; " after "with fleet error(s), " and before the AWS
+// SDK's " (aws-error-code=…" suffix: `VcpuLimitExceeded: You have requested
+// more vCPU capacity than your current vCPU limit of 96 allows for the
+// instance bucket that the specified instance type belongs to. …`. Only the
+// capacity wording names a size; a quota or another code names none.
+var (
+	fleetErrorCode = regexp.MustCompile(`(?:fleet error\(s\), |; )([A-Z][A-Za-z.]+): `)
+	vcpuLimit      = regexp.MustCompile(`current vCPU limit of (\d+)`)
+)
+
+const (
+	fleetErrorCapacity  = "InsufficientInstanceCapacity"
+	fleetErrorVcpuLimit = "VcpuLimitExceeded"
+)
+
+// fleetError is one of the cloud's fleet errors: its code and its words.
+type fleetError struct {
+	Code, Text string
+}
+
+// fleetErrors reads the fleet errors a refusal quotes, in order.
+func fleetErrors(message string) []fleetError {
+	if i := strings.Index(message, " (aws-error-code="); i >= 0 {
+		message = message[:i]
+	}
+	found := fleetErrorCode.FindAllStringSubmatchIndex(message, -1)
+	errs := make([]fleetError, 0, len(found))
+	for i, m := range found {
+		end := len(message)
+		if i+1 < len(found) {
+			end = found[i+1][0]
+		}
+		errs = append(errs, fleetError{Code: message[m[2]:m[3]], Text: strings.TrimSpace(message[m[1]:end])})
+	}
+	return errs
+}
+
 // launchFacts is what Karpenter says about the node a pod without one waits
 // for.
 type launchFacts struct {
@@ -276,12 +314,26 @@ func (lf launchFacts) unread() string {
 // read: the sizes the cloud refused, the zones the claim asked for, the
 // zones the cloud named as having capacity, whether the cache claim pins
 // the pool to the zone — the scheduling step's fields — and whose
-// constraint the zone is, for the step's message. Empty when no refusal
-// carries the cloud's capacity wording.
+// constraint the zone is, for the step's message — and each refused size's
+// own reason: capacity, the account's vCPU quota, or another fleet error.
+// Empty when no refusal carries the cloud's capacity or quota wording.
 type capacityRefusal struct {
-	RefusedInstanceTypes []string
-	RequestedZones       []string
-	AvailableZones       []string
+	// RefusedInstanceTypes are every size refused, whatever the reason;
+	// CapacityInstanceTypes those refused for capacity, QuotaInstanceTypes
+	// those refused for the vCPU quota, OtherInstanceTypes those refused for
+	// Other, the cloud's other fleet error.
+	RefusedInstanceTypes  []string
+	CapacityInstanceTypes []string
+	QuotaInstanceTypes    []string
+	OtherInstanceTypes    []string
+	// VCPULimit is the account's vCPU limit the quota error names; empty
+	// when its words were cut. Quota says the quota error stands, whether or
+	// not the sizes it refused are known.
+	VCPULimit      string
+	Quota          bool
+	Other          fleetError
+	RequestedZones []string
+	AvailableZones []string
 	// PinnedByCache is true when the cache claim's volume lies in a
 	// requested zone (the pool follows the cache), false when the claim
 	// pins nothing there, nil when that could not be read.
@@ -318,10 +370,24 @@ func (lf launchFacts) capacity(refusals []launchRefusal) capacityRefusal {
 	default:
 		cr.RequestedZones = append([]string(nil), asked.Zones...)
 	}
-	named := false
+	var short []string
 	for _, r := range refusals {
 		for _, m := range refusedSize.FindAllStringSubmatch(r.Message, -1) {
-			cr.RefusedInstanceTypes, named = appendMissing(cr.RefusedInstanceTypes, m[1]), true
+			cr.RefusedInstanceTypes, short = appendMissing(cr.RefusedInstanceTypes, m[1]), appendMissing(short, m[1])
+		}
+		for _, e := range fleetErrors(r.Message) {
+			switch e.Code {
+			case fleetErrorCapacity:
+			case fleetErrorVcpuLimit:
+				cr.Quota = true
+				if m := vcpuLimit.FindStringSubmatch(e.Text); m != nil {
+					cr.VCPULimit = m[1]
+				}
+			default:
+				if cr.Other.Code == "" {
+					cr.Other = e
+				}
+			}
 		}
 		for _, m := range refusedZone.FindAllStringSubmatch(r.Message, -1) {
 			cr.RequestedZones = appendMissing(cr.RequestedZones, m[1])
@@ -332,8 +398,22 @@ func (lf launchFacts) capacity(refusals []launchRefusal) capacityRefusal {
 			}
 		}
 	}
-	if !named {
+	if len(short) == 0 && !cr.Quota {
 		return capacityRefusal{}
+	}
+	// A fleet that launched nothing was refused every size it asked for. A
+	// size the capacity wording names was refused for capacity; the quota
+	// and other errors name no size, so the rest are the quota's while it
+	// stands, else the other error's, else capacity's too (Karpenter's
+	// event is cut after the first size the cloud names).
+	rest := without(cr.RefusedInstanceTypes, short)
+	switch {
+	case cr.Quota:
+		cr.CapacityInstanceTypes, cr.QuotaInstanceTypes = without(cr.RefusedInstanceTypes, rest), rest
+	case cr.Other.Code != "":
+		cr.CapacityInstanceTypes, cr.OtherInstanceTypes = without(cr.RefusedInstanceTypes, rest), rest
+	default:
+		cr.CapacityInstanceTypes = cr.RefusedInstanceTypes
 	}
 	// The cloud's "choosing <zones>" is the complement of the zone that
 	// fleet error refused: a zone another fleet error of the same answer
@@ -373,10 +453,12 @@ func (lf launchFacts) pinnedByCache(zones []string) (*bool, string) {
 }
 
 // refusalMessage words a refusal: how many claims Karpenter could not
-// launch, the last one and when, its reason — and, for a capacity refusal
-// the cloud's answer was read from, every size refused, the zone and whose
-// constraint it is, the zones with capacity when named, and the way out; a
-// refusal read no further keeps Karpenter's words, bounded.
+// launch, the last one and when, its reason — and, for a refusal the
+// cloud's answer was read from, each refused size with its own reason (for
+// capacity the zone, whose constraint it is and the zones with capacity when
+// named; for the vCPU quota the account's limit; for another fleet error its
+// code and words), then the way out. A refusal read no further keeps
+// Karpenter's words, bounded.
 func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 	var b strings.Builder
 	claims := "NodeClaim"
@@ -384,13 +466,31 @@ func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 		claims = "NodeClaims"
 	}
 	fmt.Fprintf(&b, "Karpenter could not launch a node: %d %s refused, the last (%s) at %s — %s: ", count, claims, last.Claim, last.At.UTC().Format(time.RFC3339), last.Reason)
-	if len(cr.RefusedInstanceTypes) == 0 {
+	if len(cr.CapacityInstanceTypes) == 0 && !cr.Quota {
 		b.WriteString(boundMessage(last.Message))
 		b.WriteString("; Karpenter retries while the pod waits")
 		return b.String()
 	}
-	fmt.Fprintf(&b, "the cloud has no %s capacity", joinList(cr.RefusedInstanceTypes, "or"))
-	pinned := cr.PinnedByCache != nil && *cr.PinnedByCache
+	var reasons []string
+	if len(cr.CapacityInstanceTypes) > 0 {
+		reasons = append(reasons, cr.capacityReason())
+	}
+	if cr.Quota {
+		reasons = append(reasons, cr.quotaReason())
+	}
+	if len(cr.OtherInstanceTypes) > 0 {
+		reasons = append(reasons, fmt.Sprintf("the cloud refused %s with %s: %s", joinList(cr.OtherInstanceTypes, "and"), cr.Other.Code, strings.TrimSuffix(boundMessage(cr.Other.Text), ".")))
+	}
+	b.WriteString(strings.Join(reasons, "; "))
+	b.WriteString(cr.wayOut())
+	return b.String()
+}
+
+// capacityReason words the sizes refused for capacity: where, whose
+// constraint that is, and where the cloud has capacity when it named it.
+func (cr capacityRefusal) capacityReason() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "the cloud has no %s capacity", joinList(cr.CapacityInstanceTypes, "or"))
 	switch {
 	case cr.Unpinned && cr.EveryZone:
 		fmt.Fprintf(&b, " in any zone the pool allows (%s)", joinList(cr.RequestedZones, "and"))
@@ -403,7 +503,7 @@ func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 		}
 		fmt.Fprintf(&b, " in %s, the %s ", joinList(cr.RequestedZones, "and"), zone)
 		switch {
-		case pinned:
+		case cr.pinned():
 			fmt.Fprintf(&b, "the pool is pinned to by the cache claim %s (its volume lives there)", cr.CacheClaim)
 		case cr.PoolZones:
 			b.WriteString("the pool constrains its nodes to")
@@ -414,28 +514,68 @@ func refusalMessage(last launchRefusal, count int, cr capacityRefusal) string {
 	if len(cr.AvailableZones) > 0 {
 		fmt.Fprintf(&b, "; it has capacity in %s", joinList(cr.AvailableZones, "and"))
 	}
-	if cr.Unpinned {
-		if cr.EveryZone {
-			b.WriteString(". No zone is left to move to; wider sizes or another accelerator (a re-run of create_node_pool) give Karpenter more to choose from, and it retries while the pod waits")
-		} else {
-			b.WriteString("; Karpenter retries while the pod waits")
-		}
-		return b.String()
-	}
-	b.WriteString(". The way out is a pool in ")
-	if len(cr.AvailableZones) > 0 {
-		b.WriteString(joinList(cr.AvailableZones, "or"))
-	} else {
-		b.WriteString("another zone")
-	}
-	if pinned {
-		b.WriteString(" (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned")
-	} else {
-		b.WriteString(" (create_node_pool with zones naming it)")
-	}
-	b.WriteString("; Karpenter retries while the pod waits")
 	return b.String()
 }
+
+// quotaReason words the sizes refused for the account's vCPU quota and its
+// limit; the sizes are unknown when the claim's could not be read.
+func (cr capacityRefusal) quotaReason() string {
+	sizes, verb, their := joinList(cr.QuotaInstanceTypes, "and"), "exceed", "their"
+	switch len(cr.QuotaInstanceTypes) {
+	case 0:
+		sizes = "the sizes asked for"
+		if len(cr.CapacityInstanceTypes) > 0 {
+			sizes = "the other sizes asked for"
+		}
+	case 1:
+		verb, their = "exceeds", "its"
+	}
+	if cr.VCPULimit == "" {
+		return fmt.Sprintf("%s %s the account's vCPU quota for %s instance bucket", sizes, verb, their)
+	}
+	return fmt.Sprintf("%s %s the account's vCPU quota: its limit is %s vCPUs for %s instance bucket", sizes, verb, cr.VCPULimit, their)
+}
+
+// wayOut words what would launch: a pool in a zone with capacity, a quota
+// increase for the sizes the quota refused — and that Karpenter retries.
+func (cr capacityRefusal) wayOut() string {
+	const retries = "; Karpenter retries while the pod waits"
+	capacity := len(cr.CapacityInstanceTypes) > 0
+	if !cr.Quota {
+		switch {
+		case cr.Unpinned && cr.EveryZone:
+			return ". No zone is left to move to; wider sizes or another accelerator (a re-run of create_node_pool) give Karpenter more to choose from, and it retries while the pod waits"
+		case cr.Unpinned:
+			return retries
+		}
+		return ". The way out is " + cr.zoneWayOut() + retries
+	}
+	quota := "a vCPU quota increase for the instance bucket (EC2 Service Quotas)"
+	switch {
+	case !capacity:
+		return ". The way out is " + quota + " or smaller sizes (a re-run of create_node_pool)" + retries
+	case cr.Unpinned && cr.EveryZone:
+		return ". No zone is left to move to; the way out is " + quota + retries
+	case cr.Unpinned:
+		return ". The way out is " + quota + retries
+	}
+	return ". The way out is " + cr.zoneWayOut() + ", or " + quota + retries
+}
+
+// zoneWayOut is a pool in a zone with capacity, and the cache claim's pin
+// lifted when it is what holds the pool in the refused zone.
+func (cr capacityRefusal) zoneWayOut() string {
+	zones := "another zone"
+	if len(cr.AvailableZones) > 0 {
+		zones = joinList(cr.AvailableZones, "or")
+	}
+	if cr.pinned() {
+		return "a pool in " + zones + " (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned"
+	}
+	return "a pool in " + zones + " (create_node_pool with zones naming it)"
+}
+
+func (cr capacityRefusal) pinned() bool { return cr.PinnedByCache != nil && *cr.PinnedByCache }
 
 // claimRefusalMessage collapses Karpenter's message to one line and drops
 // the event's prefix naming the claim.

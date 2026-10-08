@@ -12,32 +12,38 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	discoveryfake "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/openapi"
 	"k8s.io/client-go/openapi/openapitest"
-	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
 
-// testGVR is the ModelConfig resource in the version kagent API v2 serves.
-var testGVR = schema.GroupVersionResource{Group: KagentGroup, Version: DefaultAPIVersion, Resource: ModelConfigResource}
+// testGVR is the ModelConfig resource kagent 1.3 serves; legacyGVR the one
+// its cut-over leaves in place.
+var (
+	testGVR   = schema.GroupVersionResource{Group: KagentGroup, Version: "v1alpha3", Resource: ModelConfigResource}
+	legacyGVR = schema.GroupVersionResource{Group: LegacyKagentGroup, Version: "v1alpha3", Resource: ModelConfigResource}
+)
 
-// testAPIVersion is the apiVersion of the objects the fakes hold.
-const testAPIVersion = KagentGroup + "/" + DefaultAPIVersion
+// testAPIVersion is the apiVersion of the objects the fakes hold;
+// legacyAPIVersion the one of a ModelConfig written before the cut-over.
+const (
+	testAPIVersion   = DefaultAPIVersion
+	legacyAPIVersion = LegacyKagentGroup + "/v1alpha3"
+)
 
 func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		testGVR:   "ModelConfigList",
+		legacyGVR: "ModelConfigList",
 		secretGVR: "SecretList",
 	}, objs...)
 	return NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "", testInstance), client
@@ -47,10 +53,13 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 // 1.0.3 serves; kagent 1.0.2 serves them without think.
 var kagentOllamaFields = []string{"host", "options", "think"}
 
-// servedOpenAPI is the apiserver's OpenAPI v3 for kagent.dev/<version>, in
-// the shape it publishes a CRD in: a component per kind, marked with its
-// group, version and kind, the structural schema inlined.
-func servedOpenAPI(version string, ollamaFields ...string) openapi.ClientWithContext {
+// servedOpenAPI is the apiserver's OpenAPI v3 for the ModelConfig
+// group/version apiVersion, in the shape it publishes a CRD in: a component
+// per kind, marked with its group, version and kind, the structural schema
+// inlined.
+func servedOpenAPI(apiVersion string, ollamaFields ...string) openapi.ClientWithContext {
+	gv := schema.FromAPIVersionAndKind(apiVersion, "").GroupVersion()
+	group, version := gv.Group, gv.Version
 	ollama := map[string]any{}
 	for _, f := range ollamaFields {
 		ollama[f] = map[string]any{"type": "string"}
@@ -58,7 +67,7 @@ func servedOpenAPI(version string, ollamaFields ...string) openapi.ClientWithCon
 	component := func(kind string) map[string]any {
 		return map[string]any{
 			"type":                            "object",
-			"x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": kind}},
+			"x-kubernetes-group-version-kind": []any{map[string]any{"group": group, "version": version, "kind": kind}},
 			"properties": map[string]any{
 				"metadata": map[string]any{"allOf": []any{map[string]any{"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}}},
 				"spec":     map[string]any{"type": "object", "properties": map[string]any{"ollama": map[string]any{"type": "object", "properties": ollama}}},
@@ -66,22 +75,20 @@ func servedOpenAPI(version string, ollamaFields ...string) openapi.ClientWithCon
 		}
 	}
 	raw, err := json.Marshal(map[string]any{"openapi": "3.0.0", "components": map[string]any{"schemas": map[string]any{
-		"dev.kagent." + version + ".Agent":           map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": "Agent"}}},
+		"dev.kagent." + version + ".Agent":           map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": group, "version": version, "kind": "Agent"}}},
 		"dev.kagent." + version + ".ModelConfig":     component("ModelConfig"),
-		"dev.kagent." + version + ".ModelConfigList": map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": KagentGroup, "version": version, "kind": "ModelConfigList"}}},
+		"dev.kagent." + version + ".ModelConfigList": map[string]any{"type": "object", "x-kubernetes-group-version-kind": []any{map[string]any{"group": group, "version": version, "kind": "ModelConfigList"}}},
 	}}})
 	if err != nil {
 		panic(err)
 	}
 	return openapi.ToClientWithContext(&openapitest.FakeClient{PathsMap: map[string]openapi.GroupVersion{
-		"apis/" + KagentGroup + "/" + version: openapitest.FakeGroupVersion{GVSpec: raw},
+		"apis/" + apiVersion: openapitest.FakeGroupVersion{GVSpec: raw},
 	}})
 }
 
-func ptr[T any](v T) *T { return &v }
-
 func ollamaEndpoint(model string) backend.AgentEndpoint {
-	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: 32768, Think: ptr(false)}
+	return backend.AgentEndpoint{Backend: backend.NameOllama, Provider: "Ollama", Host: "http://172.21.0.1:11434", Model: model, ContextLength: 32768, Think: new(false)}
 }
 
 func lemonadeEndpoint(model string) backend.AgentEndpoint {
@@ -112,7 +119,7 @@ func TestEnsureCreatesNativeOllamaModelConfig(t *testing.T) {
 	assert.Equal(t, "smollm2:135m", ref.Model)
 	assert.Equal(t, backend.NameOllama, ref.Backend, "the ref carries the backend label")
 	assert.False(t, ref.Ready, "no controller has reconciled yet")
-	assert.Equal(t, "kagent.dev/v1alpha3", ref.APIVersion)
+	assert.Equal(t, "api.kagent.dev/v1alpha3", ref.APIVersion)
 
 	obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "smollm2-135m", metav1.GetOptions{})
 	require.NoError(t, err)
@@ -263,7 +270,7 @@ func TestEnsureOllamaThink(t *testing.T) {
 func TestThinkIsLeftOutWhereTheServedSchemaLacksIt(t *testing.T) {
 	k, client := newFakeKagent(t)
 	now := time.Now()
-	k.schema = &servedSchema{client: servedOpenAPI(DefaultAPIVersion, "host", "options"), version: DefaultAPIVersion, now: func() time.Time { return now }}
+	k.schema = &servedSchema{client: servedOpenAPI(DefaultAPIVersion, "host", "options"), gv: testGVR.GroupVersion(), now: func() time.Time { return now }}
 	ctx := context.Background()
 
 	ep := ollamaEndpoint("qwen3.5:2b")
@@ -301,7 +308,7 @@ func TestThinkIsLeftOutWhereTheServedSchemaLacksIt(t *testing.T) {
 // be read, instead of writing a field the apiserver may prune.
 func TestWritableConsultsTheSchemaOnlyForThink(t *testing.T) {
 	k, _ := newFakeKagent(t)
-	k.schema = &servedSchema{client: openapi.ToClientWithContext(&openapitest.FakeClient{ForcedErr: errors.New("openapi down")}), version: DefaultAPIVersion, now: time.Now}
+	k.schema = &servedSchema{client: openapi.ToClientWithContext(&openapitest.FakeClient{ForcedErr: errors.New("openapi down")}), gv: testGVR.GroupVersion(), now: time.Now}
 	ctx := context.Background()
 
 	for _, ep := range []backend.AgentEndpoint{lemonadeEndpoint("qwen3-4b-FLM"), func() backend.AgentEndpoint { ep := ollamaEndpoint("smollm2:135m"); ep.Think = nil; return ep }()} {
@@ -311,9 +318,9 @@ func TestWritableConsultsTheSchemaOnlyForThink(t *testing.T) {
 	_, err := k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
 	require.ErrorContains(t, err, "openapi down")
 
-	k.schema = &servedSchema{client: openapi.ToClientWithContext(openapitest.NewFakeClient()), version: DefaultAPIVersion, now: time.Now}
+	k.schema = &servedSchema{client: openapi.ToClientWithContext(openapitest.NewFakeClient()), gv: testGVR.GroupVersion(), now: time.Now}
 	_, err = k.Ensure(ctx, "qwen3.5:2b", ollamaEndpoint("qwen3.5:2b"))
-	require.ErrorContains(t, err, "publishes no OpenAPI v3 schema for kagent.dev/v1alpha3")
+	require.ErrorContains(t, err, "publishes no OpenAPI v3 schema for api.kagent.dev/v1alpha3")
 }
 
 func TestCarriesComparesTheAgentSettings(t *testing.T) {
@@ -322,11 +329,11 @@ func TestCarriesComparesTheAgentSettings(t *testing.T) {
 		ref  ModelConfigRef
 		want bool
 	}{
-		"same window, same think": {ModelConfigRef{ContextLength: 32768, Think: ptr(false)}, true},
-		"another window":          {ModelConfigRef{ContextLength: 4096, Think: ptr(false)}, false},
+		"same window, same think": {ModelConfigRef{ContextLength: 32768, Think: new(false)}, true},
+		"another window":          {ModelConfigRef{ContextLength: 4096, Think: new(false)}, false},
 		"think unset":             {ModelConfigRef{ContextLength: 32768}, false},
-		"think on":                {ModelConfigRef{ContextLength: 32768, Think: ptr(true)}, false},
-		"host and shape ignored":  {ModelConfigRef{ContextLength: 32768, Think: ptr(false), Endpoint: "http://elsewhere:11434", APIKeySecret: "x"}, true},
+		"think on":                {ModelConfigRef{ContextLength: 32768, Think: new(true)}, false},
+		"host and shape ignored":  {ModelConfigRef{ContextLength: 32768, Think: new(false), Endpoint: "http://elsewhere:11434", APIKeySecret: "x"}, true},
 	}
 	for name, tc := range cases {
 		assert.Equal(t, tc.want, tc.ref.Carries(ep), name)
@@ -689,55 +696,6 @@ func apiResources(groupVersion string, names ...string) *metav1.APIResourceList 
 	return l
 }
 
-func TestDiscoverAPIVersionFollowsWhatTheClusterServes(t *testing.T) {
-	cases := map[string]struct {
-		served  []*metav1.APIResourceList
-		want    string
-		wantErr string
-	}{
-		"kagent API v2 serves v1alpha3 only": {
-			served: []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha3", "agenttemplates", "modelconfigs")},
-			want:   "v1alpha3",
-		},
-		"kagent 0.x prefers v1alpha2 and still serves v1alpha1": {
-			served: []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha2", "agents", "modelconfigs"), apiResources("kagent.dev/v1alpha1", "agents", "modelconfigs")},
-			want:   "v1alpha2",
-		},
-		"the preferred version lacks the resource, another has it": {
-			served: []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha3", "agenttemplates"), apiResources("kagent.dev/v1alpha2", "modelconfigs")},
-			want:   "v1alpha2",
-		},
-		"the group serves no modelconfigs": {
-			served:  []*metav1.APIResourceList{apiResources("kagent.dev/v1alpha3", "agenttemplates")},
-			wantErr: "has no modelconfigs resource",
-		},
-		"kagent is not installed": {
-			served:  []*metav1.APIResourceList{apiResources("apps/v1", "deployments")},
-			wantErr: "API group kagent.dev not found",
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			dc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: tc.served}}
-			got, err := DiscoverAPIVersion(dc)
-			if tc.wantErr != "" {
-				require.ErrorContains(t, err, tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// TestDefaultAPIVersionIsTheV2One: what the service runs on when discovery
-// fails (cmd/serve falls back to DefaultAPIVersion) or is bypassed.
-func TestDefaultAPIVersionIsTheV2One(t *testing.T) {
-	assert.Equal(t, "v1alpha3", DefaultAPIVersion)
-	k := NewKagent(nil, nil, "kagent", "", "", testInstance)
-	assert.Equal(t, DefaultAPIVersion, k.APIVersion())
-}
-
 func TestReadyNeedsAcceptedAndResolvedRefs(t *testing.T) {
 	cond := func(typ, status, message string) map[string]any {
 		return map[string]any{"type": typ, "status": status, "message": message}
@@ -786,9 +744,9 @@ func TestReadyNeedsAcceptedAndResolvedRefs(t *testing.T) {
 // TestBuildPinsTheV1alpha3Shape compares what Ensure writes for a keyless
 // Ollama model and an OpenAI-compatible one with testdata/*.yaml — the files
 // `kubectl -n kagent create --dry-run=server -f` validates against a kagent
-// API v2 cluster (v1alpha3: the provider-specific block only with its
-// provider, apiKeySecret and apiKeySecretKey together, apiKeyPassthrough
-// without either). UPDATE_GOLDEN=1 rewrites them.
+// 1.3 cluster (api.kagent.dev/v1alpha3: the provider-specific block only
+// with its provider, apiKeySecret and apiKeySecretKey together,
+// apiKeyPassthrough without either). UPDATE_GOLDEN=1 rewrites them.
 func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
 	k, _ := newFakeKagent(t)
 	goldens := map[string]*unstructured.Unstructured{
@@ -810,97 +768,4 @@ func TestBuildPinsTheV1alpha3Shape(t *testing.T) {
 			assert.Equal(t, string(want), string(got))
 		})
 	}
-}
-
-// cutOver is a cluster whose kagent.dev CRD serves one ModelConfig version
-// at a time, switched by flip: a call at any other version fails NotFound,
-// as the apiserver answers a version the CRD no longer serves.
-type cutOver struct {
-	served    string
-	discovery *discoveryfake.FakeDiscovery
-	client    *dynamicfake.FakeDynamicClient
-	misses    int
-}
-
-func newCutOver(served string) *cutOver {
-	c := &cutOver{discovery: &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{}}}
-	c.client = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		{Group: KagentGroup, Version: "v1alpha2", Resource: ModelConfigResource}: "ModelConfigList",
-		testGVR:   "ModelConfigList",
-		secretGVR: "SecretList",
-	})
-	c.client.PrependReactor("*", ModelConfigResource, func(a clienttesting.Action) (bool, runtime.Object, error) {
-		if v := a.GetResource().Version; v != c.served {
-			c.misses++
-			return true, nil, apierrors.NewGenericServerResponse(404, a.GetVerb(), a.GetResource().GroupResource(), "", "", 0, true)
-		}
-		return false, nil, nil
-	})
-	c.flip(served)
-	return c
-}
-
-func (c *cutOver) flip(served string) {
-	c.served = served
-	c.discovery.Resources = []*metav1.APIResourceList{apiResources(KagentGroup+"/"+served, "agents", ModelConfigResource)}
-}
-
-func TestWiringFollowsACRDVersionCutOver(t *testing.T) {
-	ctx := context.Background()
-	c := newCutOver("v1alpha2")
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
-		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
-	ep := ollamaEndpoint("smollm2:135m")
-	ep.Think = nil
-
-	before, err := k.Ensure(ctx, "smollm2:135m", ep)
-	require.NoError(t, err)
-	assert.Equal(t, KagentGroup+"/v1alpha2", before.APIVersion)
-
-	c.flip("v1alpha3")
-	after, err := k.Ensure(ctx, "qwen2.5:0.5b", ep)
-	require.NoError(t, err, "the first call after the cut-over re-discovers and retries")
-	assert.Positive(t, c.misses, "the call failed NotFound at the old version")
-	assert.Equal(t, testAPIVersion, after.APIVersion)
-	assert.Equal(t, "v1alpha3", k.APIVersion())
-
-	misses := c.misses
-	refs, err := k.List(ctx)
-	require.NoError(t, err)
-	assert.Len(t, refs, 1, "the new version's ModelConfigs")
-	assert.Equal(t, misses, c.misses, "later calls go to the new version at once")
-}
-
-func TestWiringRediscoversWhenTheSchemaVersionIsGone(t *testing.T) {
-	c := newCutOver("v1alpha3")
-	k := NewKagent(c.client, servedOpenAPI("v1alpha3", kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
-		WithDiscovery(func() (string, error) { return DiscoverAPIVersion(c.discovery) }, nil)
-
-	ep, err := k.Writable(context.Background(), ollamaEndpoint("qwen3:0.6b"))
-	require.NoError(t, err)
-	assert.Equal(t, ptr(false), ep.Think, "read from the v1alpha3 schema")
-	assert.Equal(t, "v1alpha3", k.APIVersion())
-}
-
-func TestAnExplicitAPIVersionNeverRediscovers(t *testing.T) {
-	c := newCutOver("v1alpha3")
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance)
-
-	_, err := k.List(context.Background())
-	require.Error(t, err)
-	assert.True(t, apierrors.IsNotFound(err))
-	assert.Equal(t, "v1alpha2", k.APIVersion())
-}
-
-func TestARediscoveryOfTheSameVersionKeepsTheError(t *testing.T) {
-	c := newCutOver("v1alpha2")
-	calls := 0
-	k := NewKagent(c.client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", "v1alpha2", "", testInstance).
-		WithDiscovery(func() (string, error) { calls++; return "v1alpha2", nil }, nil)
-	c.served = "none"
-
-	_, err := k.List(context.Background())
-	require.Error(t, err)
-	assert.Equal(t, 1, calls)
-	assert.Equal(t, 1, c.misses, "no retry at an unchanged version")
 }

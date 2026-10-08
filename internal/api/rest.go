@@ -81,6 +81,9 @@ type modelRequest struct {
 	// the nodes of a fast link, or copies, one on each of the nodes.
 	Placement string   `json:"placement,omitempty"`
 	Nodes     []string `json:"nodes,omitempty"`
+	// Tracing switches the served model's trace export on (kserve load);
+	// off by default.
+	Tracing bool `json:"tracing,omitempty"`
 	// The API-key shape of a wired ModelConfig (wire): the caller's token
 	// forwarded, or a static key in a Secret of the caller's. Mutually
 	// exclusive; neither leaves the decision to the backend.
@@ -192,7 +195,7 @@ func (h *REST) load(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.svc.Load(r.Context(), service.LoadOptions{Backend: req.Backend, Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node, Placement: req.Placement, Nodes: req.Nodes})
+	m, err := h.svc.Load(r.Context(), service.LoadOptions{Backend: req.Backend, Model: req.Model, KeepAlive: req.KeepAlive, Preset: req.Preset, Node: req.Node, Placement: req.Placement, Nodes: req.Nodes, Tracing: req.Tracing})
 	if err != nil {
 		h.writeError(w, err)
 		return

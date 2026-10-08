@@ -584,6 +584,14 @@ func nodeOrAny(node string) string {
 	return node
 }
 
+// onOff words a switch for a message.
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
 func shortID() string {
 	return strconv.FormatInt(time.Now().UnixNano()%1_000_000_000, 36)
 }

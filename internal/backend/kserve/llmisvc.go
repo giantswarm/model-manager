@@ -109,6 +109,24 @@ func (b *Backend) composeLLM(p *servingPreset, s settings, node string, sh servi
 	return obj
 }
 
+// setTracing switches the served model's trace export on: spec.tracing, empty.
+// KServe's controller appends its tracing LLMInferenceServiceConfig
+// (kserve-config-llm-tracing: the exporter, the platform's OTLP endpoint, the
+// sampler and the pod labels the OTLP gateway routes by) to an object whose
+// spec carries tracing, whatever it says, so the endpoint stays the
+// platform's, never a value of the caller's.
+func setTracing(obj *unstructured.Unstructured) {
+	spec, _ := obj.Object["spec"].(map[string]any)
+	spec["tracing"] = map[string]any{}
+}
+
+// tracingOn reports whether the object exports traces: its spec carries
+// tracing.
+func tracingOn(obj *unstructured.Unstructured) bool {
+	_, ok, _ := unstructured.NestedMap(obj.Object, "spec", "tracing")
+	return ok
+}
+
 // servedNameArgs makes vLLM answer under the preset's name as well as under
 // the names the well-known template serves (the model id and its publishers/
 // path): `--served-model-name` takes a list and its last occurrence wins, so

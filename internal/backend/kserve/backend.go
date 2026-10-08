@@ -94,6 +94,10 @@ type Backend struct {
 	// by storage URI (modelimage.go).
 	imageMu sync.Mutex
 	images  map[string]modelImage
+
+	// webhookWait bounds the create's wait for an admission webhook without a
+	// ready endpoint (webhook.go); tests shorten it.
+	webhookWait time.Duration
 }
 
 // k8s returns the typed client a call should use: the caller's own when ctx
@@ -150,6 +154,8 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 		dyn:  opts.Dynamic,
 		inv:  newInventory(),
 		log:  log,
+
+		webhookWait: DefaultWebhookStartWait,
 	}
 	// The client's timeout is the ceiling of one exchange; the interactive
 	// lookups (fit check, search) are bounded by opts.HFTimeout on their
@@ -471,6 +477,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Preset:    sv.Preset,
 			GPUs:      sv.GPUs,
 			ManagedBy: sv.ManagedBy,
+			Tracing:   sv.Tracing,
 			Phase:     sv.Phase,
 			Steps:     sv.Steps,
 
@@ -671,7 +678,12 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 				}
 				return nil, fmt.Errorf("%w: %s already serves on %s, not on %s; stop it first", backend.ErrConflict, sv.Name, strings.Join(nodes, ","), other)
 			}
-			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy, "nodes", strings.Join(nodes, ","))
+			if sv.Tracing != req.Tracing {
+				// Switching tracing restarts the model: never behind an
+				// answer that says nothing was done.
+				return nil, fmt.Errorf("%w: %s already serves with tracing %s, not %s; stop it first — switching tracing restarts the model", backend.ErrConflict, sv.Name, onOff(sv.Tracing), onOff(req.Tracing))
+			}
+			b.log.Info("serving object already exists", "name", sv.Name, "model", sv.Model, "managedBy", sv.ManagedBy, "nodes", strings.Join(nodes, ","), "tracing", sv.Tracing)
 			res.AlreadyServing, res.ServingNodes = true, nodes
 			return res, nil
 		}
@@ -690,6 +702,9 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	case len(req.Nodes) > 1:
 		applyCopies(obj, req.Nodes)
 	}
+	if req.Tracing {
+		setTracing(obj)
+	}
 	if req.DryRun {
 		res.Manifests = []*unstructured.Unstructured{obj}
 		return res, nil
@@ -697,7 +712,7 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	if err := b.createServing(ctx, obj); err != nil {
 		return nil, err
 	}
-	b.log.Info("serving object created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "placement", placement, "node", nodeOrAny(req.Node), "nodes", strings.Join(fit.Nodes, ","))
+	b.log.Info("serving object created", "name", obj.GetName(), "namespace", s.Namespace, "model", plan.Repo, "preset", plan.Preset.name(), "placement", placement, "node", nodeOrAny(req.Node), "nodes", strings.Join(fit.Nodes, ","), "tracing", req.Tracing)
 	b.inv.invalidate()
 	return res, nil
 }
@@ -1021,7 +1036,8 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	reserved, _ := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
+	reserved, _, taken := b.reservedByNode(ctx, indexPresets(presets), nil, nodes)
+	withTaken(nodes, taken)
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache

@@ -80,7 +80,7 @@ data:
 | `spec.kserve.gpuPool.taint.{key,value,effect}` | no | The pool's taint (`key` required; `effect` `NoSchedule` \| `PreferNoSchedule` \| `NoExecute`, empty for every effect). Tolerated by the inventory scan pods, the download Jobs and the predictors model-manager composes: `value` empty tolerates every value (`Exists`), set compares it (`Equal`) |
 | `spec.kserve.gpuPool.nodeSelector` | no | The pool's label(s) (`giantswarm.io/machine-pool: <cluster>-<pool>`), the node selector of the composed predictors and of every scan pod and download Job that is not pinned to a node |
 | `spec.kserve.router.scheduler` | no | `true` composes the llm-d endpoint picker (`router.scheduler`) beside the route on every `LLMInferenceService` the backend composes; default `false`, the route alone — KServe routes the models Gateway to the workload Service (see below). A preset's `spec.router.scheduler` overrides it for that preset |
-| `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — and `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) |
+| `spec.kserve.gpuPool.instances[]` | no | The sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`; the fit check judges a model against them while the pool has no node (see below). Every entry: `instanceType` (required, `g6.xlarge`), `size` (`xlarge`; defaults to the part of `instanceType` after the family), `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` (the memory of one GPU) — positive integers — `usableVcpu`, `usableMemoryGiB` (positive numbers: what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets; a `g6.xlarge` 3 / 11.9 of 4 / 16) and optionally `computeCapability` (the GPU's CUDA compute capability as `major.minor`, `"8.6"`; the fit check judges the GPU generation a model's weights need against it, and without it against the instance family's) |
 | `spec.kserve.gpuPools.<pool>.instances[]` | no | The cluster's GPU pools by name — the value of their nodes' `giantswarm.io/machine-pool` label — each with its sizes in the `instances[]` shape above, which cluster-manager writes while the cluster has two or more pools and so no `gpuPool` selector pins every predictor. The fit check places a model on the chosen node's pool, or, when no node hosts it, on the pool with no node yet whose smallest hosting size is the smallest; `load_model` pins the predictor to that pool (`giantswarm.io/machine-pool=<pool>` with the pools' taint) and `list_loaded_models` names it as `pool` |
 
 Unknown fields are refused. A document that fails the schema is **reported and not loaded**: it
@@ -244,6 +244,20 @@ preset, `spec.router.scheduler: true|false` on a preset for that preset alone (t
 wins). A shape that switches it on needs the Inference Extension enabled on the models Gateway
 (giantswarm/agent-platform#504). The shape is composed at load: an object composed before a change
 keeps its shape until it is unloaded and loaded again.
+
+### Tracing
+
+A served model exports no traces unless its load asks for them: `load_model` (`POST
+/api/v1/models/load`) takes `tracing: true`, which composes `spec.tracing: {}` on the
+`LLMInferenceService`. KServe's controller appends its tracing `LLMInferenceServiceConfig`
+(`kserve-config-llm-tracing`) to an object whose spec carries `tracing`, whatever the spec says, so
+the exporter, the platform's OTLP endpoint, the sampler and the pod labels the OTLP gateway routes
+by are the platform's, never a value of the caller's: the model's spans land in the platform's trace
+store under the caller's trace. Off by default — detailed vLLM traces cost throughput. The served
+model reports the switch as `running.tracing` (`list_loaded_models`: `tracing`). It is composed at
+load like the rest of the shape: a preset already served with the other setting is refused with
+`conflict` (`already serves with tracing off, not on; stop it first`), since switching it restarts
+the model.
 
 ### The API interfaces of a served model
 
@@ -419,9 +433,46 @@ person | cluster-manager`, plus `invalid` when documents failed the schema.
 ## Zero backends and static backends
 
 With neither `backend` nor `backends` set (the chart default) the process starts with no backend:
-`list_backends` answers an empty list and every backend-scoped tool answers
-`no_backend: no backend registered: register one with add_backend (kind
-ollama|lmstudio|lemonade|kserve) or configure --backends` (HTTP 412). Static values keep working:
+`list_backends` answers an empty list and every backend-scoped tool (`check_fit`, `load_model`,
+`list_models`, …) answers `no_backend` (HTTP 412) naming the instance that answered (its
+`--instance` and version), the namespace it watches for backend documents with how many are there
+(0 valid, plus the invalid ones `list_backends` lists) and both ways to register one:
+
+```
+no_backend: no backend registered on model-manager <instance> <version>: 0 valid backend documents
+in namespace <namespace> (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true);
+register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers
+model-backend-kserve with the first GPU node pool it creates) or add_backend
+kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends
+```
+
+With runtime registration off (`--namespace` empty) the answer says so and names `--backends` as
+the only way.
+
+**`check_fit` of a preset without a backend** answers what the preset declares instead, so a person
+learns what it needs — and sizes the GPU pool — before the pool, and with it the backend, exists.
+The presets are read from the **catalog** the agent-platform connectivity chart publishes where
+model-manager runs (the ServingPreset ConfigMaps of the preset namespace: chart value
+`kserve.presets.namespace`, else the discovery document's `spec.presets.namespace`, else
+model-manager's namespace), with the caller's client first and the ServiceAccount's second, as the
+discovery document is read. The answer carries the declaration in the fields a judged answer uses —
+`weightsBytes` / `declaredWeightsBytes` (`weightsSource: preset`), `overheadBytes`, `requiredBytes`,
+`computeCapabilityRequired` (`requirements.minComputeCapability`), `devicesPerPod` /
+`tensorParallel` (the preset's own GPUs), `gpuMemoryUtilization`, `maxModelLen`,
+`cacheSource: unknown` — with `verdict: unverified`, `fits: false` (nothing judged the model, and a
+load has nothing to compose onto), `retryable: true`, no `backend`, and a `reason` that opens with
+the `no_backend` answer above and ends with the declaration: `no_backend: no backend registered on
+model-manager <instance> <version>: … or configure --backends — the fit of preset qwen3-8-27b is
+unverified until a backend is registered: it declares 1 GPU, 16.0 GiB of weights and 4.0 GiB of
+overhead (20.0 GiB required), compute capability 8.9 or newer, --max-model-len 32768`. The preset
+is resolved as a backend resolves it: by `preset`, or the single preset serving `model`. An unknown
+preset is `not_found` naming the published ones; a model no preset serves (its weights are the hub's
+to size, which a backend asks), a cluster with no preset published (the chart renders the catalog
+only where model serving is on) and a catalog the caller cannot read stay `no_backend`, naming
+why. A registered backend answers as before, the catalog has no say; `backend: ollama` (or any
+other name) is never answered from it.
+
+Static values keep working:
 `--backends=ollama,lemonade` (chart `backends`) or `--backend=ollama` lists those with `source:
 static`, in the operator's order, the first being the default backend; registered backends follow,
 sorted by name. A document naming a static kind is refused and reported — the chart values win;

@@ -42,6 +42,12 @@ type fitPlan struct {
 	CacheLocal bool
 	// KV is the KV cache check the placement runs on each GPU it judges.
 	KV *kvCheck
+	// Compute is the GPU generation the checkpoint's weights need, judged
+	// on each GPU beside KV. Config is the checkpoint's config.json both
+	// read, ConfigSkip why there is none (checkpointConfig).
+	Compute    *computeNeed
+	Config     []byte
+	ConfigSkip string
 	// Image is the model image of a preset served from one, as its registry
 	// described it; nil for every other model, or when it did not answer.
 	Image *modelImage
@@ -79,6 +85,7 @@ func (b *Backend) judgeFit(ctx context.Context, plan *fitPlan, idx presetIndex, 
 		return err
 	}
 	plan.KV = b.kvCheckFor(ctx, plan)
+	plan.Compute = b.computeNeedFor(ctx, plan)
 	if err := b.placeModel(ctx, plan, idx, req, forServe); err != nil {
 		return err
 	}
@@ -310,9 +317,9 @@ func describeHubFailure(err error, timeout time.Duration) string {
 }
 
 // placeModel picks the node the model is checked against and writes the
-// verdict into the plan: the explicit node, else the eligible node with the
-// most free budget, cache nodes first; a GPU pool at scale-to-zero answers
-// without a node. With several pools and none pinning every predictor
+// verdict into the plan: the explicit node, else the smallest eligible node
+// that hosts it, cache nodes first (chooseNode); a GPU pool at scale-to-zero
+// answers without a node. With several pools and none pinning every predictor
 // (settings.GPUPools), the verdict names the pool the model goes to — the
 // chosen node's, or a pool with no node yet whose size hosts the model when
 // no node does — and load_model pins the predictor there
@@ -334,7 +341,10 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	if err != nil {
 		return err
 	}
-	reserved, own := b.reservedByNode(ctx, idx, p, nodes)
+	reserved, own, taken := b.reservedByNode(ctx, idx, p, nodes)
+	if forServe {
+		withTaken(nodes, taken)
+	}
 	plan.Nodes, plan.Own = nodes, own
 	candidates, why := b.candidateNodes(ctx, nodes, req.Node, loc, p)
 	if len(candidates) == 0 && b.cfg.recheckDiscovery(ctx) {
@@ -344,6 +354,9 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		// above all.
 		if nodes, err = b.nodes(ctx, loc, p); err != nil {
 			return err
+		}
+		if forServe {
+			withTaken(nodes, taken)
 		}
 		plan.Nodes = nodes
 		candidates, why = b.candidateNodes(ctx, nodes, req.Node, loc, p)
@@ -410,45 +423,11 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 		}
 		return nil
 	}
-	best := candidates[0]
-	bestFree := best.Budget - reserved[best.Name]
-	for _, n := range candidates[1:] {
-		if free := n.Budget - reserved[n.Name]; free > bestFree {
-			best, bestFree = n, free
-		}
-	}
-	res.Node = best.Name
-	res.BudgetBytes = best.Budget
-	res.BudgetSource = best.BudgetSource
-	res.ReservedBytes = reserved[best.Name]
-	res.FreeBytes = best.Budget - res.ReservedBytes
-	if res.FreeBytes < 0 {
-		res.FreeBytes = 0
-	}
+	best, verdict := b.chooseNode(ctx, plan, candidates, reserved, forServe)
+	*res = verdict
 	if best.Budget <= 0 {
-		res.Reason = fmt.Sprintf("node %s reports no memory budget (%s)", best.Name, best.BudgetSource)
 		return nil
 	}
-	limit := res.BudgetBytes
-	if forServe {
-		limit = res.FreeBytes
-	}
-	res.Fits = res.RequiredBytes <= limit
-	if res.Fits {
-		res.Reason = fmt.Sprintf("%s fit within %s on %s (%s%s)",
-			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, reservedNote(res.ReservedBytes))
-	} else {
-		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
-			weightsNeed(res), humanBytes(limit), best.Name, best.BudgetSource, humanBytes(res.BudgetBytes), reservedNote(res.ReservedBytes))
-	}
-	running := int64(0)
-	if forServe {
-		running = res.ReservedBytes
-	}
-	sh, uv := b.shapeOn(p, best, running, p.residentBytes(res.WeightsBytes)+res.OverheadBytes, 1)
-	applyUnified(res, uv)
-	applyShape(res, p, sh, best, b.roomOn(ctx, best, p))
-	applyKV(res, plan.KV.shaped(sh).judgeOn(best))
 	if res.Gated && !res.TokenConfigured {
 		res.Reason += "; the repository is gated and no hub token is configured"
 	}
@@ -476,6 +455,87 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 	}
 	res.Reason += fmt.Sprintf("; the ready node %s does not host it (%s)", node, why)
 	return nil
+}
+
+// chooseNode picks the live node the model goes to and its verdict
+// (giantswarm/model-manager#254): of the candidates that host it, the
+// smallest — the least budget, so a model a small GPU holds leaves a larger
+// one free and never waits for a larger pool's capacity — the one with the
+// most free budget among equals; when none hosts it, the one with the most
+// free budget, whose verdict names why. A node whose devices the running
+// predictors hold hosts nothing more for a serve (judgeNode).
+func (b *Backend) chooseNode(ctx context.Context, plan *fitPlan, candidates []nodeBudget, reserved map[string]int64, forServe bool) (nodeBudget, backend.FitResult) {
+	free := func(i int) int64 { return candidates[i].Budget - reserved[candidates[i].Name] }
+	most, fit := 0, -1
+	verdicts := make([]backend.FitResult, len(candidates))
+	for i, n := range candidates {
+		verdicts[i] = b.judgeNode(ctx, plan, n, reserved[n.Name], forServe)
+		if free(i) > free(most) {
+			most = i
+		}
+		if !verdicts[i].Fits {
+			continue
+		}
+		if fit < 0 || n.Budget < candidates[fit].Budget || (n.Budget == candidates[fit].Budget && free(i) > free(fit)) {
+			fit = i
+		}
+	}
+	if fit < 0 {
+		fit = most
+	}
+	return candidates[fit], verdicts[fit]
+}
+
+// judgeNode is the verdict of serving the planned model on node n, reserved
+// being what the running models hold there: its budget, whether the weights
+// and overhead fit within it (within what is free for a serve), and the
+// shape, requests and KV cache it would run with. For a serve on a
+// discrete-GPU node the predictor also needs its GPUs free of the running
+// predictors' (freeGPUs): a device they hold leaves it Pending, whatever
+// memory is left.
+func (b *Backend) judgeNode(ctx context.Context, plan *fitPlan, n nodeBudget, reserved int64, forServe bool) backend.FitResult {
+	res, p := plan.Result, plan.Preset
+	res.Node = n.Name
+	res.BudgetBytes = n.Budget
+	res.BudgetSource = n.BudgetSource
+	res.ReservedBytes = reserved
+	res.FreeBytes = max(n.Budget-reserved, 0)
+	if n.Budget <= 0 {
+		res.Fits = false
+		res.Reason = fmt.Sprintf("node %s reports no memory budget (%s)", n.Name, n.BudgetSource)
+		return res
+	}
+	limit := res.BudgetBytes
+	if forServe {
+		limit = res.FreeBytes
+	}
+	res.Fits = res.RequiredBytes <= limit
+	if res.Fits {
+		res.Reason = fmt.Sprintf("%s fit within %s on %s (%s%s)",
+			weightsNeed(&res), humanBytes(limit), n.Name, n.BudgetSource, reservedNote(reserved))
+	} else {
+		res.Reason = fmt.Sprintf("%s exceed the %s available on %s (%s budget %s%s)",
+			weightsNeed(&res), humanBytes(limit), n.Name, n.BudgetSource, humanBytes(n.Budget), reservedNote(reserved))
+	}
+	running := int64(0)
+	if forServe {
+		running = reserved
+	}
+	sh, uv := b.shapeOn(p, n, running, p.residentBytes(res.WeightsBytes)+res.OverheadBytes, 1)
+	applyUnified(&res, uv)
+	applyShape(&res, p, sh, n, b.roomOn(ctx, n, p))
+	applyKV(&res, plan.KV.shaped(sh).judgeOn(n))
+	applyCompute(&res, plan.Compute.judgeNode(n))
+	if forServe && discreteGPUs(n) && !p.cpu() {
+		free := freeGPUs(n)
+		res.FreeGPUs = &free
+		if gpus := int64(plannedGPUs(plan)); free < gpus {
+			res.Fits = false
+			res.Reason = fmt.Sprintf("node %s has %s free of its %s (%s taken by running models), the predictor requests %d; ",
+				n.Name, plural(free, "GPU"), plural(gpuDevices(n), "GPU"), plural(n.GPUsTaken, "GPU"), gpus) + res.Reason
+		}
+	}
+	return res
 }
 
 // labelMachinePool is the node label a GPU pool stamps on its nodes: the
@@ -531,7 +591,14 @@ func launchingPool(plan *fitPlan, s settings, nodes []nodeBudget, explicit strin
 		}
 	}
 	if bestShape == nil {
-		return "", backend.GPUPool{}, false, nil
+		// No size of any pool hosts the predictor: the verdict is worded
+		// against the pool that comes closest (the most GPU memory per
+		// size, name order on a tie), so the refusal says what no size
+		// gives it — the GPU memory, the KV cache or the GPU generation —
+		// instead of "no accelerator node".
+		if bestName = closestPool(s.GPUPools, names, nodes, gpus); bestName == "" {
+			return "", backend.GPUPool{}, false, nil
+		}
 	}
 	pool := s.GPUPools[bestName]
 	pool.NodeSelector = map[string]string{labelMachinePool: bestName}
@@ -667,10 +734,12 @@ func presetSelector(p *servingPreset) map[string]string {
 // nodes, a split's share on each of its — and on a unified-memory node — GPUs
 // that report no memory of their own, the node's memory being theirs — at
 // least the share vLLM claims at start, --gpu-memory-utilization of the
-// node's budget, whatever the requests say. The preset being (re)loaded is not
-// counted against itself: what it holds is own, per node it serves on.
-func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) (reserved, own map[string]int64) {
-	out, own := map[string]int64{}, map[string]int64{}
+// node's budget, whatever the requests say. taken is the GPUs their
+// predictors request per node, whether or not their preset is known. The
+// preset being (re)loaded is not counted against itself: what it holds is
+// own, per node it serves on, and its GPUs are not taken.
+func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *servingPreset, nodes []nodeBudget) (reserved, own, taken map[string]int64) {
+	out, own, taken := map[string]int64{}, map[string]int64{}, map[string]int64{}
 	byName := make(map[string]nodeBudget, len(nodes))
 	for _, n := range nodes {
 		byName[n.Name] = n
@@ -678,7 +747,7 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 	servedList, err := b.listServed(ctx)
 	if err != nil {
 		b.log.Warn("listing LLMInferenceServices for the fit check failed", "error", err)
-		return out, own
+		return out, own, taken
 	}
 	for _, sv := range servedList {
 		on := sv.onNodes()
@@ -695,6 +764,9 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 			}
 			continue
 		}
+		for _, n := range on {
+			taken[n] += sv.GPUs
+		}
 		p, ok := idx.byName[sv.Preset]
 		if !ok {
 			if matches := idx.forModel(sv.Model); len(matches) == 1 {
@@ -708,7 +780,15 @@ func (b *Backend) reservedByNode(ctx context.Context, idx presetIndex, loading *
 			out[n] += presetShare(p, byName[n], b.opts.DefaultOverheadGiB, parts, sv.Utilization)
 		}
 	}
-	return out, own
+	return out, own, taken
+}
+
+// withTaken records on each node the GPUs the running predictors there
+// request (reservedByNode's taken), for the device judgement of a serve.
+func withTaken(nodes []nodeBudget, taken map[string]int64) {
+	for i := range nodes {
+		nodes[i].GPUsTaken = taken[nodes[i].Name]
+	}
 }
 
 // presetReserve is what one served preset holds on its node: its weights and

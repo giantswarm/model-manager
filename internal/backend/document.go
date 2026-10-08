@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,8 +48,46 @@ const (
 	TargetLocal = "local"
 )
 
-// ErrNoBackend: the process runs with no backend; the fix is in the message.
-var ErrNoBackend = errors.New("no backend registered: register one with add_backend (kind ollama|lmstudio|lemonade|kserve) or configure --backends")
+// ErrNoBackend: the process runs with no backend. The service answers it as
+// a NoBackendError, which names the instance and the fix.
+var ErrNoBackend = errors.New("no backend registered")
+
+// NoBackendError is ErrNoBackend as an instance answers it: which
+// model-manager answered, where it watches for backend documents and how a
+// person registers a backend there, so "the wrong instance answered" reads
+// apart from "no backend was registered here yet".
+type NoBackendError struct {
+	// Instance is the instance name (--instance), Version the build.
+	Instance string
+	Version  string
+	// Namespace is where backend documents are watched; empty means runtime
+	// registration is off and only --backends adds a backend.
+	Namespace string
+	// Invalid counts the documents found there that failed the schema.
+	Invalid int
+}
+
+func (e *NoBackendError) Is(target error) bool { return target == ErrNoBackend }
+
+func (e *NoBackendError) Error() string {
+	var b strings.Builder
+	b.WriteString(ErrNoBackend.Error())
+	if e.Instance != "" || e.Version != "" {
+		fmt.Fprintf(&b, " on model-manager %s", strings.TrimSpace(e.Instance+" "+e.Version))
+	}
+	if e.Namespace == "" {
+		b.WriteString(": runtime registration is off (--namespace is empty); configure --backends")
+		return b.String()
+	}
+	fmt.Fprintf(&b, ": 0 valid backend documents in namespace %s (ConfigMaps labelled %s)", e.Namespace, DocumentSelector)
+	if e.Invalid > 0 {
+		fmt.Fprintf(&b, ", %d invalid (list_backends names the problem)", e.Invalid)
+	}
+	b.WriteString("; register one with add_backend kind=kserve servingNamespace=<namespace> " +
+		"(cluster-manager registers " + DocumentNamePrefix + "kserve with the first GPU node pool it creates) " +
+		"or add_backend kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends")
+	return b.String()
+}
 
 // Document is the ModelBackend document.
 type Document struct {
@@ -242,6 +281,11 @@ type InstanceShape struct {
 	// daemonsets have theirs (a g6.xlarge: 3 vCPU / 11.9 GiB of 4 / 16).
 	UsableVCPU      float64 `json:"usableVcpu"`
 	UsableMemoryGiB float64 `json:"usableMemoryGiB"`
+	// ComputeCapability is the compute capability of one of the size's GPUs
+	// as major.minor ("8.6"), what cluster-manager knows of the accelerator
+	// it sized the pool with. Set, the fit check judges the GPU generation a
+	// model's weights need against it; unset, against the instance family's.
+	ComputeCapability string `json:"computeCapability,omitempty"`
 }
 
 // SizeName is the size a person knows the shape by: Size, else the part of
@@ -256,7 +300,8 @@ func (s InstanceShape) SizeName() string {
 	return s.InstanceType
 }
 
-// Validate checks the shape: an instance type and positive numbers.
+// Validate checks the shape: an instance type, positive numbers and, when
+// set, a compute capability of the form major.minor.
 func (s InstanceShape) Validate() error {
 	if strings.TrimSpace(s.InstanceType) == "" {
 		return errors.New("instanceType: required")
@@ -273,7 +318,29 @@ func (s InstanceShape) Validate() error {
 			return fmt.Errorf("%s: must be positive, got %v", f.name, f.value)
 		}
 	}
+	if s.ComputeCapability != "" {
+		if _, _, err := ParseComputeCapability(s.ComputeCapability); err != nil {
+			return fmt.Errorf("computeCapability: %w", err)
+		}
+	}
 	return nil
+}
+
+// ParseComputeCapability reads a CUDA compute capability written as
+// major.minor ("8.6" → 8, 6): two non-negative decimal integers around one
+// dot, nothing else.
+func ParseComputeCapability(s string) (major, minor int, err error) {
+	a, b, ok := strings.Cut(s, ".")
+	if ok {
+		major, err = strconv.Atoi(a)
+		if err == nil {
+			minor, err = strconv.Atoi(b)
+		}
+	}
+	if !ok || err != nil || major < 0 || minor < 0 {
+		return 0, 0, fmt.Errorf("must be a compute capability of the form major.minor (8.6), got %q", s)
+	}
+	return major, minor, nil
 }
 
 // Validate checks the pool block: the taint and every instance shape.
