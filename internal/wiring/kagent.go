@@ -564,7 +564,13 @@ func (k *Kagent) render(ctx context.Context, model string, ep backend.AgentEndpo
 	if err != nil {
 		return nil, err
 	}
-	return p.rendered(), nil
+	r := p.rendered()
+	if obj := p.provenance(); obj != nil {
+		if r.GitOps, err = gitops.Applying(ctx, k.dyn(ctx), obj); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 // wirePlan is one Ensure decided against the cluster: the name, the desired
@@ -580,21 +586,27 @@ type wirePlan struct {
 	legacy   *unstructured.Unstructured
 }
 
+// rendered is the plan's objects; the Flux provenance of the ModelConfig
+// it writes over is resolved by render (gitops.Applying).
 func (p *wirePlan) rendered() *Rendered {
 	r := &Rendered{Name: p.name, Objects: []*unstructured.Unstructured{p.desired}}
 	if p.secret != nil {
 		r.Objects = append(r.Objects, p.secret)
 	}
-	switch {
-	case p.existing != nil:
-		r.GitOps = gitops.OwnerOf(p.existing.GetLabels())
-	case p.legacy != nil:
-		r.GitOps = gitops.OwnerOf(p.legacy.GetLabels())
-	}
 	if p.replaces != nil {
 		r.Replaces = p.replaces.GetName()
 	}
 	return r
+}
+
+// provenance is the ModelConfig whose Flux provenance the plan reports: the
+// one it updates, else the one at kagent.dev it moves (legacy); nil for a
+// fresh create.
+func (p *wirePlan) provenance() *unstructured.Unstructured {
+	if p.existing != nil {
+		return p.existing
+	}
+	return p.legacy
 }
 
 // plan decides an Ensure: the name the ModelConfig gets and what it holds,
@@ -686,7 +698,7 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 		return nil, err
 	}
 	for _, obj := range []*unstructured.Unstructured{p.existing, p.replaces, p.legacy} {
-		if err := refuseGitOps(obj); err != nil {
+		if err := k.refuseGitOps(ctx, obj); err != nil {
 			return nil, err
 		}
 	}
@@ -743,16 +755,14 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	return toRef(updated), nil
 }
 
-// refuseGitOps is ErrGitOpsOwned for an object Flux applies, nil otherwise
-// (and for nil).
-func refuseGitOps(obj *unstructured.Unstructured) error {
+// refuseGitOps is ErrGitOpsOwned for an object Flux applies from git
+// (gitops.Refuse: its Kustomization still lists it), nil otherwise and for
+// nil.
+func (k *Kagent) refuseGitOps(ctx context.Context, obj *unstructured.Unstructured) error {
 	if obj == nil {
 		return nil
 	}
-	if owner := gitops.OwnerOf(obj.GetLabels()); owner != nil {
-		return fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(obj.GetKind(), obj.GetNamespace(), obj.GetName(), owner))
-	}
-	return nil
+	return gitops.Refuse(ctx, k.dyn(ctx), obj)
 }
 
 // Writable implements Wirer. Only a setting that needs the served schema
@@ -788,11 +798,16 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Re
 		return &Rendered{}, err
 	}
 	// One Flux applies from git is removed in git (commit mode), whoever
-	// rendered it; a live one only by the instance that created it.
-	if gitops.OwnerOf(obj.GetLabels()) == nil && !k.createdHere(obj) {
+	// rendered it; a live one — or one its Kustomization left behind — only
+	// by the instance that created it.
+	owner, err := gitops.Applying(ctx, k.dyn(ctx), obj)
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil && !k.createdHere(obj) {
 		return &Rendered{Name: obj.GetName(), Left: k.notOwned(obj, leftInPlace)}, nil
 	}
-	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: gitops.OwnerOf(obj.GetLabels())}
+	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: owner}
 	sec, err := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
 	switch {
 	case err == nil && sec.GetLabels()[ManagedByLabel] == ManagedByValue:
@@ -819,7 +834,7 @@ func (k *Kagent) remove(ctx context.Context, b backend.Name, model string) error
 	if obj == nil {
 		return nil
 	}
-	if err := refuseGitOps(obj); err != nil {
+	if err := k.refuseGitOps(ctx, obj); err != nil {
 		return err
 	}
 	if !k.createdHere(obj) {
@@ -839,14 +854,19 @@ func (k *Kagent) removeObj(ctx context.Context, name string) error {
 }
 
 // removePlaceholderSecret deletes the placeholder Secret of the ModelConfig
-// named mcName when model-manager created it live; a Secret of anyone
-// else's, one Flux applies from git, or none at all is left alone.
+// named mcName when model-manager created it live or its Kustomization left
+// it behind; a Secret of anyone else's, one Flux applies from git, or none
+// at all is left alone.
 func (k *Kagent) removePlaceholderSecret(ctx context.Context, mcName string) error {
 	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
 	secretName := placeholderSecretName(mcName)
 	sec, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue || gitops.OwnerOf(sec.GetLabels()) != nil {
+	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue {
 		return nil
+	}
+	owner, err := gitops.Applying(ctx, k.dyn(ctx), sec)
+	if err != nil || owner != nil {
+		return err
 	}
 	if err := secrets.Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete Secret %s/%s: %w", k.namespace, secretName, err)
