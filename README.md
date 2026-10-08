@@ -28,9 +28,11 @@ for the ollama backend; `OpenAI` provider with the caller's token forwarded
 against the workload URL for a kserve model on its in-cluster Service, and
 against Lemonade's `/api/v1` for lemonade; a kserve model's ModelConfig is
 created by the load call, before the model is ready), so agents can use them
-without manual steps. They are written in the kagent.dev API version the
-cluster serves (`v1alpha3` on kagent API v2, discovered at start-up and
-re-discovered when a call fails `NotFound`, as after a CRD version cut-over),
+without manual steps. They are written in the API group and version the
+cluster serves (`api.kagent.dev/v1alpha3` from kagent 1.3 on,
+`kagent.dev/v1alpha3` before it; discovered at start-up, re-discovered every
+minute and when a call fails `NotFound`, so a running process follows a
+kagent upgrade),
 and a ModelConfig is `ready` once kagent has accepted it and resolved its
 Secret (conditions `Accepted` and `ResolvedRefs`).
 
