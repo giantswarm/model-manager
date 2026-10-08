@@ -70,6 +70,31 @@ func TestApplyingHoldsAKustomizationToItsInventory(t *testing.T) {
 	}
 }
 
+func TestKeptIsANonPruningKustomizationThatDroppedTheObject(t *testing.T) {
+	models := &Owner{Kind: KindKustomization, Namespace: "flux-giantswarm", Name: "models"}
+	pruning := kustomization([]string{})
+	pruning.Object["spec"].(map[string]any)["prune"] = true
+	for name, tc := range map[string]struct {
+		cluster dynamic.Interface
+		object  *unstructured.Unstructured
+		kept    *Owner
+	}{
+		"dropped from the inventory": {fluxCluster(kustomization([]string{"model-serving_other__Secret"})), servingObject(), models},
+		"inventory recorded empty":   {fluxCluster(kustomization([]string{})), servingObject(), models},
+		"listed in the inventory":    {fluxCluster(kustomization([]string{servingID})), servingObject(), nil},
+		"no inventory recorded yet":  {fluxCluster(kustomization(nil)), servingObject(), nil},
+		"the kustomization prunes":   {fluxCluster(pruning), servingObject(), nil},
+		"kustomization gone":         {fluxCluster(), servingObject(), nil},
+		"written live":               {fluxCluster(), obj("v1", "Secret", "kagent", "key", nil, nil), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			kept, err := Kept(context.Background(), tc.cluster, tc.object)
+			require.NoError(t, err)
+			assert.Equal(t, tc.kept, kept)
+		})
+	}
+}
+
 func TestApplyingReportsAKustomizationItCannotRead(t *testing.T) {
 	cluster := fluxCluster(kustomization([]string{servingID}))
 	cluster.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "kustomizations", func(k8stesting.Action) (bool, runtime.Object, error) {

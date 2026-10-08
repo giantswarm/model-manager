@@ -342,7 +342,8 @@ func (c *Committer) plan(ctx context.Context, remote Remote, loc location, part 
 // inDirectory refuses a write on an object Flux applies from a file outside
 // model-manager's directory (a second file would make the Kustomization's
 // build fail on the duplicate), and a removal of an object that is not in
-// the directory at all (it was written live: removed live).
+// the directory at all: written live, or left behind by a Kustomization that
+// does not prune (Kept) — either way removed live, in mode apply.
 func (c *Committer) inDirectory(ctx context.Context, remote Remote, loc location, part Part) error {
 	check := func(obj *unstructured.Unstructured, removal bool) error {
 		p := fileOf(loc.directory(), obj)
@@ -353,6 +354,13 @@ func (c *Committer) inDirectory(ctx context.Context, remote Remote, loc location
 		case err != nil && !errors.Is(err, commit.ErrFileNotFound):
 			return commitError(err)
 		case removal:
+			kept, err := Kept(ctx, c.dyn(ctx), obj)
+			if err != nil {
+				return err
+			}
+			if kept != nil {
+				return fmt.Errorf("%w: %s %s/%s is no longer in git (no %s on %s), and Flux does not prune %s (spec.prune false): its file's removal left the object on the installation, dropped from the Kustomization's inventory — repeat the call in mode apply, and model-manager removes it live", backend.ErrConflict, obj.GetKind(), obj.GetNamespace(), obj.GetName(), p, loc.Branch, kept)
+			}
 			return fmt.Errorf("%w: %s %s/%s is not in %s (no %s on %s): it was written live — remove it with mode apply", backend.ErrConflict, obj.GetKind(), obj.GetNamespace(), obj.GetName(), loc.Repository, p, loc.Branch)
 		case obj.GetKind() == part.firstKind() && part.Owner != nil:
 			return fmt.Errorf("%w: %s %s/%s is applied from git by %s, but not from %s on %s: change it in the file it is written in", backend.ErrConflict, obj.GetKind(), obj.GetNamespace(), obj.GetName(), part.Owner, p, loc.Branch)

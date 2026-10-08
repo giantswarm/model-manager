@@ -950,8 +950,10 @@ files with their content and opens nothing. The answer's `commit` names the
 repository, base, directory, branch, files, the pull request's URL and number,
 and its author. Refused: an object Flux applies from a file outside
 `model-manager/` (change it where it is written), one a HelmRelease renders,
-a removal of an object that was written live, and a Kustomization whose
-`targetNamespace` would move the objects.
+a removal of an object that was written live, a removal of an object git no
+longer holds that a Kustomization with `prune: false` left behind (the answer
+names the Kustomization and offers `mode: apply`, which removes it live), and
+a Kustomization whose `targetNamespace` would move the objects.
 
 Commit mode needs the person's GitHub authority. The chart's `github.enabled`
 registers model-manager with muster pinned to its own user-to-server GitHub
