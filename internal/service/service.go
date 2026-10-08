@@ -691,7 +691,7 @@ func (s *Service) loadedViews(ctx context.Context, b backend.Backend, loaded []b
 			if mc, ok := wired.lookup(l.Name, &l); ok {
 				v.ModelConfig = &mc
 			} else if s.cfg.AutoWire && l.ManagedBy == wiring.ManagedByValue && !terminating(l) {
-				v.Wiring = s.wire(ctx, b, l.Name, WiredOnRead)
+				v.Wiring = s.wire(ctx, b, servedRef(l.Name, l.Preset), WiredOnRead)
 				v.ModelConfig = v.Wiring.ModelConfig
 			}
 		}
@@ -810,11 +810,12 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			// that survives a restart of this process during the cold
 			// start (giantswarm/model-manager#115). The job refreshes it
 			// at readiness.
-			view.Wiring = s.wire(ctx, b, m.Name, WiredOnLoad)
+			ref := servedRef(m.Name, req.Preset)
+			view.Wiring = s.wire(ctx, b, ref, WiredOnLoad)
 			if view.Wiring.ModelConfig != nil {
 				view.ModelConfig = view.Wiring.ModelConfig
 			}
-			s.startLoadJob(ctx, b, sl, m.Name, view.Running)
+			s.startLoadJob(ctx, b, sl, m.Name, ref, view.Running)
 			return view, nil
 		}
 		if _, err := s.wireModel(ctx, b, m.Name, backend.WireOptions{}); err != nil {
@@ -900,8 +901,9 @@ func (s *Service) loadedView(ctx context.Context, b backend.Backend, m *backend.
 // the load wired, updated in place (Ensure is idempotent), never a second
 // one. running is the serving object as the backend lists it right after
 // the load, nil when it lists none. The job lives in this process: a
-// restart drops it, and loses nothing but its progress entry.
-func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model string, running *backend.LoadedModel) {
+// restart drops it, and loses nothing but its progress entry. ref is what
+// the wiring resolves the endpoint by (servedRef).
+func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model, ref string, running *backend.LoadedModel) {
 	start := jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx}
 	object := model
 	if running != nil {
@@ -920,12 +922,12 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 				return nil, err // an unload ended the job after its last readiness read
 			}
 			report(backend.Progress{Status: "ready; refreshing the ModelConfig from the published address"})
-			ref, err := s.wireModel(jobCtx, b, model, backend.WireOptions{})
+			mc, err := s.wireModel(jobCtx, b, ref, backend.WireOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("%s is ready but refreshing its ModelConfig failed: %w", model, err)
 			}
 			report(backend.Progress{Status: "wired"})
-			return ref, nil
+			return mc, nil
 		})
 	if created {
 		s.log.Info("load job started", "backend", b.Name(), "model", model, "job", job.ID, identity.LogAttr(ctx))
@@ -1401,7 +1403,7 @@ func (s *Service) reconcileWiring(ctx context.Context, b backend.Backend) {
 		if s.hasActiveJob(jobs.TypeLoad, b.Name(), l.Name) {
 			continue
 		}
-		if _, err := s.wireModel(rctx, b, l.Name, backend.WireOptions{}); err != nil {
+		if _, err := s.wireModel(rctx, b, servedRef(l.Name, l.Preset), backend.WireOptions{}); err != nil {
 			s.log.Warn("reconcile: wiring served model failed", "backend", b.Name(), "model", l.Name, "error", err)
 		}
 	}
@@ -1495,6 +1497,16 @@ func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
 	return false
 }
 
+// servedRef is the reference a wiring of a served model resolves its
+// endpoint by: the preset it is served from — the serving object's name, one
+// of possibly several serving the model — or the model without one.
+func servedRef(model, preset string) string {
+	if preset != "" {
+		return preset
+	}
+	return model
+}
+
 // wireModel wires model on b: the backend's endpoint with the caller's
 // WireOptions laid over it (the API-key shape), refused before anything is
 // written when the shape is not one the ModelConfig can carry.
@@ -1525,11 +1537,18 @@ func (s *Service) endpointFor(ctx context.Context, b backend.Backend, model stri
 	// fitted to: its own context length caps the window the ModelConfig asks
 	// for, and think is written only for a model with the thinking
 	// capability.
+	// A model served from a preset keeps the caller's reference for the
+	// endpoint: several presets may serve one model, and only the preset —
+	// the serving object's name — says which object's route to wire.
 	var fit backend.Model
+	ref := model
 	if m, err := b.GetModel(ctx, model); err == nil {
 		model, fit = m.Name, *m
+		if m.Preset == "" {
+			ref = m.Name
+		}
 	}
-	ep := opts.Apply(b.AgentEndpoint(model)).FitTo(fit)
+	ep := opts.Apply(b.AgentEndpoint(ref)).FitTo(fit)
 	ep.Backend = b.Name()
 	if err := ep.Validate(); err != nil {
 		return "", ep, nil, err
