@@ -111,6 +111,9 @@ paths:
                   backends:
                     type: array
                     items: { $ref: "#/components/schemas/Backend" }
+                  backendsReason:
+                    type: string
+                    description: "why `backends` is empty — the `no_backend` wording: no backend is registered on this instance, the namespace it watches for backend documents and how to register one. Absent while a backend is configured, so a client tells an installation without a backend from a read that missed one; a ModelConfig labelled with a backend that is not listed is left over from one that went"
   /api/v1/backend:
     get:
       tags: [backend]

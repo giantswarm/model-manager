@@ -90,6 +90,7 @@ func TestZeroBackends(t *testing.T) {
 
 	out := f.backends(t)
 	assert.Empty(t, out["backends"], "list_backends is empty with no backend")
+	assert.Contains(t, out["backendsReason"], "no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace "+testNamespace, "the empty list says no backend is registered (giantswarm/model-manager#284)")
 	assert.Nil(t, out["invalid"])
 
 	for _, tool := range []string{ToolGetBackend, ToolListModels, ToolListLoadedModels} {
@@ -108,6 +109,49 @@ func TestZeroBackends(t *testing.T) {
 	text, isErr = callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "no backend registered")
+}
+
+func (f *registrationFixture) info(t *testing.T) map[string]any {
+	t.Helper()
+	text, isErr := callTool(t, f.srv, ToolGetInfo, nil)
+	require.False(t, isErr, text)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	return out
+}
+
+// get_info and list_backends agree with the registry (giantswarm/model-manager#284):
+// a registered kserve backend is in both, and with none registered both say
+// so in backendsReason instead of answering an empty list a caller cannot
+// tell from a read that missed the backend — on an installation where a
+// ModelConfig labelled backend=kserve stands beside it, left over from a
+// backend that went.
+func TestInfoAndListBackendsFollowTheRegistry(t *testing.T) {
+	f := newRegistrationFixture(t)
+	reason := "no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace " + testNamespace
+
+	info := f.info(t)
+	assert.Equal(t, []any{}, info["backends"])
+	assert.Contains(t, info["backendsReason"], reason)
+	out := f.backends(t)
+	assert.Empty(t, out["backends"])
+	assert.Contains(t, out["backendsReason"], reason)
+
+	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "kserve", argServingNamespace: "model-serving"})
+	require.False(t, isErr, text)
+	info = f.info(t)
+	assert.Equal(t, []any{"kserve"}, info["backends"])
+	assert.NotContains(t, info, "backendsReason", "a registered backend needs no reason")
+	out = f.backends(t)
+	list := out["backends"].([]any)
+	require.Len(t, list, 1)
+	assert.Equal(t, "kserve", list[0].(map[string]any)["backend"])
+	assert.NotContains(t, out, "backendsReason")
+
+	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "kserve"})
+	require.False(t, isErr, text)
+	assert.Contains(t, f.info(t)["backendsReason"], reason, "the backend gone, both say so again")
+	assert.Contains(t, f.backends(t)["backendsReason"], reason)
 }
 
 // fakeCatalog stands in for the kserve preset catalog: one preset's

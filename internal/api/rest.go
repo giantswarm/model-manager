@@ -128,9 +128,21 @@ func (h *REST) getBackend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// backendsBody is the body of list_backends and GET /api/v1/backends: the
+// backends read and, when there is none, backendsReason — the no_backend
+// wording — so an empty list says no backend is registered rather than
+// leaving a caller to guess whether the read missed one.
+func backendsBody(svc *service.Service, backends []service.BackendResponse) map[string]any {
+	body := map[string]any{"backends": backends}
+	if len(backends) == 0 {
+		body["backendsReason"] = svc.NoBackendReason()
+	}
+	return body
+}
+
 func (h *REST) listBackends(w http.ResponseWriter, r *http.Request) {
 	backends, _ := h.svc.Backends(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"backends": backends})
+	writeJSON(w, http.StatusOK, backendsBody(h.svc, backends))
 }
 
 func (h *REST) getOpenAPI(w http.ResponseWriter, _ *http.Request) {

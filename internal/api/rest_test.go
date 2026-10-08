@@ -353,6 +353,26 @@ func (f *fixture) waitJob(t *testing.T, id string) map[string]any {
 	return nil
 }
 
+// GET /api/v1/backends says why its list is empty (giantswarm/model-manager#284).
+func TestListBackendsSaysWhyItIsEmpty(t *testing.T) {
+	f := newFixture(t, false)
+	status, body := f.do(t, http.MethodGet, Prefix+"/backends", nil)
+	require.Equal(t, http.StatusOK, status)
+	require.Len(t, body["backends"], 1)
+	assert.NotContains(t, body, "backendsReason", "a configured backend needs no reason")
+
+	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: "agent-platform"}, nil)
+	mux := http.NewServeMux()
+	NewREST(svc, nil).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	empty := &fixture{svc: svc, srv: srv}
+	status, body = empty.do(t, http.MethodGet, Prefix+"/backends", nil)
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, []any{}, body["backends"], "an empty list, not null")
+	assert.Contains(t, body["backendsReason"], "no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace agent-platform")
+}
+
 func TestBackendEndpoint(t *testing.T) {
 	f := newFixture(t, true)
 	status, body := f.do(t, http.MethodGet, Prefix+"/backend", nil)

@@ -397,6 +397,11 @@ func (s *Service) noBackend() error {
 	return &backend.NoBackendError{Instance: s.cfg.Instance, Version: s.cfg.Version, Namespace: s.cfg.DocumentNamespace, Invalid: len(s.problems)}
 }
 
+// NoBackendReason is the no_backend answer's wording for a reader that found
+// the backend list empty (get_info, list_backends): this instance, the
+// namespace it watches for backend documents and how to register one.
+func (s *Service) NoBackendReason() string { return s.noBackend().Error() }
+
 // targets are the backends a read addresses: the named one, or all of them.
 func (s *Service) targets(name string) ([]backend.Backend, error) {
 	if strings.TrimSpace(name) == "" {
