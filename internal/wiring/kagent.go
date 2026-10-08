@@ -719,7 +719,7 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 		if err != nil {
 			return nil, fmt.Errorf("create ModelConfig %s/%s: %w", k.namespace, name, err)
 		}
-		return toRef(created), nil
+		return k.ref(ctx, created)
 	}
 	// The placeholder Secret follows the shape: created for it, removed when a
 	// re-wire moves the ModelConfig off it (a stale placeholder would otherwise
@@ -752,7 +752,7 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 	if _, ok := existing.Object["status"]; ok {
 		updated.Object["status"] = existing.Object["status"]
 	}
-	return toRef(updated), nil
+	return k.ref(ctx, updated)
 }
 
 // refuseGitOps is ErrGitOpsOwned for an object Flux applies from git
@@ -891,7 +891,7 @@ func (k *Kagent) lookup(ctx context.Context, b backend.Name, model string) (*Mod
 	if err != nil || obj == nil {
 		return nil, err
 	}
-	return toRef(obj), nil
+	return k.ref(ctx, obj)
 }
 
 // List implements Wirer.
@@ -912,7 +912,10 @@ func (k *Kagent) list(ctx context.Context) ([]ModelConfigRef, error) {
 	}
 	out := make([]ModelConfigRef, 0, len(items))
 	for i := range items {
-		ref := toRef(&items[i])
+		ref, err := k.ref(ctx, &items[i])
+		if err != nil {
+			return nil, err
+		}
 		if ref.Model == "" {
 			continue
 		}
@@ -937,7 +940,11 @@ func (k *Kagent) listAll(ctx context.Context) ([]ModelConfigRef, error) {
 	}
 	out := make([]ModelConfigRef, 0, len(items))
 	for i := range items {
-		out = append(out, *toRef(&items[i]))
+		ref, err := k.ref(ctx, &items[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *ref)
 	}
 	return out, nil
 }
@@ -1156,6 +1163,20 @@ func placeholderSecretName(mcName string) string {
 	return strings.TrimRight(mcName, "-") + suffix
 }
 
+// ref is obj as reported, its GitOps owner held to the Kustomization's
+// inventory (gitops.Applying) as the write tools hold it: a ModelConfig its
+// Kustomization left behind is reported as written live.
+func (k *Kagent) ref(ctx context.Context, obj *unstructured.Unstructured) (*ModelConfigRef, error) {
+	ref := toRef(obj)
+	owner, err := gitops.Applying(ctx, k.dyn(ctx), obj)
+	if err != nil {
+		return nil, err
+	}
+	ref.GitOps = owner
+	return ref, nil
+}
+
+// toRef is obj as reported, without its GitOps owner (ref resolves it).
 func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 	ref := &ModelConfigRef{
 		Name:       obj.GetName(),
@@ -1169,7 +1190,6 @@ func toRef(obj *unstructured.Unstructured) *ModelConfigRef {
 		ref.Model = m
 	}
 	ref.Managed = obj.GetLabels()[ManagedByLabel] == ManagedByValue
-	ref.GitOps = gitops.OwnerOf(obj.GetLabels())
 	ref.Backend = backend.Name(obj.GetLabels()[BackendLabel])
 	ref.CreatedBy = obj.GetLabels()[InstanceLabel]
 	if u, _, _ := unstructured.NestedString(obj.Object, "spec", "openAI", "baseUrl"); u != "" {
