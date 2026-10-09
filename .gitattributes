@@ -1,0 +1,5 @@
+# Parallel pull requests each add an entry under "## [Unreleased]". The union
+# driver keeps both sides' lines when a branch merges main locally
+# (`git merge origin/main`), instead of stopping on a conflict. GitHub's own
+# mergeability check and its "Update branch" button do not run merge drivers.
+CHANGELOG.md merge=union
