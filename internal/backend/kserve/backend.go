@@ -173,7 +173,7 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 }
 
 // Name implements backend.Backend.
-func (b *Backend) Name() backend.Name { return backend.NameKServe }
+func (b *Backend) Name() backend.Name { return b.opts.Name }
 
 // Capabilities implements backend.Backend. Wire is decided by the service.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -199,7 +199,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 func (b *Backend) Info(ctx context.Context) backend.Info {
 	s := b.cfg.settings(ctx)
 	info := backend.Info{
-		Backend:  backend.NameKServe,
+		Backend:  b.Name(),
 		Version:  llmisvcGVR.GroupVersion().String(),
 		Endpoint: fmt.Sprintf("%s.%s/%s", llmisvcGVR.Resource, llmisvcGVR.Group, s.Namespace),
 		// An LLMInferenceService serves only while it exists: nothing loads

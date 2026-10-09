@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
 
@@ -34,7 +35,8 @@ const (
 	DocumentAPIVersion = "agent-platform.giantswarm.io/v1alpha1"
 	DocumentKind       = "ModelBackend"
 	// DocumentNamePrefix: the ConfigMap of a backend is named
-	// DocumentNamePrefix + kind, so there is one document per kind.
+	// DocumentNamePrefix + the backend's name (DocumentMeta), so there is one
+	// document per backend.
 	DocumentNamePrefix = "model-backend-"
 
 	// SourceStatic marks a backend configured by --backends; SourcePerson
@@ -97,7 +99,9 @@ type Document struct {
 	Spec       DocumentSpec `json:"spec"`
 }
 
-// DocumentMeta is the document's metadata; Name equals spec.kind.
+// DocumentMeta is the document's metadata. Name names the backend: spec.kind
+// (the default), or for kserve kserve-<suffix>, a DNS label — one kserve
+// backend per serving cluster, kserve-<cluster> for a workload cluster's.
 type DocumentMeta struct {
 	Name string `json:"name"`
 }
@@ -423,8 +427,17 @@ func (t Target) Identity() *Target {
 	return &Target{Cluster: t.Cluster, Organization: t.Organization}
 }
 
-// DocumentName is the ConfigMap name of kind's document.
-func DocumentName(kind Name) string { return DocumentNamePrefix + string(kind) }
+// DocumentName is the ConfigMap name of the document of the backend name.
+func DocumentName(name Name) string { return DocumentNamePrefix + string(name) }
+
+// Name is the name the document's backend registers under: metadata.name,
+// defaulting to spec.kind.
+func (d *Document) Name() Name {
+	if d.Metadata.Name == "" {
+		return d.Spec.Kind
+	}
+	return Name(d.Metadata.Name)
+}
 
 // KnownKinds are the drivers a document may name, sorted.
 func KnownKinds() []Name {
@@ -504,10 +517,11 @@ func (d *Document) Validate() error {
 		return fmt.Errorf("spec.kind: required (%s)", kindList())
 	case !isKnownKind(s.Kind):
 		return fmt.Errorf("spec.kind: unknown %q (%s)", s.Kind, kindList())
-	case d.Metadata.Name != "" && d.Metadata.Name != string(s.Kind):
-		return fmt.Errorf("metadata.name: must equal spec.kind (%s)", s.Kind)
 	case s.Source != SourcePerson && s.Source != SourceClusterManager:
 		return fmt.Errorf("spec.source: must be %s or %s (static backends come from --backends)", SourcePerson, SourceClusterManager)
+	}
+	if err := s.validateName(d.Name()); err != nil {
+		return fmt.Errorf("metadata.name: %w", err)
 	}
 	if s.Credentials != nil && s.Credentials.SecretRef.Name == "" {
 		return errors.New("spec.credentials.secretRef.name: required when credentials are set")
@@ -516,6 +530,25 @@ func (d *Document) Validate() error {
 		return s.validateKServe()
 	}
 	return s.validateHost()
+}
+
+// validateName checks the backend name a document registers under: its kind,
+// or for kserve kserve-<suffix>, a DNS label so the ConfigMap, the ModelConfigs
+// suffixed with it and every label carrying it stay valid.
+func (s *DocumentSpec) validateName(name Name) error {
+	if name == s.Kind {
+		return nil
+	}
+	if s.Kind != NameKServe {
+		return fmt.Errorf("must equal spec.kind (%s)", s.Kind)
+	}
+	if name.Kind() != NameKServe || name == NameKServe+"-" {
+		return fmt.Errorf("must be %s or %s-<cluster>, got %q", NameKServe, NameKServe, name)
+	}
+	if errs := validation.IsDNS1123Label(string(name)); len(errs) > 0 {
+		return fmt.Errorf("%q is not a DNS label: %s", name, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func (s *DocumentSpec) validateHost() error {
@@ -604,7 +637,7 @@ func (d *Document) ConfigMap(namespace string) (*corev1.ConfigMap, error) {
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      DocumentName(d.Spec.Kind),
+			Name:      DocumentName(d.Name()),
 			Namespace: namespace,
 			Labels: map[string]string{
 				DocumentLabel:       "true",
@@ -630,6 +663,7 @@ func (d *Document) Options(base Options) Options {
 		base.Lemonade = LemonadeOptions{Endpoint: s.Endpoint, AgentHost: s.AgentEndpoint, Timeout: base.Lemonade.Timeout, LoadTimeout: base.Lemonade.LoadTimeout}
 	case NameKServe:
 		k := s.KServe
+		base.KServe.Name = d.Name()
 		base.KServe.Target = k.Target
 		base.KServe.Namespace = k.Target.ServingNamespace
 		base.KServe.DiscoveryNamespace = k.Discovery.Namespace
