@@ -24,6 +24,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/registry"
 	"github.com/giantswarm/model-manager/internal/service"
+	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
 const testNamespace = "agent-platform"
@@ -393,6 +394,63 @@ func TestRemoveBackendDropsModelConfigs(t *testing.T) {
 	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "kserve"})
 	assert.True(t, isErr)
 	assert.Contains(t, text, "not_found")
+}
+
+// A ModelConfig of the backend without a recorded creator would outlive the
+// backend pointing at nothing: the removal is refused naming it, nothing goes.
+// One another instance created is that instance's and does not block.
+func TestRemoveBackendRefusedWhileAModelConfigWouldOutliveIt(t *testing.T) {
+	ctx := context.Background()
+	f := newRegistrationFixture(t)
+	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "kserve", argServingNamespace: "model-serving"})
+	require.False(t, isErr, text)
+	for _, m := range []string{"org/own", "org/leftover", "org/other"} {
+		_, err := f.wirer.Ensure(ctx, m, backend.AgentEndpoint{Backend: backend.NameKServe, BaseURL: "http://m/v1"})
+		require.NoError(t, err)
+	}
+	leftover, _ := f.wirer.get(backend.NameKServe, "org/leftover")
+	other, _ := f.wirer.get(backend.NameKServe, "org/other")
+	f.wirer.mu.Lock()
+	f.wirer.notOwned = map[string]*wiring.NotOwnedError{
+		refKey(backend.NameKServe, "org/leftover"): {Namespace: leftover.Namespace, Name: leftover.Name, Message: "no instance label"},
+		refKey(backend.NameKServe, "org/other"):    {Namespace: other.Namespace, Name: other.Name, CreatedBy: "laptop", Message: "another instance"},
+	}
+	f.wirer.mu.Unlock()
+
+	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "kserve", argDryRun: true})
+	require.False(t, isErr, text)
+	var dry map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &dry))
+	assert.Equal(t, []any{"org/own"}, dry["modelConfigs"])
+	blocked := dry["blockedBy"].([]any)
+	require.Len(t, blocked, 1)
+	assert.Equal(t, "org/leftover", blocked[0].(map[string]any)["model"])
+	assert.Equal(t, leftover.Name, blocked[0].(map[string]any)["name"])
+	assert.Contains(t, dry["error"], "conflict")
+
+	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "kserve"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "conflict: backend kserve still has models wired")
+	assert.Contains(t, text, "org/leftover (ModelConfig "+leftover.Namespace+"/"+leftover.Name)
+	assert.Contains(t, text, wiring.InstanceLabel)
+	assert.NotContains(t, text, "org/other")
+	assert.Equal(t, 3, f.wirer.count(), "nothing is unwired")
+	_, ok := f.svc.Has(backend.NameKServe)
+	assert.True(t, ok, "the backend stays")
+
+	// Once the leftover is gone, the removal unwires the backend's own models
+	// and leaves the other instance's.
+	f.wirer.mu.Lock()
+	delete(f.wirer.refs, refKey(backend.NameKServe, "org/leftover"))
+	f.wirer.mu.Unlock()
+	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "kserve"})
+	require.False(t, isErr, text)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	assert.Equal(t, []any{"org/own"}, out["unwired"])
+	assert.Equal(t, true, out["deregistered"])
+	_, ok = f.wirer.get(backend.NameKServe, "org/other")
+	assert.True(t, ok, "another instance's ModelConfig is left")
 }
 
 func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {

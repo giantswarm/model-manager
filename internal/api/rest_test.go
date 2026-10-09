@@ -251,6 +251,9 @@ func (w *fakeWirer) Removal(_ context.Context, b backend.Name, model string) (*w
 	if !ok {
 		return &wiring.Rendered{}, nil
 	}
+	if left, ok := w.notOwned[refKey(b, model)]; ok {
+		return &wiring.Rendered{Name: r.Name, Left: left}, nil
+	}
 	mc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "kagent.dev/v1alpha3", "kind": "ModelConfig", "metadata": map[string]any{"name": r.Name, "namespace": r.Namespace}}}
 	return &wiring.Rendered{Name: r.Name, Objects: []*unstructured.Unstructured{mc}}, nil
 }
