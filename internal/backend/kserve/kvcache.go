@@ -625,9 +625,12 @@ func (b *Backend) kvCheckFor(ctx context.Context, plan *fitPlan) *kvCheck {
 
 // applyKV writes a KV cache verdict into a fit answer: the numbers, and the
 // clause of the reason — a refusal when the flat check passed but one
-// sequence does not fit.
+// sequence does not fit; a check not made is named in skippedChecks too.
 func applyKV(res *backend.FitResult, v kvVerdict) {
 	res.MaxModelLen, res.KVCacheBytes, res.KVCacheAvailableBytes, res.EstimatedMaxModelLen = v.MaxModelLen, v.Need, max(v.Available, 0), v.Estimated
+	if v.Skip != "" {
+		res.Skip(backend.CheckKVCache, v.Skip)
+	}
 	if res.Fits && v.Skip == "" && !v.Fits {
 		res.Fits = false
 		res.Reason += ", but " + v.clause()
