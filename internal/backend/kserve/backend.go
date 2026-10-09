@@ -15,7 +15,6 @@ package kserve
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -479,6 +478,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 			Preset:    sv.Preset,
 			GPUs:      sv.GPUs,
 			ManagedBy: sv.ManagedBy,
+			GitOps:    sv.GitOps,
 			Tracing:   sv.Tracing,
 			Phase:     sv.Phase,
 			Steps:     sv.Steps,
@@ -654,7 +654,10 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		return nil, fmt.Errorf("%w: %s is stopping; serve it again once it is gone", backend.ErrConflict, existing.GetName())
 	}
 	if existing != nil {
-		sv := parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s)
+		sv, err := b.owned(ctx, existing, parseServed(existing, indexPresets([]*servingPreset{plan.Preset}), s))
+		if err != nil {
+			return nil, err
+		}
 		if sv.manageable() && strings.EqualFold(sv.Model, plan.Repo) {
 			nodes := b.servingNodes(ctx, existing, sv)
 			other := unservedNode(req, nodes)
@@ -758,7 +761,7 @@ func (b *Backend) Stop(ctx context.Context, name string) (*backend.UnloadResult,
 		if err := stoppable(sv); err != nil {
 			return nil, err
 		}
-		if err := b.applied(ctx, sv); err != nil {
+		if err := applied(sv); err != nil {
 			return nil, err
 		}
 	}
@@ -807,16 +810,12 @@ func stoppable(sv served) error {
 // applied is ErrGitOpsOwned for a serving object Flux applies from git: one
 // its Kustomization still lists. One the Kustomization dropped — a removal
 // merged while it does not prune leaves the object on the cluster, labels
-// and all — is model-manager's to delete, and the answer is nil.
-func (b *Backend) applied(ctx context.Context, sv served) error {
+// and all — is model-manager's to delete, and the answer is nil (owned).
+func applied(sv served) error {
 	if sv.GitOps == nil {
 		return nil
 	}
-	obj, err := b.getServing(ctx, sv.Namespace, sv.Name)
-	if err != nil || obj == nil {
-		return err
-	}
-	return gitops.Refuse(ctx, b.dynamic(ctx), obj)
+	return fmt.Errorf("%w: %s", backend.ErrGitOpsOwned, gitops.Refusal(kindLLMInferenceService, sv.Namespace, sv.Name, sv.GitOps))
 }
 
 // StopPlan implements backend.StopPlanner: Stop's decision without the
@@ -846,11 +845,7 @@ func (b *Backend) StopPlan(ctx context.Context, name string) (*backend.StopPlan,
 			continue
 		}
 		plan.Objects = append(plan.Objects, obj)
-		switch err := gitops.Refuse(ctx, b.dynamic(ctx), obj); {
-		case err == nil:
-		case !errors.Is(err, backend.ErrGitOpsOwned):
-			return nil, err
-		case plan.Refusal == nil:
+		if err := applied(sv); err != nil && plan.Refusal == nil {
 			plan.Refusal = err
 		}
 	}

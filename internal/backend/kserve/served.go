@@ -54,7 +54,8 @@ type served struct {
 	// the name alone does not make an LLMInferenceService manageable.
 	PresetLabelled bool
 	// GitOps is the Flux object applying the LLMInferenceService from git:
-	// it is changed there, never live.
+	// it is changed there, never live. Held to the Kustomization's inventory
+	// (owned): one its Kustomization left behind has none.
 	GitOps     *gitops.Owner
 	StorageURI string
 	GPUs       int64
@@ -197,7 +198,10 @@ func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	pods := b.predictorPods(ctx, s)
 	out := make([]served, 0, len(items))
 	for i := range items {
-		sv := parseServed(&items[i], idx, s)
+		sv, err := b.owned(ctx, &items[i], parseServed(&items[i], idx, s))
+		if err != nil {
+			return nil, err
+		}
 		sv.applyPod(pods[sv.Name])
 		var total int64
 		if p, ok := idx.byName[sv.Preset]; ok {
@@ -467,7 +471,6 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 		PresetLabelled: obj.GetLabels()[PresetLabel] != "",
 		Created:        obj.GetCreationTimestamp().Time,
 		Deleting:       obj.GetDeletionTimestamp() != nil,
-		GitOps:         gitops.OwnerOf(obj.GetLabels()),
 	}
 	sv.StorageURI, _, _ = unstructured.NestedString(obj.Object, "spec", "model", "uri")
 	sv.Pool, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "nodeSelector", labelMachinePool)
@@ -509,6 +512,18 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 	sv.URL = normalizeServedURL(servedURL(obj, sv, s.GatewayEndpoint))
 	sv.LLM = s.LLMEndpoint
 	return sv
+}
+
+// owned is sv with its GitOps owner: the Flux object that applies obj now,
+// its Kustomization held to the inventory (gitops.Applying) — the one owner
+// resolution the read (list_loaded), the load and the unload act on.
+func (b *Backend) owned(ctx context.Context, obj *unstructured.Unstructured, sv served) (served, error) {
+	owner, err := gitops.Applying(ctx, b.dynamic(ctx), obj)
+	if err != nil {
+		return sv, err
+	}
+	sv.GitOps = owner
+	return sv, nil
 }
 
 // readyTransition is the Ready condition's lastTransitionTime; zero without
