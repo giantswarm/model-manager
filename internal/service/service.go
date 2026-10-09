@@ -1067,20 +1067,45 @@ func (s *Service) Wire(ctx context.Context, name, ref string, opts backend.WireO
 	return s.wireModel(ctx, b, m.Name, opts)
 }
 
+// ObjectRef names a Kubernetes object.
+type ObjectRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+// Unwired is what Unwire removed: the backend the ModelConfig belonged to
+// (empty when nothing is wired or downloaded under the reference) and the
+// ModelConfig it deleted, nil when there was none.
+type Unwired struct {
+	Backend     backend.Name
+	ModelConfig *ObjectRef
+}
+
 // Unwire removes the ModelConfig for a model (which need not exist anymore,
-// nor its backend) and reports the backend it belonged to. Unqualified, the
-// managed ModelConfigs are consulted first — the model may be gone from its
-// backend.
-func (s *Service) Unwire(ctx context.Context, name, ref string) (backend.Name, error) {
+// nor its backend) and reports the backend it belonged to and the
+// ModelConfig it deleted. Unqualified, the managed ModelConfigs are consulted
+// first — the model may be gone from its backend.
+func (s *Service) Unwire(ctx context.Context, name, ref string) (*Unwired, error) {
 	b, ref, err := s.unwireTarget(ctx, name, ref)
-	if err != nil || b == "" {
-		return "", err
+	if err != nil {
+		return nil, err
+	}
+	out := &Unwired{Backend: b}
+	if b == "" {
+		return out, nil
+	}
+	mc, err := s.wirer.Lookup(ctx, b, ref)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.wirer.Remove(ctx, b, ref); err != nil {
-		return b, err
+		return nil, err
 	}
-	s.log.Info("model unwired", "backend", b, "model", ref, identity.LogAttr(ctx))
-	return b, nil
+	if mc != nil {
+		out.ModelConfig = &ObjectRef{Name: mc.Name, Namespace: mc.Namespace}
+		s.log.Info("model unwired", "backend", b, "model", ref, "modelConfig", mc.Namespace+"/"+mc.Name, identity.LogAttr(ctx))
+	}
+	return out, nil
 }
 
 // unwireTarget is the backend and canonical reference an unwire of ref

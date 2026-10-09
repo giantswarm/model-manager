@@ -13,7 +13,7 @@ import (
 
 // WirePlan is what a wiring write lands — or, on a dry run, would land —
 // without landing it: the backend and canonical model, the ModelConfig's
-// name, the manifests it writes (removal: the objects it deletes), the Flux
+// name and namespace, the manifests it writes (removal: the objects it deletes), the Flux
 // object applying the ModelConfig as it exists, the ModelConfig of another
 // owner that already wires the served model (then nothing is written), and
 // the ModelConfig a removal leaves because this model-manager did not create
@@ -22,6 +22,7 @@ type WirePlan struct {
 	Backend      backend.Name                 `json:"backend"`
 	Model        string                       `json:"model"`
 	ModelConfig  string                       `json:"modelConfig,omitempty"`
+	Namespace    string                       `json:"namespace,omitempty"`
 	Manifests    []map[string]any             `json:"manifests"`
 	GitOps       *gitops.Owner                `json:"gitops,omitempty"`
 	Replaces     string                       `json:"replaces,omitempty"`
@@ -50,7 +51,7 @@ func (s *Service) PlanWire(ctx context.Context, name, ref string, opts backend.W
 	}
 	plan := &WirePlan{Backend: b.Name(), Model: model, Manifests: []map[string]any{}}
 	if existing != nil {
-		plan.AlreadyWired, plan.ModelConfig = existing, existing.Name
+		plan.AlreadyWired, plan.ModelConfig, plan.Namespace = existing, existing.Name, existing.Namespace
 		return plan, nil
 	}
 	r, err := s.wirer.Render(ctx, model, ep)
@@ -87,6 +88,9 @@ func (s *Service) PlanUnwire(ctx context.Context, name, ref string) (*WirePlan, 
 func (p *WirePlan) fill(r *wiring.Rendered) {
 	p.ModelConfig, p.GitOps, p.Replaces, p.Left, p.objects = r.Name, r.GitOps, r.Replaces, r.Left, r.Objects
 	for _, obj := range r.Objects {
+		if obj.GetName() == r.Name && p.Namespace == "" {
+			p.Namespace = obj.GetNamespace()
+		}
 		p.Manifests = append(p.Manifests, Manifest(obj))
 	}
 }
