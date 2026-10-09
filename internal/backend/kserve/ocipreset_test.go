@@ -436,3 +436,72 @@ func TestModelImageReadRetriesAHangingRegistry(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second, "bounded by the request timeout and the retries, not the budget")
 	assert.Contains(t, describeRegistryFailure(err, 4*time.Second), "the registry did not answer within 4s, timed-out requests retried (")
 }
+
+// TestFitCheckNamesTheChecksARegistryTimeoutSkips: check_fit retries a
+// registry that times out once and answers complete; a registry that keeps
+// timing out is given up within the fit check's budget, and the answer names
+// every check it could not make — the download size, the KV cache and the
+// GPU generation, which all read the model image — beside a verdict that
+// stands on the preset's numbers (giantswarm/model-manager#297).
+func TestFitCheckNamesTheChecksARegistryTimeoutSkips(t *testing.T) {
+	prev := registryRequestTimeout
+	registryRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { registryRequestTimeout = prev })
+	config, err := kvConfig("qwen3-5-9b-fp8-dynamic.json")
+	require.NoError(t, err)
+	var hang atomic.Int32
+	image := serveModelImageThrough(t, func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hang.Add(-1) >= 0 {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	}, "models/qwen3-5-9b-fp8:790f0576d2d7", 13*gib, config)
+	ctx := context.Background()
+
+	t.Run("a registry that times out once", func(t *testing.T) {
+		f := newFixture(t, presetConfigMap("qwen3-5-9b-fp8", fp8PresetDoc("qwen3-5-9b-fp8", image)))
+		f.b.opts.HFTimeout = 2 * time.Second
+		f.setPool(ctx, shapeXLarge)
+		hang.Store(1)
+		res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "qwen3-5-9b-fp8"})
+		require.NoError(t, err)
+		assert.True(t, res.Fits, res.Reason)
+		assert.Empty(t, res.SkippedChecks, "the timed-out request is retried")
+		assert.Positive(t, res.DownloadBytes)
+		assert.Positive(t, res.KVCacheBytes)
+		assert.Equal(t, "8.9", res.ComputeCapabilityRequired)
+		assert.NotContains(t, res.Reason, "not checked")
+	})
+
+	t.Run("a registry that always times out", func(t *testing.T) {
+		f := newFixture(t, presetConfigMap("qwen3-5-9b-fp8", fp8PresetDoc("qwen3-5-9b-fp8", image)))
+		f.b.opts.HFTimeout = time.Second
+		f.setPool(ctx, shapeXLarge)
+		hang.Store(1000)
+		start := time.Now()
+		res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "qwen3-5-9b-fp8"})
+		require.NoError(t, err)
+		assert.Less(t, time.Since(start), 2*time.Second, "bounded by the fit check's budget")
+		assert.True(t, res.Fits, "the preset's numbers fit: %s", res.Reason)
+		assert.Equal(t, weightsSourcePreset, res.WeightsSource)
+		assert.Zero(t, res.DownloadBytes)
+		assert.Zero(t, res.KVCacheBytes)
+		assert.Empty(t, res.ComputeCapabilityRequired)
+		checks := map[string]string{}
+		for _, s := range res.SkippedChecks {
+			checks[s.Check] = s.Reason
+		}
+		assert.Len(t, res.SkippedChecks, 3, "%+v", res.SkippedChecks)
+		assert.Contains(t, checks[backend.CheckDownloadSize], "the registry did not answer within 1s, timed-out requests retried")
+		assert.Equal(t, "the model image's registry did not answer for the checkpoint's config.json", checks[backend.CheckKVCache])
+		assert.Equal(t, "the model image's registry did not answer for the checkpoint's config.json", checks[backend.CheckComputeCapability])
+		assert.Contains(t, res.Reason, "the download size is unknown: the registry did not answer within 1s")
+		assert.Contains(t, res.Reason, "the KV cache is not checked: the model image's registry did not answer")
+	})
+}

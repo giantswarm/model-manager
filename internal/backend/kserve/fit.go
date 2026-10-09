@@ -195,6 +195,7 @@ func (b *Backend) sizeModel(ctx context.Context, plan *fitPlan) (string, error) 
 		res.WeightsBytes, res.WeightsSource = p.weightsBytes(), weightsSourcePreset
 		res.Gated = errors.Is(err, backend.ErrInvalid)
 		note = "weights from the preset's requirements: " + describeHubFailure(err, hubBudget)
+		res.Skip(backend.CheckDownloadSize, describeHubFailure(err, hubBudget))
 	default:
 		return "", hubFailure(err, hubBudget)
 	}
@@ -220,6 +221,7 @@ func (b *Backend) sizeModelImage(ctx context.Context, plan *fitPlan) (string, er
 	if err != nil {
 		b.log.Warn("reading the model image failed", "model", plan.Repo, "image", p.Spec.Model.StorageURI, "error", err)
 		note = "the download size is unknown: " + describeRegistryFailure(err, budget)
+		res.Skip(backend.CheckDownloadSize, describeRegistryFailure(err, budget))
 	} else {
 		plan.Image = &img
 		res.DownloadBytes = img.Bytes

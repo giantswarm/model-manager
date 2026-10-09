@@ -507,8 +507,12 @@ func (v computeVerdict) declaredDiffers() string {
 
 // applyCompute writes a GPU generation verdict into a fit answer: the
 // capabilities, and the clause of the reason — a refusal when the memory
-// fit passed but the GPU is below what the weights need.
+// fit passed but the GPU is below what the weights need. A generation not
+// judged is named in skippedChecks, also where the reason has nothing to say.
 func applyCompute(res *backend.FitResult, v computeVerdict) {
+	if v.Skip != "" {
+		res.Skip(backend.CheckComputeCapability, v.Skip)
+	}
 	clause := v.clause()
 	if clause == "" {
 		return

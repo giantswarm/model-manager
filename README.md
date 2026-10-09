@@ -645,6 +645,9 @@ scheduling by the registered backend document (`docs/backends.md`).
   and 8624 tokens would fit. An architecture the check does not read, a checkpoint without
   `config.json`, a preset without `--max-model-len` or a node without the GPU memory label is
   named in `reason` (`the KV cache is not checked: …`) and judged on the flat overhead alone.
+  Every check the answer could not make is listed in `skippedChecks` with why
+  (`download-size`, `kv-cache`, `compute-capability`): a model image whose registry does not
+  answer within the fit check's budget, its timed-out requests retried, leaves all three.
   The GPU generation is judged the same way, from the same `config.json` (a mistral-format
   checkpoint's `params.json`): the weights' need — FP8 (`quant_method: fp8`, compressed-tensors
   8-bit float, ModelOpt FP8) needs compute capability 8.9 (Ada, Hopper, Blackwell: below it vLLM

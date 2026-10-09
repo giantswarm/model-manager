@@ -533,6 +533,33 @@ type FitRequest struct {
 	Nodes     []string `json:"nodes,omitempty"`
 }
 
+// The checks of a fit a SkippedCheck names.
+const (
+	// CheckDownloadSize is what a pull downloads (DownloadBytes).
+	CheckDownloadSize = "download-size"
+	// CheckKVCache is vLLM's KV cache beside the weights (KVCacheBytes).
+	CheckKVCache = "kv-cache"
+	// CheckComputeCapability is the GPU generation the weights need
+	// (ComputeCapabilityRequired).
+	CheckComputeCapability = "compute-capability"
+)
+
+// SkippedCheck is a check a fit answer did not make, and why.
+type SkippedCheck struct {
+	Check  string `json:"check"`
+	Reason string `json:"reason"`
+}
+
+// Skip records a check the answer did not make; the first reason given for
+// a check stands. A FitResult is copied by value (one per node judged), so
+// the list is never appended to in place.
+func (r *FitResult) Skip(check, reason string) {
+	if slices.ContainsFunc(r.SkippedChecks, func(s SkippedCheck) bool { return s.Check == check }) {
+		return
+	}
+	r.SkippedChecks = append(slices.Clip(r.SkippedChecks), SkippedCheck{Check: check, Reason: reason})
+}
+
 // FitResult is the outcome of a fit check.
 type FitResult struct {
 	Model string `json:"model"`
@@ -551,6 +578,11 @@ type FitResult struct {
 	// (its catalog is read without one); Fits is then false and Reason
 	// starts with no_backend. Empty when a backend judged the model.
 	Verdict string `json:"verdict,omitempty"`
+	// SkippedChecks are the checks the verdict did not make, each with why
+	// (a registry or hub that did not answer, a checkpoint without a
+	// config.json, a preset without a GPU): Fits stands on the checks made
+	// and the flat overhead, not on these.
+	SkippedChecks []SkippedCheck `json:"skippedChecks,omitempty"`
 	// Preset is the preset the check used for overhead (and weights when the
 	// hub could not tell); Presets lists every preset serving the model.
 	Preset  string   `json:"preset,omitempty"`
