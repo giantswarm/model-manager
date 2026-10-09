@@ -342,8 +342,8 @@ func TestCachePodsSatisfyRestrictedPodSecurity(t *testing.T) {
 	b := &Backend{opts: backend.KServeOptions{InitImage: "alpine:3", DownloadImage: "storage-initializer:test"}}
 	s := settings{Namespace: "serving", CacheClaim: "hf-cache"}
 	specs := map[string]corev1.PodSpec{
-		"scan":     b.cachePod("scan", s, "node-a", "true", true).Spec,
-		"remove":   b.cachePod("rm", s, "node-a", "true", false).Spec,
+		"scan":     b.cachePod("scan", s, s.CacheClaim, "node-a", "true", true).Spec,
+		"remove":   b.cachePod("rm", s, s.CacheClaim, "node-a", "true", false).Spec,
 		"download": b.buildJob(downloadPlan{Dir: "tiny", Repo: tinyRepo, Node: "node-a"}, s).Spec.Template.Spec,
 	}
 	for name, spec := range specs {

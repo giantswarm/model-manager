@@ -142,6 +142,9 @@ func (b *Backend) judgeCopies(ctx context.Context, plan *fitPlan, idx presetInde
 		res.MemoryRequestBytes = min(res.MemoryRequestBytes, per.Result.MemoryRequestBytes)
 	}
 	switch {
+	case res.Fits && !sameClaim(plan.Cache, nodes):
+		res.Fits = false
+		res.Reason = fmt.Sprintf("the nodes' pods mount different cache claims (%s) and copies share one pod template, which mounts one claim; serve copies on nodes of one cache", claimsOf(plan.Cache, nodes))
 	case res.Fits && len(shapes) > 1:
 		res.Fits = false
 		res.Reason = fmt.Sprintf("the nodes need different serving shapes (%s) and copies share one; serve copies on nodes of one shape", describeShapes(shapes))
@@ -200,14 +203,18 @@ func applyCopies(obj *unstructured.Unstructured, nodes []string) {
 }
 
 // addCopies serves an already-served model on more nodes: the object's
-// replicas grow to the nodes it runs on and the new ones, in that order. The
-// fit was judged on the asked nodes by the caller.
-func (b *Backend) addCopies(ctx context.Context, existing *unstructured.Unstructured, current, asked []string, dryRun bool) (*unstructured.Unstructured, []string, error) {
+// replicas grow to the nodes it runs on and the new ones, in that order —
+// refused when the nodes' pods would mount different cache claims
+// (sameClaim). The fit was judged on the asked nodes by the caller.
+func (b *Backend) addCopies(ctx context.Context, existing *unstructured.Unstructured, current, asked []string, loc cacheLocation, dryRun bool) (*unstructured.Unstructured, []string, error) {
 	nodes := slices.Clone(current)
 	for _, n := range asked {
 		if !slices.Contains(nodes, n) {
 			nodes = append(nodes, n)
 		}
+	}
+	if !sameClaim(loc, nodes) {
+		return nil, nil, fmt.Errorf("%w: the nodes' pods mount different cache claims (%s) and copies share one pod template, which mounts one claim; serve copies on nodes of one cache", backend.ErrUnfit, claimsOf(loc, nodes))
 	}
 	obj := existing.DeepCopy()
 	applyCopies(obj, nodes)

@@ -294,9 +294,13 @@ func parseScan(node string, r io.Reader) ([]cacheEntry, error) {
 // the pod actually ran on.
 func (b *Backend) scanNode(ctx context.Context, node string) ([]cacheEntry, string, error) {
 	s := b.cfg.settings(ctx)
+	claim, err := b.claimOn(ctx, node)
+	if err != nil {
+		return nil, node, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, b.opts.InventoryTimeout)
 	defer cancel()
-	pod := b.cachePod(prefixed(scanPrefix, node+"-"+shortID()), s, node, scanScript, true)
+	pod := b.cachePod(prefixed(scanPrefix, node+"-"+shortID()), s, claim, node, scanScript, true)
 	logs, ranOn, err := b.runCacheJob(ctx, pod)
 	if err != nil {
 		return nil, ranOn, fmt.Errorf("scan cache on %s: %w", nodeOrAny(node), err)
@@ -393,8 +397,12 @@ func (b *Backend) removeDir(ctx context.Context, node, dir string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, b.opts.InventoryTimeout)
 	defer cancel()
+	claim, err := b.claimOn(ctx, node)
+	if err != nil {
+		return err
+	}
 	script := fmt.Sprintf("set -eu\ncd %s\nrm -rf -- %q %q\necho removed", cacheMount, dir, markersDir+"/"+dir+".json")
-	pod := b.cachePod(prefixed(rmPrefix, dir+"-"+shortID()), s, node, script, false)
+	pod := b.cachePod(prefixed(rmPrefix, dir+"-"+shortID()), s, claim, node, script, false)
 	if _, _, err := b.runCacheJob(ctx, pod); err != nil {
 		return fmt.Errorf("remove %s on %s: %w", dir, nodeOrAny(node), err)
 	}
@@ -406,7 +414,7 @@ func (b *Backend) removeDir(ctx context.Context, node, dir string) error {
 // claim's fsGroup, no capability. A removal mounts the claim read-write, so
 // the kubelet makes every directory group-writable for it first, whoever
 // created it; a scan mounts it read-only and reads what is there.
-func (b *Backend) cachePod(name string, s settings, node, script string, readOnly bool) *corev1.Pod {
+func (b *Backend) cachePod(name string, s settings, claim, node, script string, readOnly bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -433,7 +441,7 @@ func (b *Backend) cachePod(name string, s settings, node, script string, readOnl
 			Volumes: []corev1.Volume{{
 				Name: cacheVolume,
 				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: s.CacheClaim,
+					ClaimName: claim,
 					ReadOnly:  readOnly,
 				}},
 			}},

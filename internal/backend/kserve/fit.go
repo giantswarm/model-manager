@@ -38,8 +38,11 @@ type fitPlan struct {
 	// Dir is the cache directory the model lives in (preset name when a
 	// preset serves it, else derived from the repository id).
 	Dir string
-	// CacheLocal is true when the cache claim is pinned to nodes.
+	// CacheLocal is true when the cache claim is pinned to nodes; Cache is
+	// where the placement found the cache (the zero value for a preset that
+	// does not store in it).
 	CacheLocal bool
+	Cache      cacheLocation
 	// KV is the KV cache check the placement runs on each GPU it judges.
 	KV *kvCheck
 	// Compute is the GPU generation the checkpoint's weights need, judged
@@ -336,7 +339,7 @@ func (b *Backend) placeModel(ctx context.Context, plan *fitPlan, idx presetIndex
 			return err
 		}
 	}
-	plan.CacheLocal = len(loc.Nodes) > 0
+	plan.CacheLocal, plan.Cache = len(loc.Nodes) > 0, loc
 	nodes, err := b.nodes(ctx, loc, p)
 	if err != nil {
 		return err
@@ -956,6 +959,11 @@ func applyUnified(res *backend.FitResult, v unifiedVerdict) {
 func (b *Backend) isCached(ctx context.Context, node, dir, repo string, loc cacheLocation) (bool, string) {
 	if loc.Missing || (!loc.Bound && len(loc.Nodes) == 0) {
 		return false, backend.CacheSourceUnknown
+	}
+	if node != "" && !loc.hasCacheOn(node) {
+		// The node has no cache claim of its own yet: nothing of the model
+		// is there.
+		return false, backend.CacheSourceScan
 	}
 	scanNode := node
 	if loc.Shared {

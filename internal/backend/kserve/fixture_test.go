@@ -258,8 +258,11 @@ func discoveryConfigMapWith(o discoveryOpts) *corev1.ConfigMap {
 // node selector, the cache redirect-policy flag (whether the Kyverno policies
 // mount the cache claim into every predictor) and the RuntimeClass.
 type discoveryOpts struct {
-	nodeSelector     map[string]string
-	redirectPolicy   bool
+	nodeSelector   map[string]string
+	redirectPolicy bool
+	// nodeClaims renders spec.cache.nodeClaims: the redirect policy mounts
+	// the claim a pod's cache-claim annotations name.
+	nodeClaims       bool
 	runtimeClassName string
 	// gpuPool is the pool taint and label block (spec.gpuPool); absent when nil.
 	gpuPool *backend.GPUPool
@@ -328,11 +331,12 @@ spec:
     claimName: hf-cache
     mountPath: /mnt/models
     redirectPolicy: %t
+    nodeClaims: %t
 %s  presets:
     namespace: %s
     labelSelector: agent-platform.giantswarm.io/serving-preset=true
     names: [tiny, big]
-`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, gateway, presetNamespace)
+`, o.runtimeClassName, selector, !o.cacheDisabled, o.redirectPolicy, o.nodeClaims, gateway, presetNamespace)
 }
 
 // setDiscovery rewrites the discovery ConfigMap and drops the cached settings

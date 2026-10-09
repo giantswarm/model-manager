@@ -153,6 +153,10 @@ type discoveryDoc struct {
 			ClaimName      string `json:"claimName"`
 			MountPath      string `json:"mountPath"`
 			RedirectPolicy bool   `json:"redirectPolicy"`
+			// NodeClaims says the redirect policy mounts the claim a pod's
+			// cache-claim annotations name (CacheClaimAnnotation,
+			// WorkerCacheClaimAnnotation) instead of ClaimName.
+			NodeClaims bool `json:"nodeClaims"`
 		} `json:"cache"`
 		Presets struct {
 			Namespace     string   `json:"namespace"`
@@ -212,8 +216,12 @@ type settings struct {
 	CacheClaim          string
 	CacheMountPath      string
 	CacheRedirectPolicy bool
-	PresetNamespace     string
-	PresetSelector      string
+	// CacheNodeClaims says a model pod mounts the claim its cache-claim
+	// annotations name (discovery's spec.cache.nodeClaims): a node outside a
+	// pinned claim's reach gets a cache claim of its own (nodeclaims.go).
+	CacheNodeClaims bool
+	PresetNamespace string
+	PresetSelector  string
 	// LLMServed reports whether the LLMInferenceService API is served on the
 	// cluster; ControlPlane is the namespace holding the well-known
 	// LLMInferenceServiceConfig the llm-d controller composes from, empty
@@ -515,6 +523,7 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		setIf(&s.CacheClaim, sp.Cache.ClaimName)
 		setIf(&s.CacheMountPath, sp.Cache.MountPath)
 		s.CacheRedirectPolicy = sp.Cache.RedirectPolicy
+		s.CacheNodeClaims = sp.Cache.NodeClaims
 		setIf(&s.PresetNamespace, sp.Presets.Namespace)
 		setIf(&s.PresetSelector, sp.Presets.LabelSelector)
 		if sp.Gateway.Enabled {

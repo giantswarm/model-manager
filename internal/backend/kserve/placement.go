@@ -133,7 +133,7 @@ func (b *Backend) placeSplit(ctx context.Context, plan *fitPlan, idx presetIndex
 			return err
 		}
 	}
-	plan.CacheLocal = len(loc.Nodes) > 0
+	plan.CacheLocal, plan.Cache = len(loc.Nodes) > 0, loc
 	nodes, err := b.nodes(ctx, loc, p)
 	if err != nil {
 		return err
@@ -208,6 +208,7 @@ func (v splitVerdict) apply(res *backend.FitResult) {
 func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.FastLink, nodes []nodeBudget, reserved map[string]int64, loc cacheLocation, forServe bool) splitVerdict {
 	res := &plan.Result
 	v := splitVerdict{link: link}
+	var missing []string
 	n := int64(len(link.Nodes))
 	share := ceilDiv(res.WeightsBytes, n) + res.OverheadBytes
 	var tightFree int64 = -1
@@ -220,7 +221,7 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 			return v
 		}
 		node := candidates[0]
-		if plan.CacheLocal && !slices.Contains(loc.Nodes, name) {
+		if plan.CacheLocal && !loc.perNode() && !slices.Contains(loc.Nodes, name) {
 			v.reason = fmt.Sprintf("node %s cannot mount the cache claim %s, which holds the weights on %s; a split needs the weights on every node", name, b.cfg.settings(ctx).CacheClaim, strings.Join(loc.Nodes, ", "))
 			return v
 		}
@@ -267,6 +268,27 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 		if name == link.Nodes[0] || !cached {
 			v.cached, v.cacheSource = cached, source
 		}
+		if loc.perNode() && !cached && source == backend.CacheSourceScan {
+			missing = append(missing, name)
+		}
+	}
+	// Each node reads the weights from its own cache claim: a load is
+	// refused while a node's cache lacks them, a fit check says so.
+	var pullFirst string
+	if len(missing) > 0 {
+		pulls := make([]string, 0, len(missing))
+		for _, m := range missing {
+			pulls = append(pulls, fmt.Sprintf("pull_model %s with node %s", plan.Repo, m))
+		}
+		pullFirst = fmt.Sprintf("a split across %s needs the weights in every node's cache, and the cache of %s holds none: %s first", strings.Join(link.Nodes, ", "), strings.Join(missing, ", "), strings.Join(pulls, " and "))
+		if forServe {
+			v.reason = pullFirst
+			return v
+		}
+	}
+	if !sameClaim(loc, link.Nodes[1:]) {
+		v.reason = fmt.Sprintf("a split across %s puts its workers on nodes with cache claims of their own, and the workers share one pod template, which mounts one claim: split across two nodes, or give the cache a claim every node mounts", strings.Join(link.Nodes, ", "))
+		return v
 	}
 	sh.TensorParallel = sh.Devices * n
 	v.shape = sh
@@ -294,6 +316,9 @@ func (b *Backend) judgeSplit(ctx context.Context, plan *fitPlan, link backend.Fa
 		if note := requestsNote(p, sh, "the tightest node"); note != "" {
 			v.reason += "; " + note
 		}
+	}
+	if pullFirst != "" {
+		v.reason += "; " + pullFirst
 	}
 	return v
 }
