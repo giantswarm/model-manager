@@ -1245,10 +1245,10 @@ func (s *Service) FitCheck(ctx context.Context, name string, req backend.FitRequ
 }
 
 // catalogBackend reports whether a fit check naming backend name may be
-// answered from the kserve preset catalog: no name, or kserve.
+// answered from the kserve preset catalog: no name, or a kserve backend.
 func catalogBackend(name string) bool {
 	name = strings.TrimSpace(name)
-	return name == "" || backend.Name(name) == backend.NameKServe
+	return name == "" || backend.Name(name).Kind() == backend.NameKServe
 }
 
 // catalogFit answers a fit check from the preset catalog while no backend is

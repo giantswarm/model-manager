@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func newRegistrationFixture(t *testing.T, static ...backend.Backend) *registrati
 			return nil, errors.New("unbuildable endpoint")
 		}
 		fb := newFakeBackend()
-		fb.name = doc.Spec.Kind
+		fb.name = doc.Name()
 		return fb, nil
 	}, static...)
 }
@@ -297,7 +298,7 @@ func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
 			return nil, errors.New("kserve target wc1: --downstream-oauth is off")
 		}
 		fb := newFakeBackend()
-		fb.name = doc.Spec.Kind
+		fb.name = doc.Name()
 		return fb, nil
 	})
 
@@ -441,7 +442,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 	_, err = f.client.CoreV1().ConfigMaps(testNamespace).Create(context.Background(), misnamed, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return len(f.svc.InvalidDocuments()) == 1 }, 5*time.Second, 20*time.Millisecond)
-	assert.Contains(t, f.svc.InvalidDocuments()[0].Error, "metadata.name: the ConfigMap of a ollama document is named model-backend-ollama")
+	assert.Contains(t, f.svc.InvalidDocuments()[0].Error, "metadata.name: the ConfigMap of the ollama document is named model-backend-ollama")
 
 	// Deleting the document drops the backend.
 	require.NoError(t, f.client.CoreV1().ConfigMaps(testNamespace).Delete(context.Background(), "model-backend-ollama", metav1.DeleteOptions{}))
@@ -611,4 +612,118 @@ func TestBrokenDocumentIsNeverRegisteredAndInvalidAtOnce(t *testing.T) {
 		}
 	}
 	stop()
+}
+
+// kserveDocument is the backend document cluster-manager writes for a
+// serving cluster: kserve for the installation's own, kserve-<cluster> with a
+// remote target for a workload cluster's.
+func kserveDocument(name, cluster string) *corev1.ConfigMap {
+	target := "{cluster: local, servingNamespace: model-serving}"
+	if cluster != "local" {
+		target = "{cluster: " + cluster + ", organization: org, apiServer: https://" + cluster + ":6443, caBundle: ca, servingNamespace: model-serving}"
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: backend.DocumentName(backend.Name(name)), Namespace: testNamespace, Labels: map[string]string{backend.DocumentLabel: "true"}},
+		Data: map[string]string{backend.DocumentKey: "apiVersion: agent-platform.giantswarm.io/v1alpha1\nkind: ModelBackend\nmetadata: {name: " + name + "}\n" +
+			"spec: {kind: kserve, source: cluster-manager, kserve: {target: " + target + "}}\n"},
+	}
+}
+
+// One kserve backend per serving cluster (giantswarm/model-manager#292):
+// kserve-wc1 and kserve-wc2 register beside kserve, each addressed by its
+// name, and deleting one leaves the others serving.
+func TestSeveralKServeBackendsOnePerCluster(t *testing.T) {
+	built := map[backend.Name]*fakeServing{}
+	var mu sync.Mutex
+	f := newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
+		fs := newFakeServing()
+		fs.name = doc.Name()
+		// Every cluster's cache holds the model: only the backend named
+		// may serve it.
+		fs.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny", Node: "n1"}
+		mu.Lock()
+		built[doc.Name()] = fs
+		mu.Unlock()
+		return fs, nil
+	})
+	ctx := context.Background()
+	for _, d := range [][2]string{{"kserve", "local"}, {"kserve-wc1", "wc1"}, {"kserve-wc2", "wc2"}} {
+		_, err := f.client.CoreV1().ConfigMaps(testNamespace).Create(ctx, kserveDocument(d[0], d[1]), metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool { return len(f.svc.Names()) == 3 }, 5*time.Second, 20*time.Millisecond)
+
+	out := f.backends(t)
+	assert.Nil(t, out["invalid"])
+	var names []string
+	for _, b := range out["backends"].([]any) {
+		names = append(names, b.(map[string]any)["backend"].(string))
+	}
+	assert.Equal(t, []string{"kserve", "kserve-wc1", "kserve-wc2"}, names)
+
+	// The fit check and the load go to the backend named, and only there.
+	text, isErr := callTool(t, f.srv, ToolCheckFit, map[string]any{argModel: "org/tiny", argBackend: "kserve-wc2"})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, `"backend": "kserve-wc2"`)
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argModel: "org/tiny"})
+	assert.True(t, isErr, "three backends offer the fit check: the caller names one")
+	assert.Contains(t, text, "name the backend")
+
+	text, isErr = callTool(t, f.srv, ToolLoadModel, map[string]any{argModel: "tiny", argBackend: "kserve-wc2"})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, `"backend": "kserve-wc2"`)
+	mu.Lock()
+	wc1, wc2, local := built["kserve-wc1"], built["kserve-wc2"], built["kserve"]
+	mu.Unlock()
+	require.Eventually(t, func() bool {
+		wc2.fakeBackend.mu.Lock()
+		defer wc2.fakeBackend.mu.Unlock()
+		return len(wc2.loaded) == 1
+	}, 5*time.Second, 20*time.Millisecond, "kserve-wc2 serves the model")
+	for _, other := range []*fakeServing{wc1, local} {
+		other.fakeBackend.mu.Lock()
+		assert.Empty(t, other.loaded, "%s serves nothing", other.Name())
+		other.fakeBackend.mu.Unlock()
+	}
+
+	// Deleting wc1's document drops kserve-wc1 alone.
+	require.NoError(t, f.client.CoreV1().ConfigMaps(testNamespace).Delete(ctx, "model-backend-kserve-wc1", metav1.DeleteOptions{}))
+	require.Eventually(t, func() bool { _, has := f.svc.Has("kserve-wc1"); return !has }, 5*time.Second, 20*time.Millisecond)
+	assert.Equal(t, []backend.Name{"kserve", "kserve-wc2"}, f.svc.Names())
+	text, isErr = callTool(t, f.srv, ToolCheckFit, map[string]any{argModel: "org/tiny", argBackend: "kserve-wc2"})
+	require.False(t, isErr, text)
+
+	// remove_backend takes the name.
+	text, isErr = callTool(t, f.srv, ToolRemoveBackend, map[string]any{argName: "kserve-wc2"})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, `"name": "model-backend-kserve-wc2"`)
+	assert.Equal(t, []backend.Name{"kserve"}, f.svc.Names())
+}
+
+// add_backend writes a named kserve backend to its own ConfigMap; a name that
+// is not kserve-<cluster> is refused before anything is written.
+func TestAddBackendNamesAKServeBackend(t *testing.T) {
+	f := newRegistrationFixture(t)
+	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "kserve", argName: "kserve-wc1", argServingNamespace: "model-serving", argDryRun: true})
+	require.False(t, isErr, text)
+	assert.Contains(t, text, `"name": "model-backend-kserve-wc1"`)
+	assert.Contains(t, text, "name: kserve-wc1")
+
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "kserve", argName: "kserve-wc1", argServingNamespace: "model-serving"})
+	require.False(t, isErr, text)
+	_, has := f.svc.Has("kserve-wc1")
+	assert.True(t, has)
+
+	for name, want := range map[string]string{
+		"ollama-x":  "metadata.name: must be kserve or kserve-<cluster>",
+		"kserve-":   "metadata.name: must be kserve or kserve-<cluster>",
+		"kserve-WC": `metadata.name: "kserve-WC" is not a DNS label`,
+	} {
+		text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "kserve", argName: name, argServingNamespace: "model-serving"})
+		assert.True(t, isErr, name)
+		assert.Contains(t, text, want, name)
+	}
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argName: "ollama-x", argEndpoint: "http://x"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "metadata.name: must equal spec.kind (ollama)")
 }

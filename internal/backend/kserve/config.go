@@ -734,6 +734,9 @@ func defaultIf(dst *string, def string) {
 
 // applyDefaults fills zero options.
 func applyDefaults(o *backend.KServeOptions) {
+	if o.Name == "" {
+		o.Name = backend.NameKServe
+	}
 	defaultIf(&o.DiscoveryConfigMap, DefaultDiscoveryConfigMap)
 	defaultIf(&o.CacheIndexConfigMap, DefaultCacheIndexConfigMap)
 	defaultIf(&o.HFEndpoint, DefaultHFEndpoint)

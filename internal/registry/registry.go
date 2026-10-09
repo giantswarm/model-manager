@@ -38,7 +38,7 @@ type Registry struct {
 	log       *slog.Logger
 
 	mu    sync.Mutex
-	kinds map[string]backend.Name // ConfigMap name -> the kind it registered
+	names map[string]backend.Name // ConfigMap name -> the backend it registered
 }
 
 // New builds a Registry over client for the documents in namespace.
@@ -46,7 +46,7 @@ func New(client kubernetes.Interface, namespace string, build Builder, svc *serv
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Registry{client: client, namespace: namespace, build: build, svc: svc, log: log.With("component", "registry"), kinds: map[string]backend.Name{}}
+	return &Registry{client: client, namespace: namespace, build: build, svc: svc, log: log.With("component", "registry"), names: map[string]backend.Name{}}
 }
 
 // Run watches until ctx is done. It returns once the informer has synced
@@ -102,9 +102,9 @@ func (r *Registry) upsert(obj any) {
 		r.forgetLocked(cm.Name, err.Error())
 		return
 	}
-	// A ConfigMap's name fixes its kind (load refuses any other), so what it
-	// registered before is the backend just replaced.
-	r.kinds[cm.Name] = b.Name()
+	// A ConfigMap's name fixes its backend's name (load refuses any other),
+	// so what it registered before is the backend just replaced.
+	r.names[cm.Name] = b.Name()
 	r.log.Info("backend registered", "backend", b.Name(), "source", source, "configMap", cm.Name)
 }
 
@@ -119,13 +119,13 @@ func (r *Registry) load(cm *corev1.ConfigMap) (b backend.Backend, source string,
 	if err != nil {
 		return nil, "", err
 	}
-	kind := doc.Spec.Kind
-	if cm.Name != backend.DocumentName(kind) {
-		return nil, "", fmt.Errorf("metadata.name: the ConfigMap of a %s document is named %s", kind, backend.DocumentName(kind))
+	name := doc.Name()
+	if cm.Name != backend.DocumentName(name) {
+		return nil, "", fmt.Errorf("metadata.name: the ConfigMap of the %s document is named %s", name, backend.DocumentName(name))
 	}
 	b, err = r.build(doc)
 	if err != nil {
-		return nil, "", fmt.Errorf("build %s backend: %w", kind, err)
+		return nil, "", fmt.Errorf("build %s backend: %w", name, err)
 	}
 	return b, doc.Spec.Source, nil
 }
@@ -148,10 +148,10 @@ func (r *Registry) delete(obj any) {
 // forgetLocked drops the backend configMap registered, if any, and records
 // problem as its report (an empty problem clears it) in one step.
 func (r *Registry) forgetLocked(configMap, problem string) {
-	kind := r.kinds[configMap]
-	delete(r.kinds, configMap)
-	if r.svc.DeregisterDocument(kind, configMap, problem) {
-		r.log.Info("backend removed", "backend", kind, "configMap", configMap)
+	name := r.names[configMap]
+	delete(r.names, configMap)
+	if r.svc.DeregisterDocument(name, configMap, problem) {
+		r.log.Info("backend removed", "backend", name, "configMap", configMap)
 	}
 }
 
@@ -170,11 +170,11 @@ func NewStore(clientFor func(ctx context.Context) kubernetes.Interface, namespac
 // Namespace is where the documents live.
 func (s *Store) Namespace() string { return s.namespace }
 
-// Get reads kind's document; absent is backend.ErrNotFound.
-func (s *Store) Get(ctx context.Context, kind backend.Name) (*backend.Document, error) {
-	cm, err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Get(ctx, backend.DocumentName(kind), metav1.GetOptions{})
+// Get reads the document of the backend name; absent is backend.ErrNotFound.
+func (s *Store) Get(ctx context.Context, name backend.Name) (*backend.Document, error) {
+	cm, err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Get(ctx, backend.DocumentName(name), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("%w: no %s backend document in %s", backend.ErrNotFound, kind, s.namespace)
+		return nil, fmt.Errorf("%w: no %s backend document in %s", backend.ErrNotFound, name, s.namespace)
 	}
 	if err != nil {
 		return nil, err
@@ -211,22 +211,23 @@ func (s *Store) Apply(ctx context.Context, doc *backend.Document) (created bool,
 	return false, err
 }
 
-// Remove deletes kind's document; it reports whether one existed.
-func (s *Store) Remove(ctx context.Context, kind backend.Name) (bool, error) {
-	err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Delete(ctx, backend.DocumentName(kind), metav1.DeleteOptions{})
+// Remove deletes the document of the backend name; it reports whether one
+// existed.
+func (s *Store) Remove(ctx context.Context, name backend.Name) (bool, error) {
+	err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Delete(ctx, backend.DocumentName(name), metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// WaitFor blocks until the service's view of kind matches present (the
+// WaitFor blocks until the service's view of the backend name matches present (the
 // informer has delivered the write) or the timeout passes; it is what makes
 // add_backend / remove_backend answer with the resulting state.
-func WaitFor(ctx context.Context, svc *service.Service, kind backend.Name, present bool, timeout time.Duration) bool {
+func WaitFor(ctx context.Context, svc *service.Service, name backend.Name, present bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		_, has := svc.Has(kind)
+		_, has := svc.Has(name)
 		if has == present {
 			return true
 		}

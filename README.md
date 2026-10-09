@@ -283,11 +283,11 @@ window.
 
 model-manager starts with **no backend** (chart default `backend: ""`, `backends: []`) and gets its
 backends at runtime: `add_backend` writes a **backend document** — a ConfigMap in model-manager's
-namespace labelled `agent-platform.giantswarm.io/model-backend=true`, named `model-backend-<kind>`,
+namespace labelled `agent-platform.giantswarm.io/model-backend=true`, named `model-backend-<name>` (the backend's name, default its kind),
 key `backend.yaml`, `kind: ModelBackend` — as the caller; model-manager watches the label, enforces
 the document's schema when it reads it (an invalid document is reported under `invalid` in
 `list_backends` with the failing field, and not loaded) and registers the backend without a
-restart. `remove_backend` drops the backend's ModelConfigs and the document. One backend per kind;
+restart. `remove_backend` drops the backend's ModelConfigs and the document. One backend per kind, and for kserve one per serving cluster (`kserve`, `kserve-<cluster>`);
 `list_backends` reports every backend with `source: static | person | cluster-manager`, and a
 `kserve` document carries the **target cluster** (`{cluster, organization, apiServer, caBundle,
 servingNamespace}` — never credentials) the backend acts on, reported as `target` on the backend,

@@ -165,3 +165,59 @@ func TestNoBackendError(t *testing.T) {
 		})
 	}
 }
+
+// A kserve document names its backend kserve or kserve-<cluster>, one per
+// serving cluster (giantswarm/model-manager#292); the name is the ConfigMap's
+// and the built backend's. Host backends keep one per kind.
+func TestDocumentNamesItsBackend(t *testing.T) {
+	doc, err := ParseDocument([]byte(`
+apiVersion: agent-platform.giantswarm.io/v1alpha1
+kind: ModelBackend
+metadata:
+  name: kserve-wc1
+spec:
+  kind: kserve
+  source: cluster-manager
+  kserve:
+    target: {cluster: wc1, organization: org, apiServer: "https://wc1:6443", caBundle: ca, servingNamespace: model-serving}
+`))
+	require.NoError(t, err)
+	assert.Equal(t, Name("kserve-wc1"), doc.Name())
+	cm, err := doc.ConfigMap("ns")
+	require.NoError(t, err)
+	assert.Equal(t, "model-backend-kserve-wc1", cm.Name)
+	assert.Equal(t, Name("kserve-wc1"), doc.Options(Options{}).KServe.Name)
+
+	// No metadata.name: the kind names the backend, as before.
+	local := NewDocument(DocumentSpec{Kind: NameKServe, KServe: &KServeSpec{Target: Target{ServingNamespace: "ns"}}})
+	local.Metadata.Name = ""
+	require.NoError(t, local.Validate())
+	assert.Equal(t, NameKServe, local.Name())
+	assert.Equal(t, NameKServe, local.Options(Options{}).KServe.Name)
+
+	for name, want := range map[string]string{
+		"kserve-":                           "metadata.name: must be kserve or kserve-<cluster>",
+		"kservewc1":                         "metadata.name: must be kserve or kserve-<cluster>",
+		"lemonade-wc1":                      "metadata.name: must be kserve or kserve-<cluster>",
+		"kserve-Wc1":                        `metadata.name: "kserve-Wc1" is not a DNS label`,
+		"kserve-" + strings.Repeat("a", 60): "is not a DNS label",
+	} {
+		d := *local
+		d.Metadata.Name = name
+		err := d.Validate()
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), want, name)
+	}
+	host := NewDocument(DocumentSpec{Kind: NameOllama, Endpoint: "http://ollama:11434"})
+	host.Metadata.Name = "ollama-two"
+	assert.EqualError(t, host.Validate(), "metadata.name: must equal spec.kind (ollama)")
+}
+
+func TestNameKind(t *testing.T) {
+	for name, kind := range map[Name]Name{
+		"kserve": NameKServe, "kserve-wc1": NameKServe, "ollama": NameOllama,
+		"lmstudio": NameLMStudio, "kservewc1": "kservewc1", "": "",
+	} {
+		assert.Equal(t, kind, name.Kind(), name)
+	}
+}

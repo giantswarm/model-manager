@@ -506,7 +506,7 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		return errResult(err), nil
 	}
 	out := map[string]any{argBackend: view.Backend, argModel: name, "loaded": false}
-	if view.Backend == backend.NameKServe {
+	if view.Backend.Kind() == backend.NameKServe {
 		// The serving object is deleted, not gone: the list shows it as
 		// Terminating until Kubernetes has removed it and its pod.
 		out["status"] = "Terminating"

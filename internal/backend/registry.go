@@ -24,6 +24,10 @@ type Options struct {
 // from the platform's discovery ConfigMap" (kind ModelServingConfig) where
 // one exists; explicit values win over discovery.
 type KServeOptions struct {
+	// Name is the name the backend registers under (default kserve): a
+	// cluster's backend document names it, kserve-<cluster> for a workload
+	// cluster's (DocumentMeta).
+	Name Name
 	// Dynamic and Clientset are the Kubernetes clients (required): the
 	// ServiceAccount's, used for everything that runs without a caller.
 	Dynamic   dynamic.Interface

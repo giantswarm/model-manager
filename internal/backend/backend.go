@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,6 +36,18 @@ const (
 	// and CPU, MLX on Apple silicon). It offers no delete.
 	NameLMStudio Name = "lmstudio"
 )
+
+// Kind is the driver a backend name runs: the name itself, or the kind
+// before the suffix of a named backend (kserve-wc1 is a kserve backend, see
+// DocumentMeta). A name that names no known kind is returned as it is.
+func (n Name) Kind() Name {
+	for _, k := range KnownKinds() {
+		if n == k || strings.HasPrefix(string(n), string(k)+"-") {
+			return k
+		}
+	}
+	return n
+}
 
 // Sentinel errors drivers return so the API layer can map them to status
 // codes without knowing the driver.

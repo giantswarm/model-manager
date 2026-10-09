@@ -12,7 +12,7 @@ writes when it creates a GPU node pool, and what the Dev Portal's *Add model bac
 |---|---|
 | Object | `ConfigMap` in model-manager's own namespace (`POD_NAMESPACE`; the chart's release namespace) |
 | Label | `agent-platform.giantswarm.io/model-backend: "true"` — model-manager watches this selector |
-| Name | `model-backend-<kind>` — `model-backend-ollama`, `model-backend-lmstudio`, `model-backend-lemonade`, `model-backend-kserve`; one document per kind |
+| Name | `model-backend-<name>`, the backend's name (`metadata.name`, default `spec.kind`) — `model-backend-ollama`, `model-backend-lmstudio`, `model-backend-lemonade`, `model-backend-kserve`, and `model-backend-kserve-<cluster>` for each further serving cluster; one document per backend |
 | Key | `backend.yaml` |
 | Document | `apiVersion: agent-platform.giantswarm.io/v1alpha1`, `kind: ModelBackend` |
 | Informational label | `agent-platform.giantswarm.io/model-backend-source: person\|cluster-manager` (repeats `spec.source`) |
@@ -56,13 +56,25 @@ data:
             giantswarm.io/machine-pool: gpu01-gpu-l4
 ```
 
+### One kserve backend per serving cluster
+
+An installation serves models on its own cluster and on any number of workload clusters, each
+with its own GPU pools. cluster-manager registers one kserve backend per serving cluster: `kserve`
+(ConfigMap `model-backend-kserve`) for the installation's own cluster and `kserve-<cluster>`
+(ConfigMap `model-backend-kserve-<cluster>`, `metadata.name: kserve-<cluster>`) for a workload
+cluster. Each is a backend of its own with its own target, discovery, `gpuPool` / `gpuPools`,
+inventory and presets; the tools address one by name through their `backend` argument
+(`check_fit`, `load_model`, `pull_model`, `unload_model`, ...), and a model several of them hold
+is ambiguous until the call names one. Models, jobs, nodes and the ModelConfigs model-manager
+wires carry the backend's name. Deleting one document drops that backend alone.
+
 ### Schema (enforced when the document is read)
 
 | Field | Required | Meaning |
 |---|---|---|
 | `apiVersion` | yes | `agent-platform.giantswarm.io/v1alpha1` |
 | `kind` | yes | `ModelBackend` |
-| `metadata.name` | no | Equals `spec.kind` when set |
+| `metadata.name` | no | The backend's name, defaulting to `spec.kind`: equals `spec.kind`, or for `kserve` is `kserve-<cluster>` (a DNS label). The ConfigMap is named `model-backend-<name>` |
 | `spec.kind` | yes | `ollama` \| `lmstudio` \| `lemonade` \| `kserve` — the driver |
 | `spec.source` | yes | `person` \| `cluster-manager` — who wrote it; `static` is reserved for `--backends` and refused |
 | `spec.endpoint` | host kinds | Base URL as reached by model-manager (`http(s)://host:port`); not accepted for `kserve` |
@@ -410,18 +422,20 @@ ServiceAccount otherwise) and take `dryRun` and `mode`. `mode: apply` writes the
 and is the only accepted value; `mode: commit` — a pull request through the broker grant — is not
 available yet and is refused with that message.
 
-**`add_backend`** — `kind` (required), `source` (default `person`), `endpoint`, `agentEndpoint`,
+**`add_backend`** — `kind` (required), `name` (default the kind; `kserve-<cluster>` for a further
+kserve backend), `source` (default `person`), `endpoint`, `agentEndpoint`,
 `credentialsSecret`, `credentialsKey`, and for kserve `cluster`, `organization`, `apiServer`,
 `caBundle`, `servingNamespace`, `discoveryNamespace`, `discoveryName`, `gpuPoolTaint`
 (`key[=value][:effect]`, kubectl's taint notation) and `gpuPoolNodeSelector`
 (`key=value[,key=value]`). With `dryRun: true` it
 answers the rendered document and the ConfigMap's namespace, name and labels without writing.
-Applied, it creates or replaces the kind's ConfigMap (`created: true|false`), waits for the watch
-to deliver it (`registered: true`) and returns the backend as `list_backends` reports it. A kind
+Applied, it creates or replaces the name's ConfigMap (`created: true|false`), waits for the watch
+to deliver it (`registered: true`) and returns the backend as `list_backends` reports it. A name
 configured statically by the chart values is refused (`conflict`); a document failing the schema is
 refused with the field (`invalid_request`).
 
-**`remove_backend`** (destructive) — `kind` (required). With `dryRun: true` it lists the ConfigMap
+**`remove_backend`** (destructive) — `name`, the backend's name as `list_backends` shows it (`kind`
+is accepted for a backend named after its kind). With `dryRun: true` it lists the ConfigMap
 and the ModelConfigs that would go. Applied, it removes model-manager's ModelConfigs of that
 backend as the caller (`unwired: [...]`), deletes the ConfigMap (`removed: true`) and waits for the
 backend to leave (`deregistered: true`). A static backend cannot be removed here; an absent

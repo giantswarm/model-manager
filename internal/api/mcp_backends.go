@@ -22,6 +22,7 @@ const (
 	ToolRemoveBackend = "remove_backend"
 
 	argKind               = "kind"
+	argName               = "name"
 	argEndpoint           = "endpoint"
 	argAgentEndpoint      = "agentEndpoint"
 	argSource             = "source"
@@ -59,8 +60,9 @@ func WithBackendStore(store *registry.Store) Option {
 
 func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 	s.AddTool(mcp.NewTool(ToolAddBackend,
-		mcp.WithDescription("Register a model backend at runtime by writing its backend document — a ConfigMap in model-manager's namespace found by label — as you. One backend per kind: an existing document of the kind is replaced; a kind configured statically by the chart is refused. Host backends (ollama|lmstudio|lemonade) take endpoint and optionally agentEndpoint; kserve takes the target cluster (cluster `local` for this cluster, else apiServer and caBundle — never credentials), servingNamespace and where the discovery ConfigMap lives. dryRun returns the rendered document without writing; mode apply writes it (commit is not available yet)."),
+		mcp.WithDescription("Register a model backend at runtime by writing its backend document — a ConfigMap in model-manager's namespace found by label — as you. One backend per name (default: the kind); kserve takes one backend per serving cluster, named kserve-<cluster> beside the installation's own kserve. An existing document of the name is replaced; a name configured statically by the chart is refused. Host backends (ollama|lmstudio|lemonade) take endpoint and optionally agentEndpoint; kserve takes the target cluster (cluster `local` for this cluster, else apiServer and caBundle — never credentials), servingNamespace and where the discovery ConfigMap lives. dryRun returns the rendered document without writing; mode apply writes it (commit is not available yet)."),
 		mcp.WithString(argKind, mcp.Required(), mcp.Description("Backend kind: ollama|lmstudio|lemonade|kserve")),
+		mcp.WithString(argName, mcp.Description("Backend name (default: the kind); kserve also takes kserve-<cluster>, one backend per serving cluster")),
 		mcp.WithString(argEndpoint, mcp.Description("Host backend base URL as reached by model-manager (ollama, lmstudio, lemonade)")),
 		mcp.WithString(argAgentEndpoint, mcp.Description("Host backend base URL as reached by agent pods (default: endpoint)")),
 		mcp.WithString(argSource, mcp.Description("Who registers it: person (default) or cluster-manager")),
@@ -82,7 +84,8 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 
 	s.AddTool(mcp.NewTool(ToolRemoveBackend,
 		mcp.WithDescription("Remove a backend registered at runtime: drops model-manager's ModelConfigs for it, then deletes its backend document; the backend disappears from list_backends. A static backend (chart values) cannot be removed here. dryRun reports what would go."),
-		mcp.WithString(argKind, mcp.Required(), mcp.Description("Backend kind: ollama|lmstudio|lemonade|kserve")),
+		mcp.WithString(argName, mcp.Description("Backend name as list_backends shows it (kserve, kserve-<cluster>, ollama, ...); required unless kind is given")),
+		mcp.WithString(argKind, mcp.Description("Backend kind, the name of a backend registered under its kind (ollama|lmstudio|lemonade|kserve)")),
 		mcp.WithBoolean(argDryRun, mcp.Description("Report the ConfigMap and ModelConfigs that would be removed (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): delete as you. commit is not available yet")),
 		mcp.WithDestructiveHintAnnotation(true),
@@ -130,6 +133,9 @@ func (t *tools) documentFrom(req mcp.CallToolRequest) (*backend.Document, error)
 		spec.KServe.GPUPool = pool
 	}
 	doc := backend.NewDocument(spec)
+	if name := get(argName); name != "" {
+		doc.Metadata.Name = name
+	}
 	if err := doc.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", backend.ErrInvalid, err)
 	}
@@ -177,8 +183,8 @@ func (t *tools) addBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	if err != nil {
 		return errResult(err), nil
 	}
-	if src, has := t.svc.Has(doc.Spec.Kind); has && src == backend.SourceStatic {
-		return errResult(fmt.Errorf("%w: backend %s is configured statically by the chart values (--backends); remove it there to register it at runtime", backend.ErrConflict, doc.Spec.Kind)), nil
+	if src, has := t.svc.Has(doc.Name()); has && src == backend.SourceStatic {
+		return errResult(fmt.Errorf("%w: backend %s is configured statically by the chart values (--backends); remove it there to register it at runtime", backend.ErrConflict, doc.Name())), nil
 	}
 	if t.store == nil {
 		return t.noStore(), nil
@@ -204,7 +210,7 @@ func (t *tools) addBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		return errResult(err), nil
 	}
 	out["created"] = created
-	registered := registry.WaitFor(ctx, t.svc, doc.Spec.Kind, true, registrationWait)
+	registered := registry.WaitFor(ctx, t.svc, doc.Name(), true, registrationWait)
 	out["registered"] = registered
 	if !registered {
 		// Refused when it was read (a remote target without downstream
@@ -217,7 +223,7 @@ func (t *tools) addBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			}
 		}
 	}
-	if b, err := t.svc.Backend(ctx, string(doc.Spec.Kind)); err == nil {
+	if b, err := t.svc.Backend(ctx, string(doc.Name())); err == nil {
 		out["backend"] = b
 	}
 	return jsonResult(out)
@@ -227,12 +233,15 @@ func (t *tools) removeBackend(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if err := mode(req); err != nil {
 		return errResult(err), nil
 	}
-	kind := backend.Name(strings.TrimSpace(req.GetString(argKind, "")))
-	if kind == "" {
-		return errResult(fmt.Errorf("%w: kind is required", backend.ErrInvalid)), nil
+	name := backend.Name(strings.TrimSpace(req.GetString(argName, "")))
+	if name == "" {
+		name = backend.Name(strings.TrimSpace(req.GetString(argKind, "")))
 	}
-	if src, has := t.svc.Has(kind); has && src == backend.SourceStatic {
-		return errResult(fmt.Errorf("%w: backend %s is configured statically by the chart values (--backends) and cannot be removed here", backend.ErrConflict, kind)), nil
+	if name == "" {
+		return errResult(fmt.Errorf("%w: name is required", backend.ErrInvalid)), nil
+	}
+	if src, has := t.svc.Has(name); has && src == backend.SourceStatic {
+		return errResult(fmt.Errorf("%w: backend %s is configured statically by the chart values (--backends) and cannot be removed here", backend.ErrConflict, name)), nil
 	}
 	if t.store == nil {
 		return t.noStore(), nil
@@ -240,32 +249,32 @@ func (t *tools) removeBackend(ctx context.Context, req mcp.CallToolRequest) (*mc
 	dryRun := req.GetBool(argDryRun, false)
 	out := map[string]any{
 		"dryRun":    dryRun,
-		"configMap": map[string]any{"namespace": t.store.Namespace(), "name": backend.DocumentName(kind)},
+		"configMap": map[string]any{"namespace": t.store.Namespace(), "name": backend.DocumentName(name)},
 	}
 	if dryRun {
-		if _, err := t.store.Get(ctx, kind); err != nil {
+		if _, err := t.store.Get(ctx, name); err != nil {
 			return errResult(err), nil
 		}
-		wired, err := t.svc.WiredModels(ctx, kind)
+		wired, err := t.svc.WiredModels(ctx, name)
 		if err != nil {
 			return errResult(err), nil
 		}
 		out["modelConfigs"] = wired
 		return jsonResult(out)
 	}
-	unwired, err := t.svc.UnwireBackend(ctx, kind)
+	unwired, err := t.svc.UnwireBackend(ctx, name)
 	if err != nil {
 		return errResult(err), nil
 	}
 	out["unwired"] = unwired
-	found, err := t.store.Remove(ctx, kind)
+	found, err := t.store.Remove(ctx, name)
 	if err != nil {
 		return errResult(err), nil
 	}
 	out["removed"] = found
 	if !found {
-		return errResult(fmt.Errorf("%w: no %s backend document in %s", backend.ErrNotFound, kind, t.store.Namespace())), nil
+		return errResult(fmt.Errorf("%w: no %s backend document in %s", backend.ErrNotFound, name, t.store.Namespace())), nil
 	}
-	out["deregistered"] = registry.WaitFor(ctx, t.svc, kind, false, registrationWait)
+	out["deregistered"] = registry.WaitFor(ctx, t.svc, name, false, registrationWait)
 	return jsonResult(out)
 }
