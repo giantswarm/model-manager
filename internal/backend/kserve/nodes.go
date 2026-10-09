@@ -113,11 +113,12 @@ func isAccelerator(n *corev1.Node, gpuResource string) bool {
 // discovery node selector and the GPU pool's, every hard taint tolerated by
 // the pool toleration, and able to mount the cache claim when predictors
 // mount it (cache enabled and the redirect policy on) and the claim is
-// pinned to nodes. Every failing rule adds one reason; the reasons are
+// pinned to nodes — unless every node gets a cache claim of its own
+// (cacheLocation.perNode). Every failing rule adds one reason; the reasons are
 // joined with "; " for the API. An empty reason means eligible.
 func eligibility(n nodeBudget, s settings, loc cacheLocation) (bool, string) {
 	reasons := servingReasons(n, s)
-	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !containsString(loc.Nodes, n.Name) {
+	if s.CacheEnabled && s.CacheRedirectPolicy && loc.pinned() && !loc.perNode() && !containsString(loc.Nodes, n.Name) {
 		reasons = append(reasons, fmt.Sprintf("cache claim %s is pinned to %s", loc.Claim, strings.Join(loc.Nodes, ", ")))
 	}
 	return len(reasons) == 0, strings.Join(reasons, "; ")
@@ -328,6 +329,11 @@ type cacheLocation struct {
 	// given by flag — so an empty Zones is known to name none.
 	Zones      []string
 	VolumeRead bool
+	// NodeClaims says a node outside Nodes gets a cache claim of its own
+	// (settings.CacheNodeClaims, pod inventory mode); NodeCaches are the
+	// node claims that exist, by node (nodeclaims.go).
+	NodeClaims bool
+	NodeCaches map[string]string
 }
 
 // pinned reports whether the claim can only be mounted on known nodes (a
@@ -338,10 +344,22 @@ func (l cacheLocation) pinned() bool {
 
 // cacheNodes locates the cache: the explicit override, else the node affinity
 // of the PersistentVolume bound to the claim (a static local PV or a
-// local-path volume pins the cache to one node).
+// local-path volume pins the cache to one node) — and, where every node gets
+// a cache claim of its own (perNode), the node claims that exist.
 func (b *Backend) cacheNodes(ctx context.Context) (cacheLocation, error) {
 	s := b.cfg.settings(ctx)
-	loc := cacheLocation{Claim: s.CacheClaim}
+	loc, err := b.claimLocation(ctx, s)
+	if err != nil || !loc.perNode() {
+		return loc, err
+	}
+	loc.NodeCaches, err = b.nodeCaches(ctx, s)
+	return loc, err
+}
+
+// claimLocation locates the cache claim itself: the explicit override, else
+// the node affinity of the PersistentVolume bound to the claim.
+func (b *Backend) claimLocation(ctx context.Context, s settings) (cacheLocation, error) {
+	loc := cacheLocation{Claim: s.CacheClaim, NodeClaims: s.CacheEnabled && s.CacheRedirectPolicy && s.CacheNodeClaims && b.opts.InventoryMode != InventoryModeDaemonSet}
 	if len(b.opts.CacheNodes) > 0 {
 		loc.Nodes = append(loc.Nodes, b.opts.CacheNodes...)
 		loc.Bound = true

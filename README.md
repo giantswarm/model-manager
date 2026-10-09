@@ -547,9 +547,27 @@ scheduling by the registered backend document (`docs/backends.md`).
   claim hf-cache is pinned to spark-8723`). `pull`, `load` and `fit-check` refuse
   an explicit `node` that is not eligible with that reason (`412
   does_not_fit`; `fits=false` on the fit check) before any Job or
-  LLMInferenceService exists, and never pick an ineligible node themselves. A
-  second node-local GPU node becomes a serving target only with per-node
-  claims or shared storage — a chart decision, not a flag here. The claim
+  LLMInferenceService exists, and never pick an ineligible node themselves.
+  Where the platform's redirect rule mounts the claim a model pod names
+  (discovery `cache.nodeClaims: true`; pod inventory mode), the pin
+  disqualifies no node: every node outside the claim's reach gets a cache
+  claim of its own, `<claim>-<node>` (labelled
+  `model-manager.giantswarm.io/component: node-cache`, annotated
+  `model-manager.giantswarm.io/cache-node: <node>`), of the claim's class,
+  access modes and size. `pull` with that `node` creates it, provisioned on
+  the node, and its download Job fills it; a claim bound statically (no
+  StorageClass) is refused as `invalid`, naming the claim to create by hand.
+  `list_nodes` lists each node's own cache, `fit-check` and `load` read it
+  per node, and the composed object names the claim on its pods
+  (`spec.annotations`: `model-manager.giantswarm.io/cache-claim` for the
+  leader or a single-node model, `model-manager.giantswarm.io/worker-cache-claim`
+  for a split's workers; the claim itself on its own nodes, without an
+  annotation). A split is refused while a node's cache lacks the weights
+  (`the cache of <node> holds none: pull_model <model> with node <node>
+  first`), and over more than two nodes when its workers would need
+  different claims; copies whose nodes mount different claims are refused
+  (one pod template mounts one claim). Without `cache.nodeClaims` a second
+  node-local GPU node becomes a serving target only with shared storage. The claim
   has a say for the presets that store in it only — every download scheme
   (`hf://` and, with the redirect policy on, the rest) and `pvc://`. An
   `oci://` preset (KServe's modelcar: an OCI image containerd pulls onto the

@@ -1,6 +1,7 @@
 package kserve
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -91,6 +92,9 @@ type downloadPlan struct {
 	Node       string
 	Preset     string
 	BytesTotal int64
+	// Claim is the cache claim the download fills: the node's
+	// (cacheLocation.claimOn); the settings' cache claim when empty.
+	Claim string
 }
 
 func (p downloadPlan) jobName() string { return prefixed(jobPrefix, p.Dir) }
@@ -234,7 +238,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 						},
 					}},
 					Volumes: []corev1.Volume{
-						{Name: cacheVolume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: s.CacheClaim}}},
+						{Name: cacheVolume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: cmp.Or(plan.Claim, s.CacheClaim)}}},
 						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
 				},

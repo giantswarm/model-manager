@@ -13,6 +13,7 @@
 package kserve
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -366,7 +367,8 @@ func countModels(entries []cacheEntry) int {
 	return n
 }
 
-// cacheEntries scans every cache node (or the shared cache once).
+// cacheEntries scans every cache node, the nodes with a cache claim of their
+// own included (or the shared cache once).
 func (b *Backend) cacheEntries(ctx context.Context) ([]cacheEntry, error) {
 	s := b.cfg.settings(ctx)
 	if !s.CacheEnabled {
@@ -380,7 +382,7 @@ func (b *Backend) cacheEntries(ctx context.Context) ([]cacheEntry, error) {
 		b.log.Debug("cache claim missing; inventory lists served models only", "claim", loc.Claim)
 		return nil, nil
 	}
-	nodes := loc.Nodes
+	nodes := loc.cacheNodeNames()
 	if len(nodes) == 0 {
 		// Shared storage: one scan, wherever the scheduler puts it — once
 		// scanAllowed permits one (not on an unbound claim, not while the
@@ -538,6 +540,9 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 	if plan.CacheLocal || req.Node != "" {
 		dl.Node = res.Node
 	}
+	if dl.Claim, err = b.ensureNodeClaim(ctx, plan.Cache, dl.Node); err != nil {
+		return err
+	}
 	if res.Cached {
 		if progress != nil {
 			progress(backend.Progress{Status: "already cached", BytesCompleted: res.DownloadBytes, BytesTotal: res.DownloadBytes, Node: dl.Node, Preset: dl.Preset})
@@ -659,7 +664,7 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 				if !fit.Fits {
 					return nil, fmt.Errorf("%w: %s", backend.ErrUnfit, fit.Reason)
 				}
-				obj, all, err := b.addCopies(ctx, existing, nodes, askedNodes(req), req.DryRun)
+				obj, all, err := b.addCopies(ctx, existing, nodes, askedNodes(req), plan.Cache, req.DryRun)
 				if err != nil {
 					return nil, err
 				}
@@ -694,14 +699,18 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 	}
 	sh := shapeOf(plan.Preset, fit)
 	obj := b.composeLLM(plan.Preset, s, req.Node, sh)
+	podNodes := []string{cmp.Or(req.Node, fit.Node)}
 	switch {
 	case placement == backend.PlacementSplit:
 		link, _ := s.fastLinkOf(fit.Nodes[0])
 		link.Nodes = fit.Nodes
 		obj = b.composeSplit(plan.Preset, s, link, sh)
+		podNodes = fit.Nodes
 	case len(req.Nodes) > 1:
 		applyCopies(obj, req.Nodes)
+		podNodes = req.Nodes
 	}
+	setPodAnnotations(obj, cacheClaimAnnotations(plan.Cache, podNodes))
 	if req.Tracing {
 		setTracing(obj)
 	}
@@ -1058,7 +1067,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 	out := make([]backend.NodeInfo, 0, len(nodes))
 	for _, n := range nodes {
 		var cache *backend.NodeCache
-		if s.CacheEnabled && !loc.Missing && (loc.Shared || containsString(loc.Nodes, n.Name) || (len(loc.Nodes) == 0 && !loc.Bound)) {
+		if s.CacheEnabled && !loc.Missing && (loc.Shared || containsString(loc.Nodes, n.Name) || (len(loc.Nodes) == 0 && !loc.Bound) || (loc.perNode() && loc.hasCacheOn(n.Name))) {
 			scanNode := n.Name
 			if loc.Shared || len(loc.Nodes) == 0 {
 				scanNode = ""
@@ -1071,7 +1080,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 			}
 			// Models counts directories that hold a model; bytes count everything
 			// on the claim, client internals included — they occupy it too.
-			cache = &backend.NodeCache{Claim: loc.Claim, MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: countModels(snap.Entries), Inventory: b.opts.InventoryMode}
+			cache = &backend.NodeCache{Claim: loc.claimOn(n.Name), MountPath: s.CacheMountPath, ScannedAt: snap.ScannedAt, Shared: loc.Shared, Models: countModels(snap.Entries), Inventory: b.opts.InventoryMode}
 			for _, e := range snap.Entries {
 				cache.BytesUsed += e.Bytes
 			}

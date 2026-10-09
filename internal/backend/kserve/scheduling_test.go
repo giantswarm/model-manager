@@ -154,7 +154,7 @@ func TestGPUPoolFromDiscoveryReachesEverything(t *testing.T) {
 	job = f.b.buildJob(downloadPlan{Dir: "big", Repo: bigRepo, Node: testCacheNode}, s)
 	assert.Equal(t, s.poolTolerations(), job.Spec.Template.Spec.Tolerations)
 	assert.Nil(t, job.Spec.Template.Spec.NodeSelector, "pinned: the cache node decides")
-	pod := f.b.cachePod("scan", s, "", "true", true)
+	pod := f.b.cachePod("scan", s, s.CacheClaim, "", "true", true)
 	assert.Equal(t, s.poolTolerations(), pod.Spec.Tolerations)
 	assert.Equal(t, map[string]string{poolLabel: poolName}, pod.Spec.NodeSelector, "unpinned: onto the pool")
 

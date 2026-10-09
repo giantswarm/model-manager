@@ -87,6 +87,11 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch"]
+  # A node outside a node-local cache claim's reach gets a cache claim of
+  # its own when pull_model downloads there (giantswarm/model-manager#294).
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create"]
   {{- with .Values.kserve.cache.indexConfigMap }}
   - apiGroups: [""]
     resources: ["configmaps"]
