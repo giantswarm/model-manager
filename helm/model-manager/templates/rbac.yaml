@@ -11,7 +11,9 @@ Agent wiring: model-manager creates, updates and deletes kagent ModelConfigs
 (and placeholder API-key Secrets for OpenAI-compatible endpoints) in
 kagent.namespace only, in both API groups: api.kagent.dev from kagent 1.3 on,
 kagent.dev before it and for the ModelConfigs Flux still applies there after
-the cut-over. Discovery needs no extra permission.
+the cut-over. It reads the Agents, AgentTemplates and Harnesses there to tell
+whether one references a ModelConfig unwire_model would remove. Discovery
+needs no extra permission.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -24,6 +26,9 @@ rules:
   - apiGroups: ["api.kagent.dev", "kagent.dev"]
     resources: ["modelconfigs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["api.kagent.dev", "kagent.dev"]
+    resources: ["agents", "agenttemplates", "harnesses"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "delete"]

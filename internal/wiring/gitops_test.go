@@ -64,7 +64,7 @@ func TestGitOpsOwnedModelConfigIsNeverWrittenLive(t *testing.T) {
 			require.ErrorIs(t, err, backend.ErrGitOpsOwned)
 			assert.Contains(t, err.Error(), "ModelConfig kagent/qwen3-0-6b-gguf")
 
-			require.ErrorIs(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF"), backend.ErrGitOpsOwned)
+			require.ErrorIs(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere), backend.ErrGitOpsOwned)
 
 			obj, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b-gguf", metav1.GetOptions{})
 			require.NoError(t, err, "neither the update nor the delete reached the ModelConfig")
@@ -114,12 +114,12 @@ func TestModelConfigItsKustomizationLeftBehindIsWrittenLive(t *testing.T) {
 			mc.SetLabels(labels)
 			k, client := newFakeKagent(t, append([]runtime.Object{mc, placeholderLeft("qwen3-0-6b-gguf")}, ks...)...)
 
-			r, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+			r, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere)
 			require.NoError(t, err)
 			assert.Nil(t, r.GitOps, "the dry run reports no Flux owner")
 			require.Len(t, r.Objects, 2, "the ModelConfig and its placeholder Secret go")
 
-			require.NoError(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF"))
+			require.NoError(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere))
 			_, err = client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b-gguf", metav1.GetOptions{})
 			assert.True(t, apierrors.IsNotFound(err), "the ModelConfig is deleted: %v", err)
 			_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b-gguf-api-key", metav1.GetOptions{})
@@ -192,7 +192,7 @@ func TestRemovalListsTheModelConfigAndItsPlaceholder(t *testing.T) {
 	_, err := k.Ensure(ctx, "Qwen3-0.6B-GGUF", lemonadeEndpoint("Qwen3-0.6B-GGUF"))
 	require.NoError(t, err)
 
-	r, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+	r, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere)
 	require.NoError(t, err)
 	require.Len(t, r.Objects, 2)
 	assert.Equal(t, "ModelConfig", r.Objects[0].GetKind())
@@ -200,7 +200,7 @@ func TestRemovalListsTheModelConfigAndItsPlaceholder(t *testing.T) {
 	_, err = client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b-gguf", metav1.GetOptions{})
 	require.NoError(t, err, "a removal plan deletes nothing")
 
-	none, err := k.Removal(ctx, backend.NameLemonade, "other")
+	none, err := k.Removal(ctx, backend.NameLemonade, "other", CreatedHere)
 	require.NoError(t, err)
 	assert.Empty(t, none.Objects)
 }
@@ -243,7 +243,7 @@ func TestListReportsTheOwnerTheWriteToolsActOn(t *testing.T) {
 			}
 
 			// The write tools agree: a gitops-owned ModelConfig is refused live.
-			err = k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+			err = k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere)
 			if tc.owned {
 				require.ErrorIs(t, err, backend.ErrGitOpsOwned)
 			} else {

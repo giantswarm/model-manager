@@ -11,6 +11,7 @@ import (
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/jobs"
+	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
 // OpPlan is the dry run of an operational write — pull, load, unload,
@@ -79,7 +80,7 @@ func (s *Service) unwiring(ctx context.Context, b backend.Name, model string) (*
 	if s.wirer == nil {
 		return nil, nil
 	}
-	r, err := s.wirer.Removal(ctx, b, model)
+	r, err := s.wirer.Removal(ctx, b, model, wiring.CreatedHere)
 	if err != nil {
 		return nil, err
 	}

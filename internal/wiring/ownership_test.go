@@ -7,8 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -63,9 +65,9 @@ func TestRemoveDeletesOnlyWhatThisInstanceCreated(t *testing.T) {
 			k, client := newFakeKagent(t, managedModelConfig("qwen3-0-6b", "qwen3:0.6b", tc.createdBy), secret)
 			ctx := context.Background()
 
-			removal, err := k.Removal(ctx, backend.NameOllama, "qwen3:0.6b")
+			removal, err := k.Removal(ctx, backend.NameOllama, "qwen3:0.6b", CreatedHere)
 			require.NoError(t, err)
-			err = k.Remove(ctx, backend.NameOllama, "qwen3:0.6b")
+			err = k.Remove(ctx, backend.NameOllama, "qwen3:0.6b", CreatedHere)
 
 			_, getErr := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b", metav1.GetOptions{})
 			_, secErr := client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b-api-key", metav1.GetOptions{})
@@ -131,7 +133,7 @@ func TestEnsureAdoptsAModelConfigWithoutTheInstanceLabel(t *testing.T) {
 	assert.NotContains(t, obj.GetLabels(), InstanceLabel, "adopted, not created here")
 
 	var left *NotOwnedError
-	require.True(t, errors.As(k.Remove(ctx, backend.NameOllama, "qwen3:0.6b"), &left))
+	require.True(t, errors.As(k.Remove(ctx, backend.NameOllama, "qwen3:0.6b", CreatedHere), &left))
 	_, err = client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b", metav1.GetOptions{})
 	assert.NoError(t, err, "the unload leaves it")
 }
@@ -160,4 +162,108 @@ func TestInstanceNameIsALabelValue(t *testing.T) {
 	assert.Equal(t, "laptop-local", InstanceName("Laptop.local"))
 	long := InstanceName("a-very-long-release-namespace-and-name-that-exceeds-the-label-limit-of-63")
 	assert.LessOrEqual(t, len(long), 63)
+}
+
+// kagentObject is a kagent object of kind in namespace kagent with spec.
+func kagentObject(kind, name string, spec map[string]any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": testAPIVersion, "kind": kind,
+		"metadata": map[string]any{"name": name, "namespace": "kagent"},
+		"spec":     spec,
+	}}
+}
+
+// unwire_model's scope (Unclaimed) removes a ModelConfig no instance claims,
+// written before model-manager recorded its creator, once nothing references
+// it — its backend need not be registered — and leaves one an Agent, an
+// AgentTemplate or a Harness references, naming them; another instance's
+// stays that instance's.
+func TestUnclaimedRemovesAnUnreferencedModelConfigWithoutTheInstanceLabel(t *testing.T) {
+	leftover := func() *unstructured.Unstructured {
+		mc := managedModelConfig("qwen3-8-27b-l40s", "qwen3-8-27b-l40s", "")
+		mc.SetLabels(map[string]string{ManagedByLabel: ManagedByValue, BackendLabel: "kserve"})
+		return mc
+	}
+	for _, tc := range []struct {
+		name      string
+		createdBy string
+		objs      []*unstructured.Unstructured
+		removed   bool
+		refs      []string
+	}{
+		{name: "nothing references it", removed: true, objs: []*unstructured.Unstructured{
+			kagentObject("Agent", "elsewhere", map[string]any{"template": map[string]any{"modelConfig": map[string]any{"name": "default-model-config"}}}),
+		}},
+		{name: "an agent's model", refs: []string{"Agent kagent/reviewer"}, objs: []*unstructured.Unstructured{
+			kagentObject("Agent", "reviewer", map[string]any{"template": map[string]any{"modelConfig": map[string]any{"name": "qwen3-8-27b-l40s"}}}),
+		}},
+		{name: "a template's model", refs: []string{"AgentTemplate kagent/writer"}, objs: []*unstructured.Unstructured{
+			kagentObject("AgentTemplate", "writer", map[string]any{"modelConfig": map[string]any{"name": "qwen3-8-27b-l40s"}}),
+		}},
+		{name: "a harness's summarizer", refs: []string{"Harness kagent/compact"}, objs: []*unstructured.Unstructured{
+			kagentObject("Harness", "compact", map[string]any{"kagent": map[string]any{"compaction": map[string]any{"summarizer": map[string]any{"modelConfigRef": map[string]any{"name": "qwen3-8-27b-l40s"}}}}}),
+		}},
+		{name: "a namespace-qualified name", refs: []string{"Agent kagent/legacy"}, objs: []*unstructured.Unstructured{
+			kagentObject("Agent", "legacy", map[string]any{"declarative": map[string]any{"modelConfig": "kagent/qwen3-8-27b-l40s"}}),
+		}},
+		{name: "another instance's", createdBy: "laptop-benchmark"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := leftover()
+			if tc.createdBy != "" {
+				labels := mc.GetLabels()
+				labels[InstanceLabel] = tc.createdBy
+				mc.SetLabels(labels)
+			}
+			objs := []runtime.Object{mc, k0().placeholderSecret("qwen3-8-27b-l40s")}
+			for _, o := range tc.objs {
+				objs = append(objs, o)
+			}
+			k, client := newFakeKagent(t, objs...)
+			ctx := context.Background()
+
+			removal, err := k.Removal(ctx, backend.NameKServe, "qwen3-8-27b-l40s", Unclaimed)
+			require.NoError(t, err)
+			err = k.Remove(ctx, backend.NameKServe, "qwen3-8-27b-l40s", Unclaimed)
+
+			_, getErr := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-8-27b-l40s", metav1.GetOptions{})
+			_, secErr := client.Resource(secretGVR).Namespace("kagent").Get(ctx, "qwen3-8-27b-l40s-api-key", metav1.GetOptions{})
+			if tc.removed {
+				require.NoError(t, err)
+				assert.Nil(t, removal.Left)
+				require.NotNil(t, removal.ModelConfig(), "the dry run names it")
+				assert.Equal(t, "qwen3-8-27b-l40s", removal.ModelConfig().GetName())
+				assert.Len(t, removal.Objects, 2, "with its placeholder Secret")
+				assert.True(t, apierrors.IsNotFound(getErr), "the ModelConfig is gone")
+				assert.True(t, apierrors.IsNotFound(secErr), "its placeholder Secret went with it")
+				return
+			}
+			var left *NotOwnedError
+			require.True(t, errors.As(err, &left), "%v", err)
+			require.ErrorIs(t, err, backend.ErrConflict)
+			assert.Equal(t, tc.refs, left.ReferencedBy)
+			for _, r := range tc.refs {
+				assert.Contains(t, left.Message, r)
+			}
+			assert.NoError(t, getErr, "the ModelConfig stays")
+			assert.NoError(t, secErr, "its placeholder Secret stays")
+			require.NotNil(t, removal.Left, "the dry run says the same")
+			assert.Equal(t, tc.refs, removal.Left.ReferencedBy)
+			assert.Empty(t, removal.Objects)
+		})
+	}
+}
+
+// An unload's scope (CreatedHere) leaves the same unreferenced leftover, and
+// the answer names unwire_model as the way to remove it.
+func TestCreatedHereLeavesAnUnclaimedModelConfig(t *testing.T) {
+	k, client := newFakeKagent(t, managedModelConfig("qwen3-0-6b", "qwen3:0.6b", ""))
+	ctx := context.Background()
+
+	var left *NotOwnedError
+	require.True(t, errors.As(k.Remove(ctx, backend.NameOllama, "qwen3:0.6b", CreatedHere), &left))
+	assert.Contains(t, left.Message, "removed by unwire_model once nothing references it")
+	assert.NotContains(t, left.Message, "kubectl")
+	_, err := client.Resource(testGVR).Namespace("kagent").Get(ctx, "qwen3-0-6b", metav1.GetOptions{})
+	assert.NoError(t, err)
 }

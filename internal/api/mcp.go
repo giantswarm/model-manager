@@ -304,7 +304,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
-		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret. The model itself stays. Answers the mode that ran and the ModelConfig deleted (modelConfig: name and namespace, removed: true), modelConfig null and removed false when nothing was wired. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
+		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret; also one carrying no model-manager.giantswarm.io/instance label (written before model-manager recorded its creator) once no Agent, AgentTemplate or Harness references it — referenced, the call answers conflict naming them. The model itself stays. Answers the mode that ran and the ModelConfig deleted (modelConfig: name and namespace, removed: true), modelConfig null and removed false when nothing was wired. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("the ModelConfig belongs to; without it the wired ModelConfigs are consulted (conflict when several backends wire the reference)"),
 		dryRunArg("the ModelConfig it would remove (modelConfig, namespace), the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops); in mode commit also the removing pull request it would open"),

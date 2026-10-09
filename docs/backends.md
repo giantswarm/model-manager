@@ -440,8 +440,8 @@ and the ModelConfigs that would go (`modelConfigs`). Applied, it removes model-m
 backend as the caller (`unwired: [...]`), deletes the ConfigMap (`removed: true`) and waits for the
 backend to leave (`deregistered: true`). A ModelConfig of the backend that no model-manager deletes
 would outlive the backend pointing at nothing, so the removal is refused (`conflict`, nothing removed)
-while one exists. That is one without the `model-manager.giantswarm.io/instance` label, or one Flux
-applies from git. The refusal names each one by model, ModelConfig and reason, and the dry run lists them as
+while one exists. That is one without the `model-manager.giantswarm.io/instance` label (`unwire_model`
+removes it once nothing references it), or one Flux applies from git. The refusal names each one by model, ModelConfig and reason, and the dry run lists them as
 `blockedBy: [{model, namespace, name, reason}]` with the refusal as `error`. A ModelConfig another
 instance created belongs to that instance's backend and is left in place. A static backend cannot be removed here; an absent
 document is `not_found`.

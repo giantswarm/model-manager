@@ -74,7 +74,7 @@ func (s *Service) PlanUnwire(ctx context.Context, name, ref string) (*WirePlan, 
 		return plan, nil
 	}
 	plan.Backend = b
-	r, err := s.wirer.Removal(ctx, b, ref)
+	r, err := s.wirer.Removal(ctx, b, ref, wiring.Unclaimed)
 	if err != nil {
 		return nil, err
 	}

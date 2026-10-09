@@ -108,15 +108,19 @@ one host its own). A ModelConfig it creates carries the label
 `app.kubernetes.io/managed-by: model-manager` alone is shared by every
 instance and copied with a manifest, so it never grants a deletion. The unload,
 unwire, delete and `remove_backend` paths delete only a ModelConfig carrying
-their own instance label. Any other is left in place: the unload answers
+their own instance label, and `unwire_model` also one without any instance
+label (below). Any other is left in place: the unload answers
 `modelConfigLeft: {namespace, name, createdBy?, message}` (its dry run
 `wiring.left`), `remove_backend` leaves another instance's and refuses while one without the label remains (`conflict` naming it: the backend would go and the ModelConfig would point at nothing), and `unwire_model` and
 `delete_model` with `unwire` answer `conflict` (409) with that message, nothing
 deleted. A wire onto a ModelConfig another instance created answers `conflict`
 naming it, nothing written; one with `managed-by: model-manager` but no
 instance label (written before the label existed, or by hand) is adopted —
-its spec written, never marked as created here — and so is never deleted by
-model-manager either; `kubectl delete` removes it once nothing references it.
+its spec written, never marked as created here — and only `unwire_model`
+removes it: once no Agent, AgentTemplate or Harness in its namespace
+references it (its dry run naming it, mode commit where Flux applies it from
+git), whether or not its backend is still registered; while one does, the
+answer is `conflict` naming them (`referencedBy`).
 A ModelConfig without `managed-by: model-manager` is never written or deleted.
 `ModelConfigRef.createdBy` reports the instance label, and `get_info`'s
 `wiring.instance` this process's name.

@@ -968,7 +968,7 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
 		s.endLoadJob(ctx, b.Name(), model)
 		var left *wiring.NotOwnedError
-		switch err := s.wirer.Remove(ctx, b.Name(), model); {
+		switch err := s.wirer.Remove(ctx, b.Name(), model, wiring.CreatedHere); {
 		case errors.As(err, &left):
 			view.ModelConfigLeft = left
 			s.log.Info("ModelConfig left in place", "backend", b.Name(), "model", model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
@@ -1040,7 +1040,7 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 	}
 	if unwire && s.wirer != nil {
 		var left *wiring.NotOwnedError
-		if err := s.wirer.Remove(ctx, b.Name(), m.Name); errors.Is(err, backend.ErrGitOpsOwned) {
+		if err := s.wirer.Remove(ctx, b.Name(), m.Name, wiring.CreatedHere); errors.Is(err, backend.ErrGitOpsOwned) {
 			return b.Name(), fmt.Errorf("unwire %s: %w; nothing was deleted — remove the ModelConfig with unwire_model mode commit, or repeat with unwire=false to delete the weights alone", m.Name, err)
 		} else if errors.As(err, &left) {
 			return b.Name(), fmt.Errorf("unwire %s: %w; nothing was deleted — repeat with unwire=false to delete the weights alone", m.Name, err)
@@ -1098,7 +1098,7 @@ func (s *Service) Unwire(ctx context.Context, name, ref string) (*Unwired, error
 	if err != nil {
 		return nil, err
 	}
-	if err := s.wirer.Remove(ctx, b, ref); err != nil {
+	if err := s.wirer.Remove(ctx, b, ref, wiring.Unclaimed); err != nil {
 		return nil, err
 	}
 	if mc != nil {
@@ -1765,7 +1765,7 @@ func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]strin
 			continue
 		}
 		var left *wiring.NotOwnedError
-		if err := s.wirer.Remove(ctx, name, r.Model); errors.As(err, &left) {
+		if err := s.wirer.Remove(ctx, name, r.Model, wiring.CreatedHere); errors.As(err, &left) {
 			s.log.Info("ModelConfig left in place with its backend", "backend", name, "model", r.Model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
 			continue
 		} else if err != nil {
@@ -1784,8 +1784,9 @@ type BackendRemoval struct {
 	// Unwires are the model references whose ModelConfigs the removal deletes.
 	Unwires []string `json:"modelConfigs"`
 	// Blocking are the backend's ModelConfigs the removal cannot delete and
-	// no one else would: one without a recorded creator, or one Flux applies
-	// from git. One another instance created is that instance's to remove.
+	// no one else would: one without a recorded creator (unwire_model removes
+	// it), or one Flux applies from git. One another instance created is that
+	// instance's to remove.
 	Blocking []BlockingModelConfig `json:"blockedBy,omitempty"`
 }
 
@@ -1825,7 +1826,7 @@ func (s *Service) PlanBackendRemoval(ctx context.Context, name backend.Name) (Ba
 		if r.Backend != name {
 			continue
 		}
-		rendered, err := s.wirer.Removal(ctx, name, r.Model)
+		rendered, err := s.wirer.Removal(ctx, name, r.Model, wiring.CreatedHere)
 		if err != nil {
 			return out, fmt.Errorf("plan unwiring %s on %s: %w", r.Model, name, err)
 		}
@@ -1834,7 +1835,7 @@ func (s *Service) PlanBackendRemoval(ctx context.Context, name backend.Name) (Ba
 		case rendered.Left != nil && rendered.Left.CreatedBy != "":
 			// Another instance's: left in place, as UnwireBackend does.
 		case rendered.Left != nil:
-			blocking.Reason = "it carries no " + wiring.InstanceLabel + " label, so no model-manager deletes it"
+			blocking.Reason = "it carries no " + wiring.InstanceLabel + " label, so only unwire_model removes it, once nothing references it; unwire it first"
 			out.Blocking = append(out.Blocking, blocking)
 		case rendered.GitOps != nil:
 			o := rendered.GitOps
