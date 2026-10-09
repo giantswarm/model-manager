@@ -22,9 +22,18 @@ func appliedFromGit(t *testing.T, f *fixture, inventory []string) string {
 	f.shareVolume(ctx)
 	f.setDiscoveryOpts(ctx, discoveryOpts{gpuPool: poolInput()})
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
+	return labelFromGit(t, f, "tiny", inventory)
+}
+
+// labelFromGit labels the serving object name as applied by the
+// Kustomization flux-giantswarm/models, which records the given inventory ids
+// (nil: no Kustomization at all).
+func labelFromGit(t *testing.T, f *fixture, name string, inventory []string) string {
+	t.Helper()
+	ctx := context.Background()
 	ns := f.b.cfg.settings(ctx).Namespace
 	res := f.dyn.Resource(llmisvcGVR).Namespace(ns)
-	obj, err := res.Get(ctx, "tiny", metav1.GetOptions{})
+	obj, err := res.Get(ctx, name, metav1.GetOptions{})
 	require.NoError(t, err)
 	labels := obj.GetLabels()
 	labels[gitops.LabelKustomizeName], labels[gitops.LabelKustomizeNamespace] = "models", "flux-giantswarm"
@@ -94,6 +103,48 @@ func TestStopDeletesAServingObjectItsKustomizationNoLongerApplies(t *testing.T) 
 			left, err := f.b.getServing(ctx, ns, "tiny")
 			require.NoError(t, err)
 			assert.Nil(t, left, "the serving object is gone")
+		})
+	}
+}
+
+// TestTheReadAndTheLoadHoldTheOwnerToTheInventory: list_loaded reports the
+// owner unload_model refuses for, and a load adds copies to a serving object
+// its Kustomization no longer lists, as to one written live.
+func TestTheReadAndTheLoadHoldTheOwnerToTheInventory(t *testing.T) {
+	for name, tc := range map[string]struct {
+		inventory []string
+		owned     bool
+	}{
+		"listed in the inventory":    {[]string{"model-serving_mid_serving.kserve.io_LLMInferenceService"}, true},
+		"dropped from the inventory": {[]string{"model-serving_other_serving.kserve.io_LLMInferenceService"}, false},
+		"kustomization gone":         {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := copiesFixture(t)
+			_, err := f.b.Serve(ctx, backend.LoadRequest{Preset: "mid", Node: sparkA})
+			require.NoError(t, err)
+			require.Equal(t, "model-serving", ns(t, f), "the inventory ids name the serving namespace")
+			labelFromGit(t, f, "mid", tc.inventory)
+
+			loaded, err := f.b.ListLoaded(ctx)
+			require.NoError(t, err)
+			require.Len(t, loaded, 1)
+			plan, err := f.b.StopPlan(ctx, "mid")
+			require.NoError(t, err)
+			dry, loadErr := f.b.Serve(ctx, backend.LoadRequest{Preset: "mid", Placement: backend.PlacementCopies, Nodes: []string{sparkB}, DryRun: true})
+			if tc.owned {
+				require.NotNil(t, loaded[0].GitOps)
+				assert.Equal(t, gitops.Owner{Kind: gitops.KindKustomization, Namespace: "flux-giantswarm", Name: "models"}, *loaded[0].GitOps)
+				require.ErrorIs(t, plan.Refusal, backend.ErrGitOpsOwned)
+				require.ErrorIs(t, loadErr, backend.ErrConflict, "copies are added in git, not live")
+				return
+			}
+			assert.Nil(t, loaded[0].GitOps, "left behind by its Kustomization: written live")
+			require.NoError(t, plan.Refusal, "and unloaded live")
+			require.NoError(t, loadErr, "and given copies live")
+			require.Len(t, dry.Manifests, 1)
+			assertCopies(t, dry.Manifests[0], sparkA, sparkB)
 		})
 	}
 }
