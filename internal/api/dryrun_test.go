@@ -50,7 +50,19 @@ func TestWireAndUnwireDryRunWriteNothing(t *testing.T) {
 	require.False(t, isErr, text)
 	require.NoError(t, json.Unmarshal([]byte(text), &plan))
 	assert.Len(t, plan["manifests"], 1)
+	assert.Equal(t, "qwen3-0-6b", plan["modelConfig"], "the dry run names the ModelConfig it would remove")
+	assert.Equal(t, "kagent", plan["namespace"])
+	assert.Equal(t, "apply", plan["mode"])
 	assert.Equal(t, 1, fw.count(), "the unwire dry run removed nothing")
+
+	text, isErr = callTool(t, srv, ToolUnwireModel, map[string]any{"model": "qwen3:0.6b"})
+	require.False(t, isErr, text)
+	var done map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &done))
+	assert.Equal(t, map[string]any{"name": "qwen3-0-6b", "namespace": "kagent"}, done["modelConfig"], "the answer names the ModelConfig it deleted")
+	assert.Equal(t, true, done["removed"])
+	assert.Equal(t, "apply", done["mode"])
+	assert.Zero(t, fw.count())
 }
 
 func TestGitOpsOwnedAnswersItsOwnCode(t *testing.T) {

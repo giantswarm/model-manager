@@ -304,10 +304,10 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
-		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret. The model itself stays. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
+		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret. The model itself stays. Answers the mode that ran and the ModelConfig deleted (modelConfig: name and namespace, removed: true), modelConfig null and removed false when nothing was wired. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("the ModelConfig belongs to; without it the wired ModelConfigs are consulted (conflict when several backends wire the reference)"),
-		dryRunArg("the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops); in mode commit also the removing pull request it would open"),
+		dryRunArg("the ModelConfig it would remove (modelConfig, namespace), the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops); in mode commit also the removing pull request it would open"),
 		commitArgs("the removal"),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unwire)
@@ -602,15 +602,22 @@ func (t *tools) unwire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		}
 		return jsonResult(dryRunView(plan))
 	}
-	b, err := t.svc.Unwire(ctx, req.GetString(argBackend, ""), name)
+	u, err := t.svc.Unwire(ctx, req.GetString(argBackend, ""), name)
 	if err != nil {
 		return errResult(err), nil
 	}
-	body := map[string]any{argModel: name, "modelConfig": nil}
-	if b != "" {
-		body[argBackend] = b
+	return jsonResult(unwiredView(name, u))
+}
+
+// unwiredView is an applied unwire's answer: the mode that ran, the backend
+// the ModelConfig belonged to and the ModelConfig deleted (name and
+// namespace), null with removed false when nothing was wired.
+func unwiredView(model string, u *service.Unwired) map[string]any {
+	out := map[string]any{argModel: model, argMode: ModeApply, "modelConfig": u.ModelConfig, "removed": u.ModelConfig != nil}
+	if u.Backend != "" {
+		out[argBackend] = u.Backend
 	}
-	return jsonResult(body)
+	return out
 }
 
 func (t *tools) listJobs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -712,9 +719,12 @@ func commitPlanResult(plan *service.OpPlan, err error, dryRun bool) (*mcp.CallTo
 
 // dryRunView is a write tool's dry-run answer: the plan, marked as one.
 func dryRunView(plan *service.WirePlan) map[string]any {
-	out := map[string]any{argDryRun: true, argBackend: plan.Backend, argModel: plan.Model, "manifests": plan.Manifests}
+	out := map[string]any{argDryRun: true, argMode: ModeApply, argBackend: plan.Backend, argModel: plan.Model, "manifests": plan.Manifests}
 	if plan.ModelConfig != "" {
 		out["modelConfig"] = plan.ModelConfig
+	}
+	if plan.Namespace != "" {
+		out["namespace"] = plan.Namespace
 	}
 	if plan.GitOps != nil {
 		out["gitops"] = plan.GitOps

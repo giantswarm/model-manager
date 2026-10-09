@@ -296,16 +296,12 @@ func (h *REST) unwire(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	b, err := h.svc.Unwire(r.Context(), req.Backend, req.Model)
+	u, err := h.svc.Unwire(r.Context(), req.Backend, req.Model)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	body := map[string]any{argModel: req.Model, "modelConfig": nil}
-	if b != "" {
-		body[argBackend] = b
-	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, unwiredView(req.Model, u))
 }
 
 func (h *REST) listJobs(w http.ResponseWriter, r *http.Request) {
