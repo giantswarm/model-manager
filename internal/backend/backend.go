@@ -299,6 +299,24 @@ type LoadedModel struct {
 	// an object model-manager did not create).
 	RuntimeImage string `json:"runtimeImage,omitempty"`
 	ChartVersion string `json:"chartVersion,omitempty"`
+	// GitOps is the Flux object that applies the serving object from git
+	// (kserve), held to its Kustomization's inventory as unload_model holds
+	// it: absent for an object written live and for one its Kustomization no
+	// longer lists or that is gone. A GitOps-owned object is changed in git.
+	GitOps *GitOpsOwner `json:"gitops,omitempty"`
+}
+
+// GitOpsOwner is the Flux object that applies an object from git
+// (gitops.Owner).
+type GitOpsOwner struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+// String is "Kustomization flux-giantswarm/flux".
+func (o GitOpsOwner) String() string {
+	return fmt.Sprintf("%s %s/%s", o.Kind, o.Namespace, o.Name)
 }
 
 // Runtime is the software serving a model, as the running server reports it.
