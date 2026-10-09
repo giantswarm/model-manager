@@ -460,8 +460,8 @@ every backend-scoped tool (`check_fit`, `load_model`,
 no_backend: no backend registered on model-manager <instance> <version>: 0 valid backend documents
 in namespace <namespace> (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true);
 register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers
-model-backend-kserve with the first GPU node pool it creates) or add_backend
-kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends
+model-backend-kserve-<cluster> with the first GPU node pool it creates on a cluster, one per serving
+cluster) or add_backend kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends
 ```
 
 With runtime registration off (`--namespace` empty) the answer says so and names `--backends` as
