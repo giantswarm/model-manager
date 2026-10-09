@@ -170,13 +170,31 @@ type NotOwnedError struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	CreatedBy string `json:"createdBy,omitempty"`
-	Message   string `json:"message"`
+	// ReferencedBy names the kagent objects that keep a ModelConfig no
+	// instance claims in place ("Agent kagent/reviewer").
+	ReferencedBy []string `json:"referencedBy,omitempty"`
+	Message      string   `json:"message"`
 }
 
 func (e *NotOwnedError) Error() string { return e.Message }
 
 // Unwrap makes a NotOwnedError a backend.ErrConflict.
 func (e *NotOwnedError) Unwrap() error { return backend.ErrConflict }
+
+// Scope is how far a removal reaches beyond the ModelConfigs this instance
+// created.
+type Scope int
+
+const (
+	// CreatedHere removes only a ModelConfig this instance created: an
+	// unload's and a backend removal's reach.
+	CreatedHere Scope = iota
+	// Unclaimed also removes a managed ModelConfig no instance claims (no
+	// InstanceLabel: written before model-manager recorded its creator) once
+	// no kagent object references it: unwire_model's reach, a call naming
+	// the model. Another instance's stays that instance's.
+	Unclaimed
+)
 
 // Wirer manages the agent-facing configuration for models. A ModelConfig is
 // identified by (backend, model): the backend label plus the model
@@ -186,10 +204,11 @@ type Wirer interface {
 	// (idempotent); one Flux applies from git is refused (ErrGitOpsOwned).
 	Ensure(ctx context.Context, model string, ep backend.AgentEndpoint) (*ModelConfigRef, error)
 	// Remove deletes the ModelConfig for model on backend b; absent is not an
-	// error. Only a ModelConfig this instance created is deleted (any other is
-	// a *NotOwnedError, left in place), and never one Flux applies from git
-	// (ErrGitOpsOwned).
-	Remove(ctx context.Context, b backend.Name, model string) error
+	// error. Only a ModelConfig in scope is deleted — one this instance
+	// created, in scope Unclaimed also an unreferenced one no instance claims
+	// (any other is a *NotOwnedError, left in place) — and never one Flux
+	// applies from git (ErrGitOpsOwned).
+	Remove(ctx context.Context, b backend.Name, model string, scope Scope) error
 	// Lookup returns the ModelConfig for model on backend b, or nil when none
 	// exists.
 	Lookup(ctx context.Context, b backend.Name, model string) (*ModelConfigRef, error)
@@ -203,10 +222,10 @@ type Wirer interface {
 	// the Flux object applying the ModelConfig it would update; nothing is
 	// written. A dry run shows it, commit mode lands it in git.
 	Render(ctx context.Context, model string, ep backend.AgentEndpoint) (*Rendered, error)
-	// Removal returns what Remove would delete for model on backend b; no
-	// objects when nothing is wired, or when the ModelConfig is one Remove
-	// leaves (Rendered.Left). Nothing is deleted.
-	Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error)
+	// Removal returns what Remove would delete for model on backend b in
+	// scope; no objects when nothing is wired, or when the ModelConfig is one
+	// Remove leaves (Rendered.Left). Nothing is deleted.
+	Removal(ctx context.Context, b backend.Name, model string, scope Scope) (*Rendered, error)
 	// Writable returns ep as Ensure writes it: without the settings the
 	// served ModelConfig schema lacks, which the apiserver would prune — so
 	// a comparison with what a ModelConfig reads back (Carries) holds once
@@ -446,7 +465,7 @@ func (k *Kagent) createdHere(obj *unstructured.Unstructured) bool {
 
 // Tails of a NotOwnedError: what happened to the ModelConfig instead.
 const (
-	leftInPlace = "it is left in place: model-manager only deletes the ModelConfigs it created; delete it with kubectl once nothing references it"
+	leftInPlace = "it is left in place: model-manager only deletes the ModelConfigs it created; one without the instance label is removed by unwire_model once nothing references it"
 	notWritten  = "nothing was written: only the instance that created it writes it"
 )
 
@@ -788,24 +807,30 @@ func (k *Kagent) writable(ctx context.Context, ep backend.AgentEndpoint) (backen
 // Removal implements Wirer: Remove's decision without the write — the
 // owned ModelConfig for model on backend b and the placeholder Secret
 // model-manager created for it; no objects when nothing is wired.
-func (k *Kagent) Removal(ctx context.Context, b backend.Name, model string) (*Rendered, error) {
-	return retried(k, func() (*Rendered, error) { return k.removal(ctx, b, model) })
+func (k *Kagent) Removal(ctx context.Context, b backend.Name, model string, scope Scope) (*Rendered, error) {
+	return retried(k, func() (*Rendered, error) { return k.removal(ctx, b, model, scope) })
 }
 
-func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Rendered, error) {
+func (k *Kagent) removal(ctx context.Context, b backend.Name, model string, scope Scope) (*Rendered, error) {
 	obj, err := k.find(ctx, b, model)
 	if err != nil || obj == nil {
 		return &Rendered{}, err
 	}
 	// One Flux applies from git is removed in git (commit mode), whoever
 	// rendered it; a live one — or one its Kustomization left behind — only
-	// by the instance that created it.
+	// in scope (kept).
 	owner, err := gitops.Applying(ctx, k.dyn(ctx), obj)
 	if err != nil {
 		return nil, err
 	}
-	if owner == nil && !k.createdHere(obj) {
-		return &Rendered{Name: obj.GetName(), Left: k.notOwned(obj, leftInPlace)}, nil
+	if owner == nil {
+		left, err := k.kept(ctx, obj, scope)
+		if err != nil {
+			return nil, err
+		}
+		if left != nil {
+			return &Rendered{Name: obj.GetName(), Left: left}, nil
+		}
 	}
 	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: owner}
 	sec, err := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
@@ -819,14 +844,14 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string) (*Re
 }
 
 // Remove implements Wirer. A ModelConfig Flux applies from git is never
-// deleted live: the answer is ErrGitOpsOwned. One this instance did not
-// create is left: the answer is its *NotOwnedError.
-func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string) error {
-	_, err := retried(k, func() (struct{}, error) { return struct{}{}, k.remove(ctx, b, model) })
+// deleted live: the answer is ErrGitOpsOwned. One out of scope is left: the
+// answer is its *NotOwnedError.
+func (k *Kagent) Remove(ctx context.Context, b backend.Name, model string, scope Scope) error {
+	_, err := retried(k, func() (struct{}, error) { return struct{}{}, k.remove(ctx, b, model, scope) })
 	return err
 }
 
-func (k *Kagent) remove(ctx context.Context, b backend.Name, model string) error {
+func (k *Kagent) remove(ctx context.Context, b backend.Name, model string, scope Scope) error {
 	obj, err := k.find(ctx, b, model)
 	if err != nil {
 		return err
@@ -837,10 +862,95 @@ func (k *Kagent) remove(ctx context.Context, b backend.Name, model string) error
 	if err := k.refuseGitOps(ctx, obj); err != nil {
 		return err
 	}
-	if !k.createdHere(obj) {
-		return k.notOwned(obj, leftInPlace)
+	left, err := k.kept(ctx, obj, scope)
+	if err != nil {
+		return err
+	}
+	if left != nil {
+		return left
 	}
 	return k.removeObj(ctx, obj.GetName())
+}
+
+// kept is the *NotOwnedError of a managed ModelConfig a removal in scope
+// leaves in place, nil for one it removes: one this instance created, or in
+// scope Unclaimed one no instance claims that no kagent object references.
+func (k *Kagent) kept(ctx context.Context, obj *unstructured.Unstructured, scope Scope) (*NotOwnedError, error) {
+	if k.createdHere(obj) {
+		return nil, nil
+	}
+	if scope != Unclaimed || obj.GetLabels()[InstanceLabel] != "" {
+		return k.notOwned(obj, leftInPlace), nil
+	}
+	refs, err := k.referrers(ctx, obj)
+	if err != nil || len(refs) == 0 {
+		return nil, err
+	}
+	left := k.notOwned(obj, "it is left in place: referenced by "+strings.Join(refs, ", ")+"; unwire it again once nothing references it")
+	left.ReferencedBy = refs
+	return left, nil
+}
+
+// referenceResources are the kagent resources that name a ModelConfig of
+// their namespace: an Agent and an AgentTemplate its model (modelConfig), an
+// Agent's or a Harness's summarizer and memory (modelConfigRef).
+var referenceResources = []string{"agents", "agenttemplates", "harnesses"}
+
+// referrers names the kagent objects in obj's namespace, at the group and
+// version in use, that reference the ModelConfig obj ("Agent
+// kagent/reviewer"). A resource the API server does not serve there holds
+// no references.
+func (k *Kagent) referrers(ctx context.Context, obj *unstructured.Unstructured) ([]string, error) {
+	gv := k.resource().GroupVersion()
+	ns := obj.GetNamespace()
+	if ns == "" {
+		ns = k.namespace
+	}
+	var refs []string
+	for _, r := range referenceResources {
+		list, err := k.dyn(ctx).Resource(gv.WithResource(r)).Namespace(ns).List(ctx, metav1.ListOptions{})
+		switch {
+		case errors.IsNotFound(err):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("list %s in %s: %w", r, ns, err)
+		}
+		for _, item := range list.Items {
+			if references(item.Object["spec"], ns, obj.GetName()) {
+				refs = append(refs, item.GetKind()+" "+ns+"/"+item.GetName())
+			}
+		}
+	}
+	return refs, nil
+}
+
+// references reports whether v, a spec or part of one, names the ModelConfig
+// ns/name in a modelConfig or modelConfigRef field: {name: …}, or a name
+// string, bare or namespace-qualified.
+func references(v any, ns, name string) bool {
+	switch v := v.(type) {
+	case map[string]any:
+		for key, f := range v {
+			if key == "modelConfig" || key == "modelConfigRef" {
+				if ref, ok := f.(map[string]any); ok && ref["name"] == name {
+					return true
+				}
+				if ref, ok := f.(string); ok && (ref == name || ref == ns+"/"+name) {
+					return true
+				}
+			}
+			if references(f, ns, name) {
+				return true
+			}
+		}
+	case []any:
+		for _, f := range v {
+			if references(f, ns, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // removeObj deletes a ModelConfig this instance created and its placeholder

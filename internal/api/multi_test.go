@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,43 @@ func TestUnwireRemovesTheModelConfigOfABackendNoLongerRegistered(t *testing.T) {
 	status, body = none.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8b"})
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Empty(t, body["backend"], "nothing wired anywhere: unwired, idempotent")
+}
+
+// A ModelConfig written before model-manager recorded its creator, for a
+// backend no longer registered: unwire_model removes it, its dry run naming
+// it, once nothing references it; referenced, it answers conflict naming the
+// references, and nothing is removed.
+func TestUnwireRemovesAnUnclaimedLeftoverNothingReferences(t *testing.T) {
+	f := newMultiFixture(t, newFakeBackend())
+	leftover := func(refs ...string) wiring.ModelConfigRef {
+		wiredOn(f.wirer, backend.NameKServe, "qwen3-8-27b-l40s")
+		ref, _ := f.wirer.get(backend.NameKServe, "qwen3-8-27b-l40s")
+		f.wirer.mu.Lock()
+		f.wirer.notOwned = map[string]*wiring.NotOwnedError{refKey(backend.NameKServe, "qwen3-8-27b-l40s"): {
+			Namespace: ref.Namespace, Name: ref.Name, ReferencedBy: refs, Message: "it carries no instance label",
+		}}
+		f.wirer.mu.Unlock()
+		return ref
+	}
+
+	leftover("Agent kagent/reviewer")
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8-27b-l40s"})
+	assert.Equal(t, http.StatusConflict, status, body)
+	assert.Equal(t, 1, f.wirer.count(), "a referenced leftover stays")
+
+	ref := leftover()
+	text, isErr := callTool(t, NewMCPServer(f.svc, buildinfo.Info{Version: "test"}), ToolUnwireModel, map[string]any{"model": "qwen3-8-27b-l40s", "dryRun": true})
+	require.False(t, isErr, text)
+	var plan map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &plan))
+	assert.Equal(t, ref.Name, plan["modelConfig"], "the dry run names it")
+	assert.Len(t, plan["manifests"], 1)
+	assert.Equal(t, 1, f.wirer.count(), "a dry run removes nothing")
+
+	status, body = f.do(t, http.MethodPost, Prefix+"/models/unwire", map[string]any{"model": "qwen3-8-27b-l40s"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "kserve", body["backend"])
+	assert.Equal(t, 0, f.wirer.count(), "the leftover is removed")
 }
 
 func TestMultiBackendPullGoesToTheNamedOrDefaultBackend(t *testing.T) {

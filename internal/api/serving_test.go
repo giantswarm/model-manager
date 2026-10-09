@@ -642,7 +642,7 @@ func TestServingRestartDuringColdStartLeavesAWiredModel(t *testing.T) {
 
 	// A served model whose ModelConfig is missing all the same (wired by a
 	// job that died before this rule) is mended by the read.
-	require.NoError(t, f.wirer.Remove(context.Background(), backend.NameKServe, "org/tiny"))
+	require.NoError(t, f.wirer.Remove(context.Background(), backend.NameKServe, "org/tiny", wiring.CreatedHere))
 	status, body = after.do(t, http.MethodGet, Prefix+"/loaded", nil)
 	require.Equal(t, http.StatusOK, status, body)
 	entry = body["loaded"].([]any)[0].(map[string]any)

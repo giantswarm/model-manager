@@ -348,11 +348,11 @@ func TestAGitOpsModelConfigAtKagentDevMovesInGit(t *testing.T) {
 		assert.Equal(t, legacyAPIVersion, refs[0].APIVersion)
 	}
 
-	removal, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF")
+	removal, err := k.Removal(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere)
 	require.NoError(t, err)
 	require.NotNil(t, removal.ModelConfig())
 	assert.NotNil(t, removal.GitOps)
-	require.ErrorIs(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF"), backend.ErrGitOpsOwned)
+	require.ErrorIs(t, k.Remove(ctx, backend.NameLemonade, "Qwen3-0.6B-GGUF", CreatedHere), backend.ErrGitOpsOwned)
 }
 
 // TestALiveModelConfigAtKagentDevGetsATwin: model-manager's own live

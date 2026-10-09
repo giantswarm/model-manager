@@ -45,6 +45,9 @@ func newFakeKagent(t *testing.T, objs ...runtime.Object) (*Kagent, *dynamicfake.
 		testGVR:   "ModelConfigList",
 		legacyGVR: "ModelConfigList",
 		secretGVR: "SecretList",
+		testGVR.GroupVersion().WithResource("agents"):         "AgentList",
+		testGVR.GroupVersion().WithResource("agenttemplates"): "AgentTemplateList",
+		testGVR.GroupVersion().WithResource("harnesses"):      "HarnessList",
 	}, objs...)
 	return NewKagent(client, servedOpenAPI(DefaultAPIVersion, kagentOllamaFields...), "kagent", DefaultAPIVersion, "", testInstance), client
 }
@@ -374,7 +377,7 @@ func TestEnsureOpenAIPlaceholderSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ManagedByValue, sec.GetLabels()[ManagedByLabel])
 
-	require.NoError(t, k.Remove(ctx, "", "org/qwen3-8b"))
+	require.NoError(t, k.Remove(ctx, "", "org/qwen3-8b", CreatedHere))
 	_, err = client.Resource(secretGVR).Namespace("kagent").Get(ctx, "org-qwen3-8b-api-key", metav1.GetOptions{})
 	require.Error(t, err, "placeholder secret goes with the ModelConfig")
 }
@@ -400,7 +403,7 @@ func TestEnsurePassthroughReferencesNoSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, secrets.Items, "no placeholder Secret is created for the passthrough shape")
 
-	require.NoError(t, k.Remove(ctx, backend.NameKServe, "Qwen/Qwen3-4B-Instruct-2507"))
+	require.NoError(t, k.Remove(ctx, backend.NameKServe, "Qwen/Qwen3-4B-Instruct-2507", CreatedHere))
 	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, list.Items)
@@ -438,7 +441,7 @@ func TestEnsureCallerSecretIsReferencedNotCreated(t *testing.T) {
 	secrets, err := client.Resource(secretGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, secrets.Items, "a Secret of the caller's is never created")
-	require.NoError(t, k.Remove(ctx, backend.NameLemonade, "qwen3-4b-FLM"), "and never deleted")
+	require.NoError(t, k.Remove(ctx, backend.NameLemonade, "qwen3-4b-FLM", CreatedHere), "and never deleted")
 }
 
 func TestEnsureRewireToPassthroughRemovesPlaceholderSecret(t *testing.T) {
@@ -496,8 +499,8 @@ func TestLookupListRemove(t *testing.T) {
 	assert.Equal(t, backend.NameOllama, models["smollm2:135m"])
 	assert.Equal(t, backend.NameOllama, models["qwen3:0.6b"])
 
-	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m"))
-	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m"), "removing twice is fine")
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m", CreatedHere))
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "smollm2:135m", CreatedHere), "removing twice is fine")
 	list, err := client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1)
@@ -558,7 +561,7 @@ func TestEnsureUsesTheEndpointNameAndConverges(t *testing.T) {
 	again, err := k.Ensure(ctx, "Inferact/Qwen3.8-27B-NVFP4", ep)
 	require.NoError(t, err)
 	assert.Equal(t, "qwen3-8-27b", again.Name)
-	require.NoError(t, k.Remove(ctx, "", "Inferact/Qwen3.8-27B-NVFP4"))
+	require.NoError(t, k.Remove(ctx, "", "Inferact/Qwen3.8-27B-NVFP4", CreatedHere))
 	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, list.Items)
@@ -599,7 +602,7 @@ func TestListAllReportsForeignModelConfigs(t *testing.T) {
 	owned, err := k.List(ctx)
 	require.NoError(t, err)
 	assert.Len(t, owned, 1, "List stays model-manager's own")
-	require.NoError(t, k.Remove(ctx, "", "qwen3-8-27b"), "absent from the owned set: a no-op")
+	require.NoError(t, k.Remove(ctx, "", "qwen3-8-27b", CreatedHere), "absent from the owned set: a no-op")
 	all, err = k.ListAll(ctx)
 	require.NoError(t, err)
 	assert.Len(t, all, 2, "foreign ModelConfigs are never deleted")
@@ -644,7 +647,7 @@ func TestSameReferenceOnTwoBackendsIsTwoModelConfigs(t *testing.T) {
 	assert.Equal(t, "shared-1b-lemonade", le.Name)
 
 	// Remove is per backend: the other backend's ModelConfig stays.
-	require.NoError(t, k.Remove(ctx, backend.NameOllama, "shared:1b"))
+	require.NoError(t, k.Remove(ctx, backend.NameOllama, "shared:1b", CreatedHere))
 	list, err = client.Resource(testGVR).Namespace("kagent").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1)

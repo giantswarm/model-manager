@@ -44,7 +44,9 @@ func (w *recordingWirer) Render(_ context.Context, model string, ep backend.Agen
 	return &wiring.Rendered{Name: ep.Name, Objects: []*unstructured.Unstructured{mc}}, nil
 }
 
-func (w *recordingWirer) Remove(context.Context, backend.Name, string) error { return nil }
+func (w *recordingWirer) Remove(context.Context, backend.Name, string, wiring.Scope) error {
+	return nil
+}
 func (w *recordingWirer) Lookup(context.Context, backend.Name, string) (*wiring.ModelConfigRef, error) {
 	return nil, nil
 }
@@ -60,7 +62,7 @@ func (w *recordingWirer) List(context.Context) ([]wiring.ModelConfigRef, error) 
 func (w *recordingWirer) ListAll(ctx context.Context) ([]wiring.ModelConfigRef, error) {
 	return w.List(ctx)
 }
-func (w *recordingWirer) Removal(context.Context, backend.Name, string) (*wiring.Rendered, error) {
+func (w *recordingWirer) Removal(context.Context, backend.Name, string, wiring.Scope) (*wiring.Rendered, error) {
 	return &wiring.Rendered{}, nil
 }
 func (w *recordingWirer) Writable(_ context.Context, ep backend.AgentEndpoint) (backend.AgentEndpoint, error) {

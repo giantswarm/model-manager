@@ -227,10 +227,10 @@ func (w *fakeWirer) Writable(_ context.Context, ep backend.AgentEndpoint) (backe
 	}
 	return ep, nil
 }
-func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string) error {
+func (w *fakeWirer) Remove(_ context.Context, b backend.Name, model string, scope wiring.Scope) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if left, ok := w.notOwned[refKey(b, model)]; ok {
+	if left := w.left(b, model, scope); left != nil {
 		return left
 	}
 	delete(w.refs, refKey(b, model))
@@ -244,14 +244,25 @@ func (w *fakeWirer) Render(_ context.Context, model string, ep backend.AgentEndp
 	mc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "kagent.dev/v1alpha3", "kind": "ModelConfig", "metadata": map[string]any{"name": name, "namespace": "kagent"}}}
 	return &wiring.Rendered{Name: name, Objects: []*unstructured.Unstructured{mc}}, nil
 }
-func (w *fakeWirer) Removal(_ context.Context, b backend.Name, model string) (*wiring.Rendered, error) {
+
+// left is the notOwned entry a removal in scope leaves: any in scope
+// CreatedHere, in scope Unclaimed one another instance created or something
+// references, as the kagent wirer decides.
+func (w *fakeWirer) left(b backend.Name, model string, scope wiring.Scope) *wiring.NotOwnedError {
+	left, ok := w.notOwned[refKey(b, model)]
+	if !ok || (scope == wiring.Unclaimed && left.CreatedBy == "" && len(left.ReferencedBy) == 0) {
+		return nil
+	}
+	return left
+}
+func (w *fakeWirer) Removal(_ context.Context, b backend.Name, model string, scope wiring.Scope) (*wiring.Rendered, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	r, ok := w.refs[refKey(b, model)]
 	if !ok {
 		return &wiring.Rendered{}, nil
 	}
-	if left, ok := w.notOwned[refKey(b, model)]; ok {
+	if left := w.left(b, model, scope); left != nil {
 		return &wiring.Rendered{Name: r.Name, Left: left}, nil
 	}
 	mc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "kagent.dev/v1alpha3", "kind": "ModelConfig", "metadata": map[string]any{"name": r.Name, "namespace": r.Namespace}}}
