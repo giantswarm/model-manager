@@ -83,7 +83,7 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 	), t.addBackend)
 
 	s.AddTool(mcp.NewTool(ToolRemoveBackend,
-		mcp.WithDescription("Remove a backend registered at runtime: drops model-manager's ModelConfigs for it, then deletes its backend document; the backend disappears from list_backends. A static backend (chart values) cannot be removed here. dryRun reports what would go."),
+		mcp.WithDescription("Remove a backend registered at runtime: drops model-manager's ModelConfigs for it, then deletes its backend document; the backend disappears from list_backends. Refused with conflict, nothing removed, while a ModelConfig of the backend no model-manager deletes (no instance label, or applied by Flux from git) would be left pointing at nothing; the refusal names each. A static backend (chart values) cannot be removed here. dryRun reports what would go and blockedBy."),
 		mcp.WithString(argName, mcp.Description("Backend name as list_backends shows it (kserve, kserve-<cluster>, ollama, ...); required unless kind is given")),
 		mcp.WithString(argKind, mcp.Description("Backend kind, the name of a backend registered under its kind (ollama|lmstudio|lemonade|kserve)")),
 		mcp.WithBoolean(argDryRun, mcp.Description("Report the ConfigMap and ModelConfigs that would be removed (default false)")),
@@ -251,16 +251,25 @@ func (t *tools) removeBackend(ctx context.Context, req mcp.CallToolRequest) (*mc
 		"dryRun":    dryRun,
 		"configMap": map[string]any{"namespace": t.store.Namespace(), "name": backend.DocumentName(name)},
 	}
+	if _, err := t.store.Get(ctx, name); err != nil {
+		return errResult(err), nil
+	}
+	// A ModelConfig no model-manager deletes would outlive the backend and
+	// point at nothing: the removal is refused before anything goes.
+	plan, err := t.svc.PlanBackendRemoval(ctx, name)
+	if err != nil {
+		return errResult(err), nil
+	}
 	if dryRun {
-		if _, err := t.store.Get(ctx, name); err != nil {
-			return errResult(err), nil
+		out["modelConfigs"] = plan.Unwires
+		if len(plan.Blocking) > 0 {
+			out["blockedBy"] = plan.Blocking
+			out["error"] = plan.Err(name).Error()
 		}
-		wired, err := t.svc.WiredModels(ctx, name)
-		if err != nil {
-			return errResult(err), nil
-		}
-		out["modelConfigs"] = wired
 		return jsonResult(out)
+	}
+	if err := plan.Err(name); err != nil {
+		return errResult(err), nil
 	}
 	unwired, err := t.svc.UnwireBackend(ctx, name)
 	if err != nil {

@@ -1777,20 +1777,71 @@ func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]strin
 	return removed, nil
 }
 
-// WiredModels lists the model references of backend name's model-manager-owned
-// ModelConfigs; nil when wiring is disabled.
-func (s *Service) WiredModels(ctx context.Context, name backend.Name) ([]string, error) {
+// BackendRemoval is what removing a backend does to its ModelConfigs: the
+// models it unwires, and the ModelConfigs that would outlive the backend
+// pointing at nothing, which refuse the removal.
+type BackendRemoval struct {
+	// Unwires are the model references whose ModelConfigs the removal deletes.
+	Unwires []string `json:"modelConfigs"`
+	// Blocking are the backend's ModelConfigs the removal cannot delete and
+	// no one else would: one without a recorded creator, or one Flux applies
+	// from git. One another instance created is that instance's to remove.
+	Blocking []BlockingModelConfig `json:"blockedBy,omitempty"`
+}
+
+// BlockingModelConfig is a ModelConfig that refuses its backend's removal.
+type BlockingModelConfig struct {
+	Model     string `json:"model"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Reason    string `json:"reason"`
+}
+
+// Err is the removal's refusal: a conflict naming every blocking ModelConfig,
+// nil when nothing blocks.
+func (r BackendRemoval) Err(name backend.Name) error {
+	if len(r.Blocking) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(r.Blocking))
+	for _, b := range r.Blocking {
+		parts = append(parts, fmt.Sprintf("%s (ModelConfig %s/%s: %s)", b.Model, b.Namespace, b.Name, b.Reason))
+	}
+	return fmt.Errorf("%w: backend %s still has models wired that removing it would leave pointing at nothing: %s; nothing was removed", backend.ErrConflict, name, strings.Join(parts, "; "))
+}
+
+// PlanBackendRemoval decides what removing backend name does to its
+// ModelConfigs; nothing is written. Empty when wiring is disabled.
+func (s *Service) PlanBackendRemoval(ctx context.Context, name backend.Name) (BackendRemoval, error) {
+	var out BackendRemoval
 	if s.wirer == nil {
-		return nil, nil
+		return out, nil
 	}
 	refs, err := s.wirer.List(ctx)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	var out []string
 	for _, r := range refs {
-		if r.Backend == name {
-			out = append(out, r.Model)
+		if r.Backend != name {
+			continue
+		}
+		rendered, err := s.wirer.Removal(ctx, name, r.Model)
+		if err != nil {
+			return out, fmt.Errorf("plan unwiring %s on %s: %w", r.Model, name, err)
+		}
+		blocking := BlockingModelConfig{Model: r.Model, Namespace: r.Namespace, Name: r.Name}
+		switch {
+		case rendered.Left != nil && rendered.Left.CreatedBy != "":
+			// Another instance's: left in place, as UnwireBackend does.
+		case rendered.Left != nil:
+			blocking.Reason = "it carries no " + wiring.InstanceLabel + " label, so no model-manager deletes it"
+			out.Blocking = append(out.Blocking, blocking)
+		case rendered.GitOps != nil:
+			o := rendered.GitOps
+			blocking.Reason = fmt.Sprintf("%s %s/%s applies it from git; unwire it in mode commit first", o.Kind, o.Namespace, o.Name)
+			out.Blocking = append(out.Blocking, blocking)
+		default:
+			out.Unwires = append(out.Unwires, r.Model)
 		}
 	}
 	return out, nil

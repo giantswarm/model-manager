@@ -110,7 +110,7 @@ instance and copied with a manifest, so it never grants a deletion. The unload,
 unwire, delete and `remove_backend` paths delete only a ModelConfig carrying
 their own instance label. Any other is left in place: the unload answers
 `modelConfigLeft: {namespace, name, createdBy?, message}` (its dry run
-`wiring.left`), `remove_backend` leaves it, and `unwire_model` and
+`wiring.left`), `remove_backend` leaves another instance's and refuses while one without the label remains (`conflict` naming it: the backend would go and the ModelConfig would point at nothing), and `unwire_model` and
 `delete_model` with `unwire` answer `conflict` (409) with that message, nothing
 deleted. A wire onto a ModelConfig another instance created answers `conflict`
 naming it, nothing written; one with `managed-by: model-manager` but no
@@ -287,7 +287,7 @@ namespace labelled `agent-platform.giantswarm.io/model-backend=true`, named `mod
 key `backend.yaml`, `kind: ModelBackend` — as the caller; model-manager watches the label, enforces
 the document's schema when it reads it (an invalid document is reported under `invalid` in
 `list_backends` with the failing field, and not loaded) and registers the backend without a
-restart. `remove_backend` drops the backend's ModelConfigs and the document. One backend per kind, and for kserve one per serving cluster (`kserve`, `kserve-<cluster>`);
+restart. `remove_backend` drops the backend's ModelConfigs and the document, or refuses while a ModelConfig of the backend it cannot delete would be left pointing at nothing. One backend per kind, and for kserve one per serving cluster (`kserve`, `kserve-<cluster>`);
 `list_backends` reports every backend with `source: static | person | cluster-manager`, and a
 `kserve` document carries the **target cluster** (`{cluster, organization, apiServer, caBundle,
 servingNamespace}` — never credentials) the backend acts on, reported as `target` on the backend,
