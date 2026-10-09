@@ -886,7 +886,7 @@ func (k *Kagent) kept(ctx context.Context, obj *unstructured.Unstructured, scope
 	if err != nil || len(refs) == 0 {
 		return nil, err
 	}
-	left := k.notOwned(obj, "it is left in place: "+strings.Join(refs, ", ")+" reference it; unwire it again once nothing does")
+	left := k.notOwned(obj, "it is left in place: referenced by "+strings.Join(refs, ", ")+"; unwire it again once nothing references it")
 	left.ReferencedBy = refs
 	return left, nil
 }
