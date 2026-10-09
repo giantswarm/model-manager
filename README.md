@@ -772,6 +772,10 @@ scheduling by the registered backend document (`docs/backends.md`).
   model-manager created or that carry the `agent-platform.giantswarm.io/preset`
   label (the portal's serve flow) can be unloaded here; hand-written ones are
   inventory only (`409 conflict` on unload; `managedBy` says who owns them).
+  One Flux applies from git reports the Kustomization or HelmRelease as
+  `gitops`, held to the Kustomization's inventory as the unload holds it: a
+  leftover its Kustomization no longer lists is written live, unloaded and
+  given copies here; one it lists is changed in git (`mode: commit`).
 - **State** — the loaded models (`GET /api/v1/loaded`, `list_loaded_models`)
   are every InferenceService and LLMInferenceService of the serving namespace
   whatever their readiness: `status` `Ready`, `Pending` (the workload pod

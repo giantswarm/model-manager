@@ -8,7 +8,11 @@
 // at all; a live change would be reverted on Flux's next reconciliation.
 package gitops
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/giantswarm/model-manager/internal/backend"
+)
 
 // The labels Flux sets on every object it applies.
 const (
@@ -24,17 +28,9 @@ const (
 	KindHelmRelease   = "HelmRelease"
 )
 
-// Owner is the Flux object that applies an object from git.
-type Owner struct {
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-}
-
-// String is "Kustomization flux-giantswarm/flux".
-func (o Owner) String() string {
-	return fmt.Sprintf("%s %s/%s", o.Kind, o.Namespace, o.Name)
-}
+// Owner is the Flux object that applies an object from git; the backend
+// package declares it so a served model reports its owner (LoadedModel).
+type Owner = backend.GitOpsOwner
 
 // OwnerOf is the Flux object the labels name, nil for an object Flux does not
 // apply. A Kustomization's labels win over a HelmRelease's: the Kustomization
