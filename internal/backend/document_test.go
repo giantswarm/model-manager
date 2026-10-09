@@ -129,7 +129,7 @@ func TestNoBackendError(t *testing.T) {
 			want: []string{
 				"no backend registered on model-manager model-manager-model-manager 0.80.0: ",
 				"0 valid backend documents in namespace model-manager (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true); ",
-				"register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers model-backend-kserve with the first GPU node pool it creates) ",
+				"register one with add_backend kind=kserve servingNamespace=<namespace> (cluster-manager registers model-backend-kserve-<cluster> with the first GPU node pool it creates on a cluster, one per serving cluster) ",
 				"or add_backend kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends",
 			},
 			not: []string{"invalid"},
@@ -187,6 +187,10 @@ spec:
 	require.NoError(t, err)
 	assert.Equal(t, "model-backend-kserve-wc1", cm.Name)
 	assert.Equal(t, Name("kserve-wc1"), doc.Options(Options{}).KServe.Name)
+	// The no_backend answer names the document cluster-manager registers by
+	// the same naming (giantswarm/model-manager#296).
+	assert.Equal(t, cm.Name, strings.Replace(DocumentName(kserveClusterName), "<cluster>", "wc1", 1))
+	assert.Contains(t, (&NoBackendError{Namespace: "ns"}).Error(), "cluster-manager registers "+DocumentName(kserveClusterName)+" ")
 
 	// No metadata.name: the kind names the backend, as before.
 	local := NewDocument(DocumentSpec{Kind: NameKServe, KServe: &KServeSpec{Target: Target{ServingNamespace: "ns"}}})

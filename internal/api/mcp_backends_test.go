@@ -105,7 +105,7 @@ func TestZeroBackends(t *testing.T) {
 	assert.True(t, isErr)
 	assert.Contains(t, text, "no_backend: no backend registered on model-manager mm-test 1.2.3: 0 valid backend documents in namespace "+testNamespace)
 	assert.Contains(t, text, "add_backend kind=kserve servingNamespace=<namespace>")
-	assert.Contains(t, text, "cluster-manager registers model-backend-kserve with the first GPU node pool it creates")
+	assert.Contains(t, text, "cluster-manager registers model-backend-kserve-<cluster> with the first GPU node pool it creates on a cluster")
 	assert.Contains(t, text, "add_backend kind=ollama|lmstudio|lemonade endpoint=<url>")
 	text, isErr = callTool(t, f.srv, ToolPullModel, map[string]any{argModel: "x"})
 	assert.True(t, isErr)

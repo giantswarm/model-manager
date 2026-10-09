@@ -86,7 +86,7 @@ func (e *NoBackendError) Error() string {
 		fmt.Fprintf(&b, ", %d invalid (list_backends names the problem)", e.Invalid)
 	}
 	b.WriteString("; register one with add_backend kind=kserve servingNamespace=<namespace> " +
-		"(cluster-manager registers " + DocumentNamePrefix + "kserve with the first GPU node pool it creates) " +
+		"(cluster-manager registers " + DocumentName(kserveClusterName) + " with the first GPU node pool it creates on a cluster, one per serving cluster) " +
 		"or add_backend kind=ollama|lmstudio|lemonade endpoint=<url>, or configure --backends")
 	return b.String()
 }
@@ -427,6 +427,10 @@ func (t Target) Identity() *Target {
 	return &Target{Cluster: t.Cluster, Organization: t.Organization}
 }
 
+// kserveClusterName is the backend name of a serving cluster's kserve
+// document, kserve-<cluster>, as messages spell it.
+const kserveClusterName = NameKServe + "-<cluster>"
+
 // DocumentName is the ConfigMap name of the document of the backend name.
 func DocumentName(name Name) string { return DocumentNamePrefix + string(name) }
 
@@ -543,7 +547,7 @@ func (s *DocumentSpec) validateName(name Name) error {
 		return fmt.Errorf("must equal spec.kind (%s)", s.Kind)
 	}
 	if name.Kind() != NameKServe || name == NameKServe+"-" {
-		return fmt.Errorf("must be %s or %s-<cluster>, got %q", NameKServe, NameKServe, name)
+		return fmt.Errorf("must be %s or %s, got %q", NameKServe, kserveClusterName, name)
 	}
 	if errs := validation.IsDNS1123Label(string(name)); len(errs) > 0 {
 		return fmt.Errorf("%q is not a DNS label: %s", name, strings.Join(errs, "; "))
