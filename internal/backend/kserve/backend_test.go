@@ -664,6 +664,12 @@ func TestNewValidatesOptions(t *testing.T) {
 	f := newFixture(t)
 	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, BudgetSource: "vibes"})
 	assert.ErrorContains(t, err, "budget source")
+	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, DownloadStorageLimit: "lots"})
+	assert.ErrorContains(t, err, "ephemeral-storage limit")
+	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, DownloadStorageLimit: "0"})
+	assert.ErrorContains(t, err, "positive")
+	_, err = New(backend.KServeOptions{Dynamic: f.dyn, Clientset: f.cs, DownloadStorageRequest: "2Gi", DownloadStorageLimit: "1Gi"})
+	assert.ErrorContains(t, err, "exceeds the limit")
 }
 
 func TestNodeBudgetAnnotation(t *testing.T) {

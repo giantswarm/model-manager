@@ -48,6 +48,14 @@ const stalledMarker = "DOWNLOAD STALLED:"
 // downloadContainer is the download Job's main container.
 const downloadContainer = "download"
 
+// DefaultDownloadStorageRequest / DefaultDownloadStorageLimit bound the
+// download container's scratch: the hub client's metadata under HF_HOME in the
+// tmp emptyDir and the container's logs. The weights land on the cache claim.
+const (
+	DefaultDownloadStorageRequest = "64Mi"
+	DefaultDownloadStorageLimit   = "1Gi"
+)
+
 // downloadScript wraps the storage-initializer so progress (apparent bytes in
 // the target directory) is printed every 10 s, a download that writes nothing
 // to the target directory for MM_STALL_SECONDS is killed and fails with a
@@ -125,11 +133,35 @@ for d in ` + strings.Join(quoted, " ") + `; do
 done`
 }
 
+// downloadEphemeral parses the download container's ephemeral-storage request
+// and limit, the defaults for empty options; a request above the limit is
+// refused like a malformed quantity.
+func downloadEphemeral(o backend.KServeOptions) (request, limit resource.Quantity, err error) {
+	request, err = resource.ParseQuantity(cmp.Or(o.DownloadStorageRequest, DefaultDownloadStorageRequest))
+	if err != nil {
+		return request, limit, fmt.Errorf("kserve download ephemeral-storage request %q: %w", o.DownloadStorageRequest, err)
+	}
+	limit, err = resource.ParseQuantity(cmp.Or(o.DownloadStorageLimit, DefaultDownloadStorageLimit))
+	if err != nil {
+		return request, limit, fmt.Errorf("kserve download ephemeral-storage limit %q: %w", o.DownloadStorageLimit, err)
+	}
+	if limit.Sign() <= 0 {
+		return request, limit, fmt.Errorf("kserve download ephemeral-storage limit %s: want a positive quantity", limit.String())
+	}
+	if request.Cmp(limit) > 0 {
+		return request, limit, fmt.Errorf("kserve download ephemeral-storage request %s exceeds the limit %s", request.String(), limit.String())
+	}
+	return request, limit, nil
+}
+
 // buildJob composes the download Job: an init container creates the cache
 // directory (cacheInitScript) and the storage-initializer downloads into it,
 // both as the cache uid within the restricted Pod Security Standard
-// (security.go).
+// (security.go). The tmp emptyDir carries a sizeLimit and the container mounting
+// it ephemeral-storage requests and limits, which Kyverno's
+// require-emptydir-requests-and-limits policy asks of every emptyDir.
 func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
+	ephemeralRequest, ephemeralLimit, _ := downloadEphemeral(b.opts) // validated by New
 	dst := cacheMount + "/" + plan.Dir
 	markers := cacheMount + "/" + markersDir
 	env := []corev1.EnvVar{
@@ -229,8 +261,8 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
 						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
-							Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("512Mi"), corev1.ResourceEphemeralStorage: ephemeralRequest},
+							Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi"), corev1.ResourceEphemeralStorage: ephemeralLimit},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: cacheVolume, MountPath: cacheMount},
@@ -239,7 +271,7 @@ func (b *Backend) buildJob(plan downloadPlan, s settings) *batchv1.Job {
 					}},
 					Volumes: []corev1.Volume{
 						{Name: cacheVolume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: cmp.Or(plan.Claim, s.CacheClaim)}}},
-						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &ephemeralLimit}}},
 					},
 				},
 			},

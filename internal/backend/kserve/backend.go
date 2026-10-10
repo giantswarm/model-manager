@@ -146,6 +146,9 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	default:
 		return nil, fmt.Errorf("kserve inventory mode %q: want %s or %s", opts.InventoryMode, InventoryModePod, InventoryModeDaemonSet)
 	}
+	if _, _, err := downloadEphemeral(opts); err != nil {
+		return nil, err
+	}
 	log := slog.Default().With("backend", "kserve")
 	b := &Backend{
 		opts: opts,

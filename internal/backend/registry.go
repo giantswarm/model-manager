@@ -114,6 +114,12 @@ type KServeOptions struct {
 	// with a reason naming the window and the bytes on disk, instead of
 	// letting it hang.
 	DownloadStallTimeout time.Duration
+	// DownloadStorageRequest / DownloadStorageLimit are the download
+	// container's ephemeral-storage request and limit (resource quantities);
+	// the limit is also the sizeLimit of its tmp emptyDir (HF_HOME). The
+	// weights land on the cache claim, not in either.
+	DownloadStorageRequest string
+	DownloadStorageLimit   string
 	// InitImage creates cache directories and scans the cache (a busybox-like
 	// image with sh, find, stat, awk).
 	InitImage string

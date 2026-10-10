@@ -318,6 +318,19 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                        "ephemeralStorage": {
+                            "type": "object",
+                            "description": "ephemeral-storage of the download Job's container: the request, and the limit, which is also the sizeLimit of its `tmp` emptyDir (the hub client's HF_HOME). The weights land on the cache claim, not here.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "limit": {
+                                    "type": "string"
+                                },
+                                "request": {
+                                    "type": "string"
+                                }
+                            }
+                        },
                         "ignorePatterns": {
                             "type": "array",
                             "description": "File patterns downloads skip (fnmatch, passed as STORAGE_IGNORE_PATTERNS). Empty downloads the whole repository like an LLMInferenceService does."

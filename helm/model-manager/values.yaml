@@ -437,6 +437,12 @@ kserve:
     # Cilium `toFQDNs` DNS proxy never resolved and hangs on the dropped SYNs,
     # hf_transfer resolves per connection through the system resolver.
     stallTimeout: 10m
+    # -- ephemeral-storage of the download Job's container: the request, and
+    # the limit, which is also the sizeLimit of its `tmp` emptyDir (the hub
+    # client's HF_HOME). The weights land on the cache claim, not here.
+    ephemeralStorage:
+      request: 64Mi
+      limit: 1Gi
   inventory:
     # -- How the per-node cache contents are read. `pod`: a short-lived scan
     # pod per cache node whenever the inventory is older than `ttl` (no
