@@ -129,6 +129,8 @@ spec:
             {{- end }}
             - --kserve-job-ttl={{ $k.download.jobTTL }}
             - --kserve-download-stall-timeout={{ $k.download.stallTimeout }}
+            - --kserve-download-ephemeral-storage-request={{ $k.download.ephemeralStorage.request }}
+            - --kserve-download-ephemeral-storage-limit={{ $k.download.ephemeralStorage.limit }}
             - --kserve-init-image={{ $k.inventory.image.registry }}/{{ $k.inventory.image.name }}:{{ $k.inventory.image.tag }}
             - --kserve-inventory-ttl={{ $k.inventory.ttl }}
             - --kserve-inventory-timeout={{ $k.inventory.timeout }}

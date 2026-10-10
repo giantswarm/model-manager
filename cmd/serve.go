@@ -110,6 +110,8 @@ type kserveFlags struct {
 	downloadImage       string
 	downloadIgnore      string
 	downloadStall       time.Duration
+	downloadEphRequest  string
+	downloadEphLimit    string
 	initImage           string
 	jobTTL              time.Duration
 	inventoryTTL        time.Duration
@@ -169,6 +171,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.DurationVar(&k.hfTimeout, "kserve-hf-timeout", envDuration("KSERVE_HF_TIMEOUT", kserve.DefaultHFTimeout), "Time budget of the Hugging Face Hub lookups of one fit check (repository metadata, file tree, safetensors index) or search; a hub that does not answer (egress blocked) lets check_fit fall back to the preset's requirements within a client's meta-tool deadline. Download Jobs are not affected (KSERVE_HF_TIMEOUT)")
 	f.StringVar(&k.downloadImage, "kserve-download-image", envOr("KSERVE_DOWNLOAD_IMAGE", kserve.DefaultDownloadImage), "Image of the pre-warm download Job (the KServe storage-initializer) (KSERVE_DOWNLOAD_IMAGE)")
 	f.DurationVar(&k.downloadStall, "kserve-download-stall-timeout", envDuration("KSERVE_DOWNLOAD_STALL_TIMEOUT", kserve.DefaultDownloadStallTimeout), "A download Job that writes nothing to its target directory for this long fails with a reason the pull job shows instead of hanging; partial files stay for a retry (KSERVE_DOWNLOAD_STALL_TIMEOUT)")
+	f.StringVar(&k.downloadEphRequest, "kserve-download-ephemeral-storage-request", envOr("KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_REQUEST", kserve.DefaultDownloadStorageRequest), "ephemeral-storage request of the download Job's container (KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_REQUEST)")
+	f.StringVar(&k.downloadEphLimit, "kserve-download-ephemeral-storage-limit", envOr("KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_LIMIT", kserve.DefaultDownloadStorageLimit), "ephemeral-storage limit of the download Job's container, also the sizeLimit of its tmp emptyDir; the weights land on the cache claim, not here (KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_LIMIT)")
 	f.StringVar(&k.downloadIgnore, "kserve-download-ignore-patterns", envOr("KSERVE_DOWNLOAD_IGNORE_PATTERNS", ""), "Comma-separated file patterns downloads skip (STORAGE_IGNORE_PATTERNS); empty downloads the whole repository like an LLMInferenceService does (KSERVE_DOWNLOAD_IGNORE_PATTERNS)")
 	f.StringVar(&k.initImage, "kserve-init-image", envOr("KSERVE_INIT_IMAGE", kserve.DefaultInitImage), "Image that prepares cache directories and scans the cache (KSERVE_INIT_IMAGE)")
 	f.DurationVar(&k.jobTTL, "kserve-job-ttl", envDuration("KSERVE_JOB_TTL", kserve.DefaultJobTTL), "ttlSecondsAfterFinished of download Jobs (KSERVE_JOB_TTL)")
@@ -475,6 +479,8 @@ func (k kserveFlags) options() backend.KServeOptions {
 		DownloadImage:          k.downloadImage,
 		DownloadIgnorePatterns: splitList(k.downloadIgnore),
 		DownloadStallTimeout:   k.downloadStall,
+		DownloadStorageRequest: k.downloadEphRequest,
+		DownloadStorageLimit:   k.downloadEphLimit,
 		InitImage:              k.initImage,
 		JobTTL:                 k.jobTTL,
 		InventoryTTL:           k.inventoryTTL,

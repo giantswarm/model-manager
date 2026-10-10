@@ -752,6 +752,8 @@ func applyDefaults(o *backend.KServeOptions) {
 	defaultIf(&o.HFTokenSecretKey, DefaultHFTokenSecretKey)
 	defaultIf(&o.DownloadImage, DefaultDownloadImage)
 	defaultIf(&o.InitImage, DefaultInitImage)
+	defaultIf(&o.DownloadStorageRequest, DefaultDownloadStorageRequest)
+	defaultIf(&o.DownloadStorageLimit, DefaultDownloadStorageLimit)
 	defaultIf(&o.BudgetSource, DefaultBudgetSource)
 	defaultIf(&o.InventoryMode, InventoryModePod)
 	defaultIf(&o.InventoryAgentSelector, DefaultInventoryAgentSelector)

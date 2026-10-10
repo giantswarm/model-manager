@@ -404,6 +404,50 @@ func TestDownloadJobDisablesXetAndFailsAStall(t *testing.T) {
 	assert.Equal(t, "a | b", failureDetail("a\nb\n"), "else the tail")
 }
 
+// The download Job satisfies Kyverno's require-emptydir-requests-and-limits
+// (giantswarm/model-manager#317): its tmp emptyDir carries a sizeLimit, and
+// every container mounting an emptyDir carries ephemeral-storage requests and
+// limits — the defaults, or what the options set.
+func TestDownloadJobBoundsItsEmptyDir(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts           backend.KServeOptions
+		request, limit string
+	}{
+		"defaults":   {request: DefaultDownloadStorageRequest, limit: DefaultDownloadStorageLimit},
+		"configured": {opts: backend.KServeOptions{DownloadStorageRequest: "128Mi", DownloadStorageLimit: "2Gi"}, request: "128Mi", limit: "2Gi"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := &Backend{opts: tc.opts}
+			spec := b.buildJob(downloadPlan{Dir: "tiny", Repo: tinyRepo, Node: "node-a"}, settings{Namespace: "serving", CacheClaim: "hf-cache"}).Spec.Template.Spec
+			emptyDirs := map[string]bool{}
+			for _, v := range spec.Volumes {
+				if v.EmptyDir == nil {
+					continue
+				}
+				emptyDirs[v.Name] = true
+				require.NotNil(t, v.EmptyDir.SizeLimit, "emptyDir %s has a sizeLimit", v.Name)
+				assert.True(t, v.EmptyDir.SizeLimit.Equal(resource.MustParse(tc.limit)), "emptyDir %s sizeLimit %s", v.Name, v.EmptyDir.SizeLimit)
+			}
+			require.True(t, emptyDirs["tmp"], "the tmp emptyDir")
+			mounting := 0
+			for _, c := range append(spec.InitContainers, spec.Containers...) {
+				mounts := false
+				for _, m := range c.VolumeMounts {
+					mounts = mounts || emptyDirs[m.Name]
+				}
+				if !mounts {
+					continue
+				}
+				mounting++
+				req, lim := c.Resources.Requests[corev1.ResourceEphemeralStorage], c.Resources.Limits[corev1.ResourceEphemeralStorage]
+				assert.True(t, req.Equal(resource.MustParse(tc.request)), "%s ephemeral-storage request %s", c.Name, req.String())
+				assert.True(t, lim.Equal(resource.MustParse(tc.limit)), "%s ephemeral-storage limit %s", c.Name, lim.String())
+			}
+			assert.Equal(t, 1, mounting, "the download container mounts the emptyDir")
+		})
+	}
+}
+
 // assertRestrictedPodSecurity checks a pod spec against the restricted Pod
 // Security Standard's rules on the security context, the way the Kyverno
 // policies read them: a pod-level field covers every container that does not
