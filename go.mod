@@ -2,7 +2,7 @@ module github.com/giantswarm/model-manager
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/giantswarm/gitops-commit v0.11.1
