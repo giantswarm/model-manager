@@ -537,14 +537,22 @@ service:
   # -- Service port (container listens on 8080).
   port: 8080
 
-# -- Container resources.
+# -- Container resources. ephemeral-storage covers the `tmp` emptyDir
+# mounted at /tmp, which holds only the Go runtime's scratch files.
 resources:
   requests:
     cpu: 50m
     memory: 64Mi
+    ephemeral-storage: 32Mi
   limits:
     cpu: 500m
     memory: 256Mi
+    ephemeral-storage: 128Mi
+
+tmpVolume:
+  # -- Size limit of the `tmp` emptyDir mounted at /tmp; the kubelet evicts
+  # the pod when the volume grows past it. Empty sets no limit.
+  sizeLimit: 128Mi
 
 logging:
   # -- Enable debug logging.

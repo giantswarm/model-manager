@@ -313,7 +313,12 @@ spec:
             {{- end }}
       volumes:
         - name: tmp
+          {{- with .Values.tmpVolume.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ . }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- if $idpCA }}
         - name: idp-ca
           secret:
