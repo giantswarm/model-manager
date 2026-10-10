@@ -1,3 +1,6 @@
 CVE-2026-56855 until=2026-10-04 # golang.org/x/crypto@v0.55.0
 CVE-2026-84445 until=2026-11-30 # google.golang.org/grpc@v1.84.0: GHSA-2v4p-qf9q-27wj patched 1.84.0 before release, the index range still matches it; no newer grpc; https://github.com/giantswarm/model-manager/issues/214
 CVE-2026-5160 until=2026-10-30 # github.com/yuin/goldmark@v1.4.13
+# CVE-2026-107325 (GHSA-frr6-8pf7-f9r2): mongo-driver v1.17.10 via gitops-commit → sops/v3 → huaweicloud-sdk-go-v3; the fix (v2.9.2) is on the v2 module path only, no v1 release carries it.
+# Tracked in https://github.com/giantswarm/model-manager/issues/313; remove by 2026-11-09.
+CVE-2026-107325 until=2026-11-09 # go.mongodb.org/mongo-driver@v1.17.10
