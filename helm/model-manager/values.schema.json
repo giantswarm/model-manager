@@ -923,11 +923,6 @@
             "type": "integer",
             "description": "Number of replicas. Jobs are tracked in memory, so keep this at 1 unless clients pin to one pod."
         },
-        "revisionHistoryLimit": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging."
-        },
         "resources": {
             "type": "object",
             "description": "Container resources. ephemeral-storage covers the `tmp` emptyDir mounted at /tmp, which holds only the Go runtime's scratch files.",
@@ -964,6 +959,10 @@
                     }
                 }
             }
+        },
+        "revisionHistoryLimit": {
+            "type": "integer",
+            "description": "Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging."
         },
         "securityContext": {
             "type": "object",
