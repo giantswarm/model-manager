@@ -116,6 +116,7 @@ can stay empty.
 |-----|------|---------|-------------|
 | global | object | `{}` | Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly. |
 | replicaCount | int | `1` | Number of replicas. Jobs are tracked in memory, so keep this at 1 unless clients pin to one pod. |
+| revisionHistoryLimit | int | `3` | Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging. |
 | image.registry | string | `"gsoci.azurecr.io"` | Image registry. |
 | image.repository | string | `"giantswarm/model-manager"` | Image repository. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |

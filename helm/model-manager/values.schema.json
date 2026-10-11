@@ -960,6 +960,10 @@
                 }
             }
         },
+        "revisionHistoryLimit": {
+            "type": "integer",
+            "description": "Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging."
+        },
         "securityContext": {
             "type": "object",
             "description": "Container security context.",

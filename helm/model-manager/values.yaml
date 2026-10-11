@@ -12,6 +12,10 @@ global: {}  # @schema type: object; additionalProperties: true
 # clients pin to one pod.
 replicaCount: 1
 
+# -- Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default
+# of ten leaves stale ReplicaSets behind that policy reports keep flagging.
+revisionHistoryLimit: 3
+
 image:
   # -- Image registry.
   registry: gsoci.azurecr.io
