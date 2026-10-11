@@ -116,6 +116,7 @@ can stay empty.
 |-----|------|---------|-------------|
 | global | object | `{}` | Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly. |
 | replicaCount | int | `1` | Number of replicas. Jobs are tracked in memory, so keep this at 1 unless clients pin to one pod. |
+| revisionHistoryLimit | int | `3` | Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging. |
 | image.registry | string | `"gsoci.azurecr.io"` | Image registry. |
 | image.repository | string | `"giantswarm/model-manager"` | Image repository. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
@@ -228,7 +229,6 @@ can stay empty.
 | service.type | string | `"ClusterIP"` | Service type. |
 | service.port | int | `8080` | Service port (container listens on 8080). |
 | resources | object | `{"limits":{"cpu":"500m","ephemeral-storage":"128Mi","memory":"256Mi"},"requests":{"cpu":"50m","ephemeral-storage":"32Mi","memory":"64Mi"}}` | Container resources. ephemeral-storage covers the `tmp` emptyDir mounted at /tmp, which holds only the Go runtime's scratch files. |
-| revisionHistoryLimit | int | `3` | Old ReplicaSets the Deployment keeps after a rollout. Kubernetes' default of ten leaves stale ReplicaSets behind that policy reports keep flagging. |
 | tmpVolume.sizeLimit | string | `"128Mi"` | Size limit of the `tmp` emptyDir mounted at /tmp; the kubelet evicts the pod when the volume grows past it. Empty sets no limit. |
 | logging.verbose | bool | `false` | Enable debug logging. |
 | observability.otel.endpoint | string | `""` | OTLP endpoint traces are exported to, e.g. `http://otlp-gateway.kube-system.svc:4317`. Empty exports nothing; the W3C propagator still carries an inbound traceparent. |
