@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,4 +57,27 @@ func TestReadinessDoesNotTrackBackend(t *testing.T) {
 	assert.Equal(t, http.StatusOK, get("/readyz"), "the API stays ready while the backend is down")
 	assert.Equal(t, http.StatusServiceUnavailable, get("/backendz"), "the backend probe reports the outage")
 	assert.Equal(t, http.StatusOK, get("/api/v1/backend"), "clients can still read healthy=false")
+}
+
+// A body beyond the bound is refused, and the endpoint keeps answering.
+func TestMCPBodyIsBounded(t *testing.T) {
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	post := func(body string) int {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	big := `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"` + strings.Repeat("x", maxMCPBodyBytes) + `"}}`
+	assert.GreaterOrEqual(t, post(big), 400)
+	assert.Equal(t, http.StatusOK, post(`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
 }

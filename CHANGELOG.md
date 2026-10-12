@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP endpoint refuses a request body larger than 1 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12). ([#324](https://github.com/giantswarm/model-manager/issues/324))
+
 ### Added
 
 - kserve: a Hugging Face model can be split across nodes when the cache claim is node-local (giantswarm/model-manager#294). Where the platform's redirect rule mounts the claim a model pod names (discovery `cache.nodeClaims: true`, giantswarm/agent-platform#868), every node outside the claim's reach gets a cache claim of its own, `<claim>-<node>`, of the claim's class, access modes and size: `pull_model` with that node creates and fills it, `list_nodes` lists it, and the node is a serving target instead of `cache claim … is pinned to …`. A split reads every node's cache and is refused while one lacks the weights, naming the node and the `pull_model` to run; its workers mount their node's claim (`model-manager.giantswarm.io/worker-cache-claim` on the pods), a single-node model on such a node its claim (`model-manager.giantswarm.io/cache-claim`). Copies whose nodes mount different claims are refused. A statically bound claim (no StorageClass) is refused as `invalid`, naming the claim to create. The chart's Role may create PersistentVolumeClaims in the serving namespace.
