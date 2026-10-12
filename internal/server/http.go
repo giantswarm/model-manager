@@ -86,9 +86,10 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 	mux.Handle(api.Prefix+"/", s.guard(rest, false))
 
 	if cfg.MCPEnabled && mcpSrv != nil {
-		mux.Handle(cfg.MCPPath, s.guard(mcpserver.NewStreamableHTTPServer(mcpSrv,
-			mcpserver.WithEndpointPath(cfg.MCPPath),
-		), true))
+		// mcp-go reads a POST body whole before validating it
+		// (CVE-2026-108859): the bound keeps that read to what the REST API accepts.
+		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath))
+		mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler, true), maxMCPBodyBytes))
 	}
 
 	s.http = &http.Server{
@@ -102,6 +103,9 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 }
 
 // traced leaves the kubelet probes out of the traces.
+// maxMCPBodyBytes bounds an MCP request body, as the REST API bounds its own.
+const maxMCPBodyBytes = 1 << 20
+
 func traced(r *http.Request) bool {
 	return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 }
