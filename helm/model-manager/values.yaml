@@ -289,6 +289,9 @@ muster:
     enabled: false
     # -- MCPServer CR name (drives the tool prefix).
     name: model-manager
+    # -- Human-friendly name the Dev Portal shows for this server, rendered as
+    # the `ui.giantswarm.io/display-name` annotation. Empty renders none.
+    displayName: Model Manager
     # -- Start the server connection when muster initializes.
     autoStart: true
     # -- Human-readable description shown by muster.

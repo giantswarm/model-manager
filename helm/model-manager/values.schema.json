@@ -621,6 +621,10 @@
                             "type": "boolean",
                             "description": "Start the server connection when muster initializes."
                         },
+                        "displayName": {
+                            "type": "string",
+                            "description": "Human-friendly name the Dev Portal shows for this server, rendered as the `ui.giantswarm.io/display-name` annotation. Empty renders none."
+                        },
                         "enabled": {
                             "type": "boolean",
                             "description": "Register this server with muster by rendering an `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then appear as `x_<name>_<tool>`."
