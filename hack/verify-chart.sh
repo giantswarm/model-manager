@@ -68,14 +68,14 @@ echo "$got" | grep -q -- '^    example.com/extra: extra$' \
 # The MCPServer CR carries the display name the Dev Portal shows;
 # muster.mcpServer.displayName replaces it and empty renders no annotation.
 got=$(mcpserver)
-echo "$got" | grep -q -- '^    ui.giantswarm.io/display-name: "Model Manager"$' \
+echo "$got" | grep -qxF -- '    ui.giantswarm.io/display-name: "Model Manager"' \
   || fail "the MCPServer CR lacks ui.giantswarm.io/display-name: Model Manager"
-got=$(mcpserver --set muster.mcpServer.displayName=Models)
-echo "$got" | grep -q -- '^    ui.giantswarm.io/display-name: "Models"$' \
+got=$(mcpserver --set-string 'muster.mcpServer.displayName=Models: all of them')
+echo "$got" | grep -qxF -- '    ui.giantswarm.io/display-name: "Models: all of them"' \
   || fail "muster.mcpServer.displayName does not set the display name"
 got=$(mcpserver --set muster.mcpServer.displayName=)
-if echo "$got" | grep -q -- 'annotations:'; then
-  fail "an empty muster.mcpServer.displayName renders annotations"
+if echo "$got" | grep -qF -- 'ui.giantswarm.io/display-name'; then
+  fail "an empty muster.mcpServer.displayName renders the display name"
 fi
 
 # A Google install (no cross-client audiences) trusts the client id alone.
