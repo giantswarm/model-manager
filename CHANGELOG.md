@@ -9,126 +9,349 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The MCP endpoint refuses a request body larger than 1 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12). ([#324](https://github.com/giantswarm/model-manager/issues/324))
+## [1.18.0-rc.1] - 2026-10-15
 
 ### Added
 
 - The chart's muster `MCPServer` carries the `ui.giantswarm.io/display-name` annotation, the name the Dev Portal shows for the server (giantswarm/model-manager#335, for giantswarm/backstage#3012): new value `muster.mcpServer.displayName`, default `Model Manager`. Empty renders no annotation.
 
+## [1.17.2-rc.2] - 2026-10-12
+
+### Fixed
+
+- The MCP endpoint refuses a request body larger than 1 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12). ([#324](https://github.com/giantswarm/model-manager/issues/324))
+
+## [1.16.4] - 2026-10-10
+
+### Fixed
+
+- kserve: the weight-download Job satisfies Kyverno's `require-emptydir-requests-and-limits` policy (giantswarm/model-manager#317). Its `tmp` emptyDir (the hub client's `HF_HOME`) carries `sizeLimit` and its `download` container ephemeral-storage requests and limits: request `64Mi`, limit `1Gi`, which is also the sizeLimit, set by `--kserve-download-ephemeral-storage-request|limit` / `KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_REQUEST|LIMIT` / chart value `kserve.download.ephemeralStorage.request|limit`. The weights land on the cache claim and count against neither. A malformed quantity, a limit that is not positive or a request above the limit fails the start, naming the value.
+
+## [1.16.3] - 2026-10-10
+
+### Fixed
+
+- Chart: the `tmp` emptyDir satisfies Kyverno's `require-emptydir-requests-and-limits` policy (giantswarm/model-manager#315). The `model-manager` container requests 32Mi and is limited to 128Mi of ephemeral storage (`resources.requests|limits.ephemeral-storage`), and the volume carries `sizeLimit: 128Mi` (`tmpVolume.sizeLimit`, empty for none).
+
+## [1.16.1] - 2026-10-09
+
+### Fixed
+
+- `unwire_model` removes a ModelConfig model-manager wrote before it recorded its creator — one carrying no `model-manager.giantswarm.io/instance` label — once no Agent, AgentTemplate or Harness in its namespace references it, whether or not its backend is still registered (giantswarm/model-manager#289). Its dry run names it; where Flux applies it from git, mode commit opens the removing pull request. Referenced, the call answers `conflict` naming the referencing objects (`referencedBy`) and removes nothing. Unload, `delete_model` and `remove_backend` still leave such a ModelConfig, and their answers now name `unwire_model` instead of a `kubectl delete`. The chart's kagent Role may read Agents, AgentTemplates and Harnesses.
+
+## [1.16.1-rc.1] - 2026-10-09
+
+### Fixed
+
+- `remove_backend` no longer leaves a backend's models wired to a backend that is gone (giantswarm/model-manager#289). A ModelConfig of the backend that no model-manager deletes refuses the removal with `conflict`, naming the model, the ModelConfig and why; nothing is removed. That is one without the `model-manager.giantswarm.io/instance` label (written before model-manager recorded its creator) or one Flux applies from git. The dry run lists them as `blockedBy`. Before, the removal skipped such a ModelConfig without saying so and deleted the backend, and afterwards no tool reached the ModelConfig by its backend. Models this instance wired are still unwired with the backend, and another instance's ModelConfigs are left to that instance.
+
+## [1.16.0] - 2026-10-09
+
+### Fixed
+
+- `check_fit` names the checks it could not make (giantswarm/model-manager#297): `skippedChecks` lists each — `download-size`, `kv-cache`, `compute-capability` — with why (`the registry did not answer within 4s, timed-out requests retried (…)`, `the model image's registry did not answer for the checkpoint's config.json`). A model image whose registry did not answer left the download size, the KV cache and the GPU generation unchecked behind `fits: true`; the GPU generation was not mentioned at all. A registry request that times out is retried within the fit check's budget, as before; a registry that keeps timing out is given up when the budget ends.
+
+## [1.16.0-rc.6] - 2026-10-09
+
+### Fixed
+
+- `unwire_model` and `POST /api/v1/models/unwire` name what they removed (giantswarm/model-manager#285): the answer carries `mode: apply`, the deleted ModelConfig as `modelConfig: {name, namespace}` and `removed: true`; with nothing wired `modelConfig` is `null` and `removed` `false`. It used to answer `modelConfig: null` after deleting the ModelConfig. A dry run of `wire_model` or `unwire_model` names the ModelConfig's `namespace` beside its name, and `mode`.
+
+## [1.16.0-rc.5] - 2026-10-09
+
+### Fixed
+
+- `no_backend` and the empty-list `backendsReason` of `list_backends` and `get_info` name the per-cluster document cluster-manager registers, `model-backend-kserve-<cluster>`, instead of `model-backend-kserve` (giantswarm/model-manager#296).
+
+## [1.16.0-rc.4] - 2026-10-09
+
+### Fixed
+
+- kserve: an LLMInferenceService's GitOps owner is held to its Kustomization's `status.inventory` on read and on load, as `unload_model` holds it (giantswarm/model-manager#286): `list_loaded` reports it as `gitops` (absent for an object written live, one its Kustomization no longer lists and one whose Kustomization is gone), and `load_model` adds copies on more nodes to a leftover that a Kustomization with `prune: false` dropped from its inventory, where it answered `conflict` from the Flux labels alone while `unload_model` removed the same object live. Read, load and unload share one owner resolution.
+
+## [1.16.0-rc.1] - 2026-10-09
+
+### Added
+
 - kserve: a Hugging Face model can be split across nodes when the cache claim is node-local (giantswarm/model-manager#294). Where the platform's redirect rule mounts the claim a model pod names (discovery `cache.nodeClaims: true`, giantswarm/agent-platform#868), every node outside the claim's reach gets a cache claim of its own, `<claim>-<node>`, of the claim's class, access modes and size: `pull_model` with that node creates and fills it, `list_nodes` lists it, and the node is a serving target instead of `cache claim … is pinned to …`. A split reads every node's cache and is refused while one lacks the weights, naming the node and the `pull_model` to run; its workers mount their node's claim (`model-manager.giantswarm.io/worker-cache-claim` on the pods), a single-node model on such a node its claim (`model-manager.giantswarm.io/cache-claim`). Copies whose nodes mount different claims are refused. A statically bound claim (no StorageClass) is refused as `invalid`, naming the claim to create. The chart's Role may create PersistentVolumeClaims in the serving namespace.
 
+## [1.15.0] - 2026-10-09
+
+### Added
+
 - kserve: one backend per serving cluster (giantswarm/model-manager#292). A backend document's `metadata.name` names its backend — the kind, or for kserve `kserve-<cluster>` (a DNS label) — and the ConfigMap is `model-backend-<name>`, so cluster-manager's `model-backend-kserve-<cluster>` documents for workload clusters register beside the installation's `kserve`, each with its own target, pools and inventory. The tools address one through `backend: kserve-<cluster>` (`check_fit`, `load_model`, `pull_model`, `unload_model`, ...); deleting one document drops that backend alone. `add_backend` takes `name`, `remove_backend` takes `name` (`kind` still names a backend registered under its kind). A `model-backend-kserve` document works unchanged.
+
+## [1.14.2] - 2026-10-08
+
+### Fixed
+
+- Commit mode answers a removal of an object git no longer holds that a Kustomization with `prune: false` still labels with the reason and the next step (giantswarm/model-manager#283): `unwire_model` and `unload_model` in `mode: commit` name the Kustomization, say that it does not prune and that the object was dropped from its inventory, and offer the call in `mode: apply`, which removes it live. They used to answer "written live", though the object's labels name the Kustomization. The dry run answers the same; an object git still declares is answered as before.
+
+## [1.14.2-rc.2] - 2026-10-08
+
+### Fixed
+
+- `get_info` and `list_backends` say why their backend list is empty (giantswarm/model-manager#284): `backendsReason` carries the `no_backend` wording — no backend is registered on this instance, the namespace it watches for backend documents and how to register one — so a caller tells an installation without a backend from a read that missed one. An installation answered `backends: []` beside a ModelConfig labelled `backend=kserve`, left over from a kserve backend that had gone with its GPU pool, and nothing said which of the two it was. `GET /api/v1/backends` answers the same.
+
+## [1.14.2-rc.1] - 2026-10-08
+
+### Fixed
+
+- `list_model_configs` reports a ModelConfig's `gitops` owner held to the Kustomization's `status.inventory`, the way `unload_model`, `unwire_model` and `wire_model` decide it (giantswarm/model-manager#279): a ModelConfig its Kustomization no longer lists, or whose Kustomization is gone, is reported without an owner, as written live. The list used to name the Kustomization from the Flux labels alone while the write tools changed the object live.
+
+## [1.14.1] - 2026-10-08
+
+### Fixed
+
+- kserve: a load of a preset whose model another preset also serves wires its ModelConfig to the route of the LLMInferenceService the load creates (giantswarm/model-manager#251). The wiring resolved the address from the model id, which two presets make ambiguous: mode commit (and the dry run) wrote a `baseUrl` no object answers on, and mode apply wired the other preset's object when that one served already. Wirings of a served object on read and in the reconcile resolve it by its preset too.
+
+## [1.14.1-rc.1] - 2026-10-08
+
+### Fixed
+
+- kserve: `unload_model` answers `loaded: false` only once the LLMInferenceService is gone or terminating (giantswarm/model-manager#242). It reads every serving object back after its delete; one still there without a `deletionTimestamp` is `conflict` naming the object, and the model stays on the LLM endpoint and wired. The answer used to say unloaded while the object kept serving, and the next `delete_node_pool` was refused for it.
+
+## [1.14.0] - 2026-10-08
+
+### Fixed
+
+- `unload_model` and `unwire_model` in mode apply remove the LLMInferenceService and the ModelConfig a merged commit-mode removal left behind on a Flux Kustomization that does not prune (`spec.prune: false`) (giantswarm/model-manager#252). `gitops_owned` is decided from the Kustomization's `status.inventory`, not from the object's Flux labels alone: an object the Kustomization no longer lists, or whose Kustomization is gone, is applied by nothing and goes live; one it still lists is refused as before, and the dry run in mode apply answers the refusal the live call would (it used to plan the deletion). `unwire_model` removes a ModelConfig model-manager created under a backend that is no longer registered (kserve's, once its last GPU pool is deleted); it used to answer `no_backend`. The commit answer's `liveSteps` on such a Kustomization says to repeat the call in mode apply once the pull request has merged, where it said to delete the objects by hand. The chart grants the ServiceAccount `get` on Kustomizations for the inventory read.
+
+## [1.14.0-rc.1] - 2026-10-08
+
+### Changed
+
+- Agent wiring writes ModelConfigs at `api.kagent.dev` when the cluster serves them there (kagent 1.3 and later), else at `kagent.dev` (giantswarm/model-manager#246). The group is re-discovered every minute as well as on a `NotFound`, so a running process moves to `api.kagent.dev` within a minute of the kagent upgrade, while the old `kagent.dev` CRD is still served. A bare version in `kagent.apiVersion` (`--kagent-api-version`, `KAGENT_API_VERSION`), such as `v1alpha3`, now pins only the version and discovers the group the same way; it used to pin `kagent.dev/<version>` and skip discovery. A full group/version (`api.kagent.dev/v1alpha3`, `kagent.dev/v1alpha3`) pins both. `wiring.apiVersion` in `GET /api/v1/backend` is the full group/version (`api.kagent.dev/v1alpha3`, was `v1alpha3`). A ModelConfig Flux applies at `kagent.dev` stays listed, with that `apiVersion`, after the move: it is not written live, and a commit-mode wire rewrites its file in git at `api.kagent.dev`. The chart's kagent Role grants `modelconfigs` in both groups.
+
+## [1.13.0] - 2026-10-08
+
+### Added
+
 - `check_fit` of a serving preset answers what the preset declares while no backend is registered (giantswarm/model-manager#274), so a person learns what a preset needs — and sizes the GPU pool — before the pool, and with it the backend, exists. The presets are read from the catalog the agent-platform connectivity chart publishes where model-manager runs (the ServingPreset ConfigMaps of the preset namespace: chart value `kserve.presets.namespace`, else the discovery document's, else model-manager's namespace), the caller's client first. The answer carries the declaration — `weightsBytes` / `declaredWeightsBytes` (`weightsSource: preset`), `overheadBytes`, `requiredBytes`, `computeCapabilityRequired`, `devicesPerPod` / `tensorParallel` (the preset's GPUs), `gpuMemoryUtilization`, `maxModelLen` — with the new `verdict: unverified`, `fits: false`, `retryable: true`, no `backend`, and a `reason` that opens with the `no_backend` answer and ends with the declaration. An unknown preset is `not_found` naming the published ones; a model no preset serves, a cluster with no preset published and a catalog the caller cannot read stay `no_backend`, naming why. A registered backend answers as before. `list_presets` and the catalog report a preset's `minComputeCapability`.
-- kserve: a pool's instance size may declare its GPU's compute capability — `spec.kserve.gpuPool.instances[].computeCapability` and `spec.kserve.gpuPools.<pool>.instances[].computeCapability`, `major.minor` (`"8.6"`), what cluster-manager knows of the accelerator it sized the pool with (giantswarm/model-manager#266). The fit check judges the GPU generation a model's weights need against the declared value and keeps the instance-family table for a size without one; a value that is not `major.minor` is refused naming the field. Until now a document carrying the key failed the strict parse, and with it the fit check on every cluster.
-- kserve: `load_model` and `POST /api/v1/models/load` take `tracing` (default `false`): `true` composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the served model's spans land under the caller's trace. The served model reports it as `running.tracing` / `tracing` in the loaded list. A preset already served with the other setting is refused with `conflict`: switching tracing restarts the model, so it is stopped and served again.
+
+## [1.12.2] - 2026-10-08
 
 ### Changed
 
 - `no_backend` (HTTP 412) names the instance that answered and how to register a backend there (giantswarm/model-manager#271): its `--instance` and version, the namespace it watches for backend documents with 0 valid ones (and how many failed the schema), `add_backend kind=kserve servingNamespace=<namespace>` beside cluster-manager registering `model-backend-kserve` with the first GPU node pool, and `add_backend kind=ollama|lmstudio|lemonade endpoint=<url>`; with runtime registration off it says so and names `--backends`. A person running `check_fit` before a GPU pool exists can tell the wrong instance from a missing backend.
 
+## [1.12.1] - 2026-10-07
+
 ### Fixed
 
-- kserve: the weight-download Job satisfies Kyverno's `require-emptydir-requests-and-limits` policy (giantswarm/model-manager#317). Its `tmp` emptyDir (the hub client's `HF_HOME`) carries `sizeLimit` and its `download` container ephemeral-storage requests and limits: request `64Mi`, limit `1Gi`, which is also the sizeLimit, set by `--kserve-download-ephemeral-storage-request|limit` / `KSERVE_DOWNLOAD_EPHEMERAL_STORAGE_REQUEST|LIMIT` / chart value `kserve.download.ephemeralStorage.request|limit`. The weights land on the cache claim and count against neither. A malformed quantity, a limit that is not positive or a request above the limit fails the start, naming the value.
-- Chart: the `tmp` emptyDir satisfies Kyverno's `require-emptydir-requests-and-limits` policy (giantswarm/model-manager#315). The `model-manager` container requests 32Mi and is limited to 128Mi of ephemeral storage (`resources.requests|limits.ephemeral-storage`), and the volume carries `sizeLimit: 128Mi` (`tmpVolume.sizeLimit`, empty for none).
-- `unwire_model` removes a ModelConfig model-manager wrote before it recorded its creator — one carrying no `model-manager.giantswarm.io/instance` label — once no Agent, AgentTemplate or Harness in its namespace references it, whether or not its backend is still registered (giantswarm/model-manager#289). Its dry run names it; where Flux applies it from git, mode commit opens the removing pull request. Referenced, the call answers `conflict` naming the referencing objects (`referencedBy`) and removes nothing. Unload, `delete_model` and `remove_backend` still leave such a ModelConfig, and their answers now name `unwire_model` instead of a `kubectl delete`. The chart's kagent Role may read Agents, AgentTemplates and Harnesses.
-- `remove_backend` no longer leaves a backend's models wired to a backend that is gone (giantswarm/model-manager#289). A ModelConfig of the backend that no model-manager deletes refuses the removal with `conflict`, naming the model, the ModelConfig and why; nothing is removed. That is one without the `model-manager.giantswarm.io/instance` label (written before model-manager recorded its creator) or one Flux applies from git. The dry run lists them as `blockedBy`. Before, the removal skipped such a ModelConfig without saying so and deleted the backend, and afterwards no tool reached the ModelConfig by its backend. Models this instance wired are still unwired with the backend, and another instance's ModelConfigs are left to that instance.
-- `no_backend` and the empty-list `backendsReason` of `list_backends` and `get_info` name the per-cluster document cluster-manager registers, `model-backend-kserve-<cluster>`, instead of `model-backend-kserve` (giantswarm/model-manager#296).
-- kserve: an LLMInferenceService's GitOps owner is held to its Kustomization's `status.inventory` on read and on load, as `unload_model` holds it (giantswarm/model-manager#286): `list_loaded` reports it as `gitops` (absent for an object written live, one its Kustomization no longer lists and one whose Kustomization is gone), and `load_model` adds copies on more nodes to a leftover that a Kustomization with `prune: false` dropped from its inventory, where it answered `conflict` from the Flux labels alone while `unload_model` removed the same object live. Read, load and unload share one owner resolution.
-- `unwire_model` and `POST /api/v1/models/unwire` name what they removed (giantswarm/model-manager#285): the answer carries `mode: apply`, the deleted ModelConfig as `modelConfig: {name, namespace}` and `removed: true`; with nothing wired `modelConfig` is `null` and `removed` `false`. It used to answer `modelConfig: null` after deleting the ModelConfig. A dry run of `wire_model` or `unwire_model` names the ModelConfig's `namespace` beside its name, and `mode`.
-- Commit mode answers a removal of an object git no longer holds that a Kustomization with `prune: false` still labels with the reason and the next step (giantswarm/model-manager#283): `unwire_model` and `unload_model` in `mode: commit` name the Kustomization, say that it does not prune and that the object was dropped from its inventory, and offer the call in `mode: apply`, which removes it live. They used to answer "written live", though the object's labels name the Kustomization. The dry run answers the same; an object git still declares is answered as before.
-- `get_info` and `list_backends` say why their backend list is empty (giantswarm/model-manager#284): `backendsReason` carries the `no_backend` wording — no backend is registered on this instance, the namespace it watches for backend documents and how to register one — so a caller tells an installation without a backend from a read that missed one. An installation answered `backends: []` beside a ModelConfig labelled `backend=kserve`, left over from a kserve backend that had gone with its GPU pool, and nothing said which of the two it was. `GET /api/v1/backends` answers the same.
-- `list_model_configs` reports a ModelConfig's `gitops` owner held to the Kustomization's `status.inventory`, the way `unload_model`, `unwire_model` and `wire_model` decide it (giantswarm/model-manager#279): a ModelConfig its Kustomization no longer lists, or whose Kustomization is gone, is reported without an owner, as written live. The list used to name the Kustomization from the Flux labels alone while the write tools changed the object live.
-- kserve: a load of a preset whose model another preset also serves wires its ModelConfig to the route of the LLMInferenceService the load creates (giantswarm/model-manager#251). The wiring resolved the address from the model id, which two presets make ambiguous: mode commit (and the dry run) wrote a `baseUrl` no object answers on, and mode apply wired the other preset's object when that one served already. Wirings of a served object on read and in the reconcile resolve it by its preset too.
-- kserve: `unload_model` answers `loaded: false` only once the LLMInferenceService is gone or terminating (giantswarm/model-manager#242). It reads every serving object back after its delete; one still there without a `deletionTimestamp` is `conflict` naming the object, and the model stays on the LLM endpoint and wired. The answer used to say unloaded while the object kept serving, and the next `delete_node_pool` was refused for it.
-- `unload_model` and `unwire_model` in mode apply remove the LLMInferenceService and the ModelConfig a merged commit-mode removal left behind on a Flux Kustomization that does not prune (`spec.prune: false`) (giantswarm/model-manager#252). `gitops_owned` is decided from the Kustomization's `status.inventory`, not from the object's Flux labels alone: an object the Kustomization no longer lists, or whose Kustomization is gone, is applied by nothing and goes live; one it still lists is refused as before, and the dry run in mode apply answers the refusal the live call would (it used to plan the deletion). `unwire_model` removes a ModelConfig model-manager created under a backend that is no longer registered (kserve's, once its last GPU pool is deleted); it used to answer `no_backend`. The commit answer's `liveSteps` on such a Kustomization says to repeat the call in mode apply once the pull request has merged, where it said to delete the objects by hand. The chart grants the ServiceAccount `get` on Kustomizations for the inventory read.
 - kserve: the GPU generation check admits NVFP4 weights on compute capability 8.9 (giantswarm/model-manager#269). It required 10.0 ("NVFP4 runs on Blackwell GPUs") while the `qwen3-8-27b-l40s` and `mistral-small-4` presets serve NVFP4 on the L40S through vLLM's weight-only FP4 Marlin kernel; a pure NVFP4 checkpoint on an L40S pool was refused. NVFP4 now needs 8.9, and below it the refusal names the Marlin path and the floor. A ModelOpt mixed-precision `config.json` is read from its `config_groups` (the highest precision wins) instead of skipped, a mistral-format checkpoint (`params.json`, no `config.json`) from its `quantization_config` or `quantization.qformat_weight`, and the reason names the preset's `requirements.minComputeCapability` where it differs from the checkpoint's need. A compressed-tensors checkpoint mixing FP8 and FP4 groups is judged by its FP4 groups every time, not by whichever group came first.
+
+## [1.12.0] - 2026-10-07
+
+### Added
+
+- kserve: a pool's instance size may declare its GPU's compute capability — `spec.kserve.gpuPool.instances[].computeCapability` and `spec.kserve.gpuPools.<pool>.instances[].computeCapability`, `major.minor` (`"8.6"`), what cluster-manager knows of the accelerator it sized the pool with (giantswarm/model-manager#266). The fit check judges the GPU generation a model's weights need against the declared value and keeps the instance-family table for a size without one; a value that is not `major.minor` is refused naming the field. Until now a document carrying the key failed the strict parse, and with it the fit check on every cluster.
+
+## [1.11.2] - 2026-10-07
+
+### Fixed
+
 - kserve: the scheduling step words each refused instance size with the cloud's own reason instead of blaming every size on capacity (giantswarm/model-manager#262). A pool whose larger sizes the account's vCPU quota refused (`VcpuLimitExceeded`, under Karpenter's `InsufficientCapacityError`) read `the cloud has no g6e.12xlarge, g6e.24xlarge or g6e.48xlarge capacity in any zone`; now a size the capacity wording names is refused for capacity, per zone where the cloud names it, and the rest for the quota with the provider's limit (`g6e.24xlarge and g6e.48xlarge exceed the account's vCPU quota: its limit is 96 vCPUs for their instance bucket`), and the way out names a quota increase. A size refused for another fleet error is named with its code and words.
+
+## [1.11.1] - 2026-10-07
+
+### Fixed
+
 - kserve: the fit judges the GPU generation beside the memory and the KV cache (giantswarm/model-manager#264). `qwen3-5-9b-fp8` (FP8 weights and activations) on an A10G pool went Ready and answered gibberish: vLLM runs FP8 natively from compute capability 8.9 and falls back to the weight-only FP8 Marlin kernel below it. From the checkpoint's config.json the weights' need — FP8 (`quant_method: fp8`, compressed-tensors 8-bit float, ModelOpt FP8) 8.9, NVFP4 10.0, bf16 8.0 — is judged against a node's `nvidia.com/gpu.compute.major`/`minor` labels or, for a pool with no node yet, the GPU of its instance family (g4dn T4 7.5, g5 A10G 8.6, g6 L4 8.9, g6e L40S 8.9); a GPU below it is a refusal naming both and the way out, `load_model` composes nothing, and among several pools one whose GPU is below the need is skipped for one that is not. When no size of any pool hosts a predictor the refusal is worded against the closest pool instead of "no accelerator node". The answer carries `computeCapabilityRequired` and `computeCapability`.
+
+## [1.11.0] - 2026-10-07
+
+### Added
+
+- kserve: `load_model` and `POST /api/v1/models/load` take `tracing` (default `false`): `true` composes `spec.tracing: {}` on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the served model's spans land under the caller's trace. The served model reports it as `running.tracing` / `tracing` in the loaded list. A preset already served with the other setting is refused with `conflict`: switching tracing restarts the model, so it is stopped and served again.
+
+## [1.10.9] - 2026-10-07
+
+### Fixed
+
 - kserve: `load_model` right after a serving slice is installed waits for the llmisvc admission webhook instead of answering `backend_error` (giantswarm/model-manager#241). The slice's HelmReleases are Ready a minute or two before the webhook Service has a ready endpoint, and the create failed with `failed calling webhook … connect: no route to host`. A create the API server refuses because it cannot reach a webhook (`no route to host`, `connection refused`, `no endpoints available`) is retried every poll interval for up to two minutes within the call's deadline; a webhook still unreachable then answers `503 unavailable` (`serving is still starting: the admission webhook … has no ready endpoint yet`) with nothing created. A webhook's own denial is answered as before.
+
+## [1.10.8] - 2026-10-07
+
+### Fixed
+
 - kserve: `check_fit` and `load_model` count a node's free GPU devices, not only its memory budget (giantswarm/model-manager#257). On a node whose GPUs have memory of their own, a running model reserves only its weights and overhead, so a one-GPU node serving one model still showed free budget, the next preset was placed there and its predictor stayed Pending on the held device. A node needs the preset's GPUs free of the running predictors' now: the verdict names them (`node … has 0 GPUs free of its 1 GPU (1 GPU taken by running models), the predictor requests 1`), another node with a free device is chosen, and a GPU pool none of whose nodes has one launches one of its sizes. `check_fit` and `GET /api/v1/nodes` report `freeGpus` for such a node. Unified-memory nodes keep the memory judgement alone.
+
+## [1.10.7-rc.1] - 2026-10-07
+
+### Fixed
+
 - kserve: `check_fit` and `load_model` place a model on the smallest live node that hosts it, not the one with the most free budget (giantswarm/model-manager#254). A small preset went to a running L40S node beside a running L4 node that hosts it, and waited for L40S capacity when that node could not take it; the L4 node is now the placement and its pool the pin. Nodes of one size still go by the most free budget, and with no live node hosting the model the pool with no node yet whose size does is chosen as before.
+
+## [1.10.6] - 2026-10-06
+
+### Fixed
+
 - kserve: `check_fit` and `load_model` judge a preset against a GPU pool's listed sizes (`gpuPool.instances`, `gpuPools.<pool>.instances`) while the pool has nodes none of which takes the predictor: nodes with fewer GPUs than the preset requests, or nodes that are no serving target, such as a node Karpenter disrupts (giantswarm/model-manager#249). A four-GPU preset was refused against a running one-GPU `g6e.2xlarge` (`101.0 GiB exceed the 45.0 GiB available on <node>`) although the pool lists a `g6e.12xlarge`; it now fits, the answer names the size Karpenter launches (`instanceType: g6e.12xlarge`), and the predictor is composed with the preset's own shape and pinned to the pool. A preset no size hosts is refused naming the pool's largest size. Reading a model image from its registry bounds each request (1.5 s for the connection, the TLS handshake and the response headers) and retries a timed-out one within the fit check's budget; a registry that keeps hanging is reported as `the registry did not answer within …`.
+
+## [1.10.5] - 2026-10-06
+
+### Fixed
+
 - kserve: the KV cache check leaves the cache what the claim holds beside the weights the runtime keeps in memory (`requirements.residentWeightsGiB`), not beside the checkpoint's full size. `qwen3-8-flash-next-nvfp4`, whose 25 GiB n-gram table stays on disk, was refused on a GB10 with "not one token fits", counting 98.6 GiB of weights in its 97.4 GiB claim where 74 GiB are resident.
+
+## [1.10.4] - 2026-10-06
+
+### Fixed
 
 - kserve: on a unified-memory node (a GB10) `check_fit` and `load_model` refuse a preset whose `--gpu-memory-utilization` claim is less than the weights and overhead it must hold (giantswarm/model-manager#240). The check only asked whether the claim fit what the node leaves, so `kolibri-1` on one GB10 (73.4 GiB of weights and 34 GiB of overhead in a 73.0 GiB claim at 0.60) answered `fits: true` and failed at start. The refusal names the utilization that holds them (`fitGpuMemoryUtilization` when the node leaves it); the claim is never sized up behind the preset. A split is judged by each node's share. A preset whose runtime keeps part of its weights on disk declares what it holds in memory as `requirements.residentWeightsGiB` (default: all of `weightsGiB`), which the claim is judged against.
 
+## [1.10.3] - 2026-10-06
+
+### Fixed
+
 - kserve: a serve right after a GPU pool node launches waits for the node instead of being refused (giantswarm/model-manager#243). The fit check counted a node that was not ready yet, or still carried its start-up taints (`ebs.csi.aws.com/agent-not-ready`, any `<driver>/agent-not-ready`, `node.kubernetes.io/not-ready`, `node.cloudprovider.kubernetes.io/uninitialized`, `karpenter.sh/unregistered`), as ineligible, so `load_model` answered `does_not_fit: no eligible node` while the pool's only node was coming up. A node created within the last 15 minutes that is no serving target only for those reasons is now starting: when no node is a serving target but one is starting, or a pool's nodes all start, the fit is judged like a pool at scale-from-zero (`budgetSource: pool-scale-from-zero`, against its instance shapes when known), the reason names the node and what it still waits on (`no ready node in the GPU pool yet (…): node … is starting (not ready, ebs.csi.aws.com/agent-not-ready:NoExecute)`, `no ready node yet: …` without a pool selector), and `load_model` creates the serving object without a node pin, whose predictor schedules once the taints are lifted. `GET /api/v1/nodes` appends `starting (created … ago)` to the node's `eligibilityReason`. An older node with the same taints keeps the refusal.
+
+## [1.10.2] - 2026-10-04
+
+### Fixed
+
 - kserve: a serving pod's CPU and memory requests are the preset's capped at what the node has left beside the requests of its other pods, so a preset written for a larger node (16 CPUs for a 48-vCPU `g6e.12xlarge`) schedules on a 20-core GB10 instead of staying Pending. `check_fit` answers `cpuRequestMillis` and `memoryRequestBytes`, names a capped request in `reason`, and answers `fits: false` when the node has nothing left of a request; a split and copies request the least any of their nodes leaves. A request the node holds is composed as written. The chart's ClusterRole lists pods to read what a node's other pods request.
-- `check_fit` names the checks it could not make (giantswarm/model-manager#297): `skippedChecks` lists each — `download-size`, `kv-cache`, `compute-capability` — with why (`the registry did not answer within 4s, timed-out requests retried (…)`, `the model image's registry did not answer for the checkpoint's config.json`). A model image whose registry did not answer left the download size, the KV cache and the GPU generation unchecked behind `fits: true`; the GPU generation was not mentioned at all. A registry request that times out is retried within the fit check's budget, as before; a registry that keeps timing out is given up when the budget ends.
+
+## [1.10.0] - 2026-10-02
 
 ### Changed
 
-- Agent wiring writes ModelConfigs at `api.kagent.dev` when the cluster serves them there (kagent 1.3 and later), else at `kagent.dev` (giantswarm/model-manager#246). The group is re-discovered every minute as well as on a `NotFound`, so a running process moves to `api.kagent.dev` within a minute of the kagent upgrade, while the old `kagent.dev` CRD is still served. A bare version in `kagent.apiVersion` (`--kagent-api-version`, `KAGENT_API_VERSION`), such as `v1alpha3`, now pins only the version and discovers the group the same way; it used to pin `kagent.dev/<version>` and skip discovery. A full group/version (`api.kagent.dev/v1alpha3`, `kagent.dev/v1alpha3`) pins both. `wiring.apiVersion` in `GET /api/v1/backend` is the full group/version (`api.kagent.dev/v1alpha3`, was `v1alpha3`). A ModelConfig Flux applies at `kagent.dev` stays listed, with that `apiVersion`, after the move: it is not written live, and a commit-mode wire rewrites its file in git at `api.kagent.dev`. The chart's kagent Role grants `modelconfigs` in both groups.
 - kserve: a serving preset's `resources.gpus` and `--tensor-parallel-size` describe its reference shape; `check_fit` and `load_model` derive the shape from the node the model is placed on, so one preset serves every accelerator. On a unified-memory node (one GPU without memory of its own, a GB10, time-sliced or not) each pod requests one device with tensor parallel 1; on a node whose GPUs have memory of their own, the smallest power of two whose cards hold the weights and overhead. A split requests that per-node count on every pod and runs tensor parallel over devices × nodes (it used to request the preset's count on every pod, which left it Pending on GB10s). `check_fit` answers `devicesPerPod`, `tensorParallel` and `gpuMemoryUtilization`, names a shape that differs from the reference in `reason`, and answers `fits: false` when the node's allocatable GPUs cannot hold the devices per pod. Copies on nodes that need different device counts are refused. A preset on its reference node is composed as written; a pipeline-parallel preset keeps its shape.
+
+### Fixed
+
+- kserve: on a unified-memory node (GPUs without memory of their own, a GB10) `check_fit` and `load_model` judge what vLLM claims at start, `--gpu-memory-utilization` of the node's whole memory, outside the pod's memory limit and the kubelet's accounting. The claim must fit the node's budget, at most its memory less a host headroom (`--kserve-unified-host-headroom-gib`, chart `kserve.budget.unifiedHostHeadroomGiB`, default 16 GiB), less what running models reserve. A preset whose own claim does not fit is composed at the utilization its weights and overhead need there (`gpuMemoryUtilization`); only when that does not fit either is the fit refused, naming the claim and the utilization, and `load_model` creates nothing. The answer carries `unifiedReservationBytes`, `hostHeadroomBytes` and `fitGpuMemoryUtilization`. A running model's reservation there is its share of the node's capacity, the memory vLLM sees. Dedicated GPUs are judged as before.
+
+## [1.9.3] - 2026-10-02
 
 ### Fixed
 
 - Commit mode refuses a namespace whose Flux labels name a HelmRelease or Kustomization that no longer exists (a serving namespace left behind after model serving was switched off) with `invalid_request`, on model-manager's own cluster and on a remote target, before anything is written. The refusal names the namespace, the cluster it was read on and the gone owner, and asks for `repository`, `branch` and `path`; it used to answer an opaque `backend_error`. Other read errors keep their classification.
 
-- kserve: on a unified-memory node (GPUs without memory of their own, a GB10) `check_fit` and `load_model` judge what vLLM claims at start, `--gpu-memory-utilization` of the node's whole memory, outside the pod's memory limit and the kubelet's accounting. The claim must fit the node's budget, at most its memory less a host headroom (`--kserve-unified-host-headroom-gib`, chart `kserve.budget.unifiedHostHeadroomGiB`, default 16 GiB), less what running models reserve. A preset whose own claim does not fit is composed at the utilization its weights and overhead need there (`gpuMemoryUtilization`); only when that does not fit either is the fit refused, naming the claim and the utilization, and `load_model` creates nothing. The answer carries `unifiedReservationBytes`, `hostHeadroomBytes` and `fitGpuMemoryUtilization`. A running model's reservation there is its share of the node's capacity, the memory vLLM sees. Dedicated GPUs are judged as before.
+## [1.9.1] - 2026-10-02
+
+### Fixed
 
 - Unload, unwire, delete with `unwire` and `remove_backend` delete only a ModelConfig this model-manager created. Each instance has a name (`--instance`, `MODEL_MANAGER_INSTANCE`; the chart sets `<release namespace>-<release name>`, the default is the host name), written as the label `model-manager.giantswarm.io/instance` when it creates a ModelConfig. A ModelConfig of another instance, or one without the label (written before it existed, or by hand with model-manager's labels), is left in place: the unload answers `modelConfigLeft`, unwire and delete answer `conflict`. A wire onto another instance's ModelConfig answers `conflict`, nothing written; one without the label is adopted but never marked as created here. `ModelConfigRef.createdBy` and `get_info`'s `wiring.instance` report the names.
+
+## [1.9.0] - 2026-10-02
 
 ### Added
 
 - kserve: `list_presets` reports a preset's provenance: `runtimeImage`, the image a load runs (the preset's `template.containers[main].image`, else the well-known template's), and `chartVersion`, the version of the chart that published the preset ConfigMap (its `agent-platform.giantswarm.io/chart-version` annotation). A load records the chart version on the LLMInferenceService (`model-manager.giantswarm.io/preset-chart-version`), and `list_loaded_models` and a model's `running` report both for the serving object, on the REST API and over MCP. The well-known template's image is read once with the control plane's discovery, no longer on every split load.
 
-- kserve: a serving preset's `spec.split.env` reaches the leader and the workers of a split placement, after the fast link's environment, and never a single-node pod: environment measured for the split alone, such as the RoCE all-reduce of a tensor-parallel split.
-- Every write tool takes `dryRun`: `pull_model`, `load_model`, `unload_model`, `delete_model` and `cancel_job` answer the plan (present and loaded state, keep-alive, the kserve fit verdict, the serving object a load would create or an unload delete, the ModelConfig the call would wire or unwire, the job) and change nothing.
-- kserve `load_model` and `unload_model` take `mode: commit`: the LLMInferenceService and the ModelConfig wiring it land in one pull request as the person (the removing one for an unload), in the repository that owns the serving namespace. `pull_model` and `delete_model` answer `unsupported` for `mode: commit`, as does a load or unload on the other backends.
-
-- Commit mode: `wire_model` and `unwire_model` with `mode: commit` open a pull request as the person in the GitOps repository that owns the kagent namespace (Flux provenance of the ModelConfig or the namespace; `repository`, `branch` and `path` where there is none). The files go under `<path>/model-manager/` with their kustomization entries (gitops-commit's `layout`), and the placeholder Secret is committed only SOPS-encrypted for the repository's `.sops.yaml`. `dryRun` shows the files without opening anything. The chart's `github.enabled` pins the MCPServer to the GitHub App `giantswarm-model-manager` with `auth.forwardIdentity` (`--github-authorization-server`, `--github-api-url`): the App user token opens the pull request, and the forwarded ID token keeps apply mode acting on Kubernetes as the person. The new error code `auth_required` (401) names the consent, and capabilities report `commit`.
-
-- `wire_model` and `unwire_model` take `dryRun`: the answer carries the `manifests` the call would write (the ModelConfig and, for a keyless endpoint, its placeholder Secret) or delete, the ModelConfig's name, the Flux object applying it from git (`gitops`) and a ModelConfig of another owner that already wires the served model (`alreadyWired`); nothing is written.
-- A ModelConfig or LLMInferenceService Flux applies from git (`kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name`, whatever its `app.kubernetes.io/managed-by` says) is never changed or deleted live: `wire_model`, `unwire_model`, `unload_model` and `delete_model` answer the new error code `gitops_owned` (409) naming the Flux object, and the wiring reconciler leaves such a ModelConfig alone. A ModelConfig reports its owner as `gitops`.
-
-- Prometheus metrics on `GET /metrics` of a separate `metrics` port (`9464`): `mcp_server_operation_duration_seconds` for every `tools/call`, by `gen_ai_tool_name` and, on failure, `error_type` (`tool_error` for an `isError` result, `_OTHER` for a handler error), and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Chart: `observability.metrics.enabled` (default `true`) and `.port`; off renders `OTEL_METRICS_EXPORTER=none`, so an OTLP endpoint set for traces pushes no metrics. A ServiceMonitor gated on `serviceMonitor.enabled`, with `serviceMonitor.labels` and `.interval`, and `networkPolicy.metricsNamespaces` (default `kube-system`) admitted to the metrics port.
+## [1.8.2] - 2026-10-02
 
 ### Fixed
 
 - Wiring follows a kagent CRD version cut-over under a running process: with `--kagent-api-version auto` a call that fails `NotFound` at the version discovered at start-up re-discovers the served version and is retried once at the new one, instead of failing until a restart. An explicit `--kagent-api-version` never re-discovers.
+
+## [1.8.1] - 2026-10-01
+
+### Fixed
+
 - kserve: a split's environment is merged by name: a preset's `spec.split.env` entry replaces the fast link's of the same name, and a fast link's entry a preset's `spec.env` already sets. The LLMInferenceService API refused the load with `Duplicate value` on the env name.
+
+## [1.8.0-rc.1] - 2026-10-01
+
+### Added
+
+- kserve: a serving preset's `spec.split.env` reaches the leader and the workers of a split placement, after the fast link's environment, and never a single-node pod: environment measured for the split alone, such as the RoCE all-reduce of a tensor-parallel split.
+
+## [1.6.0] - 2026-09-28
+
+### Added
+
+- Every write tool takes `dryRun`: `pull_model`, `load_model`, `unload_model`, `delete_model` and `cancel_job` answer the plan (present and loaded state, keep-alive, the kserve fit verdict, the serving object a load would create or an unload delete, the ModelConfig the call would wire or unwire, the job) and change nothing.
+- kserve `load_model` and `unload_model` take `mode: commit`: the LLMInferenceService and the ModelConfig wiring it land in one pull request as the person (the removing one for an unload), in the repository that owns the serving namespace. `pull_model` and `delete_model` answer `unsupported` for `mode: commit`, as does a load or unload on the other backends.
+- Commit mode: `wire_model` and `unwire_model` with `mode: commit` open a pull request as the person in the GitOps repository that owns the kagent namespace (Flux provenance of the ModelConfig or the namespace; `repository`, `branch` and `path` where there is none). The files go under `<path>/model-manager/` with their kustomization entries (gitops-commit's `layout`), and the placeholder Secret is committed only SOPS-encrypted for the repository's `.sops.yaml`. `dryRun` shows the files without opening anything. The chart's `github.enabled` pins the MCPServer to the GitHub App `giantswarm-model-manager` with `auth.forwardIdentity` (`--github-authorization-server`, `--github-api-url`): the App user token opens the pull request, and the forwarded ID token keeps apply mode acting on Kubernetes as the person. The new error code `auth_required` (401) names the consent, and capabilities report `commit`.
+- `wire_model` and `unwire_model` take `dryRun`: the answer carries the `manifests` the call would write (the ModelConfig and, for a keyless endpoint, its placeholder Secret) or delete, the ModelConfig's name, the Flux object applying it from git (`gitops`) and a ModelConfig of another owner that already wires the served model (`alreadyWired`); nothing is written.
+- A ModelConfig or LLMInferenceService Flux applies from git (`kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name`, whatever its `app.kubernetes.io/managed-by` says) is never changed or deleted live: `wire_model`, `unwire_model`, `unload_model` and `delete_model` answer the new error code `gitops_owned` (409) naming the Flux object, and the wiring reconciler leaves such a ModelConfig alone. A ModelConfig reports its owner as `gitops`.
+
+## [1.5.1] - 2026-09-28
+
+### Fixed
+
 - kserve: `check_fit` judges the KV cache on a unified-memory node (a GB10: GPUs, no `nvidia.com/gpu.memory` label) against the node's memory capacity, the total vLLM profiles against there, instead of skipping it with "the node reports no GPU memory". The verdict names "the node's … unified memory"; a node whose memory several GPUs share is not judged, and says so.
+
+## [1.5.0] - 2026-09-28
+
+### Added
+
+- Prometheus metrics on `GET /metrics` of a separate `metrics` port (`9464`): `mcp_server_operation_duration_seconds` for every `tools/call`, by `gen_ai_tool_name` and, on failure, `error_type` (`tool_error` for an `isError` result, `_OTHER` for a handler error), and `http_server_request_duration_seconds` for the REST API and the MCP endpoint. Chart: `observability.metrics.enabled` (default `true`) and `.port`; off renders `OTEL_METRICS_EXPORTER=none`, so an OTLP endpoint set for traces pushes no metrics. A ServiceMonitor gated on `serviceMonitor.enabled`, with `serviceMonitor.labels` and `.interval`, and `networkPolicy.metricsNamespaces` (default `kube-system`) admitted to the metrics port.
+
+## [1.4.7] - 2026-09-28
+
+### Fixed
+
 - kserve: `check_fit` reads the KV cache of Gemma 4's unified multimodal checkpoints (`gemma4_unified_text`, the `gemma-4-12b` preset) and of Qwen4-Exp (`qwen4_exp_text`, the `qwen3-8-flash-next-nvfp4` preset): its full-attention layers, none for the linear-attention ones, and the sparse-attention index each full layer keeps (one bf16 key per `indexer_compress_ratio` tokens). Both presets were judged by their flat overhead alone, so a `--max-model-len` vLLM refuses read as a fit.
+
+## [1.4.5] - 2026-09-28
+
+### Fixed
+
 - kserve: `check_fit` for a preset served from an OCI model image no longer asks the Hugging Face Hub. The weights come from the image's `io.giantswarm.models.weights.bytes` label (`weightsSource: model-image`, else the preset's requirements), the KV cache layout from the `config.json` the image carries (streamed from the head of its layers, no weight file fetched, read once per image), and `downloadBytes` is 0 when the chosen node already holds the image: `prePulledNodes` lists the nodes whose kubelet reports it, and the reason says "served from the model image, pre-pulled on …". `list_nodes` reports `modelImageEligible`, so a node the cache claim's pin rules out is still shown as a serving target for such presets, as the verdict places them. A fit for a preset that already serves names its nodes (`servingNodes`) and what it holds there.
+
+## [1.4.4] - 2026-09-28
+
+### Fixed
+
 - kserve: `load_model` for a preset that is already served no longer answers as a new serve. It creates nothing and starts no load job, and answers `alreadyServing: true` with `servingNodes`; a node that differs from the serving node is refused with `conflict` naming both. The kserve `model loaded` log line no longer carries a keep-alive, which kserve does not have.
+
+## [1.4.3] - 2026-09-28
+
+### Fixed
+
 - kserve: a served model also answers under its preset name (`--served-model-name <id> publishers/<ns>/models/<id> <preset>` after the preset's arguments, on a split's leader too); a request naming the preset at the model's route or workload Service got `404 model does not exist`. The id stays first, so responses, `/v1/models`, the ModelConfig and the LLM endpoint objects are unchanged.
+
+## [1.4.2] - 2026-09-27
+
+### Fixed
+
 - kserve: a split's launch re-splits the preset's shell-quoted arguments as the single-node template's entrypoint does; a quoted JSON value (`--speculative-config '{"method":"mtp"}'`) reached vLLM with its quotes and the split's pods exited at start.
 - kserve: a split's containers run without the capabilities KServe's multi-node template adds (`IPC_LOCK`, `SYS_RAWIO`, `NET_RAW`), which a namespace enforcing the baseline Pod Security Standard refuses (the split's pods were never created); NCCL over the fast link needs none of them.
+
+## [1.4.1] - 2026-09-27
+
+### Fixed
+
 - kserve: a split's fit answer reports `requiredBytes` per node — its share of the weights plus the overhead, the figure each node is judged by — instead of the whole model's requirement (`weightsBytes` stays the whole model's).
-- kserve: on a unified-memory node (GPUs that report no memory of their own, the node's memory being theirs) a served model reserves at least what vLLM claims at start, `--gpu-memory-utilization` of the node's budget (vLLM's 0.9 when the preset sets none), not only its preset's weights and overhead (giantswarm/model-manager#18). `check_fit`, `load_model` and `list_nodes` read the same reservation, so a second preset that vLLM would refuse to start next to the first is refused by the fit check first. `list_presets` / `GET /api/v1/presets` report each GPU preset's `gpuMemoryUtilization`.
 
-### Removed
-
-- **Breaking** — kserve: the classic `InferenceService` kind. The backend composes, lists, stops and deletes `LLMInferenceService`s (`serving.kserve.io/v1alpha2`, KServe's llm-d control plane) and nothing else (giantswarm/model-manager#134). Gone with it: the chart values `kserve.servingKind` and `kserve.runtime` (the `kserve` block's schema rejects them), the flags `--kserve-serving-kind` / `--kserve-runtime` and their environment variables, a preset's `spec.runtime` and `spec.predictor` (ignored when a chart still publishes them), the preset field `runtime` in `list_presets` / `GET /api/v1/presets`, the values `InferenceService` of a loaded model's `kind` and the discovery document's `spec.runtime`, `spec.deploymentStrategyType` and `spec.timeoutSeconds` (ignored when present). The chart's kserve Role reads and writes `llminferenceservices` instead of `inferenceservices` and `servingruntimes`; its ClusterRole reads `llminferenceserviceconfigs` (below). An installation that serves classic `InferenceService`s or pins `kserve.servingKind: InferenceService` moves to llm-d (the platform's `kserve-llmisvc-crd`, `kserve-llmisvc-resources` and `kserve-runtime-configs` components) and drops the pin before it takes this release; an installation serving through llm-d, `servingKind` unset, needs no action. No fallback, no deprecation window.
+## [1.4.0] - 2026-09-27
 
 ### Added
 
 - kserve: placement `split` — one model across the nodes of a fast link, one vLLM instance tensor parallel over the link (giantswarm/model-manager#190). The discovery document's `spec.fastLinks` names the node groups joined by RDMA, with the network attachments, device resources and NCCL environment a split's pods need. `check_fit` / `load_model` (MCP and REST) take `placement` (`split` or `copies`, the default) and `nodes`; a split is judged per node (its share of the weights plus the preset's overhead, its share of the KV cache) and refused across nodes without a shared fast link. Every fit answer carries `recommended` and `recommendedNodes`: split across the first fast link that hosts the model, copies otherwise. A split is composed as a LeaderWorkerSet in KServe's data-parallel shape, the leader serving the API and the workers joining headless through vLLM's multi-node launch. `list_loaded` and `list_nodes` report `placement` / `nodes` and a node's `fastLink`. Copies on several nodes are refused for now.
-- OTLP traces (giantswarm/giantswarm#36711). With `OTEL_EXPORTER_OTLP_ENDPOINT` set (chart: `observability.otel.endpoint`, empty by default) every request except `/healthz` and `/readyz` is an HTTP server span (`POST /mcp`, `GET /api/v1/`) joined to the caller's `traceparent`, every MCP request an `mcp.<method>` server span under it (`mcp.tools/call` carries `mcp.tool.name` and `gen_ai.tool.name`) and every tool handler a `tool.<name>` span. The exporter, protocol, headers, resource attributes and sampler come from the standard `OTEL_*` variables; the chart renders `observability.otel.{endpoint,protocol,headers,resourceAttributes,sampler,samplerArg}` as those (`grpc`, `parentbased_traceidratio` at `0.1` by default, the pod's namespace, name and node as resource attributes) and, with `networkPolicy.enabled`, an egress rule to the collector's namespace and port (any address for a host that is not an in-cluster Service). Without an endpoint nothing is exported.
-- kserve: served models on the platform's LLM endpoint (giantswarm/model-manager#145). With the platform's LLM endpoint document (a ConfigMap in model-manager's namespace labelled `agent-platform.giantswarm.io/llm-endpoint=true`, rendered by the agent-platform chart's `llmRouting`; a backend serving another cluster reads none), every Ready model created from a preset whose server registered interfaces gets two `AgentgatewayModel`s in the parents' namespace, attached to the endpoint's parents (the LLM listener, the external route): `<preset>-workload`, Internal, provider Custom with `baseURL` the workload Service's `/v1` and `custom.formats` the model's interfaces, matched on the Hugging Face id vLLM serves; and `<preset>`, the public name, a virtual model targeting it that rewrites the request's `model` (agentgateway 2.1 forwards a concrete model's `model` unchanged). They are written with model-manager's ServiceAccount, kept while the serving object exists, removed by `unload_model` and when the serving object goes. `list_loaded_models` reports `publicName` and the endpoint URL as `endpoint` (the public one, the document's `externalEndpoint`, when the installation publishes it), or `publicNameReason`; the model's ModelConfig rides the endpoint under the public name with the placeholder key. Without the document nothing changes.
-- kserve: a served model reports the API interfaces its running server registered (giantswarm/model-manager#144). Once each time an `LLMInferenceService` turns Ready the backend reads its workload Service's `GET /version` and `GET /openapi.json` and reports `runtime {name: vllm, version}` and `interfaces [{type, path}]` on the loaded model — `list_loaded_models`, `GET /api/v1/loaded`, and `running` of `list_models` / `get_model`. Since vLLM 0.16 the server registers a family of routes only when the model's task includes it, so a generate model lists `Completions`, `Responses`, `Messages` and `AnthropicTokenCount` and a pooling model `Embeddings`; the names are agentgateway's format vocabulary. A server that publishes no route list (`--disable-fastapi-docs`), one whose list names chat completions and embeddings side by side (it registers every route whatever the model serves, vLLM before 0.16) or one that could not be read reports `interfaces: []` and `interfacesReason`; nothing is judged by the version, which the llm-d runtimes report as `0.1.dev1+g<commit>`; a read that got no answer is repeated after a minute. A preset states no interfaces. The chart's NetworkPolicy lets the pod reach the workloads' port 8000 in the serving namespace; the serving namespace's own policies must admit it (giantswarm/agent-platform#602).
-- kserve: a preset that requests no GPU (`resources.gpus: 0`) is CPU work — the fit judges every node against its allocatable memory instead of the accelerator nodes alone, and the preset knows no GPU pool and no accelerator RuntimeClass: the `LLMInferenceService` it composes requests no `nvidia.com/gpu`, carries neither the pool's toleration and label nor `runtimeClassName`, so it lands on the cluster's CPU capacity (a tainted GPU pool stays out of reach); an explicit accelerator node is refused with the taint as the reason. A GPU preset and a bare model reference keep the accelerator nodes as their capacity, and `GET /api/v1/nodes` still lists those. What a lab without a GPU, or a small model on CPU capacity, needs to serve on the llm-d path (giantswarm/agentlab#221).
 
-- kserve: `list_loaded_models` / `GET /api/v1/loaded` report a serving object's `reason` next to `status` and `message`: the Ready condition's (`HTTPRoutesNotReady`, `PredictorNotReady`), a failed load's, or — while the predictor pod waits — the pod's own: `Unschedulable` with the scheduler's message (no node with a free GPU, a pool still scaling from zero), `ImagePullBackOff`. An object whose predictor pod is Pending is `Pending` whatever its conditions say; `NotReady` is a condition that says so with no pod waiting. `load_model`'s answer names the object it created (`running.resource`, `running.kind`, its `status` and `reason`), and the `load` job that follows it carries `resource` and `preset`.
-- `get_info` MCP tool: the build this server runs (`version` — the release, `dev` for an untagged local build —, `commit`, `built`), the names of its tools, the configured backends in order and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to — the same first call the other Agent Platform managers offer.
-- kserve: the GPU node pool's scheduling as one input, `gpuPool` — the pool's taint (`nvidia.com/gpu` `NoSchedule`, the taint a platform-created pool carries) tolerated and the pool's label (`giantswarm.io/machine-pool=<cluster>-<pool>`) selected on everything the driver schedules onto the pool: the composed `LLMInferenceService` / `InferenceService` predictors (the pool toleration first, the preset's `scheduling.tolerations` after it), the download Jobs and the inventory scan pods (the toleration always, the selector unless the pod is pinned to a cache node). Read from the discovery ConfigMap's `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the platform chart's `modelServing.gpuPool.*`); a registered backend document's `spec.kserve.gpuPool` (and `add_backend`'s `gpuPoolTaint` / `gpuPoolNodeSelector`) replaces it. `GET /api/v1/nodes` reports a tainted GPU node as capacity once its taint is tolerated and names an untolerated `NoSchedule`/`NoExecute` taint or a node outside the pool's selector in `eligibilityReason`; `GET /api/v1/backend` reports the input as `gpuPool`. Unset, nothing changes.
-- kserve: a serving preset is composed into an `LLMInferenceService` (`serving.kserve.io/v1alpha2`, the llm-d control plane) by spec shape wherever that API is served — `spec.model.uri`/`name`, one replica, `router.route` and `router.scheduler`, the preset's args, env and resources on `template.containers[main]`, `scheduling` as the template's nodeSelector/tolerations, the chat template mounted, `template.runtimeClassName` from the discovery ConfigMap when set; no `baseRefs` and no image unless the preset's new `spec.template` (containers merged by name) or `spec.baseRefs` say so. `--kserve-serving-kind` / `kserve.servingKind` (`auto` | `LLMInferenceService` | `InferenceService`) pins the kind; both kinds are listed, stopped and deleted, `LoadedModel.kind` names it, and the wiring's served model name follows the kind. Composer tests validate every shipped preset against the LLMInferenceService CRD schema.
-- `agent-platform.giantswarm.io/tool-group: agent-platform` on the muster `MCPServer` CR, next to `muster.giantswarm.io/type`: model-manager is part of the Agent Platform's own management surface, the tier the portal's MCP servers page, the toolset presets and the docs group it under. `muster.mcpServer.labels` still adds to and overrides the CR's labels; the passthrough is merged instead of appended, so an override renders one key instead of a duplicate.
-- `lmstudio` backend: an LM Studio on the host (llama.cpp on GPU and CPU, MLX on Apple silicon) as a serving backend, proxying its `/api/v1` API — the library, the download that backs a pull with real byte progress, and load/unload. Agent wiring uses kagent's `OpenAI` provider against the agent host plus `/v1` with the placeholder key. LM Studio serves no delete (`lms rm` is host-only), so the backend reports `delete: false` and the call answers `501 unsupported`; it exposes no host hardware, so `nodeInventory` is false too. A load is idempotent (LM Studio loads an *instance*, so a repeat would pin a second copy), load and unload prove themselves from the answer's body rather than its status code, a pull resolves its reference against the library before reporting success (LM Studio does not promise the download's `key` is the reference asked for) and gives up on a status that is neither progress nor an end it knows. Chart values `lmstudio.endpoint` / `lmstudio.agentHost`, flags `--lmstudio-endpoint` / `--lmstudio-agent-host`. Requires LM Studio 0.4.0+.
-
-### Changed
-
-- Agent wiring targets kagent API v2: the ModelConfig API version used when discovery is unavailable is `kagent.dev/v1alpha3`, the only version kagent API v2 serves; `kagent.apiVersion: auto` keeps resolving whatever the cluster serves, so a kagent 0.x cluster still gets `v1alpha2`. The spec model-manager writes — `provider`, `model`, `ollama.host`, `openAI.baseUrl`, `apiKeySecret`/`apiKeySecretKey` — is the same in both versions. A ModelConfig's `ready` needs kagent's `ResolvedRefs` condition to be `True` beside `Accepted` whenever the controller reports it: kagent API v2 reports a missing or incomplete API-key Secret there while `Accepted` stays `True`, so such a ModelConfig read as ready before; `message` names the condition holding it back. The chart-test smoke applies the v2 `modelconfigs` CRD.
-
-- The chart README no longer renders a version badge (`chart.badgesSection` removed from `README.md.gotmpl`): a release PR bumping `Chart.yaml`'s `version` no longer changes the checked-in `README.md`, so the helm-docs pre-commit hook no longer fails on it. ([giantswarm/devctl#2180](https://github.com/giantswarm/devctl/issues/2180))
+## [1.3.3] - 2026-09-26
 
 ### Fixed
 
 - kserve: an unload no longer leaves its ModelConfig behind: `unload_model` ends the model's load job before it unwires, so a readiness poll that read the object Ready just before the deletion cannot re-wire the ModelConfig the unload removed.
+
+## [1.3.2] - 2026-09-26
+
+### Fixed
+
+- kserve: on a unified-memory node (GPUs that report no memory of their own, the node's memory being theirs) a served model reserves at least what vLLM claims at start, `--gpu-memory-utilization` of the node's budget (vLLM's 0.9 when the preset sets none), not only its preset's weights and overhead (giantswarm/model-manager#18). `check_fit`, `load_model` and `list_nodes` read the same reservation, so a second preset that vLLM would refuse to start next to the first is refused by the fit check first. `list_presets` / `GET /api/v1/presets` report each GPU preset's `gpuMemoryUtilization`.
+
+## [1.3.1] - 2026-09-26
+
+### Fixed
+
 - kserve: a model whose runtime fails its first request after the list stopped waiting, and drops out of Ready while the request hangs, is `failed` (giantswarm/model-manager#177). The first request was bound to the list with a 15 s timeout. vLLM's harmony renderer answers 500 only when its vocab download gives up, after some 30 s, and the hung request also hangs `/health`, so the object left Ready and turned Ready again. Every transition sent another request that timed out, and the model sat at `loading`/`routing` for hours without reaching `failed`. A list now waits 15 s while the request runs on for up to 2 min. It's kept per object: one at a time, none beside one in flight, and asked anew on the next Ready transition. A failure stands while the object is not Ready, until a later request is answered.
+
+## [1.3.0] - 2026-09-25
+
+### Added
+
+- OTLP traces (giantswarm/giantswarm#36711). With `OTEL_EXPORTER_OTLP_ENDPOINT` set (chart: `observability.otel.endpoint`, empty by default) every request except `/healthz` and `/readyz` is an HTTP server span (`POST /mcp`, `GET /api/v1/`) joined to the caller's `traceparent`, every MCP request an `mcp.<method>` server span under it (`mcp.tools/call` carries `mcp.tool.name` and `gen_ai.tool.name`) and every tool handler a `tool.<name>` span. The exporter, protocol, headers, resource attributes and sampler come from the standard `OTEL_*` variables; the chart renders `observability.otel.{endpoint,protocol,headers,resourceAttributes,sampler,samplerArg}` as those (`grpc`, `parentbased_traceidratio` at `0.1` by default, the pod's namespace, name and node as resource attributes) and, with `networkPolicy.enabled`, an egress rule to the collector's namespace and port (any address for a host that is not an in-cluster Service). Without an endpoint nothing is exported.
+
+## [1.2.1] - 2026-09-25
+
+### Fixed
+
 - kserve: a served model is Ready only once it has answered a request
   ([#177](https://github.com/giantswarm/model-manager/issues/177)). The `LLMInferenceService`'s
   Ready condition follows vLLM's `GET /health`, which a runtime can pass and then fail every request:
@@ -144,55 +367,416 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the platform's LLM endpoint. A server whose route list names nothing to ask is not asked, and
   its `ready` step says why.
 
-- kserve: the fit check judges vLLM's KV cache, not a flat overhead alone (giantswarm/model-manager#149). vLLM starts a model only when its KV cache holds one sequence of `--max-model-len` tokens beside the weights; `gemma-4-31b` at 65536 tokens passed `check_fit` on a 48 GB card and crash-looped. From the checkpoint's `config.json` (full-attention, sliding-window, MLA, linear-attention and Mamba layers; Gemma 4's global heads) and the preset's `--max-model-len`, `--gpu-memory-utilization`, `--kv-cache-dtype`, `--max-num-batched-tokens`, `--block-size` and `--tensor-parallel-size`, `check_fit`, `load_model` and `pull_model` compute vLLM v0.23's KV need per GPU on the node (its `nvidia.com/gpu.memory`) or the pool size (`gpuMemoryGiB`, decimal GB) against `--gpu-memory-utilization` of the GPU less the weights and a 3.15 GiB reserve, and refuse a context that does not fit, naming the KV need, what is left and vLLM's estimated maximum model length (new `maxModelLen`, `kvCacheBytes`, `kvCacheAvailableBytes`, `estimatedMaxModelLen`). An architecture, argument or node the check cannot read is named in the reason and judged on the flat overhead as before.
-- kserve: `check_fit` counts what the models served on a node reserve, as `load_model` does — `reservedBytes` read 0 on a node serving a model while the load three seconds later refused on the same node — and judges against the free budget; `pull_model` still judges against the whole budget and now reports the reservation too.
-- kserve: the `loading` step names the node's locked-memory limit when a runtime dies on a CUDA out-of-memory because `mlock()` refused it (giantswarm/model-manager#135). A runtime that locks its weights in memory (B12X's weight pool: `could not lock final weight storage: Cannot allocate memory`) dies at engine start on a GPU node whose containerd runs with the default `LimitMEMLOCK` of 8 MB, since a container inherits that limit and has no `CAP_IPC_LOCK` to raise it, root included, and the crash read as an out-of-memory at a few MiB with the GPU idle. When the crashed container's log tail carries both a lock refusal and a CUDA out-of-memory, the crash message adds the cause and the fix (a `containerd.service` drop-in with `LimitMEMLOCK=infinity`, `systemctl daemon-reload`, restart containerd); any other out-of-memory keeps its wording.
-- kserve: a preset served from a model image (`oci://`) gets the environment the modelcar path needs without declaring it (giantswarm/model-manager#146). KServe runs such a predictor as its modelcar uid on a read-only image, a uid the runtime image's passwd does not know, so vLLM's import died in torch's inductor cache-dir lookup (`getpass.getuser()` → `getpwuid`: `KeyError: uid not found`) unless the preset carried the workaround in its own `env`. The composed main container now ends with `HOME=/tmp`, `HF_HOME=/tmp/hf`, `VLLM_CACHE_ROOT=/tmp/vllm-cache`, `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor`, `USER=vllm` and `LOGNAME=vllm`, each only where the preset sets no value of its own; an `hf://` preset is composed as before.
-- kserve: `check_fit`'s `downloadBytes` for a preset served from a model image (`oci://`) is the image's layers, read from its registry (giantswarm/model-manager#150). It counted the Hub repository's whole tree, 195.8 GB for `gpt-oss-120b`, whose repository also holds the `original/` and `metal/` copies the 65 GB image leaves out. The size is the sum of the layers of the image's linux/amd64 manifest, read anonymously (the index and one manifest, no layer). When the registry does not answer, `downloadBytes` is 0 and the reason says why; the Hub tree is not used for such a preset. The weights are still sized from the Hub's safetensors index, and an `hf://` preset is unchanged.
-- kserve: with several GPU pools a model is pinned to the pool its fit chose (giantswarm/model-manager#152). With two pools no slice-wide selector pins the predictors, so a 24 GB model fitted for the L4 pool landed on the first free GPU, an L40S another model was waiting for. The fit now names the pool it places a model on (`pool` in the `check_fit` and `load_model` answers): the chosen node's `giantswarm.io/machine-pool`, or, when no ready node hosts the model, the pool with no node yet whose smallest hosting size is the smallest, judged on the backend document's new `spec.kserve.gpuPools` (the pools by name with their sizes, which cluster-manager writes for two or more pools). `load_model` pins the predictor to that pool with its label and the pools' taint, and `list_loaded_models` names the pool. The one-pool case, where the slice's `gpuPool.nodeSelector` pins every predictor, is unchanged.
+## [1.2.0] - 2026-09-25
+
+### Added
+
+- kserve: served models on the platform's LLM endpoint (giantswarm/model-manager#145). With the platform's LLM endpoint document (a ConfigMap in model-manager's namespace labelled `agent-platform.giantswarm.io/llm-endpoint=true`, rendered by the agent-platform chart's `llmRouting`; a backend serving another cluster reads none), every Ready model created from a preset whose server registered interfaces gets two `AgentgatewayModel`s in the parents' namespace, attached to the endpoint's parents (the LLM listener, the external route): `<preset>-workload`, Internal, provider Custom with `baseURL` the workload Service's `/v1` and `custom.formats` the model's interfaces, matched on the Hugging Face id vLLM serves; and `<preset>`, the public name, a virtual model targeting it that rewrites the request's `model` (agentgateway 2.1 forwards a concrete model's `model` unchanged). They are written with model-manager's ServiceAccount, kept while the serving object exists, removed by `unload_model` and when the serving object goes. `list_loaded_models` reports `publicName` and the endpoint URL as `endpoint` (the public one, the document's `externalEndpoint`, when the installation publishes it), or `publicNameReason`; the model's ModelConfig rides the endpoint under the public name with the placeholder key. Without the document nothing changes.
+
+## [1.1.9] - 2026-09-25
+
+### Fixed
+
 - kserve, a workload-cluster target: a 401 or 403 from the target apiserver names the precondition — the target must trust the installation's Dex as an OIDC issuer (with the issuer and audience of the caller's token), the caller's token expired, the caller's RBAC there, or a call without a caller's token — instead of a bare `Unauthorized`
 - kserve, a workload-cluster target: a background cache rescan and the cleanup of a cancelled download run with the caller's token, and are skipped with the reason when there is no caller; a refused caller is no longer retried anonymously on the discovery reads
 - kserve, a workload-cluster target: the document is refused when read, naming why, with `--downstream-oauth` off or the `daemonset` inventory; `add_backend` answers such a refusal with its `error`, and a registered document edited into one drops its backend in the same step that reports it
 - kserve: the backend's `agentEndpoint` is the models Gateway's origin from the discovery document, and a workload-cluster target whose discovery enables no Gateway says agents cannot reach its models
+
+## [1.1.8] - 2026-09-25
+
+### Fixed
+
+- A backend document that breaks drops its backend in the same step that reports it, so `list_backends` never answers a backend registered beside its own fresh `invalid` report. The registry reported the broken document and dropped the backend under two locks: a registered document updated to one failing the schema (`spec: {kind: ollama}` without `endpoint`) was, between the two, both registered and reported, the break-side mirror of the window giantswarm/model-manager#101 closed for a fixed document, and `list_backends` observes it since it reads both at one moment. A broken document that still names its kind — its backend failed to build, e.g. a remote kserve target whose `caBundle` is no PEM certificate — kept the last good backend registered beside the report for as long as it stayed broken; it is dropped like any other broken document now, so what serves is always what the ConfigMap holds. The service drops and reports in one step (`DeregisterDocument`, the mirror of `RegisterDocument`), also when a document is deleted; `TestBrokenDocumentIsNeverRegisteredAndInvalidAtOnce` samples good → bad updates of both kinds.
+
+## [1.1.7] - 2026-09-24
+
+### Fixed
+
+- kserve: the fit check judges vLLM's KV cache, not a flat overhead alone (giantswarm/model-manager#149). vLLM starts a model only when its KV cache holds one sequence of `--max-model-len` tokens beside the weights; `gemma-4-31b` at 65536 tokens passed `check_fit` on a 48 GB card and crash-looped. From the checkpoint's `config.json` (full-attention, sliding-window, MLA, linear-attention and Mamba layers; Gemma 4's global heads) and the preset's `--max-model-len`, `--gpu-memory-utilization`, `--kv-cache-dtype`, `--max-num-batched-tokens`, `--block-size` and `--tensor-parallel-size`, `check_fit`, `load_model` and `pull_model` compute vLLM v0.23's KV need per GPU on the node (its `nvidia.com/gpu.memory`) or the pool size (`gpuMemoryGiB`, decimal GB) against `--gpu-memory-utilization` of the GPU less the weights and a 3.15 GiB reserve, and refuse a context that does not fit, naming the KV need, what is left and vLLM's estimated maximum model length (new `maxModelLen`, `kvCacheBytes`, `kvCacheAvailableBytes`, `estimatedMaxModelLen`). An architecture, argument or node the check cannot read is named in the reason and judged on the flat overhead as before.
+- kserve: `check_fit` counts what the models served on a node reserve, as `load_model` does — `reservedBytes` read 0 on a node serving a model while the load three seconds later refused on the same node — and judges against the free budget; `pull_model` still judges against the whole budget and now reports the reservation too.
+
+## [1.1.6] - 2026-09-24
+
+### Fixed
+
+- kserve: with several GPU pools a model is pinned to the pool its fit chose (giantswarm/model-manager#152). With two pools no slice-wide selector pins the predictors, so a 24 GB model fitted for the L4 pool landed on the first free GPU, an L40S another model was waiting for. The fit now names the pool it places a model on (`pool` in the `check_fit` and `load_model` answers): the chosen node's `giantswarm.io/machine-pool`, or, when no ready node hosts the model, the pool with no node yet whose smallest hosting size is the smallest, judged on the backend document's new `spec.kserve.gpuPools` (the pools by name with their sizes, which cluster-manager writes for two or more pools). `load_model` pins the predictor to that pool with its label and the pools' taint, and `list_loaded_models` names the pool. The one-pool case, where the slice's `gpuPool.nodeSelector` pins every predictor, is unchanged.
+
+## [1.1.5] - 2026-09-24
+
+### Fixed
+
+- kserve: `check_fit`'s `downloadBytes` for a preset served from a model image (`oci://`) is the image's layers, read from its registry (giantswarm/model-manager#150). It counted the Hub repository's whole tree, 195.8 GB for `gpt-oss-120b`, whose repository also holds the `original/` and `metal/` copies the 65 GB image leaves out. The size is the sum of the layers of the image's linux/amd64 manifest, read anonymously (the index and one manifest, no layer). When the registry does not answer, `downloadBytes` is 0 and the reason says why; the Hub tree is not used for such a preset. The weights are still sized from the Hub's safetensors index, and an `hf://` preset is unchanged.
+
+## [1.1.3] - 2026-09-24
+
+### Fixed
+
+- kserve: a preset served from a model image (`oci://`) gets the environment the modelcar path needs without declaring it (giantswarm/model-manager#146). KServe runs such a predictor as its modelcar uid on a read-only image, a uid the runtime image's passwd does not know, so vLLM's import died in torch's inductor cache-dir lookup (`getpass.getuser()` → `getpwuid`: `KeyError: uid not found`) unless the preset carried the workaround in its own `env`. The composed main container now ends with `HOME=/tmp`, `HF_HOME=/tmp/hf`, `VLLM_CACHE_ROOT=/tmp/vllm-cache`, `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor`, `USER=vllm` and `LOGNAME=vllm`, each only where the preset sets no value of its own; an `hf://` preset is composed as before.
+
+## [1.1.2] - 2026-09-24
+
+### Fixed
+
+- kserve: the `loading` step names the node's locked-memory limit when a runtime dies on a CUDA out-of-memory because `mlock()` refused it (giantswarm/model-manager#135). A runtime that locks its weights in memory (B12X's weight pool: `could not lock final weight storage: Cannot allocate memory`) dies at engine start on a GPU node whose containerd runs with the default `LimitMEMLOCK` of 8 MB, since a container inherits that limit and has no `CAP_IPC_LOCK` to raise it, root included, and the crash read as an out-of-memory at a few MiB with the GPU idle. When the crashed container's log tail carries both a lock refusal and a CUDA out-of-memory, the crash message adds the cause and the fix (a `containerd.service` drop-in with `LimitMEMLOCK=infinity`, `systemctl daemon-reload`, restart containerd); any other out-of-memory keeps its wording.
+
+## [1.1.1] - 2026-09-24
+
+### Fixed
+
+- `list_backends` reads the backends and the `invalid` documents at one moment. It read them under two locks, so a document broken, or deleted and recreated invalid, between the two reads could be answered both registered and reported: the reader side of the window giantswarm/model-manager#101 closed for the writer. `TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce` sampled the same way and failed intermittently on CI with a violation the service never held; its sampler now reads what `list_backends` reads.
+
+## [1.1.0] - 2026-09-24
+
+### Added
+
+- kserve: a served model reports the API interfaces its running server registered (giantswarm/model-manager#144). Once each time an `LLMInferenceService` turns Ready the backend reads its workload Service's `GET /version` and `GET /openapi.json` and reports `runtime {name: vllm, version}` and `interfaces [{type, path}]` on the loaded model — `list_loaded_models`, `GET /api/v1/loaded`, and `running` of `list_models` / `get_model`. Since vLLM 0.16 the server registers a family of routes only when the model's task includes it, so a generate model lists `Completions`, `Responses`, `Messages` and `AnthropicTokenCount` and a pooling model `Embeddings`; the names are agentgateway's format vocabulary. A server that publishes no route list (`--disable-fastapi-docs`), one whose list names chat completions and embeddings side by side (it registers every route whatever the model serves, vLLM before 0.16) or one that could not be read reports `interfaces: []` and `interfacesReason`; nothing is judged by the version, which the llm-d runtimes report as `0.1.dev1+g<commit>`; a read that got no answer is repeated after a minute. A preset states no interfaces. The chart's NetworkPolicy lets the pod reach the workloads' port 8000 in the serving namespace; the serving namespace's own policies must admit it (giantswarm/agent-platform#602).
+
+## [1.0.15] - 2026-09-24
+
+### Fixed
+
 - kserve: `check_fit` / `load_model` no longer answer `no accelerator node` for a GPU pool that scales from zero in the moments after it is registered (giantswarm/model-manager#127). cluster-manager registers the pool's instance shapes with the backend document, and the serving slice names the pool in its discovery document (`spec.gpuPool.nodeSelector`) only when its connectivity child renders it again; settings resolved from a document that named no pool yet stood for the full minute. Such settings now stand for five seconds, like those resolved without the document, a fit that finds no candidate node re-reads the document once before it refuses, and while the document still names no pool the answer is `fits: false`, `retryable: true` with a reason that says so and to retry. A load now composes its `LLMInferenceService` with the settings its fit was judged on: after such a re-read — this one or the one for a document not published yet — the predictor carried neither the pool's toleration nor its node selector.
+
+## [1.0.12] - 2026-09-24
+
+### Fixed
+
 - ollama: a model with Ollama's `thinking` capability is wired with thinking off, so its agents answer in `content` instead of an empty reply (giantswarm/model-manager#161). Such a model (Qwen3.5, Qwen3, DeepSeek-R1, Granite 4.2) reasons before every answer unless the chat request carries `think: false`, 1.5–2k tokens per model call on a CPU, and `qwen3.5:2b` wrote its whole answer into `message.thinking`, which the agent runtime does not read. Its `ModelConfig` now carries `spec.ollama.think` from the new chart value `ollama.think` (flag `--ollama-think`, `MODEL_MANAGER_OLLAMA_THINK`): `false` by default, `true`, or empty to write none. A model without the capability gets none, since Ollama refuses `true` for it. The value is reported as `modelConfig.think`. The field is written only where the ModelConfig schema the apiserver serves has it (kagent 1.0.3 and later, read from its OpenAPI v3), since the apiserver prunes a field its CRD lacks; on an older kagent wiring works as before. With auto-wiring the reconciler re-wires a ModelConfig whose `think` or `num_ctx` is not the configured one, in one comparison against what the served schema can carry, so a pruned field never re-wires on every pass.
+
+## [1.0.8] - 2026-09-24
+
+### Fixed
+
 - ollama: every Ollama `ModelConfig` model-manager creates or re-wires carries `spec.ollama.options.num_ctx`, so agent prompts no longer lose their front on hosts with less than 24 GiB of VRAM (giantswarm/model-manager#157). Without it every request ran at Ollama's VRAM-tiered default, 4,096 tokens below 24 GiB (every CPU-only host). Ollama fills a longer prompt by dropping everything between its first tokens and its tail, which removes an agent turn's system prompt and tool schemas. Its only trace is a `truncating input prompt` warning in the server's log. The window is the new chart value `ollama.contextLength` (flag `--ollama-context-length`, `MODEL_MANAGER_OLLAMA_CONTEXT_LENGTH`, default 32768; 0 leaves it to the server), capped at the model's own context length and reported as `modelConfig.contextLength`. Loads pre-warm at the same `num_ctx`, since Ollama reloads a model when a request's differs. With auto-wiring the reconciler brings a ModelConfig written before this release, or under another value, to the configured window. Ollama reserves the KV cache for the whole window in the host's memory at load; lower the value on a host short of memory.
+
+## [1.0.6] - 2026-09-23
+
+### Fixed
+
 - Chart: the `helm.sh/chart` label is a valid label value for any chart version. The 63-character cut of a long development version could end in `_` (from a `+`) or in a run like `--.`, which trimming one `-` and one `.` left in place, so the API server refused every labelled object; the whole run of non-alphanumeric characters at the ends of the cut is now trimmed, and the render assertions check the label for such versions. The render assertions (`hack/verify-chart.sh`) run again on every pull request, in the new `chart` workflow: the generated pre-commit configuration had dropped the hook that ran them. (giantswarm/model-manager#154)
+
+## [1.0.5] - 2026-09-22
+
+### Fixed
+
 - kserve: `load_model` no longer refuses a pool whose serving slice has just landed on a verdict cached before it did (giantswarm/model-manager#148). The driver's settings record whether the llm-d control plane is there — the `LLMInferenceService` API served and the well-known `LLMInferenceServiceConfig` `kserve-config-llm-template` present — and are cached for a minute; the serving slice publishes its discovery document first and its CRDs and runtime configs seconds later, and settings resolved in between were cached for the full minute. On an installation the portal's guided flow waited for every chart of the slice to be Ready and called `load_model` 49 s after the well-known config existed — and was refused with `503 unavailable: … the llm-d controller is not installed: no LLMInferenceServiceConfig kserve-config-llm-template in any namespace … turn on the platform's kserve-llmisvc-resources and kserve-runtime-configs components`, a hint to turn on components that were on. Now settings resolved without the control plane stand for five seconds (`ControlPlaneAbsentTTL`, as settings without the discovery document already did), a load about to be refused resolves them once more first and is judged on what the cluster says now, and a refusal that stands tells the two cases apart: with the discovery document published, `… the serving layer's discovery document is published, so its slice is most likely still landing: retry in a moment, and turn on the platform's … components if this persists`; without it, `… install the llm-d control plane — the platform's … components`. `get_backend`'s `message` follows within the five seconds.
+
+## [1.0.4] - 2026-09-19
+
+### Fixed
+
+- kserve: the pre-warm download Job's image (chart value `kserve.download.image`, flag `--kserve-download-image`) defaults to `gsoci.azurecr.io/giantswarm/storage-initializer:v0.20.0`, the platform's mirror of the KServe storage-initializer at the version the platform's KServe chart injects into a predictor, instead of the upstream image on Docker Hub. Every image the platform runs comes from `gsoci.azurecr.io` and verifies against the platform's signing identity; the download Job was the one pod pulling from Docker Hub, which an installation with image verification on refuses. An installation that sets the value keeps its own.
+
+## [1.0.3] - 2026-09-19
+
+### Fixed
 
 - kserve: `check_fit` / `load_model` size a Hugging Face checkpoint by its safetensors index's `total_size` only while the shards the index's `weight_map` names agree with it within one percent; otherwise the shards size it (`weightsSource: safetensors-shards`, a log line naming both figures). Quantized repacks keep the original BF16 total in the index — `RedHatAI/gemma-4-31B-it-FP8-dynamic` declares 58.25 GiB over two shards of 30.98 GiB — and were refused the 48 GB pool their preset targets. Summing every `.safetensors` file of the tree would double-count the `consolidated` copy Mistral repositories carry, so a repository without an index keeps today's tree sum. Both fit verdicts name the sizing source beside the weights (`31.0 GiB weights (safetensors-shards) + …`) (giantswarm/model-manager#141).
 
-- kserve: the pre-warm download Job's image (chart value `kserve.download.image`, flag `--kserve-download-image`) defaults to `gsoci.azurecr.io/giantswarm/storage-initializer:v0.20.0`, the platform's mirror of the KServe storage-initializer at the version the platform's KServe chart injects into a predictor, instead of the upstream image on Docker Hub. Every image the platform runs comes from `gsoci.azurecr.io` and verifies against the platform's signing identity; the download Job was the one pod pulling from Docker Hub, which an installation with image verification on refuses. An installation that sets the value keeps its own.
+## [1.0.1] - 2026-09-19
+
+### Fixed
+
 - kserve: an `LLMInferenceService` without a models Gateway in discovery is wired to agents at its workload Service, whatever ingress route KServe published as `status.url`; the published route is the endpoint only under the models Gateway.
-- kserve: an `LLMInferenceService` routed on the models Gateway keeps its address under the discovery Gateway's origin when KServe publishes the Gateway's in-cluster address (`<gateway>.<namespace>.svc.cluster.local`, what a Gateway without a load balancer address gets): the Gateway terminates TLS and demands the person's token there too, and the cluster-local https address was taken for the keyless workload Service, rewritten to plain http and wired into kagent with the placeholder key — an endpoint nothing answered on. KServe's path stays; an external published address stands as before (giantswarm/agentlab#221).
+
+## [1.0.0] - 2026-09-18
+
+### Removed
+
+- **Breaking** — kserve: the classic `InferenceService` kind. The backend composes, lists, stops and deletes `LLMInferenceService`s (`serving.kserve.io/v1alpha2`, KServe's llm-d control plane) and nothing else (giantswarm/model-manager#134). Gone with it: the chart values `kserve.servingKind` and `kserve.runtime` (the `kserve` block's schema rejects them), the flags `--kserve-serving-kind` / `--kserve-runtime` and their environment variables, a preset's `spec.runtime` and `spec.predictor` (ignored when a chart still publishes them), the preset field `runtime` in `list_presets` / `GET /api/v1/presets`, the values `InferenceService` of a loaded model's `kind` and the discovery document's `spec.runtime`, `spec.deploymentStrategyType` and `spec.timeoutSeconds` (ignored when present). The chart's kserve Role reads and writes `llminferenceservices` instead of `inferenceservices` and `servingruntimes`; its ClusterRole reads `llminferenceserviceconfigs` (below). An installation that serves classic `InferenceService`s or pins `kserve.servingKind: InferenceService` moves to llm-d (the platform's `kserve-llmisvc-crd`, `kserve-llmisvc-resources` and `kserve-runtime-configs` components) and drops the pin before it takes this release; an installation serving through llm-d, `servingKind` unset, needs no action. No fallback, no deprecation window.
+
+### Fixed
 
 - kserve: `load_model` fails fast, with nothing created and nothing to wait for, where no llm-d control plane would reconcile the object (giantswarm/model-manager#129). With the `LLMInferenceService` CRDs installed but the controller off — the platform ships them as separate components — the backend composed an object nothing reconciled: no pod, no conditions, the load job waited "for LLMInferenceService … to become ready" until the model was unloaded. The driver's settings now record whether the API is served and whether the well-known `LLMInferenceServiceConfig` `kserve-config-llm-template` the controller composes from exists in some namespace (the runtime configs ship with the control plane, not with the CRDs); `load_model` / `POST /api/v1/models/load` refuse before the fit check with `503 unavailable` naming what is missing and which platform component turns it on — or, when the driver cannot read either, the error and the permission it needs (`get`/`list` on `llminferenceserviceconfigs` cluster-wide, which the chart's ClusterRole grants and a caller under `oauth.downstream` brings) — and `get_backend` / `GET /api/v1/backends` carry the same reason in `message` before anyone tries.
-- kserve: the cache index is written only for a cache that exists, an entry is bound to the claim and volume it was recorded against, and `unload_model` drops an entry whose directory is in no cache (giantswarm/model-manager#130). With the serving layer's cache off (`cache.enabled: false` in the discovery document: no claim, every predictor downloads into storage that goes with its pod) `load_model` still wrote `model-manager-cache-index`, recording the model as filling the cache directory `<name>` of a claim that does not exist; `unload_model` left the entry, so it outlived the model, the GPU pool and the slice release; and `check_fit`, which trusts the index while no cache scan can answer (a pool at zero), could have answered `cached: true` for weights that are nowhere. Now `recordServed` records nothing while the serving layer has no cache or its claim is missing or has no volume; an entry carries `claim` and `volume`, and `check_fit` trusts it only when both are the ones bound now — an entry bound to another cache, or to none (an older release's), is no verdict (`cacheSource: unknown`); `unload_model` drops the deleted objects' entries that name a directory in no cache (cache off, claim missing or unbound, bound elsewhere) and keeps one bound to the current volume, whose directory outlives the object; the ConfigMap is deleted with its last entry (the chart's kserve Role grants `delete` on it).
+
+## [0.25.1] - 2026-09-18
+
+### Fixed
+
+- kserve: an `LLMInferenceService` routed on the models Gateway keeps its address under the discovery Gateway's origin when KServe publishes the Gateway's in-cluster address (`<gateway>.<namespace>.svc.cluster.local`, what a Gateway without a load balancer address gets): the Gateway terminates TLS and demands the person's token there too, and the cluster-local https address was taken for the keyless workload Service, rewritten to plain http and wired into kagent with the placeholder key — an endpoint nothing answered on. KServe's path stays; an external published address stands as before (giantswarm/agentlab#221).
+
+## [0.25.0] - 2026-09-18
+
+### Added
+
+- kserve: a preset that requests no GPU (`resources.gpus: 0`) is CPU work — the fit judges every node against its allocatable memory instead of the accelerator nodes alone, and the preset knows no GPU pool and no accelerator RuntimeClass: the `LLMInferenceService` it composes requests no `nvidia.com/gpu`, carries neither the pool's toleration and label nor `runtimeClassName`, so it lands on the cluster's CPU capacity (a tainted GPU pool stays out of reach); an explicit accelerator node is refused with the taint as the reason. A GPU preset and a bare model reference keep the accelerator nodes as their capacity, and `GET /api/v1/nodes` still lists those. What a lab without a GPU, or a small model on CPU capacity, needs to serve on the llm-d path (giantswarm/agentlab#221).
+
+## [0.24.10] - 2026-09-18
+
+### Fixed
+
 - kserve: the `scheduling` step's `CapacityUnavailable` names every zone a pool that pins none allows, and offers no zone as the way out when every one was refused (giantswarm/model-manager#132). On a pool without a zone pin Karpenter's CreateFleet asks for every size in every zone of the pool's node class, the cloud refuses each (size, zone) with its own fleet error, and Karpenter's event holds the first 300 characters of that answer: the step read the one zone the event names and said `the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1a, the zone the claim was constrained to. The way out is a pool in another zone (create_node_pool with zones naming it)` with `requestedZones: ["eu-central-1a"]` — the claim was constrained to no zone, every zone was refused, and no zone was left to move to. Now the pool's zone requirement (cluster-manager's `zones` pin) is the constraint; when the pool pins none, the zones a claim allowed are its own zone requirement while it stands (Karpenter resolves it from the node class), else the zones of the node class's subnets (`ec2nodeclasses.karpenter.k8s.aws`, `status.subnets[].zone`, read as the caller — the chart's ClusterRole grants `get`), and a fleet that launched nothing was refused every one of them: `requestedZones` names them all, `availableZones` never a zone the same answer refused (the cloud's "choosing …" sentence is the complement of the zone that fleet error refused), `pinnedByCache` is `false`, and the message reads `the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in any zone the pool allows (eu-central-1a, eu-central-1b and eu-central-1c). No zone is left to move to; wider sizes or another accelerator (a re-run of create_node_pool) give Karpenter more to choose from, and it retries while the pod waits`. A node class that could not be read leaves the zone the cloud named, `at least`, and names the failed read; a pinned refusal keeps its wording.
-- kserve: the `scheduling` step's `CapacityUnavailable` names every size the cloud refused, the zone the claim was constrained to and whose constraint it is, the zones the cloud names as having capacity, and the way out — instead of Karpenter's event message cut after the first size (giantswarm/model-manager#125). Karpenter truncates its `InsufficientCapacityError` event at 300 characters, so the step read `… InsufficientInstanceCapacity: We currently do not have sufficient g6e.2xlarg…`: one size cut mid-word — not the two other sizes the NodeClaim asked for and CreateFleet refused with it, not the zone the claim was constrained to, not that the constraint is the pool's (`pool.zones`, pinned to the model cache claim's zone by cluster-manager when the pool was created while the claim was Bound), not the cloud's own sentence naming the zones with capacity — and a person waited the whole scale-up budget with nothing that said what to change. Now, when a refusal stands, the step reads as the caller what the claim asked for — its `spec.requirements` while it stands, else the template of the NodePool it is named after (`nodepools.karpenter.sh`; the chart's RBAC reads it; the pool chart's family and sizes are composed to types), parses every refusal text — the claim's `Launched=False` condition, the events — for the sizes, the zone and the `choosing <zones>` clause where the text is whole, and reads where the cache claim's volume lies: `Karpenter could not launch a node: 4 NodeClaims refused, the last (gpu-l40s-46flj) at 2026-09-18T12:24:14Z — InsufficientCapacityError: the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache (its volume lives there); it has capacity in eu-central-1a and eu-central-1c. The way out is a pool in eu-central-1a or eu-central-1c (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned; Karpenter retries while the pod waits`. The step carries the same as fields — `refusedInstanceTypes`, `requestedZones`, `availableZones`, `pinnedByCache` (absent when the claim or its volume could not be read) — and the model's `reason`/`message` in `list_loaded_models` / `GET /api/v1/loaded` carry the message as before, the budget clause included once the step fails. A refusal that is not the cloud's capacity wording (`NodeClassNotReady`) keeps Karpenter's words; a read that fails — the NodePool, the cache claim — is named in the message, never silent.
+
+## [0.24.9] - 2026-09-18
+
+### Fixed
+
+- kserve: the cache index is written only for a cache that exists, an entry is bound to the claim and volume it was recorded against, and `unload_model` drops an entry whose directory is in no cache (giantswarm/model-manager#130). With the serving layer's cache off (`cache.enabled: false` in the discovery document: no claim, every predictor downloads into storage that goes with its pod) `load_model` still wrote `model-manager-cache-index`, recording the model as filling the cache directory `<name>` of a claim that does not exist; `unload_model` left the entry, so it outlived the model, the GPU pool and the slice release; and `check_fit`, which trusts the index while no cache scan can answer (a pool at zero), could have answered `cached: true` for weights that are nowhere. Now `recordServed` records nothing while the serving layer has no cache or its claim is missing or has no volume; an entry carries `claim` and `volume`, and `check_fit` trusts it only when both are the ones bound now — an entry bound to another cache, or to none (an older release's), is no verdict (`cacheSource: unknown`); `unload_model` drops the deleted objects' entries that name a directory in no cache (cache off, claim missing or unbound, bound elsewhere) and keeps one bound to the current volume, whose directory outlives the object; the ConfigMap is deleted with its last entry (the chart's kserve Role grants `delete` on it).
+
+## [0.24.8] - 2026-09-18
+
+### Fixed
+
 - kserve: `check_fit` and `load_model` no longer judge a fit on settings that predate the serving layer's discovery document (giantswarm/model-manager#127). The driver's settings — the GPU pool above all — are read from the discovery ConfigMap and cached for a minute; a resolve that found the ConfigMap absent was cached like any other result, and the document appears exactly then: the serving slice publishes it as its connectivity child installs, about two minutes after the node pool is created. Every call until the cache expired was judged without the pool, so `placeModel` never took the scale-from-zero path: on an installation `check_fit` a second after the slice's presets were listed answered `fits: false, reason: "no accelerator node: no node advertises nvidia.com/gpu or carries the nvidia.com/gpu.present label"` with `budgetBytes: 0` and no `budgetSource`, and `load_model` refused with `does_not_fit` the same second — for the preset and pool shape that answer `budgetSource: pool-scale-from-zero, instanceType: g6e.2xlarge` once the cache had expired. A pool that reports ready refused its first model for up to a minute with a reason that was wrong. Now settings resolved without a configured discovery ConfigMap stand for five seconds (`DiscoveryAbsentTTL`), not the minute; a fit that finds no candidate node while the cached settings lack the document re-resolves them once, bypassing the cache, and judges the nodes again on what the document says — the pool path when it names one; and while the document is still absent the answer names it: `fits: false`, the new `retryable: true`, `reason: "the serving layer's discovery document <namespace>/<name> is not published yet — the slice is still installing; retry in a moment"` (a document that could not be read names the error), which `load_model` / `pull_model` echo in their refusal. `no accelerator node` is the verdict for a document that names no pool. A resolve error is never cached, as before.
 
+## [0.24.7] - 2026-09-18
+
+### Fixed
+
+- kserve: the `scheduling` step's `CapacityUnavailable` names every size the cloud refused, the zone the claim was constrained to and whose constraint it is, the zones the cloud names as having capacity, and the way out — instead of Karpenter's event message cut after the first size (giantswarm/model-manager#125). Karpenter truncates its `InsufficientCapacityError` event at 300 characters, so the step read `… InsufficientInstanceCapacity: We currently do not have sufficient g6e.2xlarg…`: one size cut mid-word — not the two other sizes the NodeClaim asked for and CreateFleet refused with it, not the zone the claim was constrained to, not that the constraint is the pool's (`pool.zones`, pinned to the model cache claim's zone by cluster-manager when the pool was created while the claim was Bound), not the cloud's own sentence naming the zones with capacity — and a person waited the whole scale-up budget with nothing that said what to change. Now, when a refusal stands, the step reads as the caller what the claim asked for — its `spec.requirements` while it stands, else the template of the NodePool it is named after (`nodepools.karpenter.sh`; the chart's RBAC reads it; the pool chart's family and sizes are composed to types), parses every refusal text — the claim's `Launched=False` condition, the events — for the sizes, the zone and the `choosing <zones>` clause where the text is whole, and reads where the cache claim's volume lies: `Karpenter could not launch a node: 4 NodeClaims refused, the last (gpu-l40s-46flj) at 2026-09-18T12:24:14Z — InsufficientCapacityError: the cloud has no g6e.2xlarge, g6e.4xlarge or g6e.8xlarge capacity in eu-central-1b, the zone the pool is pinned to by the cache claim hf-cache (its volume lives there); it has capacity in eu-central-1a and eu-central-1c. The way out is a pool in eu-central-1a or eu-central-1c (create_node_pool with zones naming it and cache: false), or removing the cache claim so the next pool is not pinned; Karpenter retries while the pod waits`. The step carries the same as fields — `refusedInstanceTypes`, `requestedZones`, `availableZones`, `pinnedByCache` (absent when the claim or its volume could not be read) — and the model's `reason`/`message` in `list_loaded_models` / `GET /api/v1/loaded` carry the message as before, the budget clause included once the step fails. A refusal that is not the cloud's capacity wording (`NodeClassNotReady`) keeps Karpenter's words; a read that fails — the NodePool, the cache claim — is named in the message, never silent.
+
+## [0.24.6] - 2026-09-18
+
+### Fixed
+
 - kserve: an `oci://` preset is served on any eligible GPU node — the cache claim's node pin, the cache-node preference and the pre-warm download apply to the presets that store in the cache, not to a model image (giantswarm/model-manager#123). The backend judged every preset as a download into the cache claim: `eligibility` marked a GPU node ineligible when the claim was pinned to another node, `candidateNodes` preferred the nodes holding the claim, and `pull_model` built a storage-initializer download Job — also for a preset whose `storageUri` is `oci://` (KServe's modelcar: the weights are an OCI image containerd pulls onto the node's own disk; no storage-initializer, no claim mount, and the platform's cache redirect leaves such pods alone). On an installation whose claim is a node-local volume such a preset was refused on every node but the claim's although it never touches the claim, and `pull_model` would have started a download nothing consumes. Now the preset's storage scheme decides what the cache means for it (`storesInCache`: every download scheme and `pvc://` do, `oci://` does not; a bare model reference is a Hugging Face download and does): for an `oci://` preset `placeModel` judges the nodes without the claim's location — no pin, no cache-node preference, no scan — and answers `cached: false` with the new `cacheSource: oci-image`, so `check_fit` and `load_model` place it on any eligible GPU node with the budget, on a pool at zero against the pool's shapes as before; `pull_model` refuses it with `ErrInvalid` before the Hub is asked (`<model> is served from an OCI model image the platform pre-pulls on its GPU nodes (preset <name>, <image>); nothing to download`) and creates no Job. `list_nodes` is unchanged: it describes the nodes, not a preset. An `hf://` preset keeps every verdict.
+
+## [0.24.5] - 2026-09-18
+
+### Fixed
+
 - kserve: the `scheduling` step of a served model ends when the node exists, not when Karpenter nominates a NodeClaim for the pod, and Karpenter's refusal to launch one is the step's reason — failing the step and the phase once the GPU pool's scale-up budget is spent (giantswarm/model-manager#121). The step was marked done and `nodeStarting` began on Karpenter's `Nominated` event (`Pod should schedule on: nodeclaim/…`), which names a claim, not an instance: a claim the cloud refuses for capacity (`InsufficientInstanceCapacity`) is deleted within seconds and another one nominated, for as long as Karpenter retries, so a model whose pool had no capacity read `nodeStarting` for sixteen minutes while no node ever existed, and neither `list_loaded_models` nor the timeline carried the refusal. Now, for a pod without a node, the nominated NodeClaim (`karpenter.sh/v1`) is read as the caller: `nodeStarting` begins when its `Launched` condition is `True` (`since` = the transition; the message names the node once registered) — or when the pod names a node — and until then the step stays `scheduling` with `reason: NodeLaunching`. A refusal is read from the claim's `Launched=False` while the claim stands, else from the `InsufficientCapacityError` / `NodeClassNotReady` Warning events Karpenter publishes on the pool's claims before deleting them (in the `default` namespace, where a cluster-scoped object's events land; a claim created after a refusal is the retry and speaks for itself): the step reads `reason: CapacityUnavailable` with a message counting the refused claims, naming the last and when, and quoting Karpenter's reason and message (`Karpenter could not launch a node: 3 NodeClaims refused, the last (gpu-l4-c67br) at 2026-09-18T06:51:44Z — InsufficientCapacityError: … InsufficientInstanceCapacity: We currently do not have sufficient g6e.2xlarge capacity in the Availability Zone you requested (eu-central-1b) …; it retries while the pod waits`). Once the pod has waited longer than the new `--kserve-scale-up-timeout` / `KSERVE_SCALE_UP_TIMEOUT` / chart value `kserve.scaleUpTimeout` (default `10m`, from the pod's creation) against a refusal, the step is `failed` with that message plus the budget, `phase` is `failed`, and the model's `reason`/`message` in `list_loaded_models` / `GET /api/v1/loaded` carry it — as they carry Karpenter's account (`NodeLaunching`, `CapacityUnavailable`, `NodeStarting`) instead of the scheduler's `Unschedulable` for every pod without a node. A caller who may not read `nodeclaims.karpenter.sh` or the `default` namespace's events gets the message with the reason the read failed, never silently; the chart's ServiceAccount RBAC (used without downstream OAuth) reads both. A bound pod's `scheduling` ends when its claim launched, else at the nomination as before.
+
+## [0.24.4] - 2026-09-18
+
+### Fixed
+
 - kserve: `unload_model` deletes the serving object and unwires within the caller's deadline, whatever the cache scan would take, and rescans the cache inventory in the background — the answer says so (giantswarm/model-manager#119). The service resolved the model before the unload through the backend's inventory read, which runs a cache scan when none is fresh: a scan pod that could not start (a cache claim pinned to another zone than the pool's node) kept the call waiting until the caller's transport gave up at 30 s — `waiting for Job mm-scan--…: context canceled` — and the model stayed served. Now a backend whose unload needs no inventory (`backend.Stopper`, kserve) is asked to stop by the reference as given — repository id, object name or preset name, matched against the served objects — so no inventory read stands between the call and the deletion; the ModelConfig is unwired in the same call as before. The cached scans are dropped afterwards and, where a scan pod may run (the scan gate of #104: a bound claim, a node of the GPU pool), the cache is rescanned in the background with the ServiceAccount's clients so the next inventory read answers from the cache as it is now; the answer carries `inventory: {refreshing: true}` — or `{refreshing: false, reason}` naming why no scan can run (the pool at zero, an unbound claim) — and `unload_model`'s `next` says which. A model nothing serves answers `not_found` without a scan either. `POST /api/v1/models/unload` answers the same `inventory`.
+
+## [0.24.3] - 2026-09-18
+
+### Fixed
+
 - kserve: the `loading` step of a served model names a crash-looping runtime instead of the probe's "connection refused", and the phase fails once the kubelet backs off (giantswarm/model-manager#117). A runtime that died at start-up (a vLLM engine error, exit 1) was restarted by the kubelet and the step kept `inProgress` with the last `Unhealthy` event — `Startup probe failed: … connect: connection refused` — for as long as the loop lasted: a probe that had not passed yet, not a container that had died twice with a traceback. Now the step reads the runtime container's status beside the Events: while the kubelet restarts the container the step stays under way with `reason: CrashLoop` and a message naming the crash count, the exit code (and its reason unless the plain `Error`: `exit 137, OOMKilled`) and the last error line of the crashed container's log — read as the caller with `previous=true`, the last 200 lines, the last line matching `Error|Traceback|Exception|denied`, from the exception on when the line carries one — `runtime crashed 2× (exit 1): PermissionError: [Errno 13] Permission denied: '/mnt/models/.cache/vllm'`; once the kubelet backs off (`CrashLoopBackOff`) the step is `failed` with the same message plus the kubelet's back-off, `phase` is `failed`, and the model's `reason`/`message` in `list_loaded_models` / `GET /api/v1/loaded` carry it instead of the object's Ready condition. A caller who may not read `pods/log` gets the message with the reason the line is missing, never silently. The step's `since` is the image's first pull, so the elapsed time covers the whole loop (a restarted container is `Pulled` again — the image step keeps its first pull), and a back-off whose Events have expired is still the `loading` step, not `pullingImage`. A container starting for the first time keeps the probe wording.
+
+## [0.24.2] - 2026-09-18
+
+### Fixed
+
 - kserve: `load_model` wires the kagent ModelConfig in the same call, before the model is ready, and the caller's reads wire a served model model-manager manages that has none — a model-manager restart during the 10–15 minute cold start no longer leaves a served model no agent can use (giantswarm/model-manager#115). The ModelConfig was written only by the in-memory `load` job once the model was Ready, and model-manager runs in caller-only mode (`--downstream-oauth`: no reconciler, nothing runs without a caller), so a restart in that window — every release is one — lost the job: the model reached Ready, `list_loaded_models` showed it served, no ModelConfig existed and nothing said so. Now the address a served model will answer on is known when the object is composed — the discovery document's `spec.gateway.endpoint` (`https://models.<domain>`) plus the route KServe renders for every `LLMInferenceService`, `/<namespace>/<name>`; a classic `InferenceService` keeps its predictor Service — so `load_model` creates the ModelConfig in the same call, with `apiKeyPassthrough` for a model routed on the models Gateway, and answers `wiring: {wired: true, reason: "wired on load", modelConfig}` beside `fit` and `running`; the `load` job still follows the model to readiness and refreshes that ModelConfig from the published address in place, never a second one. `list_loaded_models` / `GET /api/v1/loaded` carry each served model's `modelConfig`, and a served model carrying model-manager's managed-by label that has none is wired by the read, as the caller, the entry saying `wiring: {wired: true, reason: "wired on read", modelConfig}` — objects someone else manages and objects being deleted are left alone. A ModelConfig someone else already points at the model is reported as `reason: "already wired"` and never duplicated; a wiring that fails is answered as `wired: false, reason: "wiring failed"` with the error, never silently. `unload_model` unwires as before; `wire_model` / `unwire_model` are unchanged; the caller-only start-up line says what a restart loses (the in-memory jobs, nothing else).
+
+## [0.24.1] - 2026-09-18
+
+### Fixed
+
 - kserve: the scale-from-zero fit budgets GPU memory from the GPUs the predictor requests, not the node's, and names a Hub-vs-preset weights discrepancy (giantswarm/model-manager#113). `check_fit` on a GPU pool with no node yet judged the weights plus overhead against a size's `gpus × gpuMemoryGiB` — the whole node — and reported that total as `budgetBytes`, so a preset requesting one GPU fit a four-GPU size whenever its weights fit the sum of the four cards: the predictor was scheduled with one GPU and vLLM could not allocate, while cluster-manager's form, which sized the pool, compared against the requested GPUs' memory and the two judges disagreed on every multi-GPU size. Now the budget on either verdict is the memory of the GPUs the preset requests (`resources.gpus`, default 1) on the size — a one-GPU preset needing 30 GiB is refused on a pool whose only size carries 4 × 24 GiB, a two-GPU preset needing 40 GiB fits it with a 48 GiB budget — and the reason says so (`fit within 48.0 GiB on the 2 GPU the predictor requests`; `carries 4 × 24 GiB GPU, 24.0 GiB on the 1 GPU the predictor requests`). And since the pool was sized from the preset's declared `requirements.weightsGiB` while the fit sizes the weights from the Hub, the answer carries the declaration as `declaredWeightsBytes` whenever a preset serves the model, and when the Hub holds more than the preset declares the reason names it on both verdicts — `the preset declares 15.0 GiB of weights, the Hub holds 24.6 GiB` on a fit, `…; the Hub holds 24.6 GiB, which is what does not fit — correct the preset` on a refusal, which `load_model` / `pull_model` echo. A declaration that covers the Hub adds nothing.
+
+## [0.23.12] - 2026-09-17
+
+### Fixed
+
 - kserve: the ModelConfig wired for a model routed on the models Gateway forwards the caller's own token instead of carrying a placeholder key (giantswarm/model-manager#108). The Gateway's JWT policy admits a person's Dex token and nothing else, and the auto-wired `ModelConfig` carried `apiKeySecret` pointing at the placeholder Secret, so an agent created on it failed every turn with `401 Unauthorized` (`the token header is malformed`); the same agent on a passthrough ModelConfig applied by hand answered through the Gateway as the person. The API key now follows the address KServe published: a model routed on the Gateway (`status.addresses`, an external host) is wired with `apiKeyPassthrough: true` and no `apiKeySecret` — no placeholder Secret is created — while a model reached on its in-cluster Service keeps the placeholder `OPENAI_API_KEY` Secret kagent's OpenAI runtime insists on. `wire_model` / `POST /api/v1/models/wire` take the shape explicitly for any backend: `apiKeyPassthrough` composes the passthrough shape, `apiKeySecret` (+ `apiKeySecretKey`, default `OPENAI_API_KEY`) references a Secret of the caller's holding a static key, and the two together are refused with the reason (the CRD's exclusivity). A re-wire that changes the shape refreshes the ModelConfig in place and removes a placeholder Secret it no longer reads; `ModelConfigRef` reports `apiKeyPassthrough` / `apiKeySecret`. `unwire_model` and `unload_model` remove what was wired as before.
+
+## [0.23.11] - 2026-09-17
+
+### Fixed
+
 - kserve: the download Job downloads without Xet and fails a stalled download with a reason instead of hanging (giantswarm/model-manager#106). The KServe storage-initializer image ships `hf_xet`, so `huggingface_hub` took the Xet path for a Xet-backed repository (Qwen/Qwen3-4B-Instruct-2507 is one): on a Giant Swarm cluster the Xet client connects to CDN addresses the pods' Cilium `toFQDNs` DNS proxy never resolved for an allowed name (30 s TTLs, the client's own resolver cache), the SYNs are dropped by policy and the client hangs without an error — `pull_model` would have said "downloading" forever, holding the pool's GPU node. The Job's pod now carries `HF_HUB_DISABLE_XET=1` beside `HF_HUB_ENABLE_HF_TRANSFER=1`: shards come from `cdn-lfs*.hf.co` through hf_transfer and the system resolver, one DNS query per new connection, every address admitted (giantswarm/agent-platform#520 is the storage-initializer half of an `LLMInferenceService`). The download script keeps a stall clock on the bytes allocated in the target directory: a download that writes nothing for the new `--kserve-download-stall-timeout` / `KSERVE_DOWNLOAD_STALL_TIMEOUT` / chart value `kserve.download.stallTimeout` (default `10m`) is killed and the pod exits 3 with `DOWNLOAD STALLED: no bytes written to <dir> for <N>s (<bytes> bytes on disk, HF_HUB_DISABLE_XET=… HF_HUB_ENABLE_HF_TRANSFER=…); partial files stay for a retry`; the Job's `podFailurePolicy` fails the Job on that exit code at once (a retry would hang the same way) and ignores a pod its node's disruption took, other failures keep their two retries; the pull job's error — what `pullProgress` and `list_models` show — is that stall line, not the log tail. A new `pull_model` resumes from the partial files.
+
+## [0.23.10] - 2026-09-17
+
+### Fixed
+
 - kserve: `load_model` on a fresh slice with the GPU pool at zero answers within a muster meta-tool call's deadline on the first call, and no cache scan pod launches a GPU node any more (giantswarm/model-manager#104). Before, the call ran the pre-create cache scan inline: on a `WaitForFirstConsumer` claim the scan pod `mm-scan--…` — carrying the pool's toleration and selector — was the claim's first consumer, so the autoscaler launched a g6.xlarge for it (19.5 min, no predictor ever ran), and three consecutive calls each timed out at ~10 s before the `LLMInferenceService` existed. Now a scan pod is created only where it can launch nothing: never while the claim is unbound (the predictor binds it), on a shared claim only while a node of the pool exists, on a claim pinned to its nodes as before; and a call whose deadline leaves less than the scan's budget (`--kserve-inventory-timeout`) is answered from the last scan — or nothing — while the scan, when permitted, runs in the background for the next call. The cache index (`--kserve-cache-index-configmap`) stands in for the scan while none can answer. The hub lookups of a fit check get what the caller's deadline leaves after a 2 s reserve for the Kubernetes side, at most `--kserve-hf-timeout`; a load whose object was created but whose state could not be read in time answers with the resolved model instead of a cancelled call. The scan and removal pods run as Jobs that own their pod (`BackoffLimit` 0, a 10 min TTL as a safety net, deleted with the pod once read), so the fleet's `prevent-bare-pods` Kyverno policy no longer warns.
+
+## [0.23.9] - 2026-09-17
+
+### Fixed
+
 - kserve: an `LLMInferenceService` is composed without `router.scheduler`, so KServe routes the models Gateway to the model's workload Service (giantswarm/model-manager#100). The composer asked for the llm-d endpoint picker on every object, and KServe then rendered the `HTTPRoute`'s `/v1/*` rules against an `InferencePool` that a gateway resolves only with the Gateway API Inference Extension — the platform's gateway does not run it, so the route stayed `ResolvedRefs=False BackendNotFound`, the object `RouterReady=False HTTPRoutesNotReady` (70 minutes on the first model served through the platform, giantswarm/agent-platform#504) and `/v1/chat/completions` had no route, while the picker put a Deployment and a hop in front of a single replica for nothing. Now `spec.router: {route: {}}`: the route targets `<name>-kserve-workload-svc:8000`, `ResolvedRefs=True`, `Ready=True` once the predictor is up, no `InferencePool`, no scheduler Deployment. The picker is opt-in for the shapes that need it (several replicas, prefill/decode): the backend document's new `spec.kserve.router.scheduler: true` for every preset, or a preset's `spec.router.scheduler` for one — either then needs the Inference Extension on the gateway (`docs/backends.md`). An object composed before keeps its shape until it is unloaded and loaded again.
+
+## [0.23.8] - 2026-09-16
+
+### Fixed
+
 - `list_backends` never reports a registered backend's own document as `invalid` (giantswarm/model-manager#101). The registry registered the backend a fixed document builds and cleared the ConfigMap's `invalid` report in two steps under two locks, so a reader between them saw the backend registered and its stale report standing — the tag pipeline of 0.23.7 failed in `TestInvalidDocumentIsReportedNotLoaded` on exactly that window. The service now registers and clears in one step (`RegisterDocument`); a refused registration leaves the report to the caller as before.
-- `list_backends` reads the backends and the `invalid` documents at one moment. It read them under two locks, so a document broken, or deleted and recreated invalid, between the two reads could be answered both registered and reported: the reader side of the window giantswarm/model-manager#101 closed for the writer. `TestFixedDocumentIsNeverRegisteredAndInvalidAtOnce` sampled the same way and failed intermittently on CI with a violation the service never held; its sampler now reads what `list_backends` reads.
-- A backend document that breaks drops its backend in the same step that reports it, so `list_backends` never answers a backend registered beside its own fresh `invalid` report. The registry reported the broken document and dropped the backend under two locks: a registered document updated to one failing the schema (`spec: {kind: ollama}` without `endpoint`) was, between the two, both registered and reported, the break-side mirror of the window giantswarm/model-manager#101 closed for a fixed document, and `list_backends` observes it since it reads both at one moment. A broken document that still names its kind — its backend failed to build, e.g. a remote kserve target whose `caBundle` is no PEM certificate — kept the last good backend registered beside the report for as long as it stayed broken; it is dropped like any other broken document now, so what serves is always what the ConfigMap holds. The service drops and reports in one step (`DeregisterDocument`, the mirror of `RegisterDocument`), also when a document is deleted; `TestBrokenDocumentIsNeverRegisteredAndInvalidAtOnce` samples good → bad updates of both kinds.
+
+## [0.23.7] - 2026-09-16
+
+### Fixed
+
 - kserve: `check_fit` at a GPU pool's scale-from-zero judges the model against the pool's instance shapes instead of answering unverified (giantswarm/model-manager#97). The kserve backend document's `spec.kserve.gpuPool` (and the discovery ConfigMap's `spec.gpuPool`) gains `instances[]` — the sizes the pool launches, in the shape cluster-manager's `create_node_pool` answer lists under `sizes`: `instanceType`, `size`, `vcpu`, `memoryGiB`, `gpus`, `gpuMemoryGiB` and what a node of the size leaves a predictor after the kubelet's reservations and the fleet's daemonsets, `usableVcpu` / `usableMemoryGiB`; validated when the document is read (a non-empty instance type, positive numbers). With the shapes known and no node in the pool yet, the preset's `resources.requests` cpu and memory are judged against a size's usable vCPU and memory, its `gpus` against the size's and the weights plus overhead against `gpus × gpuMemoryGiB`: the smallest size that hosts the predictor is the node it will come as (`fits: true`, the new `instanceType` names it, `budgetBytes` is its GPU memory, the reason is no longer "unverified"), and when no size does the answer is `fits: false` naming the pool's sizes, what the predictor asks and what the largest size leaves — and `load_model` / `pull_model` refuse with that reason before any object is created. A model without a preset is judged on its weights and the default overhead against the GPU memory alone. Before, a predictor composed from a preset requesting 4 vCPU / 16 GiB sat Pending for ten minutes on a pool of `g6.xlarge` nodes (3 vCPU / 11.9 GiB for a predictor) while only Karpenter's log said no size of the pool could host it (giantswarm/agent-platform#502). Without shapes the answer is the one before.
 
+## [0.23.6] - 2026-09-16
+
+### Fixed
+
 - kserve: the cache-scan pod, the removal pod, the download Job and the cache-agent DaemonSet stay within the restricted Pod Security Standard (giantswarm/model-manager#94). They ran as root with `DAC_OVERRIDE`/`FOWNER` (the download Job's init container with `CHOWN` too, the cache-agent with `DAC_READ_SEARCH`) and without a seccomp profile — within the *baseline* profile, which a Giant Swarm cluster does not enforce: its Kyverno set is the *restricted* profile, and `require-run-as-nonroot`, `require-run-as-non-root-user`, `disallow-capabilities-strict` and `restrict-seccomp-strict` denied every `mm-scan-*` pod, so `list_models` / `get_model` / `delete_model` on the kserve backend logged `cache scan failed` and listed the served models only, and `pull_model`'s Job would have been denied the same way. Every pod mounting the cache claim now runs as uid 1000 — the KServe storage-initializer's, the uid a predictor's download writes as — with the pod's `fsGroup` set to the same id and `seccompProfile: RuntimeDefault`, and adds no capability: the kubelet makes the claim's contents group-owned and group-writable on every read-write mount (the CSI driver's `fsGroupPolicy` permitting), so the scan reads, the removal deletes and the download writes without root. The download Job's init container creates its directories with `mkdir -m 0777 -p` — a directory a predictor's init container already created is left alone instead of failing a `chmod` on root's directory — and fails with a message naming the fsGroup when the claim root is not writable, instead of the download's first write. The cache-agent DaemonSet renders the chart's `podSecurityContext` / `securityContext`. A unit test asserts the composed scan, removal and download pod specs against the four rules.
+
+## [0.23.5] - 2026-09-16
+
+### Fixed
+
 - kserve: `check_fit` answers within a meta-tool deadline when the Hugging Face Hub is unreachable (giantswarm/model-manager#88). The hub lookups of one fit check (repository metadata, file tree, safetensors index) or search are bounded by the new `--kserve-hf-timeout` / `KSERVE_HF_TIMEOUT` / chart value `kserve.hf.timeout` (default `4s`; the hub answers in well under a second when reachable). Before, a hub whose packets an egress policy dropped kept the 30 s client in TCP retries until muster's 10 s deadline cancelled the call, so the preset fallback ran only when nobody could receive its answer (`http upstream error: upstream call timeout`). When the hub does not answer, the preset's `requirements` size the model within the budget — `weightsSource: preset`, and `reason` says the hub did not answer within the timeout (it also names a refused or failed lookup); a model no preset serves answers an error that says the same instead of the bare context error. Download Jobs are not affected.
+
+## [0.23.4] - 2026-09-16
+
+### Added
+
+- kserve: `list_loaded_models` / `GET /api/v1/loaded` report a serving object's `reason` next to `status` and `message`: the Ready condition's (`HTTPRoutesNotReady`, `PredictorNotReady`), a failed load's, or — while the predictor pod waits — the pod's own: `Unschedulable` with the scheduler's message (no node with a free GPU, a pool still scaling from zero), `ImagePullBackOff`. An object whose predictor pod is Pending is `Pending` whatever its conditions say; `NotReady` is a condition that says so with no pod waiting. `load_model`'s answer names the object it created (`running.resource`, `running.kind`, its `status` and `reason`), and the `load` job that follows it carries `resource` and `preset`.
+
+### Fixed
+
 - kserve: a serving object that is not Ready stays visible and removable (giantswarm/model-manager#92). The driver's settings — the serving namespace, the GPU pool, whether the `LLMInferenceService` API is served and so which kinds are listed at all — are cached for a minute and were refreshed by whichever call came first, with that caller's credentials. A `load` job polling readiness with a caller token that had expired got `401` from the API discovery, "LLMInferenceService API not served" was cached for everyone, and the namespace's LLMInferenceServices vanished from `list_loaded_models`, `unload_model` and `delete_model` until the job gave up two hours later (a Pending `qwen3-4b-instruct` invisible for ninety minutes; `unload_model` by preset name answered `not_found`). A refresh that fails now keeps the last good settings and is retried on the next call; the API discovery and the discovery ConfigMap are read with the caller's client first and the ServiceAccount's after it, so a dead caller token decides nothing; and the `load` job stops polling on `401`/`403` with an error that says the object keeps starting and that `wire_model` wires it once Ready, instead of logging the same failure every five seconds.
+
+## [0.23.3] - 2026-09-16
+
+### Fixed
+
 - kserve: a GPU pool at scale-to-zero can be served (giantswarm/model-manager#90). When the pool selector (`spec.gpuPool.nodeSelector`) names a pool no node belongs to yet, `check_fit` answers `fits: true` without a node (`budgetSource: pool-scale-from-zero`, the reason says the fit is unverified) and `load_model` / `pull_model` proceed: the predictor carries the pool's toleration and selector, goes Pending, and the autoscaler launches the node. Before, `no eligible node` refused every load on an empty pool, so the first model could never be served on it. An explicit node, a pool whose nodes do not fit, or no pool selector keep the refusal.
 
+## [0.23.2] - 2026-09-16
+
+### Added
+
+- `get_info` MCP tool: the build this server runs (`version` — the release, `dev` for an untagged local build —, `commit`, `built`), the names of its tools, the configured backends in order and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to — the same first call the other Agent Platform managers offer.
+
+### Fixed
+
 - The image reports its release: a binary built from a tagged checkout resolves `version` (`get_info`, `model-manager version`, `--version`, the MCP server identity, the start-up log — which now names the commit too) from the Go toolchain's build info — the tag at HEAD, the commit, its time — when the build passes no `-ldflags -X`; the 0.23.0 image said `dev`. The `+dirty` the toolchain appends for a modified working tree is dropped from the version (the release pipeline's checkout carries build artefacts); the commit keeps its `-dirty` marker for a local build. A build without version control information still says `dev`.
+
+## [0.23.0] - 2026-09-16
+
+### Added
+
+- kserve: the GPU node pool's scheduling as one input, `gpuPool` — the pool's taint (`nvidia.com/gpu` `NoSchedule`, the taint a platform-created pool carries) tolerated and the pool's label (`giantswarm.io/machine-pool=<cluster>-<pool>`) selected on everything the driver schedules onto the pool: the composed `LLMInferenceService` / `InferenceService` predictors (the pool toleration first, the preset's `scheduling.tolerations` after it), the download Jobs and the inventory scan pods (the toleration always, the selector unless the pod is pinned to a cache node). Read from the discovery ConfigMap's `spec.gpuPool.taint` / `spec.gpuPool.nodeSelector` (the platform chart's `modelServing.gpuPool.*`); a registered backend document's `spec.kserve.gpuPool` (and `add_backend`'s `gpuPoolTaint` / `gpuPoolNodeSelector`) replaces it. `GET /api/v1/nodes` reports a tainted GPU node as capacity once its taint is tolerated and names an untolerated `NoSchedule`/`NoExecute` taint or a node outside the pool's selector in `eligibilityReason`; `GET /api/v1/backend` reports the input as `gpuPool`. Unset, nothing changes.
+
+## [0.21.0] - 2026-09-16
+
+### Added
+
+- kserve: a serving preset is composed into an `LLMInferenceService` (`serving.kserve.io/v1alpha2`, the llm-d control plane) by spec shape wherever that API is served — `spec.model.uri`/`name`, one replica, `router.route` and `router.scheduler`, the preset's args, env and resources on `template.containers[main]`, `scheduling` as the template's nodeSelector/tolerations, the chat template mounted, `template.runtimeClassName` from the discovery ConfigMap when set; no `baseRefs` and no image unless the preset's new `spec.template` (containers merged by name) or `spec.baseRefs` say so. `--kserve-serving-kind` / `kserve.servingKind` (`auto` | `LLMInferenceService` | `InferenceService`) pins the kind; both kinds are listed, stopped and deleted, `LoadedModel.kind` names it, and the wiring's served model name follows the kind. Composer tests validate every shipped preset against the LLMInferenceService CRD schema.
+
+## [0.20.4] - 2026-09-15
+
+### Changed
+
+- The chart README no longer renders a version badge (`chart.badgesSection` removed from `README.md.gotmpl`): a release PR bumping `Chart.yaml`'s `version` no longer changes the checked-in `README.md`, so the helm-docs pre-commit hook no longer fails on it. ([giantswarm/devctl#2180](https://github.com/giantswarm/devctl/issues/2180))
+
+## [0.20.0] - 2026-09-11
+
+### Changed
+
+- Agent wiring targets kagent API v2: the ModelConfig API version used when discovery is unavailable is `kagent.dev/v1alpha3`, the only version kagent API v2 serves; `kagent.apiVersion: auto` keeps resolving whatever the cluster serves, so a kagent 0.x cluster still gets `v1alpha2`. The spec model-manager writes — `provider`, `model`, `ollama.host`, `openAI.baseUrl`, `apiKeySecret`/`apiKeySecretKey` — is the same in both versions. A ModelConfig's `ready` needs kagent's `ResolvedRefs` condition to be `True` beside `Accepted` whenever the controller reports it: kagent API v2 reports a missing or incomplete API-key Secret there while `Accepted` stays `True`, so such a ModelConfig read as ready before; `message` names the condition holding it back. The chart-test smoke applies the v2 `modelconfigs` CRD.
+
+## [0.19.0] - 2026-09-08
+
+### Added
+
+- `lmstudio` backend: an LM Studio on the host (llama.cpp on GPU and CPU, MLX on Apple silicon) as a serving backend, proxying its `/api/v1` API — the library, the download that backs a pull with real byte progress, and load/unload. Agent wiring uses kagent's `OpenAI` provider against the agent host plus `/v1` with the placeholder key. LM Studio serves no delete (`lms rm` is host-only), so the backend reports `delete: false` and the call answers `501 unsupported`; it exposes no host hardware, so `nodeInventory` is false too. A load is idempotent (LM Studio loads an *instance*, so a repeat would pin a second copy), load and unload prove themselves from the answer's body rather than its status code, a pull resolves its reference against the library before reporting success (LM Studio does not promise the download's `key` is the reference asked for) and gives up on a status that is neither progress nor an end it knows. Chart values `lmstudio.endpoint` / `lmstudio.agentHost`, flags `--lmstudio-endpoint` / `--lmstudio-agent-host`. Requires LM Studio 0.4.0+.
+
+## [0.18.0] - 2026-09-07
+
+### Added
+
+- `agent-platform.giantswarm.io/tool-group: agent-platform` on the muster `MCPServer` CR, next to `muster.giantswarm.io/type`: model-manager is part of the Agent Platform's own management surface, the tier the portal's MCP servers page, the toolset presets and the docs group it under. `muster.mcpServer.labels` still adds to and overrides the CR's labels; the passthrough is merged instead of appended, so an override renders one key instead of a duplicate.
+
+### Fixed
+
 - The `helm.sh/chart` label value is valid for every chart version: the 63-character cut of a branch build's version (`0.x.y-dev.<branch>.<timestamp>.<sha>`) could end on a `.`, which the API server rejects on every labelled object (the ATS smoke of a 16-character branch name failed that way). The helper trims a trailing `.` like it trims a trailing `-`.
 
-[Unreleased]: https://github.com/giantswarm/model-manager/tree/main
+[Unreleased]: https://github.com/giantswarm/model-manager/compare/v1.18.0-rc.1...HEAD
+[1.18.0-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.17.2-rc.2...v1.18.0-rc.1
+[1.17.2-rc.2]: https://github.com/giantswarm/model-manager/compare/v1.16.4...v1.17.2-rc.2
+[1.16.4]: https://github.com/giantswarm/model-manager/compare/v1.16.3...v1.16.4
+[1.16.3]: https://github.com/giantswarm/model-manager/compare/v1.16.1...v1.16.3
+[1.16.1]: https://github.com/giantswarm/model-manager/compare/v1.16.1-rc.1...v1.16.1
+[1.16.1-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.16.0...v1.16.1-rc.1
+[1.16.0]: https://github.com/giantswarm/model-manager/compare/v1.16.0-rc.6...v1.16.0
+[1.16.0-rc.6]: https://github.com/giantswarm/model-manager/compare/v1.16.0-rc.5...v1.16.0-rc.6
+[1.16.0-rc.5]: https://github.com/giantswarm/model-manager/compare/v1.16.0-rc.4...v1.16.0-rc.5
+[1.16.0-rc.4]: https://github.com/giantswarm/model-manager/compare/v1.16.0-rc.1...v1.16.0-rc.4
+[1.16.0-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.15.0...v1.16.0-rc.1
+[1.15.0]: https://github.com/giantswarm/model-manager/compare/v1.14.2...v1.15.0
+[1.14.2]: https://github.com/giantswarm/model-manager/compare/v1.14.2-rc.2...v1.14.2
+[1.14.2-rc.2]: https://github.com/giantswarm/model-manager/compare/v1.14.2-rc.1...v1.14.2-rc.2
+[1.14.2-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.14.1...v1.14.2-rc.1
+[1.14.1]: https://github.com/giantswarm/model-manager/compare/v1.14.1-rc.1...v1.14.1
+[1.14.1-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.14.0...v1.14.1-rc.1
+[1.14.0]: https://github.com/giantswarm/model-manager/compare/v1.14.0-rc.1...v1.14.0
+[1.14.0-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.13.0...v1.14.0-rc.1
+[1.13.0]: https://github.com/giantswarm/model-manager/compare/v1.12.2...v1.13.0
+[1.12.2]: https://github.com/giantswarm/model-manager/compare/v1.12.1...v1.12.2
+[1.12.1]: https://github.com/giantswarm/model-manager/compare/v1.12.0...v1.12.1
+[1.12.0]: https://github.com/giantswarm/model-manager/compare/v1.11.2...v1.12.0
+[1.11.2]: https://github.com/giantswarm/model-manager/compare/v1.11.1...v1.11.2
+[1.11.1]: https://github.com/giantswarm/model-manager/compare/v1.11.0...v1.11.1
+[1.11.0]: https://github.com/giantswarm/model-manager/compare/v1.10.9...v1.11.0
+[1.10.9]: https://github.com/giantswarm/model-manager/compare/v1.10.8...v1.10.9
+[1.10.8]: https://github.com/giantswarm/model-manager/compare/v1.10.7-rc.1...v1.10.8
+[1.10.7-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.10.6...v1.10.7-rc.1
+[1.10.6]: https://github.com/giantswarm/model-manager/compare/v1.10.5...v1.10.6
+[1.10.5]: https://github.com/giantswarm/model-manager/compare/v1.10.4...v1.10.5
+[1.10.4]: https://github.com/giantswarm/model-manager/compare/v1.10.3...v1.10.4
+[1.10.3]: https://github.com/giantswarm/model-manager/compare/v1.10.2...v1.10.3
+[1.10.2]: https://github.com/giantswarm/model-manager/compare/v1.10.0...v1.10.2
+[1.10.0]: https://github.com/giantswarm/model-manager/compare/v1.9.3...v1.10.0
+[1.9.3]: https://github.com/giantswarm/model-manager/compare/v1.9.1...v1.9.3
+[1.9.1]: https://github.com/giantswarm/model-manager/compare/v1.9.0...v1.9.1
+[1.9.0]: https://github.com/giantswarm/model-manager/compare/v1.8.2...v1.9.0
+[1.8.2]: https://github.com/giantswarm/model-manager/compare/v1.8.1...v1.8.2
+[1.8.1]: https://github.com/giantswarm/model-manager/compare/v1.8.0-rc.1...v1.8.1
+[1.8.0-rc.1]: https://github.com/giantswarm/model-manager/compare/v1.6.0...v1.8.0-rc.1
+[1.6.0]: https://github.com/giantswarm/model-manager/compare/v1.5.1...v1.6.0
+[1.5.1]: https://github.com/giantswarm/model-manager/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/giantswarm/model-manager/compare/v1.4.7...v1.5.0
+[1.4.7]: https://github.com/giantswarm/model-manager/compare/v1.4.5...v1.4.7
+[1.4.5]: https://github.com/giantswarm/model-manager/compare/v1.4.4...v1.4.5
+[1.4.4]: https://github.com/giantswarm/model-manager/compare/v1.4.3...v1.4.4
+[1.4.3]: https://github.com/giantswarm/model-manager/compare/v1.4.2...v1.4.3
+[1.4.2]: https://github.com/giantswarm/model-manager/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/giantswarm/model-manager/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/giantswarm/model-manager/compare/v1.3.3...v1.4.0
+[1.3.3]: https://github.com/giantswarm/model-manager/compare/v1.3.2...v1.3.3
+[1.3.2]: https://github.com/giantswarm/model-manager/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/giantswarm/model-manager/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/giantswarm/model-manager/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/giantswarm/model-manager/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/giantswarm/model-manager/compare/v1.1.9...v1.2.0
+[1.1.9]: https://github.com/giantswarm/model-manager/compare/v1.1.8...v1.1.9
+[1.1.8]: https://github.com/giantswarm/model-manager/compare/v1.1.7...v1.1.8
+[1.1.7]: https://github.com/giantswarm/model-manager/compare/v1.1.6...v1.1.7
+[1.1.6]: https://github.com/giantswarm/model-manager/compare/v1.1.5...v1.1.6
+[1.1.5]: https://github.com/giantswarm/model-manager/compare/v1.1.3...v1.1.5
+[1.1.3]: https://github.com/giantswarm/model-manager/compare/v1.1.2...v1.1.3
+[1.1.2]: https://github.com/giantswarm/model-manager/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/giantswarm/model-manager/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/giantswarm/model-manager/compare/v1.0.15...v1.1.0
+[1.0.15]: https://github.com/giantswarm/model-manager/compare/v1.0.12...v1.0.15
+[1.0.12]: https://github.com/giantswarm/model-manager/compare/v1.0.8...v1.0.12
+[1.0.8]: https://github.com/giantswarm/model-manager/compare/v1.0.6...v1.0.8
+[1.0.6]: https://github.com/giantswarm/model-manager/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/giantswarm/model-manager/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/giantswarm/model-manager/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/giantswarm/model-manager/compare/v1.0.1...v1.0.3
+[1.0.1]: https://github.com/giantswarm/model-manager/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/giantswarm/model-manager/compare/v0.25.1...v1.0.0
+[0.25.1]: https://github.com/giantswarm/model-manager/compare/v0.25.0...v0.25.1
+[0.25.0]: https://github.com/giantswarm/model-manager/compare/v0.24.10...v0.25.0
+[0.24.10]: https://github.com/giantswarm/model-manager/compare/v0.24.9...v0.24.10
+[0.24.9]: https://github.com/giantswarm/model-manager/compare/v0.24.8...v0.24.9
+[0.24.8]: https://github.com/giantswarm/model-manager/compare/v0.24.7...v0.24.8
+[0.24.7]: https://github.com/giantswarm/model-manager/compare/v0.24.6...v0.24.7
+[0.24.6]: https://github.com/giantswarm/model-manager/compare/v0.24.5...v0.24.6
+[0.24.5]: https://github.com/giantswarm/model-manager/compare/v0.24.4...v0.24.5
+[0.24.4]: https://github.com/giantswarm/model-manager/compare/v0.24.3...v0.24.4
+[0.24.3]: https://github.com/giantswarm/model-manager/compare/v0.24.2...v0.24.3
+[0.24.2]: https://github.com/giantswarm/model-manager/compare/v0.24.1...v0.24.2
+[0.24.1]: https://github.com/giantswarm/model-manager/compare/v0.23.12...v0.24.1
+[0.23.12]: https://github.com/giantswarm/model-manager/compare/v0.23.11...v0.23.12
+[0.23.11]: https://github.com/giantswarm/model-manager/compare/v0.23.10...v0.23.11
+[0.23.10]: https://github.com/giantswarm/model-manager/compare/v0.23.9...v0.23.10
+[0.23.9]: https://github.com/giantswarm/model-manager/compare/v0.23.8...v0.23.9
+[0.23.8]: https://github.com/giantswarm/model-manager/compare/v0.23.7...v0.23.8
+[0.23.7]: https://github.com/giantswarm/model-manager/compare/v0.23.6...v0.23.7
+[0.23.6]: https://github.com/giantswarm/model-manager/compare/v0.23.5...v0.23.6
+[0.23.5]: https://github.com/giantswarm/model-manager/compare/v0.23.4...v0.23.5
+[0.23.4]: https://github.com/giantswarm/model-manager/compare/v0.23.3...v0.23.4
+[0.23.3]: https://github.com/giantswarm/model-manager/compare/v0.23.2...v0.23.3
+[0.23.2]: https://github.com/giantswarm/model-manager/compare/v0.23.0...v0.23.2
+[0.23.0]: https://github.com/giantswarm/model-manager/compare/v0.21.0...v0.23.0
+[0.21.0]: https://github.com/giantswarm/model-manager/compare/v0.20.4...v0.21.0
+[0.20.4]: https://github.com/giantswarm/model-manager/compare/v0.20.0...v0.20.4
+[0.20.0]: https://github.com/giantswarm/model-manager/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/giantswarm/model-manager/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/giantswarm/model-manager/releases/tag/v0.18.0
