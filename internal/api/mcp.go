@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/giantswarm/mcp-toolkit/tooldesc"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -79,11 +80,11 @@ const (
 )
 
 // commitArgs are the mode argument of a write that commits and its explicit
-// target; what names the tool's files.
-func commitArgs(what string) mcp.ToolOption {
+// target.
+func commitArgs() mcp.ToolOption {
 	opts := []mcp.ToolOption{
-		mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply (default): write "+what+" live, as you — refused with gitops_owned for an object Flux applies from git. commit: open a pull request as you in the GitOps repository that owns the kagent namespace (Flux provenance: the object's Kustomization, else the namespace's), the files under <path>/model-manager/ with their kustomization entries, a Secret SOPS-encrypted for the repository's .sops.yaml; answers the pull request (commit.pullRequest), auth_required naming the one-time consent (core_auth_login server=model-manager), or repository_unavailable naming a repository the model-manager GitHub App is not installed on (dryRun: commit.unavailable). get_backend's capabilities.commit says whether this server offers it")),
-		mcp.WithString(argRepository, mcp.Description("mode commit: the repository (owner/name) to commit to where no Flux provenance names one; with branch and path it overrides the provenance. On a kserve backend with a remote target it names the serving object's location only (a directory a Flux Kustomization applies to the target); the ModelConfig follows the kagent namespace's provenance")),
+		mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply (default): write live as you (gitops_owned where Flux applies it from git). commit: open a pull request as you in its GitOps repository")),
+		mcp.WithString(argRepository, mcp.Description("mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance")),
 		mcp.WithString(argBranch, mcp.Description("mode commit: the base branch of repository")),
 		mcp.WithString(argPath, mcp.Description("mode commit: the directory in repository a Flux Kustomization builds from (default: the root); model-manager's files go under <path>/model-manager/")),
 	}
@@ -101,9 +102,9 @@ const (
 )
 
 // applyOnly is the mode argument of a write that never commits: commit
-// answers unsupported, why names what to do instead.
-func applyOnly(tool, why string) mcp.ToolOption {
-	return mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply only: "+tool+" in mode commit answers unsupported — "+why))
+// answers unsupported, its refusal (refuseCommit) naming what to do instead.
+func applyOnly() mcp.ToolOption {
+	return mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply only: mode commit answers unsupported, naming what to do instead"))
 }
 
 // refuseCommit is applyOnly's refusal.
@@ -136,12 +137,32 @@ func modeOf(req mcp.CallToolRequest) (string, error) {
 // dryRunArg is the dryRun argument of a write tool; returns says what the
 // dry run answers.
 func dryRunArg(returns string) mcp.ToolOption {
-	return mcp.WithBoolean(argDryRun, mcp.Description("Write nothing: return "+returns))
+	return mcp.WithBoolean(argDryRun, mcp.Description("Write nothing; return the plan: "+returns))
 }
 
 // backendArg is the optional backend argument every tool takes.
 func backendArg(what string) mcp.ToolOption {
-	return mcp.WithString(argBackend, mcp.Description("Backend (ollama|kserve|lemonade|lmstudio) "+what+"; one model-manager may run several — list_backends names them. Optional when one backend is configured."))
+	return mcp.WithString(argBackend, mcp.Description("Backend "+what+", as list_backends names it; optional with one backend"))
+}
+
+// readOnly annotates a tool that changes nothing; mcp-go defaults every tool
+// to destructive and not idempotent.
+func readOnly() mcp.ToolOption {
+	return func(t *mcp.Tool) {
+		mcp.WithReadOnlyHintAnnotation(true)(t)
+		mcp.WithDestructiveHintAnnotation(false)(t)
+		mcp.WithIdempotentHintAnnotation(true)(t)
+	}
+}
+
+// write annotates a tool that changes something; destructive when it deletes
+// or stops what others may depend on.
+func write(destructive, idempotent bool) mcp.ToolOption {
+	return func(t *mcp.Tool) {
+		mcp.WithReadOnlyHintAnnotation(false)(t)
+		mcp.WithDestructiveHintAnnotation(destructive)(t)
+		mcp.WithIdempotentHintAnnotation(idempotent)(t)
+	}
 }
 
 // Info is get_info's answer: the build this server runs, the tools it
@@ -181,153 +202,188 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetInfo,
-		mcp.WithDescription("Report this server's build (version — the release, or dev for a local build —, commit and build time), the names of its tools, the configured backends in order (the first is the default; an empty list comes with backendsReason: no backend is registered on this instance, the namespace it watches for backend documents and how to register one) and, when agent wiring is enabled, the namespace and kagent API version ModelConfigs are written to."),
-		mcp.WithReadOnlyHintAnnotation(true),
+		tooldesc.Describe("Report this server's build, its tool names, the configured backends and where agent wiring writes ModelConfigs.", ""),
+		readOnly(),
 	), t.getInfo)
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
-		mcp.WithDescription("Report one serving backend (ollama|kserve|lemonade|lmstudio) — the named one, else the default (first configured) — with its health/version, its load semantics, the capability flags clients must honor, and the names of every configured backend."),
+		tooldesc.Describe("Report one serving backend (default: the first configured): health, version, load semantics and capability flags.",
+			"Clients must honor the capability flags."),
 		backendArg("to describe"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.getBackend)
 
 	s.AddTool(mcp.NewTool(ToolListBackends,
-		mcp.WithDescription("List every serving backend this model-manager runs, in configured order (the first is the default backend an unqualified pull goes to), each with its health, endpoints, load semantics and capability flags. An empty list comes with backendsReason: no backend is registered on this instance, the namespace it watches for backend documents and how to register one — a ModelConfig labelled with a backend that is not listed is left over from one that went."),
-		mcp.WithReadOnlyHintAnnotation(true),
+		tooldesc.Describe("List the serving backends this model-manager runs, in order (the first is the default), with health and capabilities.",
+			"Call it first: every tool takes an optional backend. An empty list comes with backendsReason: no backend is registered and how to register one. "+
+				"A ModelConfig labelled with a backend not listed is left over from one that went."),
+		readOnly(),
 	), t.listBackends)
 
 	s.AddTool(mcp.NewTool(ToolListModels,
-		mcp.WithDescription("List downloaded models with their backend, size, family/parameters, whether each is loaded, and its kagent ModelConfig if wired. A loaded model carries running: its list_loaded_models entry, the runtime and interfaces of a Ready kserve model included. Without a backend every backend is listed; a backend that fails to answer is reported under errors while the others' models are returned."),
+		tooldesc.Describe("List downloaded models with backend, size, family and parameters, whether each is loaded, and its kagent ModelConfig.",
+			"Without backend every backend is listed; one that fails to answer is reported under errors while the others' models are returned."),
 		backendArg("to list"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.listModels)
 
 	s.AddTool(mcp.NewTool(ToolGetModel,
-		mcp.WithDescription("Get one downloaded model with loaded state and ModelConfig reference."),
+		tooldesc.Describe("Get one downloaded model with its loaded state and kagent ModelConfig.", ""),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference, e.g. smollm2:135m or hf.co/org/repo:Q4_K_M")),
-		backendArg("holding the model; without it the model is resolved across backends (conflict when several hold it)"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		backendArg("holding the model; else resolved across backends (conflict when several hold it)"),
+		readOnly(),
 	), t.getModel)
 
 	s.AddTool(mcp.NewTool(ToolListLoadedModels,
-		mcp.WithDescription("List models currently loaded in memory / serving, with their backend, memory use and expiry. On kserve every entry carries its phase and steps[] and, when one exists, its kagent ModelConfig (modelConfig); a served model model-manager manages (managedBy model-manager) that has no ModelConfig is wired by this read as the caller, and the entry says so (wiring: {wired: true, reason: \"wired on read\", modelConfig}) — the mend for a model-manager restart during a cold start, since no reconciler runs without a caller. A Ready kserve model carries runtime {name, version} and interfaces [{type, path}] — the API interfaces its running server registered, read from the server's GET /version and GET /openapi.json once each time the model turns Ready; type is agentgateway's format name: Completions (OpenAI chat completions, the legacy /v1/completions with it), Responses (OpenAI Responses), Messages (Anthropic Messages), AnthropicTokenCount (Anthropic count_tokens), Embeddings (OpenAI embeddings); path is relative to endpoint. runtime.version is what the server reports (a source build answers 0.1.dev<n>+g<commit>); runtimeImage is the image the serving object's main container runs and chartVersion the chart version of the preset model-manager created it from. gitops names the Flux object that applies a kserve serving object from git, held to its Kustomization's inventory as unload_model holds it (absent for one written live or left behind by its Kustomization); such an object is changed in git. A server that publishes no route list (--disable-fastapi-docs), one whose list names chat completions and embeddings side by side (a server that registers every route whatever the model serves, vLLM before 0.16) or one that could not be read reports interfaces [] and interfacesReason. On an installation with the platform's LLM endpoint (its LLM endpoint document in model-manager's namespace) a Ready model created from a preset whose server registered interfaces is on the endpoint: publicName is the preset's name, what a client sends as model there, and endpoint the endpoint's URL; a served model that is not on it carries publicNameReason instead, and its ModelConfig rides the endpoint under the public name."),
+		tooldesc.Describe("List the models loaded or serving now, with memory use and expiry; on kserve phase, steps, API interfaces and endpoint.",
+			"Not read-only on kserve: a served model model-manager manages that has no ModelConfig is wired by this read, as you (wiring.reason \"wired on read\"). "+
+				"A Ready kserve model carries runtime and interfaces, the APIs its server registered ([] with interfacesReason when unreadable); "+
+				"on the platform's LLM endpoint publicName is the model name clients send there. "+
+				"gitops names the Flux object applying a serving object from git: change it there."),
 		backendArg("to list"),
-		mcp.WithIdempotentHintAnnotation(true),
+		write(false, true),
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
-		mcp.WithDescription("Start importing a model: an Ollama registry tag or hf.co/... GGUF reference (ollama), a Lemonade catalog model name such as Qwen3-0.6B-GGUF (lemonade: `lemonade list`, GET /api/v1/models?show_all=true on the server), an LM Studio hub reference such as ibm/granite-4-micro (lmstudio: `lms ls`), or a Hugging Face repository owner/name (kserve: a pre-warm download Job into the node cache after a fit check). Returns a job immediately; poll get_job for progress. On ollama, lemonade and lmstudio the model is wired into kagent on success unless wire=false; on kserve models are wired when served."),
+		tooldesc.Describe("Start downloading a model onto a backend; returns a job at once, poll get_job for progress.",
+			"The reference is an Ollama tag or hf.co/… GGUF (ollama), a Lemonade catalog name such as Qwen3-0.6B-GGUF (lemonade), "+
+				"an LM Studio hub reference such as ibm/granite-4-micro (lmstudio), or a Hugging Face repository owner/name "+
+				"(kserve: a download Job into a node's cache after a fit check). "+
+				"On ollama, lemonade and lmstudio the model is wired into kagent on success unless wire=false; on kserve it is wired when served."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference to pull")),
-		backendArg("to pull on; default: the default (first configured) backend"),
+		backendArg("to pull on; default: the first configured"),
 		mcp.WithBoolean(argWire, mcp.Description("Create a kagent ModelConfig when the pull completes (ollama, lemonade, lmstudio; default: the server's autoWire setting)")),
-		mcp.WithString(argPreset, mcp.Description("kserve: serving preset the download is for (its LLMInferenceService mounts the resulting cache directory); default: the single preset serving the model")),
+		mcp.WithString(argPreset, mcp.Description("kserve: the serving preset the download is for, whose serving object mounts the cache; default: the one preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
-		dryRunArg("the plan: whether the model is downloaded already (present), on kserve the fit verdict and the node the download would go to (fit), and the ModelConfig a successful pull would wire (wiring); no download starts"),
-		applyOnly("pull_model", noCommitPull),
+		dryRunArg("whether the model is there, on kserve the fit verdict and target node, and the ModelConfig it would wire"),
+		applyOnly(),
+		write(false, false),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
-		mcp.WithDescription("Load a downloaded model into memory (ollama, lemonade, lmstudio) / start serving it as an LLMInferenceService composed from a serving preset after a fit check (kserve) — refused with `unavailable` and nothing created where the llm-d control plane is not installed; a preset no node — or, on a GPU pool with no node yet whose instance shapes are known, no size of the pool — can host is refused before any object is created. On kserve the answer carries fit (the verdict), running (the serving object, its phase and steps[]) and wiring: the kagent ModelConfig created in the same call, before the model is ready, at the address the model will answer on — apiKeyPassthrough for a model routed on the models Gateway — so an agent created on it answers as soon as the model serves; a `load` job follows the model to readiness and refreshes that ModelConfig from the published address. A preset that is served already creates nothing and starts no job: the answer carries alreadyServing true and servingNodes (the nodes it serves on), and a node that differs from them is refused with `conflict` naming both. On lemonade keepAlive -1 pins the model against slot eviction; Lemonade has no idle timer, so other keep-alives are ignored. On lmstudio a load persists until unloaded — no TTL, no keep-alive; a model an agent JIT-loaded instead gets LM Studio's idle TTL."),
+		tooldesc.Describe("Load a model into memory, or on kserve serve it from a preset after a fit check; auto-wire writes its ModelConfig.",
+			"kserve: refused with unavailable, nothing created, without the llm-d control plane, and refused before anything is created where no node (or GPU pool size) can host the preset. "+
+				"With auto-wire on kserve the ModelConfig is written before the model is ready and a load job follows it to readiness. "+
+				"A preset served already starts nothing and answers alreadyServing and servingNodes; another node is refused with conflict. mode commit is kserve only."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
-		mcp.WithString(argKeepAlive, mcp.Description("How long to keep the model loaded after the last request (ollama duration such as 10m, or -1 for forever; lemonade: only -1 means something — it pins the model; lmstudio has neither timer nor pinning, so keep-alives are ignored)")),
+		mcp.WithString(argKeepAlive, mcp.Description("Keep the model loaded this long after the last request: ollama a duration (10m) or -1 forever; lemonade only -1 (pins it); lmstudio ignores it")),
 		mcp.WithString(argPreset, mcp.Description("kserve: serving preset to compose the LLMInferenceService from; default: the single preset serving the model")),
 		mcp.WithString(argNode, mcp.Description("kserve: pin the workload to this node")),
-		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: how the model is placed — copies (default: one copy on each of nodes, else one on node or the node the fit check picks; serving an already-served model on more nodes adds copies there) or split: one model across the nodes of one fast link, tensor parallel over the link (refused where the nodes share no fast link; never over the cluster network). check_fit's recommended names the placement to use")),
-		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: placement split, the nodes to split across, in rank order (the first serves the API; default: the first fast link whose nodes all host the model); placement copies, the nodes to run one copy each on, behind the one endpoint (check_fit's copies say which nodes host one)")),
-		mcp.WithBoolean(argTracing, mcp.Description("kserve: export the served model's traces — spec.tracing on the LLMInferenceService, which KServe completes from its tracing preset (the platform's OTLP endpoint and tenant), so the model's spans appear under the caller's trace. Default false: detailed vLLM traces cost throughput. The served model reports it as running.tracing. A preset already served with the other setting is refused with `conflict`: stop it first, switching tracing restarts the model")),
-		dryRunArg("the plan: whether the model is loaded (loaded), the keep-alive a load would set (ollama), on kserve the fit verdict (fit) and the serving object it would create (manifests) or where it serves already (alreadyServing, servingNodes), and the ModelConfig the auto-wire would ensure (wiring); nothing is loaded, created or wired"),
-		commitArgs("the serving object and its ModelConfig (kserve; mode commit answers unsupported on the other backends, which serve no manifest)"),
-		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: copies (default: one per node in nodes, else on node or the fit check's pick) or split: one model across one fast link's nodes")),
+		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: split, the nodes in rank order, the first serving the API (default: the first fast link hosting the model); copies, one copy on each")),
+		mcp.WithBoolean(argTracing, mcp.Description("kserve: export the served model's traces under the caller's trace (default false: costs throughput); switching on a served preset answers conflict")),
+		dryRunArg("the fit verdict, the serving object it would create or where it serves already, and the ModelConfig it would wire"),
+		commitArgs(),
+		write(false, true),
 	), t.load)
 
 	s.AddTool(mcp.NewTool(ToolListPresets,
-		mcp.WithDescription("List the curated serving presets (kserve): model, runtime, GPUs, the share of each GPU's memory vLLM claims (gpuMemoryUtilization), weights and overhead requirements, arguments, the runtime image a load runs (runtimeImage: the preset's own, else the well-known template's) and the version of the chart that published the preset (chartVersion). Presets are the only way to serve a model on kserve. A preset states no API interfaces: the ones a served model answers are read from its running server (list_loaded_models interfaces)."),
+		tooldesc.Describe("List the kserve serving presets, the only way to serve a model there: model, runtime, GPUs and memory requirements.",
+			"A preset states no API interfaces; list_loaded_models reads them from the running server."),
 		backendArg("to list presets of"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.listPresets)
 
 	s.AddTool(mcp.NewTool(ToolSearchModels,
-		mcp.WithDescription("Search the model hub (kserve: Hugging Face Hub) by free text. Results carry gated/private flags and the presets that serve each hit; run check_fit before pulling."),
+		tooldesc.Describe("Search the model hub (kserve: Hugging Face Hub) by free text; each hit with gated and private flags and its presets.",
+			"Run check_fit before pulling."),
 		mcp.WithString(argQuery, mcp.Required(), mcp.Description("Search text")),
 		backendArg("whose hub to search"),
-		mcp.WithNumber(argLimit, mcp.Description("Maximum results (default 20, max 50)")),
-		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithNumber(argLimit, mcp.Description(fmt.Sprintf("Maximum results (default %d, max %d)", backend.SearchLimitDefault, backend.SearchLimitMax))),
+		readOnly(),
 	), t.search)
 
 	s.AddTool(mcp.NewTool(ToolCheckFit,
-		mcp.WithDescription("Check whether a model fits a node (kserve): resolves the weight size from the hub (the safetensors index's total_size while the shards its weight_map names agree with it within one percent, else those shards; else the file tree; else the preset), adds the serving overhead and compares with the node's free memory budget — what the models already served there reserve (reservedBytes: their weights and overhead, and on a unified-memory node at least --gpu-memory-utilization of the node's budget) subtracted, the same verdict load_model reaches — and checks vLLM's KV cache: from the checkpoint's config.json and the preset's --max-model-len, --gpu-memory-utilization, --kv-cache-dtype and --max-num-batched-tokens, one sequence of --max-model-len tokens must fit beside the weights on a GPU of the node (kvCacheBytes against kvCacheAvailableBytes), else fits false naming the estimated maximum model length (estimatedMaxModelLen), as vLLM would refuse to start; an architecture or argument the check cannot read is named in reason and left to the flat overhead. Every check the answer could not make is listed in skippedChecks with why (download-size, kv-cache, compute-capability: a registry or hub that did not answer, a checkpoint without config.json): fits stands on the checks made, not on these. On a unified-memory node (GPUs without memory of their own, a GB10) vLLM's claim at start, --gpu-memory-utilization of the node's whole memory (unifiedReservationBytes), must fit the budget less the host headroom (hostHeadroomBytes) and what running models reserve; a preset whose own utilization claims more runs at the one its weights and overhead need (gpuMemoryUtilization), else fits false. The preset's GPUs and --tensor-parallel-size are its reference shape: the answer derives the devices each pod requests (devicesPerPod: one on a unified-memory node, else the smallest power of two whose cards hold the weights and overhead) and the tensor parallel degree (tensorParallel; a split's is devices × nodes) from the node, and answers fits false when the node's allocatable GPUs cannot hold the devices; the preset's CPU and memory requests are capped at what the node has left beside its other pods' requests (cpuRequestMillis, memoryRequestBytes), fits false when nothing is left. Says which node, whether the model is cached there and whether a hub token is needed. When the hub does not answer within its lookup timeout, the preset's requirements size the model (weightsSource preset) and reason says so. A preset served from an OCI model image (storageUri oci://) is sized from its image, never the hub: the weights from the image's weights label (weightsSource model-image, else the preset's), the KV cache layout from the config.json the image carries, downloadBytes from its layers, and 0 when the node the model is placed on already holds the image (prePulledNodes lists the nodes whose kubelet does); the cache claim has no say in where it goes. A preset that already serves names its nodes (servingNodes) and reason says so; its own reservation is left out, serving it again being a no-op. A GPU pool with no node yet, or whose nodes are all still starting — created within 15 minutes and kept from serving only by readiness and start-up taints (a CSI agent's agent-not-ready, node.kubernetes.io/not-ready), which reason names — (budgetSource pool-scale-from-zero) is judged on its instance shapes when the backend document lists them: the preset's CPU/memory requests, GPUs and GPU memory — budgeted from the GPUs the preset requests on a size, not the node's — against the pool's sizes, instanceType naming the size the node will come as, or fits false naming what no size of the pool leaves; declaredWeightsBytes carries the preset's declared weights beside the hub-sized weightsBytes, and reason names the discrepancy on both verdicts when the hub holds more; without shapes the answer is yes and unverified. With no backend registered, a preset the platform chart publishes where model-manager runs is answered from that catalog: what it declares (weights, overhead, GPUs, computeCapabilityRequired, maxModelLen) with verdict unverified, fits false and a reason opening with the no_backend answer — what the preset needs before a GPU pool, and with it a backend, exists."),
+		tooldesc.Describe("Check whether a model or serving preset fits a kserve node before pulling or loading: the verdict load_model reaches.",
+			"Sizes the weights from the hub (an oci:// preset from its image), adds the serving overhead and vLLM's KV cache at --max-model-len, "+
+				"and compares with the node's free budget less what served models reserve. "+
+				"fits stands only on the checks made: skippedChecks names those it could not make, reason any estimate. "+
+				"A GPU pool with no ready node is judged on its instance shapes (unverified without them). Says whether the model is cached there and needs a hub token."),
 		mcp.WithString(argModel, mcp.Description("Hugging Face repository owner/name (required unless preset is given)")),
-		backendArg("to check on (required when several backends offer fit checks)"),
+		backendArg("to check on; required when several backends offer fit checks"),
 		mcp.WithString(argPreset, mcp.Description("Serving preset (overhead, model id)")),
 		mcp.WithString(argNode, mcp.Description("Node to check against; default: the best eligible node")),
-		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: the placement to judge — copies (default; each copy holds the whole model on its node) or split across the nodes of one fast link: each node holds its share of the weights (weights / nodes) beside the overhead, and its share of the KV cache. The answer carries recommended (split when two or more nodes of one fast link host the model, copies otherwise) and recommendedNodes, and for copies without nodes on a cluster of several nodes copies: each node's verdict of one copy")),
-		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: the nodes to judge — placement split, the nodes to split across (default: the first fast link whose nodes all host the model); placement copies, one copy on each (fits when every copy does)")),
-		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: copies (default; each holds the whole model) or split across one fast link's nodes (each its share); the answer recommends one")),
+		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: split, the nodes to split across (default: the first fast link hosting the model); copies, one copy on each, fitting when every copy does")),
+		readOnly(),
 	), t.checkFit)
 
 	s.AddTool(mcp.NewTool(ToolListNodes,
-		mcp.WithDescription("List nodes with their backend, serving memory budget, what loaded models reserve and the download cache each node holds. kserve: the accelerator nodes only (GPU resource or gpu-feature-discovery labels), budget from GPU labels or allocatable memory, and eligible / eligibilityReason saying whether a model can be served there (ready, inside the serving node selector, able to mount the cache claim) — load_model, pull_model and check_fit refuse a node with eligible=false and echo the reason; modelImageEligible says whether a preset served from an OCI model image can go there, which never mounts the cache claim, so a node the claim's pin rules out is still one for it. ollama: the proxied host (always eligible), budget from MemTotal of /proc/meminfo as the pod sees it or the operator's ollama.memoryBudgetGiB override (budgetSource says which), reservations from /api/ps, accelerated when a loaded model sits on the GPU. lemonade: the proxied host as Lemonade's system-info reports it (always eligible) — budget from the host memory (budgetSource system-info), gpuCount/gpuProduct from the accelerators Lemonade enumerates (the NPU, the GPUs), reservations = the catalog sizes of the loaded models, and the model store as the cache. lmstudio reports no nodes at all — LM Studio exposes no host hardware, so the call answers 501 unsupported."),
+		tooldesc.Describe("List the nodes a backend serves on, with memory budget, what loaded models reserve and the download cache each holds.",
+			"kserve: accelerator nodes only; eligible and eligibilityReason say whether a model can be served there, and load_model, pull_model and check_fit refuse an ineligible node with that reason. "+
+				"modelImageEligible says the same for a preset served from an OCI model image. "+
+				"ollama and lemonade: the proxied host, always eligible. lmstudio answers unsupported: LM Studio exposes no host hardware."),
 		backendArg("to list nodes of"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.listNodes)
 
 	s.AddTool(mcp.NewTool(ToolUnloadModel,
-		mcp.WithDescription("Unload a model from memory / stop serving it. The download stays. On kserve the serving object is deleted and its ModelConfig unwired within the call — only one this model-manager created; any other is left and named in modelConfigLeft — whatever the cache scan would take; the answer's inventory says whether the cache is rescanned in the background or why it cannot be, and next says what list_loaded_models shows meanwhile."),
+		tooldesc.Describe("Unload a model from memory, or on kserve stop serving it and unwire its ModelConfig; the download stays.",
+			"On kserve only a ModelConfig this model-manager created is unwired; any other is named in modelConfigLeft. "+
+				"next says what list_loaded_models shows meanwhile. mode commit is kserve only."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
-		dryRunArg("the plan: on kserve the serving objects the unload would delete (manifests) and the ModelConfig it would unwire (wiring), elsewhere whether the model is loaded; nothing is unloaded"),
-		commitArgs("the removal of the serving object and its ModelConfig (kserve; mode commit answers unsupported on the other backends)"),
-		mcp.WithIdempotentHintAnnotation(true),
+		dryRunArg("on kserve the serving objects it would delete and the ModelConfig to unwire, elsewhere whether it is loaded"),
+		commitArgs(),
+		write(true, true),
 	), t.unload)
 
 	s.AddTool(mcp.NewTool(ToolDeleteModel,
-		mcp.WithDescription("Delete a downloaded model and, by default, its kagent ModelConfig. Not every backend can: lmstudio answers 501 unsupported (LM Studio removes models only through its `lms rm` CLI on the host) — check the delete capability from list_backends, and use unwire_model there to drop just the ModelConfig."),
+		tooldesc.Describe("Delete a downloaded model and, by default, its kagent ModelConfig.",
+			"lmstudio answers unsupported (LM Studio removes models only with `lms rm` on the host): check list_backends' delete capability, and use unwire_model there to drop only the ModelConfig."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argUnwire, mcp.Description("Also remove the ModelConfig (default true)")),
-		dryRunArg("the plan: whether the model is loaded and the ModelConfig the delete would unwire (wiring); nothing is deleted"),
-		applyOnly("delete_model", noCommitDelete),
-		mcp.WithDestructiveHintAnnotation(true),
+		dryRunArg("whether the model is loaded and the ModelConfig the delete would unwire"),
+		applyOnly(),
+		write(true, false),
 	), t.deleteModel)
 
 	s.AddTool(mcp.NewTool(ToolWireModel,
-		mcp.WithDescription("Create (or refresh) the kagent ModelConfig for a downloaded model so agents can use it. The backend decides how the ModelConfig authenticates against the endpoint — a kserve model routed on the models Gateway forwards the caller's own token (apiKeyPassthrough), a keyless in-cluster endpoint gets kagent's placeholder key — unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive. A ModelConfig Flux applies from git (kustomize.toolkit.fluxcd.io or helm.toolkit.fluxcd.io labels, whatever its managed-by says) is never written live: the call answers gitops_owned naming the Flux object."),
+		tooldesc.Describe("Create or refresh the kagent ModelConfig for a downloaded model so agents can use it.",
+			"The backend decides how the ModelConfig authenticates (a kserve model on the models Gateway forwards the caller's token, a keyless in-cluster endpoint gets kagent's placeholder key) "+
+				"unless apiKeyPassthrough or apiKeySecret says otherwise; the two are mutually exclusive. "+
+				"A ModelConfig Flux applies from git is never written live: gitops_owned names the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
-		mcp.WithBoolean(argAPIKeyPassthrough, mcp.Description("Forward the Bearer token of the agent's incoming request to the endpoint as the API key (for an endpoint that admits the person's token, such as the models Gateway); no Secret is referenced or created")),
+		mcp.WithBoolean(argAPIKeyPassthrough, mcp.Description("Forward the Bearer token of the agent's request as the API key, for an endpoint that admits the person's token (the models Gateway); no Secret")),
 		mcp.WithString(argAPIKeySecret, mcp.Description("Name of an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it")),
 		mcp.WithString(argAPIKeySecretKey, mcp.Description("Key within apiKeySecret holding the API key (default OPENAI_API_KEY)")),
-		dryRunArg("the manifests the wiring writes (the ModelConfig and, for a keyless endpoint, its placeholder Secret), the ModelConfig's name, the Flux object applying it from git where one does (gitops) and a ModelConfig of another owner that already wires the served model (alreadyWired); in mode commit also the pull request it would open (commit: repository, base, directory, branch, files with their content)"),
-		commitArgs("the ModelConfig"),
-		mcp.WithIdempotentHintAnnotation(true),
+		dryRunArg("the manifests, the Flux object applying the ModelConfig from git, another owner's ModelConfig wiring it"),
+		commitArgs(),
+		write(false, true),
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
-		mcp.WithDescription("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret; also one carrying no model-manager.giantswarm.io/instance label (written before model-manager recorded its creator) once no Agent, AgentTemplate or Harness references it — referenced, the call answers conflict naming them. The model itself stays. Answers the mode that ran and the ModelConfig deleted (modelConfig: name and namespace, removed: true), modelConfig null and removed false when nothing was wired. A ModelConfig Flux applies from git is never deleted live: the call answers gitops_owned naming the Flux object."),
+		tooldesc.Describe("Delete the kagent ModelConfig model-manager created for a model, and its placeholder Secret; the model stays.",
+			"Also removes a leftover without an instance label (written before model-manager recorded its creator) once no Agent, AgentTemplate or Harness references it; "+
+				"referenced, it answers conflict naming them. A ModelConfig Flux applies from git is never deleted live: gitops_owned names the Flux object."),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
-		backendArg("the ModelConfig belongs to; without it the wired ModelConfigs are consulted (conflict when several backends wire the reference)"),
-		dryRunArg("the ModelConfig it would remove (modelConfig, namespace), the objects the unwire deletes (the ModelConfig and the placeholder Secret model-manager created for it; none when nothing is wired) and the Flux object applying the ModelConfig from git where one does (gitops); in mode commit also the removing pull request it would open"),
-		commitArgs("the removal"),
-		mcp.WithIdempotentHintAnnotation(true),
+		backendArg("the ModelConfig belongs to; else found among the wired ones (conflict when ambiguous)"),
+		dryRunArg("the ModelConfig and Secret it would delete and the Flux object applying the ModelConfig from git"),
+		commitArgs(),
+		write(true, true),
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		mcp.WithDescription("List jobs (newest first) with their backend, phase and progress; on kserve a pull job carries the node whose cache receives the download and the serving preset it is for (ollama, lemonade and lmstudio jobs carry neither)."),
+		tooldesc.Describe("List pull and load jobs, newest first, with backend, phase and progress.",
+			"On kserve a pull job carries the node whose cache receives the download and the preset it is for."),
 		backendArg("to list jobs of"),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.listJobs)
 
 	s.AddTool(mcp.NewTool(ToolGetJob,
-		mcp.WithDescription("Get one job: backend, phase (pending|running|succeeded|failed|cancelled), bytes done/total, percent, error, and the ModelConfig created on success."),
+		tooldesc.Describe("Get one job: backend, phase, progress, error, and the ModelConfig created on success.", ""),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id from pull_model")),
-		mcp.WithReadOnlyHintAnnotation(true),
+		readOnly(),
 	), t.getJob)
 
 	s.AddTool(mcp.NewTool(ToolCancelJob,
-		mcp.WithDescription("Cancel a running job."),
+		tooldesc.Describe("Cancel a running job.", ""),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id")),
 		dryRunArg("the job it would cancel"),
+		write(true, false),
 	), t.cancelJob)
 
 	return s

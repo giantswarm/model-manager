@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The MCP tool descriptions are shorter (~5.0k instead of ~9.2k tokens with the input schemas) and each starts with a summary line of at most 120 runes, all muster's `filter_tools` shows; before, 19 of 21 were cut there. What a description carried that the answer, a refusal or the README's kserve section already says moved out of it; every parameter description fits 150 runes. The descriptions are built with mcp-toolkit's `tooldesc.Describe` (v0.4.2); `docs/tools.md` lists every tool as a model reads it (`make tools-doc`, kept current by a test) and `tooldesc.CheckServer` holds the budgets ([giantswarm#38592](https://github.com/giantswarm/giantswarm/issues/38592)).
+- MCP tool annotations: the read-only tools report `destructiveHint: false` and `idempotentHint: true` (mcp-go's defaults had reported them destructive); `list_loaded_models`, `pull_model`, `load_model` and `wire_model` report `destructiveHint: false`. Every tool now sets all three hints explicitly.
 - `no_backend` (HTTP 412) names the instance that answered and how to register a backend there (giantswarm/model-manager#271): its `--instance` and version, the namespace it watches for backend documents with 0 valid ones (and how many failed the schema), `add_backend kind=kserve servingNamespace=<namespace>` beside cluster-manager registering `model-backend-kserve` with the first GPU node pool, and `add_backend kind=ollama|lmstudio|lemonade endpoint=<url>`; with runtime registration off it says so and names `--backends`. A person running `check_fit` before a GPU pool exists can tell the wrong instance from a missing backend.
 
 ### Fixed
