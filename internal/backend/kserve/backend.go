@@ -978,8 +978,8 @@ func (b *Backend) Search(ctx context.Context, query string, limit int) ([]backen
 	if query == "" {
 		return nil, fmt.Errorf("%w: query is required", backend.ErrInvalid)
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	if limit <= 0 || limit > backend.SearchLimitMax {
+		limit = backend.SearchLimitDefault
 	}
 	hctx, hubBudget, cancel := b.hubContext(ctx)
 	defer cancel()

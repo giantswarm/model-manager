@@ -914,6 +914,13 @@ type Searcher interface {
 	Search(ctx context.Context, query string, limit int) ([]SearchResult, error)
 }
 
+// A search answers SearchLimitDefault hits when its limit is unset or above
+// SearchLimitMax.
+const (
+	SearchLimitDefault = 20
+	SearchLimitMax     = 50
+)
+
 // FitChecker is implemented by backends with Capabilities().FitCheck.
 type FitChecker interface {
 	FitCheck(ctx context.Context, req FitRequest) (*FitResult, error)

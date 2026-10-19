@@ -45,7 +45,8 @@ The same operations are exposed twice from one process:
   `load_model`, `unload_model`, `delete_model`, `wire_model`, `unwire_model`,
   `list_jobs`, `get_job`, `cancel_job`, plus the kserve capabilities
   `list_presets`, `search_models`, `check_fit`, `list_nodes` (through muster:
-  `x_<server>_<tool>`); every tool takes an optional `backend`.
+  `x_<server>_<tool>`); every tool takes an optional `backend`. Every tool's
+  description and input schema as a model reads them: [docs/tools.md](docs/tools.md).
 
 Part of [Model management in the Agent Platform](https://github.com/giantswarm/giantswarm/issues/37590);
 decision records: Model Manager PDR, the Ollama-backend ADR and the
