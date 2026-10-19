@@ -24,7 +24,7 @@ Generated from the registered tools (`make tools-doc`); through muster every too
 | `search_models` | read-only |
 | `unload_model` | write, destructive |
 | `unwire_model` | write, destructive |
-| `wire_model` | write |
+| `wire_model` | write, destructive |
 
 ## `add_backend`
 
@@ -78,7 +78,7 @@ One backend per name (default: the kind); kserve takes one per serving cluster, 
       "type": "string"
     },
     "gpuPoolNodeSelector": {
-      "description": "kserve: the GPU pool's node labels, key=value[,key=value]; replaces the discovery ConfigMap's gpuPool.nodeSelector",
+      "description": "kserve: the GPU pool's node labels, key=value[,key=value] (giantswarm.io/machine-pool=<cluster>-<pool>); replaces the discovery's gpuPool.nodeSelector",
       "type": "string"
     },
     "gpuPoolTaint": {
@@ -120,7 +120,7 @@ One backend per name (default: the kind); kserve takes one per serving cluster, 
 ## `cancel_job`
 
 ```text
-Cancel a running job.
+Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).
 ```
 
 ```json
@@ -257,7 +257,7 @@ Clients must honor the capability flags.
 ## `get_info`
 
 ```text
-Report this server's build, its tool names, the configured backends and where agent wiring writes ModelConfigs.
+Report this server's build, its tool names, the configured backends and, with agent wiring on, where ModelConfigs go.
 ```
 
 ```json
@@ -319,7 +319,7 @@ Get one downloaded model with its loaded state and kagent ModelConfig.
 ```text
 List the serving backends this model-manager runs, in order (the first is the default), with health and capabilities.
 
-Call it first: every tool takes an optional backend. An empty list comes with backendsReason: no backend is registered and how to register one. A ModelConfig labelled with a backend not listed is left over from one that went.
+Call it first: most tools take an optional backend. An empty list comes with backendsReason: no backend is registered and how to register one. A ModelConfig labelled with a backend not listed is left over from one that went.
 ```
 
 ```json
@@ -440,7 +440,7 @@ A preset states no API interfaces; list_loaded_models reads them from the runnin
 ```text
 Load a model into memory, or on kserve serve it from a preset after a fit check; auto-wire writes its ModelConfig.
 
-kserve: refused with unavailable, nothing created, without the llm-d control plane, and refused before anything is created where no node (or GPU pool size) can host the preset. With auto-wire on kserve the ModelConfig is written before the model is ready and a load job follows it to readiness. A preset served already starts nothing and answers alreadyServing and servingNodes; another node is refused with conflict. mode commit is kserve only.
+kserve: refused with unavailable, nothing created, without the llm-d control plane, and refused before anything is created where no node (or GPU pool size) can host the preset. With auto-wire on kserve the ModelConfig is written before the model is ready and a load job follows it to readiness. A preset served already answers alreadyServing and servingNodes; placement copies on more nodes adds copies there, another node is conflict. mode commit is kserve only.
 ```
 
 ```json
@@ -502,7 +502,7 @@ kserve: refused with unavailable, nothing created, without the llm-d control pla
       "type": "string"
     },
     "repository": {
-      "description": "mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance",
+      "description": "mode commit: the repository (owner/name) if no Flux provenance names one; branch and path with it override that (remote kserve: serving object only)",
       "type": "string"
     },
     "tracing": {
@@ -518,7 +518,7 @@ kserve: refused with unavailable, nothing created, without the llm-d control pla
 ## `pull_model`
 
 ```text
-Start downloading a model onto a backend; returns a job at once, poll get_job for progress.
+Download a model onto a backend: start a pull job and return at once; poll get_job for progress.
 
 The reference is an Ollama tag or hf.co/… GGUF (ollama), a Lemonade catalog name such as Qwen3-0.6B-GGUF (lemonade), an LM Studio hub reference such as ibm/granite-4-micro (lmstudio), or a Hugging Face repository owner/name (kserve: a download Job into a node's cache after a fit check). On ollama, lemonade and lmstudio the model is wired into kagent on success unless wire=false; on kserve it is wired when served.
 ```
@@ -571,7 +571,7 @@ The reference is an Ollama tag or hf.co/… GGUF (ollama), a Lemonade catalog na
 ```text
 Remove a backend registered at runtime: unwire model-manager's ModelConfigs for it, then delete its backend document.
 
-Refused with conflict, nothing removed, while a ModelConfig of the backend no model-manager deletes (no instance label, or applied by Flux from git) would be left pointing at nothing; the refusal names each. A backend the chart configures cannot be removed here. dryRun reports what would go and blockedBy.
+Refused with conflict, nothing removed, while a ModelConfig of the backend no model-manager deletes (no instance label, or applied by Flux from git) would be left pointing at nothing; the refusal names each. Its served models keep running: unload them first. A backend the chart configures cannot be removed here. dryRun reports what would go and blockedBy.
 ```
 
 ```json
@@ -670,7 +670,7 @@ On kserve only a ModelConfig this model-manager created is unwired; any other is
       "type": "string"
     },
     "repository": {
-      "description": "mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance",
+      "description": "mode commit: the repository (owner/name) if no Flux provenance names one; branch and path with it override that (remote kserve: serving object only)",
       "type": "string"
     }
   },
@@ -721,7 +721,7 @@ Also removes a leftover without an instance label (written before model-manager 
       "type": "string"
     },
     "repository": {
-      "description": "mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance",
+      "description": "mode commit: the repository (owner/name) if no Flux provenance names one; branch and path with it override that (remote kserve: serving object only)",
       "type": "string"
     }
   },
@@ -784,7 +784,7 @@ The backend decides how the ModelConfig authenticates (a kserve model on the mod
       "type": "string"
     },
     "repository": {
-      "description": "mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance",
+      "description": "mode commit: the repository (owner/name) if no Flux provenance names one; branch and path with it override that (remote kserve: serving object only)",
       "type": "string"
     }
   },

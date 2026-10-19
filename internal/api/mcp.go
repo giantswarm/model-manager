@@ -84,7 +84,7 @@ const (
 func commitArgs() mcp.ToolOption {
 	opts := []mcp.ToolOption{
 		mcp.WithString(argMode, mcp.Enum(ModeApply, ModeCommit), mcp.Description("apply (default): write live as you (gitops_owned where Flux applies it from git). commit: open a pull request as you in its GitOps repository")),
-		mcp.WithString(argRepository, mcp.Description("mode commit: the repository (owner/name) where no Flux provenance names one; with branch and path it overrides the provenance")),
+		mcp.WithString(argRepository, mcp.Description("mode commit: the repository (owner/name) if no Flux provenance names one; branch and path with it override that (remote kserve: serving object only)")),
 		mcp.WithString(argBranch, mcp.Description("mode commit: the base branch of repository")),
 		mcp.WithString(argPath, mcp.Description("mode commit: the directory in repository a Flux Kustomization builds from (default: the root); model-manager's files go under <path>/model-manager/")),
 	}
@@ -155,16 +155,6 @@ func readOnly() mcp.ToolOption {
 	}
 }
 
-// write annotates a tool that changes something; destructive when it deletes
-// or stops what others may depend on.
-func write(destructive, idempotent bool) mcp.ToolOption {
-	return func(t *mcp.Tool) {
-		mcp.WithReadOnlyHintAnnotation(false)(t)
-		mcp.WithDestructiveHintAnnotation(destructive)(t)
-		mcp.WithIdempotentHintAnnotation(idempotent)(t)
-	}
-}
-
 // Info is get_info's answer: the build this server runs, the tools it
 // registers, the backends it holds and where it wires models into kagent.
 type Info struct {
@@ -202,7 +192,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetInfo,
-		tooldesc.Describe("Report this server's build, its tool names, the configured backends and where agent wiring writes ModelConfigs.", ""),
+		tooldesc.Describe("Report this server's build, its tool names, the configured backends and, with agent wiring on, where ModelConfigs go.", ""),
 		readOnly(),
 	), t.getInfo)
 
@@ -215,7 +205,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 
 	s.AddTool(mcp.NewTool(ToolListBackends,
 		tooldesc.Describe("List the serving backends this model-manager runs, in order (the first is the default), with health and capabilities.",
-			"Call it first: every tool takes an optional backend. An empty list comes with backendsReason: no backend is registered and how to register one. "+
+			"Call it first: most tools take an optional backend. An empty list comes with backendsReason: no backend is registered and how to register one. "+
 				"A ModelConfig labelled with a backend not listed is left over from one that went."),
 		readOnly(),
 	), t.listBackends)
@@ -241,11 +231,13 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 				"on the platform's LLM endpoint publicName is the model name clients send there. "+
 				"gitops names the Flux object applying a serving object from git: change it there."),
 		backendArg("to list"),
-		write(false, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
-		tooldesc.Describe("Start downloading a model onto a backend; returns a job at once, poll get_job for progress.",
+		tooldesc.Describe("Download a model onto a backend: start a pull job and return at once; poll get_job for progress.",
 			"The reference is an Ollama tag or hf.co/… GGUF (ollama), a Lemonade catalog name such as Qwen3-0.6B-GGUF (lemonade), "+
 				"an LM Studio hub reference such as ibm/granite-4-micro (lmstudio), or a Hugging Face repository owner/name "+
 				"(kserve: a download Job into a node's cache after a fit check). "+
@@ -257,14 +249,16 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argNode, mcp.Description("kserve: node whose cache receives the download; default: the cache node or the node with the largest budget")),
 		dryRunArg("whether the model is there, on kserve the fit verdict and target node, and the ModelConfig it would wire"),
 		applyOnly(),
-		write(false, false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
 	), t.pull)
 
 	s.AddTool(mcp.NewTool(ToolLoadModel,
 		tooldesc.Describe("Load a model into memory, or on kserve serve it from a preset after a fit check; auto-wire writes its ModelConfig.",
 			"kserve: refused with unavailable, nothing created, without the llm-d control plane, and refused before anything is created where no node (or GPU pool size) can host the preset. "+
 				"With auto-wire on kserve the ModelConfig is written before the model is ready and a load job follows it to readiness. "+
-				"A preset served already starts nothing and answers alreadyServing and servingNodes; another node is refused with conflict. mode commit is kserve only."),
+				"A preset served already answers alreadyServing and servingNodes; placement copies on more nodes adds copies there, another node is conflict. mode commit is kserve only."),
 		mcp.WithString(argModel, mcp.Description("Model reference (required unless preset is given)")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithString(argKeepAlive, mcp.Description("Keep the model loaded this long after the last request: ollama a duration (10m) or -1 forever; lemonade only -1 (pins it); lmstudio ignores it")),
@@ -275,7 +269,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithBoolean(argTracing, mcp.Description("kserve: export the served model's traces under the caller's trace (default false: costs throughput); switching on a served preset answers conflict")),
 		dryRunArg("the fit verdict, the serving object it would create or where it serves already, and the ModelConfig it would wire"),
 		commitArgs(),
-		write(false, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.load)
 
 	s.AddTool(mcp.NewTool(ToolListPresets,
@@ -326,7 +322,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		backendArg("holding the model; without it the model is resolved across backends"),
 		dryRunArg("on kserve the serving objects it would delete and the ModelConfig to unwire, elsewhere whether it is loaded"),
 		commitArgs(),
-		write(true, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.unload)
 
 	s.AddTool(mcp.NewTool(ToolDeleteModel,
@@ -337,7 +335,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithBoolean(argUnwire, mcp.Description("Also remove the ModelConfig (default true)")),
 		dryRunArg("whether the model is loaded and the ModelConfig the delete would unwire"),
 		applyOnly(),
-		write(true, false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.deleteModel)
 
 	s.AddTool(mcp.NewTool(ToolWireModel,
@@ -352,7 +352,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argAPIKeySecretKey, mcp.Description("Key within apiKeySecret holding the API key (default OPENAI_API_KEY)")),
 		dryRunArg("the manifests, the Flux object applying the ModelConfig from git, another owner's ModelConfig wiring it"),
 		commitArgs(),
-		write(false, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.wire)
 
 	s.AddTool(mcp.NewTool(ToolUnwireModel,
@@ -363,7 +365,9 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		backendArg("the ModelConfig belongs to; else found among the wired ones (conflict when ambiguous)"),
 		dryRunArg("the ModelConfig and Secret it would delete and the Flux object applying the ModelConfig from git"),
 		commitArgs(),
-		write(true, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
@@ -380,10 +384,12 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.getJob)
 
 	s.AddTool(mcp.NewTool(ToolCancelJob,
-		tooldesc.Describe("Cancel a running job.", ""),
+		tooldesc.Describe("Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).", ""),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id")),
 		dryRunArg("the job it would cancel"),
-		write(true, false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.cancelJob)
 
 	return s

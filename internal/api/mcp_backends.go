@@ -81,21 +81,25 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 		mcp.WithString(argDiscoveryNamespace, mcp.Description("kserve: namespace of the model-serving discovery ConfigMap (default: the serving namespace)")),
 		mcp.WithString(argDiscoveryName, mcp.Description("kserve: name of the discovery ConfigMap (default agent-platform-model-serving)")),
 		mcp.WithString(argGPUPoolTaint, mcp.Description("kserve: the GPU pool's taint, key[=value][:effect] (nvidia.com/gpu:NoSchedule); replaces the discovery ConfigMap's gpuPool.taint")),
-		mcp.WithString(argGPUPoolSelector, mcp.Description("kserve: the GPU pool's node labels, key=value[,key=value]; replaces the discovery ConfigMap's gpuPool.nodeSelector")),
+		mcp.WithString(argGPUPoolSelector, mcp.Description("kserve: the GPU pool's node labels, key=value[,key=value] (giantswarm.io/machine-pool=<cluster>-<pool>); replaces the discovery's gpuPool.nodeSelector")),
 		mcp.WithBoolean(argDryRun, mcp.Description("Render the document and the ConfigMap without writing (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): write the ConfigMap as you. commit is not available yet")),
-		write(true, true),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.addBackend)
 
 	s.AddTool(mcp.NewTool(ToolRemoveBackend,
 		tooldesc.Describe("Remove a backend registered at runtime: unwire model-manager's ModelConfigs for it, then delete its backend document.",
 			"Refused with conflict, nothing removed, while a ModelConfig of the backend no model-manager deletes (no instance label, or applied by Flux from git) would be left pointing at nothing; the refusal names each. "+
-				"A backend the chart configures cannot be removed here. dryRun reports what would go and blockedBy."),
+				"Its served models keep running: unload them first. A backend the chart configures cannot be removed here. dryRun reports what would go and blockedBy."),
 		mcp.WithString(argName, mcp.Description("Backend name as list_backends shows it (kserve, kserve-<cluster>, ollama, ...); required unless kind is given")),
 		mcp.WithString(argKind, mcp.Description("Backend kind, the name of a backend registered under its kind (ollama|lmstudio|lemonade|kserve)")),
 		mcp.WithBoolean(argDryRun, mcp.Description("Report the ConfigMap and ModelConfigs that would be removed (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): delete as you. commit is not available yet")),
-		write(true, false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
 	), t.removeBackend)
 }
 
