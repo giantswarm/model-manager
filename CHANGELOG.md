@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The image's certs stage builds on alpine 3.24.2 with a current CA bundle instead of `alpine:3.20.3-giantswarm` (2024-09).
 - The MCP endpoint refuses a request body larger than 1 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12). ([#324](https://github.com/giantswarm/model-manager/issues/324))
 
 ### Added
