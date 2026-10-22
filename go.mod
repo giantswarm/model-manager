@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.3
 
 require (
-	github.com/giantswarm/gitops-commit v0.11.6
+	github.com/giantswarm/gitops-commit v0.11.7
 	github.com/giantswarm/mcp-oauth v1.7.6
 	github.com/giantswarm/mcp-toolkit v0.4.3
 	github.com/go-jose/go-jose/v4 v4.1.6
