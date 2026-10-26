@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/giantswarm/mcp-toolkit/tooldesc"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -810,5 +811,5 @@ func jsonResult(v any) (*mcp.CallToolResult, error) {
 
 func errResult(err error) *mcp.CallToolResult {
 	_, code := statusFor(err)
-	return mcp.NewToolResultError(fmt.Sprintf("%s: %s", code, err.Error()))
+	return mcp.NewToolResultError(code + ": " + strings.TrimPrefix(err.Error(), code+": "))
 }
