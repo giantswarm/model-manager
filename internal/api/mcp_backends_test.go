@@ -333,6 +333,20 @@ func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
 	assert.Equal(t, refusal, invalid[0].(map[string]any)["error"])
 }
 
+func TestStaticBackendConflictMessageHasOnePrefix(t *testing.T) {
+	static := newFakeBackend()
+	static.name = backend.NameLemonade
+	f := newRegistrationFixture(t, static)
+
+	text, isErr := callTool(t, f.srv, ToolRemoveBackend, map[string]any{argKind: "lemonade"})
+	require.True(t, isErr)
+	require.Equal(t, "conflict: backend lemonade is configured statically by the chart values (--backends) and cannot be removed here", text)
+
+	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "lemonade", argEndpoint: "http://x"})
+	require.True(t, isErr)
+	require.Equal(t, "conflict: backend lemonade is configured statically by the chart values (--backends); remove it there to register it at runtime", text)
+}
+
 func TestAddBackendRefusals(t *testing.T) {
 	static := newFakeBackend()
 	static.name = backend.NameLemonade
