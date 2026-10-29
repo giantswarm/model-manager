@@ -57,6 +57,9 @@
         "clusterID": {
             "type": "string"
         },
+        "externalDNSIP": {
+            "type": "string"
+        },
         "extraArgs": {
             "type": "array",
             "description": "Extra container arguments."
@@ -149,6 +152,16 @@
         "global": {
             "type": "object",
             "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly.",
+            "additionalProperties": true,
+            "properties": {
+                "podSecurityStandards": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "helm": {
+            "type": "object",
             "additionalProperties": true
         },
         "httpRoute": {
@@ -577,6 +590,9 @@
                     "description": "Enable debug logging."
                 }
             }
+        },
+        "managementCluster": {
+            "type": "string"
         },
         "mcp": {
             "type": "object",
