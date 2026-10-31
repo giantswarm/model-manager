@@ -185,8 +185,8 @@ github.com/getsops/sops/v3 v3.13.3 h1:saYczbT88kD1saNChe1cAbFQe5mrRhTIfEw3TaEcmK
 github.com/getsops/sops/v3 v3.13.3/go.mod h1:3mUuUtKnJ63IzIvU4LQoDXdp0ZvorY5s2hEc7UVNfx8=
 github.com/giantswarm/gitops-commit v0.11.10 h1:RfwCyml97MUrpoVuWtdg/NJl+416ZvR8t8XGHZrUmL4=
 github.com/giantswarm/gitops-commit v0.11.10/go.mod h1:X9KxzmbALsJVg7664WRTs5DlZCx1Nd7hhtJN1Lw83Ws=
-github.com/giantswarm/mcp-oauth v1.9.4 h1:KVMpLQGBg5B6YhGRHbeytX1NgtlIwyrUEIc6A8o+zYA=
-github.com/giantswarm/mcp-oauth v1.9.4/go.mod h1:zySf65rDkXwTZ2aegIpLk1PadcWDXMxbY5oiVCY+FR4=
+github.com/giantswarm/mcp-oauth v1.9.5 h1:B8Ax7lS9BKyjApzVrbtUQAwz+vx0TiZaYVpQy7LePZY=
+github.com/giantswarm/mcp-oauth v1.9.5/go.mod h1:zySf65rDkXwTZ2aegIpLk1PadcWDXMxbY5oiVCY+FR4=
 github.com/giantswarm/mcp-toolkit v0.4.8 h1:nQwgGJA6tvRj0OOoFmB927e2NrqKgLrEg/ORIsXm+5c=
 github.com/giantswarm/mcp-toolkit v0.4.8/go.mod h1:9Mk1QilOoEd9uU4eyqxqlGPWlZhjukg+nbFUT23+Zns=
 github.com/go-jose/go-jose/v4 v4.1.7 h1:Nac/98uT5LPkfbiFuYa8ktf62a2VxwQ4xbq1GK8pV5E=
