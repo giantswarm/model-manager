@@ -17,12 +17,14 @@ import (
 // A10G (Ampere, 8.6) answered gibberish at temperature 0 while the same
 // preset answered on an L4 (giantswarm/model-manager#264). NVFP4 weights
 // run natively on Blackwell (10.0) and through vLLM's weight-only FP4 Marlin
-// kernel on Ada and Hopper — the path the L40S presets serve; vLLM's
-// quantization matrix lists that kernel from Turing, but nothing below 8.9
-// is proven and its FP8 sibling answers wrong there, so NVFP4 needs 8.9 as
-// FP8 does. bf16 weights need a GPU of 8.0 (a T4 has neither). The fit
-// refuses a GPU below what the weights need, so nothing composes a
-// predictor whose answers are wrong.
+// kernel below it: NVFP4 checkpoints of both shapes (ModelOpt with its FP8 KV
+// cache, compressed-tensors) answered as their BF16 original does on an A10G
+// (giantswarm/model-manager#272), so NVFP4 needs 8.6; vLLM's quantization
+// matrix lists the kernel from Turing, but nothing below 8.6 is proven. A
+// checkpoint mixing FP8 and FP4 layers needs 8.9 for its FP8 ones. bf16
+// weights need a GPU of 8.0 (a T4 has neither). The fit refuses a GPU below
+// what the weights need, so nothing composes a predictor whose answers are
+// wrong.
 
 // skipNoConfig is why a checkpoint without a config.json is not read from
 // one: a mistral-format checkpoint's params.json stands in for it.
@@ -35,14 +37,14 @@ const (
 )
 
 // weightPrecision is what of the weights the GPU generation is judged by,
-// ordered by what the check says of it: a checkpoint mixing precisions
-// needs its highest.
+// ordered by the compute capability it needs: a checkpoint mixing
+// precisions needs the highest (FP8 layers beside FP4 ones need 8.9).
 type weightPrecision int
 
 const (
 	precisionBF16 weightPrecision = iota + 1
-	precisionFP8
 	precisionFP4
+	precisionFP8
 )
 
 // capability is the compute capability the precision needs.
@@ -50,7 +52,9 @@ func (p weightPrecision) capability() string {
 	switch p {
 	case precisionBF16:
 		return "8.0"
-	case precisionFP8, precisionFP4:
+	case precisionFP4:
+		return "8.6"
+	case precisionFP8:
 		return "8.9"
 	}
 	return ""
@@ -62,7 +66,7 @@ func (p weightPrecision) remedy() string {
 	case precisionFP8:
 		return "without native FP8 vLLM falls back to the weight-only FP8 Marlin kernel, which answers wrong for such a checkpoint; serve it on a GPU of 8.9 or above (Ada, Hopper, Blackwell) or serve a BF16 checkpoint here"
 	case precisionFP4:
-		return "NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel on Ada and Hopper, which is proven from 8.9 and not below it; serve it on a GPU of 8.9 or above or serve a BF16 checkpoint here"
+		return "NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel below it, which is proven from 8.6 (Ampere's A10G) and not below it; serve it on a GPU of 8.6 or above or serve a BF16 checkpoint here"
 	case precisionBF16:
 		return "bf16 needs a GPU of 8.0 or above; set --dtype=float16 for this GPU or serve it on a newer one"
 	}
@@ -297,7 +301,7 @@ func dtypeNeed(dtypeFlag, checkpointDType, source string) computeNeed {
 
 // quantizedNeed is the need of quantized weights: FP8 (vLLM's fp8 method,
 // compressed-tensors' 8-bit float, ModelOpt's FP8), NVFP4 (compressed-tensors'
-// 4-bit float, ModelOpt's NVFP4); a checkpoint mixing them needs the highest.
+// 4-bit float, ModelOpt's NVFP4); a checkpoint mixing them needs FP8's 8.9.
 // ModelOpt's config_groups (mixed precision since ModelOpt 0.43) are read as
 // compressed-tensors' are, its quant_algo and quantized_layers where it has
 // none. false for unquantized weights, or a scheme whose precision the dtype
@@ -339,8 +343,8 @@ func quantizedNeed(raw json.RawMessage) (computeNeed, bool) {
 	return computeNeed{}, false
 }
 
-// floatGroups is the highest float precision of the config_groups' weights
-// (8-bit: FP8, 4-bit: FP4); 0 when no group quantizes its weights to a float.
+// floatGroups is the float precision of the config_groups' weights needing
+// the highest compute capability (8-bit: FP8, 4-bit: FP4); 0 when no group quantizes its weights to a float.
 func (q hfQuantization) floatGroups() weightPrecision {
 	var p weightPrecision
 	for _, g := range q.ConfigGroups {
@@ -357,8 +361,8 @@ func (q hfQuantization) floatGroups() weightPrecision {
 	return p
 }
 
-// modelOptAlgos is the highest precision of ModelOpt's quant_algo and the
-// quantized_layers' algorithms; 0 when none names FP8 or FP4.
+// modelOptAlgos is the precision of ModelOpt's quant_algo and the
+// quantized_layers' algorithms needing the highest compute capability; 0 when none names FP8 or FP4.
 func (q hfQuantization) modelOptAlgos() weightPrecision {
 	var p weightPrecision
 	algos := []string{q.QuantAlgo}
