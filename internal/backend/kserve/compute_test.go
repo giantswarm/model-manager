@@ -51,11 +51,11 @@ func TestComputeNeedOfTheQuantizationSchemes(t *testing.T) {
 	for name, tc := range map[string]struct {
 		config, dtype, capability, why, skip string
 	}{
-		"ModelOpt NVFP4":                  {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"NVFP4"}}`, "", "8.6", "NVFP4 weights (ModelOpt)", ""},
-		"ModelOpt FP8":                    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"FP8"}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
-		"ModelOpt mixed, NVFP4 layers":    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt NVFP4":                    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"NVFP4"}}`, "", "8.6", "NVFP4 weights (ModelOpt)", ""},
+		"ModelOpt FP8":                      {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"FP8"}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt mixed, NVFP4 layers":      {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
 		"ModelOpt mixed, NVFP4 layers only": {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"W4A16_NVFP4"}}}}`, "", "8.6", "NVFP4 weights (ModelOpt)", ""},
-		"ModelOpt mixed, FP8 layers only": {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt mixed, FP8 layers only":   {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
 		// nvidia/Qwen3.8-27B-NVFP4: FP8 attention, NVFP4 MLPs and head, as
 		// config_groups beside the per-layer algorithms; the FP8 layers
 		// decide.
