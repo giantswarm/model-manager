@@ -439,6 +439,11 @@ func (b *Backend) GetModel(ctx context.Context, name string) (*backend.Model, er
 		return nil, err
 	}
 	if p == nil {
+		if len(presets) == 0 {
+			if err := b.notReady(b.cfg.settingsForLoad(ctx), "whether "+name+" is a preset is known once its serving presets are published"); err != nil {
+				return nil, err
+			}
+		}
 		return nil, fmt.Errorf("%w: %s is neither cached, served nor a preset", backend.ErrNotFound, name)
 	}
 	return &backend.Model{
@@ -603,6 +608,23 @@ func (b *Backend) Load(ctx context.Context, req backend.LoadRequest) error {
 	return err
 }
 
+// notReady is ErrUnavailable naming the backend and what it waits on while
+// s says its llm-d control plane is not ready (settings.servingUnavailable),
+// with consequence — what the caller learns once it is — when given; nil
+// once the control plane serves the cluster. A caller is told to wait for
+// the backend, never sent looking for another model name
+// (giantswarm/model-manager#312).
+func (b *Backend) notReady(s settings, consequence string) error {
+	reason := s.servingUnavailable()
+	if reason == "" {
+		return nil
+	}
+	if consequence != "" {
+		return fmt.Errorf("%w: backend %s is not ready (%s): %s", backend.ErrUnavailable, b.Name(), consequence, reason)
+	}
+	return fmt.Errorf("%w: backend %s is not ready: %s", backend.ErrUnavailable, b.Name(), reason)
+}
+
 // Serve implements backend.Server: Load with the fit verdict the model was
 // judged by in the answer (giantswarm/model-manager#110). It fails fast, before
 // the fit check and with nothing created, where no llm-d control plane would
@@ -619,8 +641,8 @@ func (b *Backend) Serve(ctx context.Context, req backend.LoadRequest) (*backend.
 		return nil, err
 	}
 	s := b.cfg.settingsForLoad(ctx)
-	if reason := s.servingUnavailable(); reason != "" {
-		return nil, fmt.Errorf("%w: %s", backend.ErrUnavailable, reason)
+	if err := b.notReady(s, ""); err != nil {
+		return nil, err
 	}
 	req.Node, req.Nodes = oneCopy(placement, req.Node, req.Nodes)
 	fitReq := backend.FitRequest{Model: name, Preset: req.Preset, Node: req.Node, Placement: placement, Nodes: req.Nodes}
@@ -955,12 +977,20 @@ func (b *Backend) AgentEndpoint(model string) backend.AgentEndpoint {
 	return sv.agentEndpoint()
 }
 
-// ListPresets implements backend.PresetLister.
+// ListPresets implements backend.PresetLister. No published preset while the
+// llm-d control plane is not ready is a backend still installing — its
+// serving slice publishes the controller and the presets together — and
+// answers so, not with an empty list (giantswarm/model-manager#312).
 func (b *Backend) ListPresets(ctx context.Context) ([]backend.Preset, error) {
 	s := b.cfg.settings(ctx)
 	presets, warnings, err := b.presets(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if len(presets) == 0 {
+		if err := b.notReady(b.cfg.settingsForLoad(ctx), "its serving presets are published with the llm-d control plane"); err != nil {
+			return nil, err
+		}
 	}
 	for _, w := range warnings {
 		b.log.Warn("skipping unusable preset", "detail", w)

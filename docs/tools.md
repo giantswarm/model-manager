@@ -419,7 +419,7 @@ kserve: accelerator nodes only; eligible and eligibilityReason say whether a mod
 ```text
 List the kserve serving presets, the only way to serve a model there: model, runtime, GPUs and memory requirements.
 
-A preset states no API interfaces; list_loaded_models reads them from the running server.
+A preset states no API interfaces; list_loaded_models reads them from the running server. kserve: unavailable, naming the backend and what it waits on, while it publishes no preset and its llm-d control plane is not ready.
 ```
 
 ```json

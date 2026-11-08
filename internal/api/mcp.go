@@ -279,7 +279,8 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 
 	s.AddTool(mcp.NewTool(ToolListPresets,
 		tooldesc.Describe("List the kserve serving presets, the only way to serve a model there: model, runtime, GPUs and memory requirements.",
-			"A preset states no API interfaces; list_loaded_models reads them from the running server."),
+			"A preset states no API interfaces; list_loaded_models reads them from the running server. "+
+				"kserve: unavailable, naming the backend and what it waits on, while it publishes no preset and its llm-d control plane is not ready."),
 		backendArg("to list presets of"),
 		readOnly(),
 	), t.listPresets)

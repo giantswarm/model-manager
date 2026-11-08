@@ -714,7 +714,11 @@ scheduling by the registered backend document (`docs/backends.md`).
   names the permission: `get`/`list` on `llminferenceserviceconfigs`
   cluster-wide, which the chart's ClusterRole grants). `get_backend` /
   `GET /api/v1/backends` carry the same reason in `message` before anyone
-  tries. While the
+  tries. While a backend's serving slice is still installing — the control
+  plane not ready and no preset published yet — `list_presets` and a
+  `get_model` or `load_model` of a model it does not know yet answer the same
+  `unavailable`, `backend <name> is not ready` with what it waits on, instead
+  of an empty list or `not_found`; once ready they answer as before. While the
   llmisvc admission webhook has no ready endpoint (the minute or two after the
   serving slice is installed: `no route to host`, `connection refused`, `no
   endpoints available`) the create is retried every poll interval for up to
