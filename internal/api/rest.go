@@ -186,7 +186,7 @@ func (h *REST) listLoaded(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, withErrors(map[string]any{"loaded": loaded}, errs))
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{keyLoaded: loaded}, errs))
 }
 
 func (h *REST) pull(w http.ResponseWriter, r *http.Request) {

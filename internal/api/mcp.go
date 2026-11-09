@@ -103,6 +103,10 @@ const (
 	noCommitDelete = "the weights are no object of a GitOps repository; remove a committed ModelConfig with unwire_model mode commit, then delete with unwire=false"
 )
 
+// keyLoaded is the answer key that carries loaded models (list) or whether
+// a model is loaded (unload), in the MCP and the REST answers alike.
+const keyLoaded = "loaded"
+
 // applyOnly is the mode argument of a write that never commits: commit
 // answers unsupported, its refusal (refuseCommit) naming what to do instead.
 func applyOnly() mcp.ToolOption {
@@ -461,7 +465,7 @@ func (t *tools) listLoaded(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	if err != nil {
 		return errResult(err), nil
 	}
-	return withErrorsResult(map[string]any{"loaded": loaded}, errs)
+	return withErrorsResult(map[string]any{keyLoaded: loaded}, errs)
 }
 
 func (t *tools) pull(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -571,7 +575,7 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if err != nil {
 		return errResult(err), nil
 	}
-	out := map[string]any{argBackend: view.Backend, argModel: name, "loaded": false}
+	out := map[string]any{argBackend: view.Backend, argModel: name, keyLoaded: false}
 	if view.Backend.Kind() == backend.NameKServe {
 		// The serving object is deleted, not gone: the list shows it as
 		// Terminating until Kubernetes has removed it and its pod.
