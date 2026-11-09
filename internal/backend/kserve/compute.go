@@ -18,8 +18,9 @@ import (
 // preset answered on an L4 (giantswarm/model-manager#264). NVFP4 weights
 // run natively on Blackwell (10.0) and through vLLM's weight-only FP4 Marlin
 // kernel below it: NVFP4 checkpoints of both shapes (ModelOpt with its FP8 KV
-// cache, compressed-tensors) answered as their BF16 original does on an A10G
-// (giantswarm/model-manager#272), so NVFP4 needs 8.6; vLLM's quantization
+// cache, compressed-tensors) answered coherently on an A10G: compressed-tensors
+// matched its BF16 control, ModelOpt the L4's quantized baseline rather than
+// BF16's accuracy (giantswarm/model-manager#272), so NVFP4 needs 8.6; vLLM's quantization
 // matrix lists the kernel from Turing, but nothing below 8.6 is proven. A
 // checkpoint mixing FP8 and FP4 layers needs 8.9 for its FP8 ones. bf16
 // weights need a GPU of 8.0 (a T4 has neither). The fit refuses a GPU below
