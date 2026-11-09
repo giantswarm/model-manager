@@ -252,27 +252,25 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	assert.Equal(t, "admin@lab.local", caller, "the caller is known and attributed")
 	assert.False(t, hasToken, "but nothing is presented to the Kubernetes API")
 
-	// An id_token for another client resolves through the IdP's userinfo
-	// endpoint; without downstream OAuth that is enough — attributed, served.
+	// An id_token for another client is refused by mcp-oauth even without
+	// downstream OAuth: the handler is not reached.
 	caller = ""
 	req = httptest.NewRequest(http.MethodGet, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"portal-client", "kubernetes"}, time.Now().Add(time.Minute)))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "admin@lab.local", caller)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Empty(t, caller)
 }
 
-// TestUntrustedAudienceIsNamedInTheRefusal is the portal-session shape: the
-// IdP signed the token for the portal's own login client plus the audience
-// the kube-apiserver trusts, not for the platform client. mcp-oauth resolves
-// the caller through the IdP's userinfo endpoint, which leaves no token
-// model-manager may present downstream, so the request is refused — and the
-// refusal says which audiences the token carried and which are trusted, in
-// the log and in the WWW-Authenticate challenge muster shows. Trusting the
-// audience every forwarded token carries (the chart unions the MCPServer's
-// requiredAudiences in) accepts the same token as a forwarded id_token.
-func TestUntrustedAudienceIsNamedInTheRefusal(t *testing.T) {
+// TestUntrustedAudienceIsRefused is the portal-session shape: the IdP signed
+// the token for the portal's own login client plus the audience the
+// kube-apiserver trusts, not for the platform client. mcp-oauth refuses it
+// before this server sees a caller, and its log names the token's audiences
+// next to the trusted ones. Trusting the audience every forwarded token
+// carries (the chart unions the MCPServer's requiredAudiences in) accepts the
+// same token as a forwarded id_token.
+func TestUntrustedAudienceIsRefused(t *testing.T) {
 	idp := newFakeIdP(t)
 	portal := idp.idToken(t, []string{"portal-client", "kubernetes"}, time.Now().Add(30*time.Minute))
 
@@ -312,21 +310,11 @@ func TestUntrustedAudienceIsNamedInTheRefusal(t *testing.T) {
 	rec := call(portal)
 	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assert.False(t, seen.ok, "the handler is not reached")
-	www := rec.Header().Get("WWW-Authenticate")
-	assert.True(t, strings.HasPrefix(www, "Bearer "), www)
-	assert.Contains(t, www, `resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource`)
-	assert.Contains(t, www, `error="invalid_token"`)
-	assert.Contains(t, www, "audience [portal-client, kubernetes]")
-	assert.Contains(t, www, "trusted audiences [agent-platform]")
-	assert.Contains(t, www, "muster.mcpServer.auth.requiredAudiences")
-	var body map[string]string
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, "invalid_token", body["error"])
-	assert.Contains(t, body["error_description"], "matches none of the trusted audiences [agent-platform]")
-	assert.Contains(t, logs.String(), "request refused: the bearer is an id_token for audience [portal-client, kubernetes]")
-	assert.Contains(t, logs.String(), "caller=admin@lab.local")
-	assert.Contains(t, logs.String(), "source=oauth")
-	assert.Contains(t, logs.String(), "trustedAudiences=[agent-platform]")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `error="invalid_token"`)
+	assert.Contains(t, logs.String(), "Unknown JWT bearer refused")
+	assert.Contains(t, logs.String(), `token_audience="[portal-client kubernetes]"`)
+	assert.Contains(t, logs.String(), `trusted_audiences=[agent-platform]`)
+	assert.NotContains(t, logs.String(), portal, "no token material in the log")
 
 	// A bearer that is no JWT at all cannot be attributed to an audience:
 	// mcp-oauth refuses it before this server sees a caller.
@@ -341,15 +329,13 @@ func TestUntrustedAudienceIsNamedInTheRefusal(t *testing.T) {
 	assert.Equal(t, identity.SourceSSO, seen.id.Source)
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
 	assert.Equal(t, portal, seen.token)
-	assert.NotContains(t, logs.String(), "request refused")
+	assert.NotContains(t, logs.String(), "refused")
 }
 
-// TestRefusalHeaderIsQuoted keeps token-supplied audiences inside the
-// quoted-string of the WWW-Authenticate challenge.
+// TestRefusalHeaderIsQuoted keeps a description inside the quoted-string of
+// the WWW-Authenticate challenge.
 func TestRefusalHeaderIsQuoted(t *testing.T) {
 	assert.Equal(t, `a\"b\\c d e`, headerQuoted("a\"b\\c\r\nd\ne"))
-	assert.Nil(t, jwtAudience("opaque"))
-	assert.Nil(t, jwtAudience("a.b.c"))
 }
 
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled

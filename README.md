@@ -920,9 +920,9 @@ of `--oauth-trusted-audiences`. The chart passes the platform's OAuth client
 MCPServer's `requiredAudiences`: every forwarded token carries those by
 construction and they are what the kube-apiserver trusts, so a portal session
 — whose id_token carries them but not the platform client — is accepted too.
-An id_token whose audience matches none of them is refused with 401, and the
-refusal names the token's `aud` next to the trusted audiences (the log line
-and the `WWW-Authenticate` `error_description`). The caller — the `email`,
+An id_token whose audience matches none of them is refused with 401; the
+`Unknown JWT bearer refused` log line names the token's `token_audience` next
+to the `trusted_audiences`. The caller — the `email`,
 else the `sub` — is on every mutation's log line and recorded as
 `requestedBy` on jobs.
 
