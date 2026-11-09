@@ -421,6 +421,17 @@ func (b *Backend) GetModel(ctx context.Context, name string) (*backend.Model, er
 	repo, _ := splitRevision(name)
 	models, err := b.ListModels(ctx)
 	if err != nil {
+		// Before the CRD lands the inventory list itself returns 404,
+		// so it cannot reach the missing-preset check below. Confirm the
+		// API is absent before translating it; keep other read failures.
+		if apierrors.IsNotFound(err) {
+			s := b.cfg.settingsForLoad(ctx)
+			if !s.LLMServed {
+				if readyErr := b.notReady(s, "its serving API is not available yet"); readyErr != nil {
+					return nil, readyErr
+				}
+			}
+		}
 		return nil, err
 	}
 	for i := range models {

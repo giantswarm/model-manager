@@ -2,12 +2,17 @@ package kserve
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
 )
@@ -76,6 +81,34 @@ func TestPresetReadsWhileTheBackendIsNotReady(t *testing.T) {
 			require.ErrorIs(t, err, backend.ErrUnavailable, "by preset name too")
 		})
 	}
+
+	t.Run("the missing API rejects inventory reads", func(t *testing.T) {
+		f := newFixture(t)
+		f.dropPresets(ctx)
+		f.dropLLMAPI()
+		f.dyn.PrependReactor("list", llmisvcGVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: llmisvcGVR.Group, Resource: llmisvcGVR.Resource}, "")
+		})
+		for _, name := range []string{tinyRepo, "tiny"} {
+			_, err := f.b.GetModel(ctx, name)
+			require.ErrorIs(t, err, backend.ErrUnavailable)
+			assert.ErrorContains(t, err, "backend "+string(f.b.Name())+" is not ready")
+			assert.ErrorContains(t, err, "is not served on this cluster")
+			assert.ErrorContains(t, err, "retry in a moment")
+		}
+	})
+
+	t.Run("an inventory permission failure is preserved", func(t *testing.T) {
+		f := newFixture(t)
+		f.dropPresets(ctx)
+		f.dropControlPlane(ctx)
+		f.dyn.PrependReactor("list", llmisvcGVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: llmisvcGVR.Group, Resource: llmisvcGVR.Resource}, "", errors.New("list denied"))
+		})
+		_, err := f.b.GetModel(ctx, tinyRepo)
+		require.True(t, apierrors.IsForbidden(err))
+		assert.NotErrorIs(t, err, backend.ErrUnavailable)
+	})
 
 	t.Run("the backend becomes ready", func(t *testing.T) {
 		f := newFixture(t)
