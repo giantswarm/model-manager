@@ -107,6 +107,9 @@ const (
 // a model is loaded (unload), in the MCP and the REST answers alike.
 const keyLoaded = "loaded"
 
+// keyJob is the answer key for a job in MCP and REST responses.
+const keyJob = "job"
+
 // applyOnly is the mode argument of a write that never commits: commit
 // answers unsupported, its refusal (refuseCommit) naming what to do instead.
 func applyOnly() mcp.ToolOption {
@@ -491,7 +494,7 @@ func (t *tools) pull(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return errResult(err), nil
 	}
-	return jsonResult(map[string]any{"job": job, "created": created})
+	return jsonResult(map[string]any{keyJob: job, "created": created})
 }
 
 func (t *tools) load(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -720,7 +723,7 @@ func (t *tools) cancelJob(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 		if err != nil {
 			return errResult(err), nil
 		}
-		return jsonResult(map[string]any{argDryRun: true, "job": job})
+		return jsonResult(map[string]any{argDryRun: true, keyJob: job})
 	}
 	job, err := t.svc.CancelJob(id)
 	if err != nil {
