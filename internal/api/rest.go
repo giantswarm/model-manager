@@ -186,7 +186,7 @@ func (h *REST) listLoaded(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, withErrors(map[string]any{"loaded": loaded}, errs))
+	writeJSON(w, http.StatusOK, withErrors(map[string]any{keyLoaded: loaded}, errs))
 }
 
 func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +199,7 @@ func (h *REST) pull(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "created": created})
+	writeJSON(w, http.StatusAccepted, map[string]any{keyJob: job, "created": created})
 }
 
 func (h *REST) load(w http.ResponseWriter, r *http.Request) {
