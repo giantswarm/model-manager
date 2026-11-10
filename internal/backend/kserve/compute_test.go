@@ -16,10 +16,11 @@ import (
 // their weights need of the GPU: FP8 weights (RedHatAI's compressed-tensors
 // repacks, DeepSeek's fp8 method) compute capability 8.9; int4 and MXFP4
 // weights run in the model's dtype (bf16: 8.0; gpt-oss names no dtype);
-// NVFP4 weights 8.9 through the FP4 Marlin kernel, the ModelOpt mixed
-// precision of Nemotron 3 Super read from its config_groups (FP8 and NVFP4),
-// Inferact's pure NVFP4 from its quant_algo; the Flash Next checkpoint says
-// MIXED_PRECISION and nothing more.
+// NVFP4 weights 8.6 through the FP4 Marlin kernel (Inferact's pure NVFP4,
+// read from its quant_algo); the ModelOpt mixed precision of Nemotron 3
+// Super, read from its config_groups, carries FP8 layers beside the NVFP4
+// ones and needs FP8's 8.9; the Flash Next checkpoint says MIXED_PRECISION
+// and nothing more.
 func TestComputeNeedOfTheCheckpoints(t *testing.T) {
 	for _, tc := range []struct {
 		file, dtype, capability, why, skip string
@@ -30,8 +31,8 @@ func TestComputeNeedOfTheCheckpoints(t *testing.T) {
 		{"gemma-4-12b-it-qat-w4a16.json", "", "8.0", "bf16 weights", ""},
 		{"gemma-4-12b-it-qat-w4a16.json", "float16", "", "", "float16 weights need no particular GPU generation"},
 		{"gpt-oss-20b.json", "", "", "", "config.json names no dtype"},
-		{"nemotron-3-super-nvfp4.json", "", "8.9", "NVFP4 weights (ModelOpt)", ""},
-		{"qwen3-8-27b-nvfp4-inferact.json", "", "8.9", "NVFP4 weights (ModelOpt)", ""},
+		{"nemotron-3-super-nvfp4.json", "", "8.9", "FP8 weights (ModelOpt)", ""},
+		{"qwen3-8-27b-nvfp4-inferact.json", "", "8.6", "NVFP4 weights (ModelOpt)", ""},
 		{"qwen3-8-flash-next-nvfp4.json", "", "", "", "the ModelOpt checkpoint quantizes its layers in mixed precision and config.json does not say to what"},
 	} {
 		raw, err := kvConfig(tc.file)
@@ -50,16 +51,18 @@ func TestComputeNeedOfTheQuantizationSchemes(t *testing.T) {
 	for name, tc := range map[string]struct {
 		config, dtype, capability, why, skip string
 	}{
-		"ModelOpt NVFP4":                  {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"NVFP4"}}`, "", "8.9", "NVFP4 weights (ModelOpt)", ""},
-		"ModelOpt FP8":                    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"FP8"}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
-		"ModelOpt mixed, NVFP4 layers":    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "NVFP4 weights (ModelOpt)", ""},
-		"ModelOpt mixed, FP8 layers only": {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt NVFP4":                    {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"NVFP4"}}`, "", "8.6", "NVFP4 weights (ModelOpt)", ""},
+		"ModelOpt FP8":                      {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"FP8"}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt mixed, NVFP4 layers":      {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
+		"ModelOpt mixed, NVFP4 layers only": {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"NVFP4"},"model.layers.1.mlp":{"quant_algo":"W4A16_NVFP4"}}}}`, "", "8.6", "NVFP4 weights (ModelOpt)", ""},
+		"ModelOpt mixed, FP8 layers only":   {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{"model.layers.0.mlp":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
 		// nvidia/Qwen3.8-27B-NVFP4: FP8 attention, NVFP4 MLPs and head, as
-		// config_groups beside the per-layer algorithms.
-		"ModelOpt mixed, config_groups":   {`{"dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","config_groups":{"group_0":{"weights":{"type":"float","num_bits":8},"targets":["model.language_model.layers.0.linear_attn.in_proj_qkv"]},"group_1":{"weights":{"type":"float","num_bits":4,"group_size":16},"targets":["lm_head"]}},"quantized_layers":{"model.language_model.layers.0.linear_attn.in_proj_qkv":{"quant_algo":"FP8"}}}}`, "", "8.9", "NVFP4 weights (ModelOpt)", ""},
+		// config_groups beside the per-layer algorithms; the FP8 layers
+		// decide.
+		"ModelOpt mixed, config_groups":   {`{"dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","config_groups":{"group_0":{"weights":{"type":"float","num_bits":8},"targets":["model.language_model.layers.0.linear_attn.in_proj_qkv"]},"group_1":{"weights":{"type":"float","num_bits":4,"group_size":16},"targets":["lm_head"]}},"quantized_layers":{"model.language_model.layers.0.linear_attn.in_proj_qkv":{"quant_algo":"FP8"}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
 		"ModelOpt mixed, FP8 group only":  {`{"dtype":"bfloat16","quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","config_groups":{"group_0":{"weights":{"type":"float","num_bits":8}}}}}`, "", "8.9", "FP8 weights (ModelOpt)", ""},
-		"compressed-tensors FP4":          {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"compressed-tensors","config_groups":{"group_0":{"weights":{"type":"float","num_bits":4}}}}}`, "", "8.9", "FP4 weights (compressed-tensors)", ""},
-		"compressed-tensors FP8 and FP4":  {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"compressed-tensors","config_groups":{"a":{"weights":{"type":"float","num_bits":8}},"b":{"weights":{"type":"float","num_bits":4}},"c":{"weights":{"type":"float","num_bits":8}}}}}`, "", "8.9", "FP4 weights (compressed-tensors)", ""},
+		"compressed-tensors FP4":          {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"compressed-tensors","config_groups":{"group_0":{"weights":{"type":"float","num_bits":4}}}}}`, "", "8.6", "FP4 weights (compressed-tensors)", ""},
+		"compressed-tensors FP8 and FP4":  {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"compressed-tensors","config_groups":{"a":{"weights":{"type":"float","num_bits":8}},"b":{"weights":{"type":"float","num_bits":4}},"c":{"weights":{"type":"float","num_bits":8}}}}}`, "", "8.9", "FP8 weights (compressed-tensors)", ""},
 		"compressed-tensors int8 in bf16": {`{"torch_dtype":"bfloat16","quantization_config":{"quant_method":"compressed-tensors","config_groups":{"group_0":{"weights":{"type":"int","num_bits":8}}}}}`, "", "8.0", "bf16 weights", ""},
 		"AWQ in fp16":                     {`{"torch_dtype":"float16","quantization_config":{"quant_method":"awq","bits":4}}`, "", "", "", "float16 weights need no particular GPU generation"},
 		"bf16, --dtype=bfloat16":          {`{"torch_dtype":"float16"}`, "bfloat16", "8.0", "bf16 weights", ""},
@@ -74,21 +77,21 @@ func TestComputeNeedOfTheQuantizationSchemes(t *testing.T) {
 }
 
 // A mistral-format checkpoint ships params.json in place of config.json:
-// Mistral Small 4's NVFP4A16 (compressed-tensors) needs 8.9 like the
+// Mistral Small 4's NVFP4A16 (compressed-tensors) needs 8.6 like the
 // config.json shape; the older qformat_weight is read too, and unquantized
 // weights take the preset's --dtype, params.json naming none.
 func TestComputeNeedOfParams(t *testing.T) {
 	raw, err := kvConfig("mistral-small-4-nvfp4.params.json")
 	require.NoError(t, err)
 	need := computeNeedOfParams(raw, "")
-	assertNeed(t, need, "8.9", "FP4 weights (compressed-tensors)", "")
+	assertNeed(t, need, "8.6", "FP4 weights (compressed-tensors)", "")
 	assert.Equal(t, precisionFP4, need.Precision)
 
 	for name, tc := range map[string]struct {
 		params, dtype, capability, why, skip string
 	}{
 		"qformat fp8":       {`{"dim":4096,"quantization":{"qformat_weight":"fp8_e4m3","qscheme_act":"TENSOR"}}`, "", "8.9", "FP8 weights (params.json qformat_weight fp8_e4m3)", ""},
-		"qformat nvfp4":     {`{"dim":4096,"quantization":{"qformat_weight":"nvfp4"}}`, "", "8.9", "FP4 weights (params.json qformat_weight nvfp4)", ""},
+		"qformat nvfp4":     {`{"dim":4096,"quantization":{"qformat_weight":"nvfp4"}}`, "", "8.6", "FP4 weights (params.json qformat_weight nvfp4)", ""},
 		"unquantized, bf16": {`{"dim":4096}`, "bfloat16", "8.0", "bf16 weights", ""},
 		"unquantized, auto": {`{"dim":4096}`, "auto", "", "", "params.json names no dtype"},
 		"unquantized, fp16": {`{"dim":4096}`, "float16", "", "", "float16 weights need no particular GPU generation"},
@@ -163,25 +166,36 @@ func TestComputeJudgesTheShapeAndTheNode(t *testing.T) {
 	assert.Equal(t, "config.json names no dtype", skipped.judgeShape(shape("g5.xlarge")).Skip)
 	assert.Empty(t, skipped.judgeShape(shape("g5.xlarge")).clause())
 
-	// NVFP4 weights: the L40S (8.9) serves them through the FP4 Marlin
-	// kernel, the A10G (8.6) is refused naming the real floor.
+	// NVFP4 weights: the A10G (8.6) and every newer GPU serve them through
+	// the FP4 Marlin kernel, the A100 (8.0) and the T4 (7.5) are refused
+	// naming the proven floor.
 	fp4 := precisionFP4.need("NVFP4 weights (ModelOpt)")
 	v = fp4.judgeShape(shape("g6e.xlarge"))
 	assert.True(t, v.Fits)
-	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.9 and the L40S of a g6e.xlarge (Ada) has 8.9", v.clause())
+	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.6 and the L40S of a g6e.xlarge (Ada) has 8.9", v.clause())
 	v = fp4.judgeShape(shape("g5.xlarge"))
+	assert.True(t, v.Fits)
+	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.6 and the A10G of a g5.xlarge (Ampere) has 8.6", v.clause())
+	v = fp4.judgeShape(shape("p4d.24xlarge"))
 	assert.False(t, v.Fits)
-	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.9 and the A10G of a g5.xlarge (Ampere) has 8.6: NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel on Ada and Hopper, which is proven from 8.9 and not below it; serve it on a GPU of 8.9 or above or serve a BF16 checkpoint here", v.clause())
+	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.6 and the A100 of a p4d.24xlarge (Ampere) has 8.0: NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel below it, which is proven from 8.6 (Ampere's A10G) and not below it; serve it on a GPU of 8.6 or above or serve a BF16 checkpoint here", v.clause())
+	assert.False(t, fp4.judgeShape(shape("g4dn.xlarge")).Fits, "a T4 (7.5) is below the proven floor")
 	assert.True(t, fp4.judgeShape(shape("p6-b200.48xlarge")).Fits)
+	v = fp4.judgeNode(a10g)
+	assert.True(t, v.Fits)
+	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.6 and the NVIDIA-A10G of a10g has 8.6", v.clause())
+
+	// A checkpoint mixing FP8 and FP4 layers is judged by its FP8 ones.
+	assert.Equal(t, precisionFP8, max(precisionFP4, precisionFP8))
 
 	// The preset's declared floor is named where it differs from the
 	// checkpoint's need, and only there.
-	fp4.Declared = "8.9"
+	fp4.Declared = "8.6"
 	assert.NotContains(t, fp4.judgeShape(shape("g6e.xlarge")).clause(), "declares")
-	fp4.Declared = "10.0"
-	v = fp4.judgeShape(shape("g6e.xlarge"))
+	fp4.Declared = "8.9"
+	v = fp4.judgeShape(shape("g5.xlarge"))
 	assert.True(t, v.Fits, "the checkpoint is what the check judges by")
-	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.9 and the L40S of a g6e.xlarge (Ada) has 8.9 (the preset declares requirements.minComputeCapability 10.0; the checkpoint needs 8.9)", v.clause())
+	assert.Equal(t, "its NVFP4 weights (ModelOpt) need compute capability 8.6 and the A10G of a g5.xlarge (Ampere) has 8.6 (the preset declares requirements.minComputeCapability 8.9; the checkpoint needs 8.6)", v.clause())
 	fp4.Declared = "eight"
 	assert.Contains(t, fp4.judgeShape(shape("g6e.xlarge")).clause(), `(the preset declares requirements.minComputeCapability "eight", which does not parse)`)
 }
@@ -348,10 +362,10 @@ spec:
 
 // A pure NVFP4 checkpoint (Inferact's Qwen3.8 27B shape) and a
 // mistral-format one (Mistral Small 4's params.json, no config.json): the
-// L40S pool serves both through the FP4 Marlin kernel, the A10G pool is
-// refused naming 8.9 and the Marlin path, and a preset declaring another
-// floor than the checkpoint needs is named in the reason.
-func TestFitCheckJudgesNVFP4OnTheL40S(t *testing.T) {
+// L40S and the A10G pools serve both through the FP4 Marlin kernel, an A100
+// pool (8.0) is refused naming 8.6 and the Marlin path, and a preset
+// declaring another floor than the checkpoint needs is named in the reason.
+func TestFitCheckJudgesNVFP4FromTheA10G(t *testing.T) {
 	config, err := kvConfig("qwen3-8-27b-nvfp4-inferact.json")
 	require.NoError(t, err)
 	params, err := kvConfig("mistral-small-4-nvfp4.params.json")
@@ -360,36 +374,42 @@ func TestFitCheckJudgesNVFP4OnTheL40S(t *testing.T) {
 	mistral := serveModelImageFiles(t, func(h http.Handler) http.Handler { return h }, "models/mistral-small-4-nvfp4:1", 12*gib,
 		map[string][]byte{"models/tekken.json": []byte("{}"), modelImageParamsPath: params})
 	f := newFixture(t,
-		presetConfigMap("pure-nvfp4", nvfp4PresetDoc("pure-nvfp4", "Inferact/Qwen3.8-27B-NVFP4", pure, "8.9")),
-		presetConfigMap("mistral-nvfp4", nvfp4PresetDoc("mistral-nvfp4", "mistralai/Mistral-Small-4-119B-2603-NVFP4", mistral, "8.9")),
-		presetConfigMap("blackwell-nvfp4", nvfp4PresetDoc("blackwell-nvfp4", "Inferact/Qwen3.8-27B-NVFP4", pure, "10.0")),
+		presetConfigMap("pure-nvfp4", nvfp4PresetDoc("pure-nvfp4", "Inferact/Qwen3.8-27B-NVFP4", pure, "8.6")),
+		presetConfigMap("mistral-nvfp4", nvfp4PresetDoc("mistral-nvfp4", "mistralai/Mistral-Small-4-119B-2603-NVFP4", mistral, "8.6")),
+		presetConfigMap("ada-nvfp4", nvfp4PresetDoc("ada-nvfp4", "Inferact/Qwen3.8-27B-NVFP4", pure, "8.9")),
 	)
 	ctx := context.Background()
 	a10g := backend.InstanceShape{InstanceType: "g5.xlarge", Size: "xlarge", VCPU: 4, MemoryGiB: 16, GPUs: 1, GPUMemoryGiB: 24, UsableVCPU: 3, UsableMemoryGiB: 11.9}
+	a100 := backend.InstanceShape{InstanceType: "p4d.24xlarge", Size: "24xlarge", VCPU: 96, MemoryGiB: 1152, GPUs: 8, GPUMemoryGiB: 40, UsableVCPU: 90, UsableMemoryGiB: 1100}
 
 	for preset, why := range map[string]string{"pure-nvfp4": "NVFP4 weights (ModelOpt)", "mistral-nvfp4": "FP4 weights (compressed-tensors)"} {
-		f.setPool(ctx, shapeL40S)
+		for _, pool := range []struct {
+			shape     backend.InstanceShape
+			has, name string
+		}{{shapeL40S, "8.9", "the L40S of a g6e.xlarge (Ada)"}, {a10g, "8.6", "the A10G of a g5.xlarge (Ampere)"}} {
+			f.setPool(ctx, pool.shape)
+			res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: preset})
+			require.NoError(t, err)
+			assert.True(t, res.Fits, "%s on %s: %s", preset, pool.shape.InstanceType, res.Reason)
+			assert.Equal(t, "8.6", res.ComputeCapabilityRequired, preset)
+			assert.Contains(t, res.Reason, "; its "+why+" need compute capability 8.6 and "+pool.name+" has "+pool.has, preset)
+			assert.NotContains(t, res.Reason, "declares requirements.minComputeCapability", preset)
+		}
+
+		f.setPool(ctx, a100)
 		res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: preset})
 		require.NoError(t, err)
-		assert.True(t, res.Fits, "%s: %s", preset, res.Reason)
-		assert.Equal(t, "8.9", res.ComputeCapabilityRequired, preset)
-		assert.Contains(t, res.Reason, "; its "+why+" need compute capability 8.9 and the L40S of a g6e.xlarge (Ada) has 8.9", preset)
-		assert.NotContains(t, res.Reason, "declares requirements.minComputeCapability", preset)
-
-		f.setPool(ctx, a10g)
-		res, err = f.b.FitCheck(ctx, backend.FitRequest{Preset: preset})
-		require.NoError(t, err)
 		assert.False(t, res.Fits, "%s: %s", preset, res.Reason)
-		assert.Equal(t, "8.6", res.ComputeCapability, preset)
-		assert.Contains(t, res.Reason, "; its "+why+" need compute capability 8.9 and the A10G of a g5.xlarge (Ampere) has 8.6: NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel on Ada and Hopper, which is proven from 8.9 and not below it", preset)
+		assert.Equal(t, "8.0", res.ComputeCapability, preset)
+		assert.Contains(t, res.Reason, "; its "+why+" need compute capability 8.6 and the A100 of a p4d.24xlarge (Ampere) has 8.0: NVFP4 runs natively on Blackwell and through vLLM's weight-only FP4 Marlin kernel below it, which is proven from 8.6 (Ampere's A10G) and not below it", preset)
 		assert.Zero(t, servingObjects(t, f, ctx))
 	}
 
-	f.setPool(ctx, shapeL40S)
-	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "blackwell-nvfp4"})
+	f.setPool(ctx, a10g)
+	res, err := f.b.FitCheck(ctx, backend.FitRequest{Preset: "ada-nvfp4"})
 	require.NoError(t, err)
 	assert.True(t, res.Fits, res.Reason)
-	assert.Contains(t, res.Reason, "has 8.9 (the preset declares requirements.minComputeCapability 10.0; the checkpoint needs 8.9)")
+	assert.Contains(t, res.Reason, "has 8.6 (the preset declares requirements.minComputeCapability 8.9; the checkpoint needs 8.6)")
 }
 
 // needOf is the need of weights of the precision, as the fit plan holds it.

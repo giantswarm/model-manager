@@ -672,10 +672,11 @@ type FitResult struct {
 	FreeGPUs *int64 `json:"freeGpus,omitempty"`
 	// ComputeCapabilityRequired is the compute capability the checkpoint's
 	// weights need of the GPU, from its config.json (8.9 for FP8 weights,
-	// 10.0 for NVFP4, 8.0 for bf16), and ComputeCapability what the GPU
-	// judged has: a node's nvidia.com/gpu.compute labels, or the GPU of a
-	// pool size's instance family. Empty when the GPU generation was not
-	// checked — Reason then says why.
+	// alone or beside NVFP4 ones, 8.6 for NVFP4, 8.0 for bf16), and
+	// ComputeCapability what the GPU judged has: a node's
+	// nvidia.com/gpu.compute labels, or the GPU of a pool size's instance
+	// family. Empty when the GPU generation was not checked — Reason then
+	// says why.
 	ComputeCapabilityRequired string `json:"computeCapabilityRequired,omitempty"`
 	ComputeCapability         string `json:"computeCapability,omitempty"`
 	// MaxModelLen is the preset's --max-model-len and KVCacheBytes the KV

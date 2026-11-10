@@ -199,10 +199,11 @@ spec:
 	assert.Equal(t, NameKServe, local.Name())
 	assert.Equal(t, NameKServe, local.Options(Options{}).KServe.Name)
 
+	const notKServeName = "metadata.name: must be kserve or kserve-<cluster>"
 	for name, want := range map[string]string{
-		"kserve-":                           "metadata.name: must be kserve or kserve-<cluster>",
-		"kservewc1":                         "metadata.name: must be kserve or kserve-<cluster>",
-		"lemonade-wc1":                      "metadata.name: must be kserve or kserve-<cluster>",
+		"kserve-":                           notKServeName,
+		"kservewc1":                         notKServeName,
+		"lemonade-wc1":                      notKServeName,
 		"kserve-Wc1":                        `metadata.name: "kserve-Wc1" is not a DNS label`,
 		"kserve-" + strings.Repeat("a", 60): "is not a DNS label",
 	} {
