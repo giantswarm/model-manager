@@ -14,6 +14,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers/oidc"
 	"github.com/stretchr/testify/require"
 
+	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/identity"
 )
@@ -121,6 +122,9 @@ func TestGitHubExchange(t *testing.T) {
 				grant, ok := errors.AsType[*gitops.ErrGrantRequired](err)
 				require.True(t, ok)
 				require.Equal(t, "github", grant.App)
+			}
+			if scenario == "delegated actor" {
+				require.ErrorIs(t, err, backend.ErrForbidden)
 			}
 			if scenario == "missing identity token" || scenario == "delegated actor" {
 				require.Zero(t, exchanges)

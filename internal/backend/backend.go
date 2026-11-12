@@ -57,6 +57,10 @@ var (
 	// ErrUnsupported means the backend (or the deployment) does not offer the
 	// operation; the matching capability flag is false.
 	ErrUnsupported = errors.New("operation not supported")
+	// ErrForbidden means the caller may not do this, whatever the cluster's
+	// RBAC says (an agent acting for a person asking for the person's
+	// GitHub grant).
+	ErrForbidden = errors.New("forbidden")
 	// ErrConflict means the operation would clobber state owned by someone else.
 	ErrConflict = errors.New("conflict")
 	// ErrInvalid means the request was malformed (empty reference, bad option).

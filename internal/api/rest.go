@@ -388,7 +388,7 @@ func statusFor(err error) (int, string) {
 		return http.StatusPreconditionFailed, "does_not_fit"
 	case errors.Is(err, backend.ErrUnavailable):
 		return http.StatusServiceUnavailable, "unavailable"
-	case apierrors.IsForbidden(err):
+	case errors.Is(err, backend.ErrForbidden), apierrors.IsForbidden(err):
 		// The cluster refused the caller: their own RBAC decides, not a
 		// broken backend, so a client must not retry it.
 		return http.StatusForbidden, "forbidden"

@@ -99,7 +99,7 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client) 
 		// A delegated caller (an agent acting for the person) never receives
 		// the person's GitHub grant.
 		if claims, err := oidc.ParseUnverifiedClaims(subjectToken); err != nil || claims["act"] != nil {
-			return nil, fmt.Errorf("%w: commit mode opens the pull request as you, and only you, not an agent acting for you, can authorize it", backend.ErrUnsupported)
+			return nil, fmt.Errorf("%w: commit mode opens the pull request as you, and only you, not an agent acting for you, can authorize it", backend.ErrForbidden)
 		}
 		secret, err := os.ReadFile(configuration.ClientSecretFile)
 		if err != nil || len(strings.TrimSpace(string(secret))) == 0 {
