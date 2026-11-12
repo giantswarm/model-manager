@@ -104,6 +104,9 @@ type errorBody struct {
 type errorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Apps are the provider Apps (muster's names) the person must grant,
+	// with code grant_required.
+	Apps []string `json:"apps,omitempty"`
 }
 
 // backendQuery is the optional ?backend= filter of the read routes.
@@ -361,7 +364,11 @@ func (h *REST) writeError(w http.ResponseWriter, err error) {
 	if status >= http.StatusInternalServerError {
 		h.log.Error("request failed", "status", status, "error", err)
 	}
-	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: err.Error()}})
+	detail := errorDetail{Code: code, Message: err.Error()}
+	if grant, ok := errors.AsType[*gitops.ErrGrantRequired](err); ok {
+		detail.Apps = []string{grant.App}
+	}
+	writeJSON(w, status, errorBody{Error: detail})
 }
 
 // statusFor maps domain errors to HTTP status and a stable code clients can
@@ -376,6 +383,9 @@ func statusFor(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, backend.ErrUnsupported):
 		return http.StatusNotImplemented, "unsupported"
+	case isGrantRequired(err):
+		// The bearer is valid; the person has not granted a provider App.
+		return http.StatusForbidden, statusGrantRequired
 	case errors.Is(err, gitops.ErrAuthRequired):
 		return http.StatusUnauthorized, "auth_required"
 	case errors.Is(err, gitops.ErrRepositoryUnavailable):
@@ -388,13 +398,18 @@ func statusFor(err error) (int, string) {
 		return http.StatusPreconditionFailed, "does_not_fit"
 	case errors.Is(err, backend.ErrUnavailable):
 		return http.StatusServiceUnavailable, "unavailable"
-	case apierrors.IsForbidden(err):
+	case errors.Is(err, backend.ErrForbidden), apierrors.IsForbidden(err):
 		// The cluster refused the caller: their own RBAC decides, not a
 		// broken backend, so a client must not retry it.
 		return http.StatusForbidden, "forbidden"
 	default:
 		return http.StatusBadGateway, "backend_error"
 	}
+}
+
+func isGrantRequired(err error) bool {
+	_, ok := errors.AsType[*gitops.ErrGrantRequired](err)
+	return ok
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

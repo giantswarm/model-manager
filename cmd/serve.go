@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -86,6 +87,12 @@ type serveOptions struct {
 	downstreamOAuth               bool
 	githubAuthorizationServer     string
 	githubAPIURL                  string
+	githubExchangeEndpoint        string
+	githubExchangeClient          string
+	githubExchangeClientFile      string
+	githubExchangeSecretFile      string
+	githubExchangeAudience        string
+	githubExchangeCAFile          string
 
 	jobRetention time.Duration
 }
@@ -216,6 +223,12 @@ environment variable named next to it; flags win over the environment.`,
 	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
 	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
 	f.StringVar(&o.githubAuthorizationServer, "github-authorization-server", envOr("MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER", ""), "Issuer identity of the GitHub App muster pins this server's registration to (https://github.com/apps/giantswarm-model-manager): the bearer of every call is then the person's App user token, verified with GET /user and used for commit mode's pull request, and the person's IdP ID token arrives in X-Muster-Id-Token (MCPServer auth.forwardIdentity). Empty: the bearer is the forwarded IdP ID token and commit mode is not offered. Needs --enable-oauth (MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER)")
+	f.StringVar(&o.githubExchangeEndpoint, "github-token-exchange-endpoint", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT", ""), "RFC 8693 endpoint (muster's broker) that releases the person's GitHub App user grant for commit mode, in place of the App-pinned registration (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT)")
+	f.StringVar(&o.githubExchangeClient, "github-token-exchange-client-id", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID", ""), "Confidential token exchange client ID; wins over --github-token-exchange-client-id-file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID)")
+	f.StringVar(&o.githubExchangeClientFile, "github-token-exchange-client-id-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE", ""), "Mounted confidential client ID file, read at startup when --github-token-exchange-client-id is empty (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE)")
+	f.StringVar(&o.githubExchangeSecretFile, "github-token-exchange-client-secret-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE", ""), "Mounted confidential client secret file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE)")
+	f.StringVar(&o.githubExchangeAudience, "github-token-exchange-audience", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE", ""), "RFC 8693 audience: the provider App (muster's aggregator.providerApps name) whose grant the broker releases, named in grant_required answers (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE)")
+	f.StringVar(&o.githubExchangeCAFile, "github-token-exchange-ca-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE", ""), "Additional CA bundle for token exchange (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE)")
 	f.StringVar(&o.githubAPIURL, "github-api-url", envOr("MODEL_MANAGER_GITHUB_API_URL", server.DefaultGitHubAPIURL), "GitHub REST API base URL for GET /user and commit mode (MODEL_MANAGER_GITHUB_API_URL)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
@@ -255,6 +268,9 @@ func runServe(ctx context.Context, o *serveOptions) error {
 
 	if o.githubAuthorizationServer != "" && !o.oauthEnabled {
 		return fmt.Errorf("--github-authorization-server needs --enable-oauth: the forwarded IdP ID token is validated by the OAuth resource server")
+	}
+	if err := validateGitHubExchange(o); err != nil {
+		return err
 	}
 
 	names, err := backendNames(o.backendName, o.backendNameSet, o.backends)
@@ -364,14 +380,23 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		svc.WithCatalog(catalog)
 	}
 
-	if o.githubAuthorizationServer != "" && clients != nil && wirer != nil {
+	if (o.githubAuthorizationServer != "" || o.githubExchangeEndpoint != "") && clients != nil && wirer != nil {
 		// Commit mode: the pull request is opened as the person, with the
-		// App user token the pinned registration carries; the Flux objects
-		// that name the repository are read as the caller.
+		// App user token the pinned registration carries or the grant
+		// fetched for the commit; the Flux objects that name the repository
+		// are read as the caller.
 		apiURL := o.githubAPIURL
-		svc.WithCommitter(gitops.NewCommitter(o.githubAuthorizationServer, func(token string) (gitops.Remote, error) {
+		committer := gitops.NewCommitter(o.githubAuthorizationServer, func(token string) (gitops.Remote, error) {
 			return gitops.NewGitHub(token, apiURL)
-		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic }))
+		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
+		if o.githubExchangeEndpoint != "" {
+			user, err := server.NewGitHubExchange(o.gitHubExchangeConfig(), log)
+			if err != nil {
+				return err
+			}
+			committer.WithGitHubUser(o.githubExchangeAudience, user)
+		}
+		svc.WithCommitter(committer)
 	}
 
 	var (
@@ -417,7 +442,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	if err != nil {
 		return err
 	}
-	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth, "commit", o.githubAuthorizationServer != "")
+	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth, "commit", o.githubAuthorizationServer != "" || o.githubExchangeEndpoint != "")
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -609,4 +634,23 @@ func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) reg
 		}
 		return backend.New(doc.Spec.Kind, opts)
 	}
+}
+
+func (o *serveOptions) gitHubExchangeConfig() server.GitHubExchangeConfig {
+	return server.GitHubExchangeConfig{TokenEndpoint: o.githubExchangeEndpoint, ClientID: o.githubExchangeClient, ClientIDFile: o.githubExchangeClientFile, ClientSecretFile: o.githubExchangeSecretFile, Audience: o.githubExchangeAudience, CAFile: o.githubExchangeCAFile, APIURL: o.githubAPIURL}
+}
+
+// validateGitHubExchange checks the token exchange options: they replace
+// the App-pinned registration and need the caller's IdP token.
+func validateGitHubExchange(o *serveOptions) error {
+	if o.githubExchangeEndpoint == "" {
+		if o.githubExchangeClient != "" || o.githubExchangeClientFile != "" || o.githubExchangeSecretFile != "" || o.githubExchangeAudience != "" || o.githubExchangeCAFile != "" {
+			return errors.New("GitHub token exchange options require --github-token-exchange-endpoint")
+		}
+		return nil
+	}
+	if !o.oauthEnabled || !o.downstreamOAuth || o.oauthProvider != server.ProviderDex || o.githubAuthorizationServer != "" {
+		return errors.New("GitHub token exchange requires Dex OAuth and downstream OAuth, and replaces the GitHub-pinned MCP registration")
+	}
+	return o.gitHubExchangeConfig().Validate()
 }

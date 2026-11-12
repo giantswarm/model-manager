@@ -235,3 +235,41 @@ protocol's (4317 gRPC, 4318 HTTP). Empty without an endpoint.
 {{- printf "%s:%s" $namespace $port -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+"true" when github.tokenExchange is on (tokenEndpoint set), after refusing an
+incomplete or contradictory configuration: the exchange needs github.enabled,
+Dex OAuth with downstream OAuth and muster's forwardToken (the person's ID
+token is the subject token), an audience, and a client secret (existingSecret or the inline clientSecret).
+*/}}
+{{- define "model-manager.githubTokenExchange" -}}
+{{- $x := .Values.github.tokenExchange -}}
+{{- if $x.tokenEndpoint -}}
+{{- if not .Values.github.enabled -}}
+{{- fail "github.tokenExchange.tokenEndpoint is set and github.enabled is false: set github.enabled to offer commit mode with the token exchange" -}}
+{{- end -}}
+{{- if not (and .Values.oauth.enabled (eq .Values.oauth.provider "dex") .Values.oauth.downstream.enabled) -}}
+{{- fail "github.tokenExchange exchanges the person's Dex ID token: set oauth.enabled with oauth.provider dex and oauth.downstream.enabled" -}}
+{{- end -}}
+{{- if not $x.audience -}}
+{{- fail "github.tokenExchange.audience is required with github.tokenExchange.tokenEndpoint" -}}
+{{- end -}}
+{{- if not .Values.muster.mcpServer.auth.forwardToken -}}
+{{- fail "github.tokenExchange needs muster.mcpServer.auth.forwardToken: the exchange's subject is the forwarded ID token, and muster refuses auth.providerApps without it" -}}
+{{- end -}}
+{{- if not (or $x.existingSecret $x.clientSecret) -}}
+{{- fail "github.tokenExchange needs existingSecret (preferred) or clientSecret" -}}
+{{- end -}}
+true
+{{- else if or $x.audience $x.clientID $x.clientSecret $x.existingSecret $x.caSecretName -}}
+{{- fail "github.tokenExchange.tokenEndpoint is required when any other github.tokenExchange value is set" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret with the token exchange client's client-secret (and client-id):
+github.tokenExchange.existingSecret, else the chart-rendered one.
+*/}}
+{{- define "model-manager.githubTokenExchangeSecretName" -}}
+{{- .Values.github.tokenExchange.existingSecret | default (printf "%s-github-token-exchange" (include "model-manager.fullname" .)) }}
+{{- end }}

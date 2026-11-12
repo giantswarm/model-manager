@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -40,6 +41,24 @@ var (
 // or with one GitHub refused; the message names the consent that gives one.
 var ErrAuthRequired = errors.New("GitHub authorization required")
 
+// ErrGrantRequired is a commit the person has not granted the GitHub App
+// for: the call needs their grant of App, which muster keeps. The MCP answer
+// names App so muster turns it into the App's sign-in. It is an
+// ErrAuthRequired.
+type ErrGrantRequired struct {
+	// App is the provider App, by muster's name for it.
+	App string
+	// Reason says what the grant is for.
+	Reason string
+}
+
+func (e *ErrGrantRequired) Error() string { return e.Reason }
+
+func (e *ErrGrantRequired) Unwrap() error { return ErrAuthRequired }
+
+// GitHubUser fetches the person's GitHub grant for one commit.
+type GitHubUser func(context.Context) (*identity.GitHub, error)
+
 // signIn is the one-time consent a commit needs.
 const signIn = "connect model-manager in muster (core_auth_login server=model-manager), then call again"
 
@@ -63,7 +82,12 @@ type RemoteFor func(token string) (Remote, error)
 type Committer struct {
 	app    string
 	remote RemoteFor
-	dyn    func(ctx context.Context) dynamic.Interface
+	// user fetches the person's grant per commit (nil: the pinned
+	// registration's token); grantApp is muster's name for the provider App
+	// that grant is of.
+	user     GitHubUser
+	grantApp string
+	dyn      func(ctx context.Context) dynamic.Interface
 }
 
 // NewCommitter builds a Committer; app is the GitHub App whose user token
@@ -73,6 +97,14 @@ type Committer struct {
 // which reads the Flux objects.
 func NewCommitter(app string, remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
 	return &Committer{app: app, remote: remote, dyn: dyn}
+}
+
+// WithGitHubUser fetches the person's grant on demand for every commit, in
+// place of the token an App-pinned registration carries; app is muster's
+// name for the provider App the grant is of, named in refusals.
+func (c *Committer) WithGitHubUser(app string, user GitHubUser) *Committer {
+	c.grantApp, c.user = app, user
+	return c
 }
 
 // Result is the pull request a commit opened — or, dry run, would open —
@@ -193,6 +225,13 @@ type planned struct {
 // part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	gh, ok := identity.GitHubFromContext(ctx)
+	if c.user != nil {
+		var err error
+		if gh, err = c.user(ctx); err != nil {
+			return nil, err
+		}
+		ok = gh != nil && gh.Token != ""
+	}
 	if !ok {
 		return nil, fmt.Errorf("%w: commit mode opens the pull request with your GitHub authorization, and this call carries none: %s", ErrAuthRequired, signIn)
 	}
@@ -211,10 +250,10 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 		}
 		if remote == nil {
 			if remote, err = c.remote(gh.Token); err != nil {
-				return nil, commitError(err)
+				return nil, c.commitError(err)
 			}
 		}
-		ok, err := reachable(ctx, remote, reached, loc.Repository)
+		ok, err := c.reachable(ctx, remote, reached, loc.Repository)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +290,7 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 		title := fmt.Sprintf("feat(model-manager): %s %s", req.Verb, req.Subject)
 		prs, err := commit.Open(ctx, remote, commit.Request{Branch: branch, Title: title, Body: body(req, gh.Login, plans)}, changes)
 		if err != nil {
-			return nil, commitError(err)
+			return nil, c.commitError(err)
 		}
 		for _, p := range plans {
 			for _, pr := range prs {
@@ -269,13 +308,13 @@ func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 
 // reachable reports whether the App's token reaches repo; reached caches
 // the answer per repository.
-func reachable(ctx context.Context, remote Remote, reached map[commit.Repository]bool, repo commit.Repository) (bool, error) {
+func (c *Committer) reachable(ctx context.Context, remote Remote, reached map[commit.Repository]bool, repo commit.Repository) (bool, error) {
 	if ok, seen := reached[repo]; seen {
 		return ok, nil
 	}
 	ok, err := remote.Reachable(ctx, repo)
 	if err != nil {
-		return false, commitError(err)
+		return false, c.commitError(err)
 	}
 	reached[repo] = ok
 	return ok, nil
@@ -286,7 +325,10 @@ func reachable(ctx context.Context, remote Remote, reached map[commit.Repository
 // and the App to install on it.
 func (c *Committer) unreachable(loc location, part Part) error {
 	app := "model-manager's GitHub App"
-	if c.app != "" {
+	switch {
+	case c.grantApp != "":
+		app = "the GitHub App you granted in muster as " + c.grantApp + " (core_auth_login app=" + c.grantApp + ")"
+	case c.app != "":
 		app = "the GitHub App " + c.app
 	}
 	return fmt.Errorf("%w: %s is not installed on %s, where the %s for %s go (GitHub answers 404 for a repository the App's token does not reach, or that you cannot see): an owner of %s installs the App on %s with contents and pull requests read and write, then call again",
@@ -330,7 +372,7 @@ func (c *Committer) plan(ctx context.Context, remote Remote, loc location, part 
 		return planned{}, fmt.Errorf("%w: %s holds the placeholder API key, and %s: model-manager commits a Secret only encrypted for the repository's age recipients — pass apiKeySecret (an existing Secret) or apiKeyPassthrough, give the path an age creation rule, or use mode apply", backend.ErrInvalid, strings.Join(secret.Paths, ", "), secret.Reason)
 	}
 	if err != nil {
-		return planned{}, commitError(err)
+		return planned{}, c.commitError(err)
 	}
 	res := c.result(loc, part, "", "", nil)
 	if len(part.Remove) > 0 && !loc.prune && loc.kustomization != "" {
@@ -352,7 +394,7 @@ func (c *Committer) inDirectory(ctx context.Context, remote Remote, loc location
 		case err == nil && raw != nil:
 			return nil
 		case err != nil && !errors.Is(err, commit.ErrFileNotFound):
-			return commitError(err)
+			return c.commitError(err)
 		case removal:
 			kept, err := Kept(ctx, c.dyn(ctx), obj)
 			if err != nil {
@@ -628,13 +670,20 @@ func body(req Request, login string, plans []planned) string {
 	return b.String()
 }
 
-// commitError answers a token GitHub refused with the consent to renew.
-func commitError(err error) error {
+// commitError answers a token GitHub refused with the consent to renew. A
+// grant fetched per commit that GitHub answers 401 is a grant to give again.
+func (c *Committer) commitError(err error) error {
 	var auth *commit.AuthError
-	if errors.As(err, &auth) {
-		return fmt.Errorf("%w: GitHub refused your token on %s (status %d): reconnect model-manager in muster (core_auth_login server=model-manager) — the App must be installed on the repository and your account must be allowed to push to it", ErrAuthRequired, auth.Op, auth.Status)
+	if !errors.As(err, &auth) {
+		return err
 	}
-	return err
+	if c.grantApp != "" {
+		if auth.Status == http.StatusUnauthorized {
+			return &ErrGrantRequired{App: c.grantApp, Reason: fmt.Sprintf("GitHub refused your grant of the GitHub App you granted in muster as %s on %s (status %d): grant it again (core_auth_login app=%s), then call again", c.grantApp, auth.Op, auth.Status, c.grantApp)}
+		}
+		return fmt.Errorf("%w: GitHub refused your grant on %s (status %d): the GitHub App you granted in muster as %s must be installed on the repository and your account must be allowed to push to it; to renew the grant, core_auth_login app=%s", ErrAuthRequired, auth.Op, auth.Status, c.grantApp, c.grantApp)
+	}
+	return fmt.Errorf("%w: GitHub refused your token on %s (status %d): reconnect model-manager in muster (core_auth_login server=model-manager) — the App must be installed on the repository and your account must be allowed to push to it", ErrAuthRequired, auth.Op, auth.Status)
 }
 
 func nested(obj *unstructured.Unstructured, fields ...string) string {
