@@ -4,6 +4,8 @@
 # (.github/workflows/chart.yml) on every change and as `make helm-verify`.
 # Needs helm.
 set -euo pipefail
+# Matches read their whole input (grep >/dev/null, never grep -q): under
+# pipefail, grep -q exiting at the first match fails a writer still writing.
 cd "$(dirname "$0")/.."
 CHART=helm/model-manager
 
@@ -42,7 +44,7 @@ got=$(trusted "${DEX[@]}" \
 helm template mm "$CHART" --show-only templates/mcpserver.yaml "${DEX[@]}" \
   --set muster.mcpServer.enabled=true \
   --set-json 'muster.mcpServer.auth.requiredAudiences=["kubernetes"]' \
-  | grep -q -- '^ *- kubernetes$' \
+  | grep >/dev/null -- '^ *- kubernetes$' \
   || fail "the MCPServer CR does not list requiredAudiences"
 
 # The MCPServer CR carries the Agent Platform tier label next to the muster
@@ -53,28 +55,28 @@ mcpserver() {
     --set muster.mcpServer.enabled=true "$@"
 }
 got=$(mcpserver)
-echo "$got" | grep -q -- '^    agent-platform.giantswarm.io/tool-group: agent-platform$' \
+echo "$got" | grep >/dev/null -- '^    agent-platform.giantswarm.io/tool-group: agent-platform$' \
   || fail "the MCPServer CR lacks agent-platform.giantswarm.io/tool-group: agent-platform"
-echo "$got" | grep -q -- '^    muster.giantswarm.io/type: model-manager$' \
+echo "$got" | grep >/dev/null -- '^    muster.giantswarm.io/type: model-manager$' \
   || fail "the MCPServer CR lacks muster.giantswarm.io/type: model-manager"
 got=$(mcpserver --set-json 'muster.mcpServer.labels={"agent-platform.giantswarm.io/tool-group":"infrastructure","example.com/extra":"extra"}')
-echo "$got" | grep -q -- '^    agent-platform.giantswarm.io/tool-group: infrastructure$' \
+echo "$got" | grep >/dev/null -- '^    agent-platform.giantswarm.io/tool-group: infrastructure$' \
   || fail "muster.mcpServer.labels does not override the tier label"
 [ "$(echo "$got" | grep -c -- 'agent-platform.giantswarm.io/tool-group:')" = 1 ] \
   || fail "the overridden tier label renders more than once"
-echo "$got" | grep -q -- '^    example.com/extra: extra$' \
+echo "$got" | grep >/dev/null -- '^    example.com/extra: extra$' \
   || fail "muster.mcpServer.labels does not add labels"
 
 # The MCPServer CR carries the display name the Dev Portal shows;
 # muster.mcpServer.displayName replaces it and empty renders no annotation.
 got=$(mcpserver)
-echo "$got" | grep -qxF -- '    ui.giantswarm.io/display-name: "Model Manager"' \
+echo "$got" | grep >/dev/null -xF -- '    ui.giantswarm.io/display-name: "Model Manager"' \
   || fail "the MCPServer CR lacks ui.giantswarm.io/display-name: Model Manager"
 got=$(mcpserver --set-string 'muster.mcpServer.displayName=Models: all of them')
-echo "$got" | grep -qxF -- '    ui.giantswarm.io/display-name: "Models: all of them"' \
+echo "$got" | grep >/dev/null -xF -- '    ui.giantswarm.io/display-name: "Models: all of them"' \
   || fail "muster.mcpServer.displayName does not set the display name"
 got=$(mcpserver --set muster.mcpServer.displayName=)
-if echo "$got" | grep -qF -- 'ui.giantswarm.io/display-name'; then
+if echo "$got" | grep >/dev/null -F -- 'ui.giantswarm.io/display-name'; then
   fail "an empty muster.mcpServer.displayName renders the display name"
 fi
 
@@ -97,26 +99,26 @@ args() {
 }
 got=$(args --set backend=lemonade --set lemonade.endpoint=http://172.21.0.1:13305 \
   --set lemonade.agentHost=http://172.21.0.1:13305)
-echo "$got" | grep -q -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
+echo "$got" | grep >/dev/null -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
   || fail "lemonade backend: --lemonade-endpoint not rendered, got '$got'"
-echo "$got" | grep -q -- '^--lemonade-agent-host=http://172.21.0.1:13305$' \
+echo "$got" | grep >/dev/null -- '^--lemonade-agent-host=http://172.21.0.1:13305$' \
   || fail "lemonade backend: --lemonade-agent-host not rendered, got '$got'"
-if echo "$got" | grep -q -- '^--ollama-\|^--kserve-\|^--lmstudio-'; then
+if echo "$got" | grep >/dev/null -- '^--ollama-\|^--kserve-\|^--lmstudio-'; then
   fail "lemonade backend renders ollama, kserve or lmstudio flags: '$got'"
 fi
-echo "$got" | grep -q -- '^--in-cluster=true$' \
+echo "$got" | grep >/dev/null -- '^--in-cluster=true$' \
   || fail "lemonade backend with wiring on: Kubernetes access expected (wiring)"
 
 # Without an agent host only the endpoint flag renders; the default backend
 # renders no lemonade flag at all.
 got=$(args --set backend=lemonade)
-echo "$got" | grep -q -- '^--lemonade-endpoint=http://host.docker.internal:13305$' \
+echo "$got" | grep >/dev/null -- '^--lemonade-endpoint=http://host.docker.internal:13305$' \
   || fail "lemonade backend: default endpoint not rendered, got '$got'"
-if echo "$got" | grep -q -- '^--lemonade-agent-host'; then
+if echo "$got" | grep >/dev/null -- '^--lemonade-agent-host'; then
   fail "lemonade backend: agent host flag rendered without a value"
 fi
 got=$(args)
-if echo "$got" | grep -q -- '^--lemonade-\|^--lmstudio-'; then
+if echo "$got" | grep >/dev/null -- '^--lemonade-\|^--lmstudio-'; then
   fail "ollama backend renders lemonade or lmstudio flags: '$got'"
 fi
 
@@ -137,21 +139,21 @@ done
 # The lmstudio backend renders its own flags and none of the others'.
 got=$(args --set backend=lmstudio --set lmstudio.endpoint=http://172.21.0.1:1234 \
   --set lmstudio.agentHost=http://172.21.0.1:1234)
-echo "$got" | grep -q -- '^--lmstudio-endpoint=http://172.21.0.1:1234$' \
+echo "$got" | grep >/dev/null -- '^--lmstudio-endpoint=http://172.21.0.1:1234$' \
   || fail "lmstudio backend: --lmstudio-endpoint not rendered, got '$got'"
-echo "$got" | grep -q -- '^--lmstudio-agent-host=http://172.21.0.1:1234$' \
+echo "$got" | grep >/dev/null -- '^--lmstudio-agent-host=http://172.21.0.1:1234$' \
   || fail "lmstudio backend: --lmstudio-agent-host not rendered, got '$got'"
-if echo "$got" | grep -q -- '^--ollama-\|^--kserve-\|^--lemonade-'; then
+if echo "$got" | grep >/dev/null -- '^--ollama-\|^--kserve-\|^--lemonade-'; then
   fail "lmstudio backend renders ollama, kserve or lemonade flags: '$got'"
 fi
-echo "$got" | grep -q -- '^--in-cluster=true$' \
+echo "$got" | grep >/dev/null -- '^--in-cluster=true$' \
   || fail "lmstudio backend with wiring on: Kubernetes access expected (wiring)"
 
 # Without an agent host only the endpoint flag renders.
 got=$(args --set backend=lmstudio)
-echo "$got" | grep -q -- '^--lmstudio-endpoint=http://host.docker.internal:1234$' \
+echo "$got" | grep >/dev/null -- '^--lmstudio-endpoint=http://host.docker.internal:1234$' \
   || fail "lmstudio backend: default endpoint not rendered, got '$got'"
-if echo "$got" | grep -q -- '^--lmstudio-agent-host'; then
+if echo "$got" | grep >/dev/null -- '^--lmstudio-agent-host'; then
   fail "lmstudio backend: agent host flag rendered without a value"
 fi
 
@@ -159,41 +161,41 @@ fi
 # driver's flags, and never the single --backend flag.
 got=$(args --set 'backends={ollama,lemonade}' --set ollama.endpoint=http://172.21.0.1:11434 \
   --set lemonade.endpoint=http://172.21.0.1:13305)
-echo "$got" | grep -q -- '^--backends=ollama,lemonade$' \
+echo "$got" | grep >/dev/null -- '^--backends=ollama,lemonade$' \
   || fail "backends list: --backends=ollama,lemonade not rendered, got '$got'"
-echo "$got" | grep -q -- '^--ollama-endpoint=http://172.21.0.1:11434$' \
+echo "$got" | grep >/dev/null -- '^--ollama-endpoint=http://172.21.0.1:11434$' \
   || fail "backends list: the ollama flags must render for a listed ollama"
-echo "$got" | grep -q -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
+echo "$got" | grep >/dev/null -- '^--lemonade-endpoint=http://172.21.0.1:13305$' \
   || fail "backends list: the lemonade flags must render for a listed lemonade"
-if echo "$got" | grep -q -- '^--backend='; then
+if echo "$got" | grep >/dev/null -- '^--backend='; then
   fail "backends list: the single --backend flag must not render next to --backends: '$got'"
 fi
-if echo "$got" | grep -q -- '^--kserve-'; then
+if echo "$got" | grep >/dev/null -- '^--kserve-'; then
   fail "backends list without kserve renders kserve flags: '$got'"
 fi
 
 # An lmstudio next to the other host drivers renders all three.
 got=$(args --set 'backends={ollama,lemonade,lmstudio}' --set ollama.endpoint=http://172.21.0.1:11434 \
   --set lemonade.endpoint=http://172.21.0.1:13305 --set lmstudio.endpoint=http://172.21.0.1:1234)
-echo "$got" | grep -q -- '^--backends=ollama,lemonade,lmstudio$' \
+echo "$got" | grep >/dev/null -- '^--backends=ollama,lemonade,lmstudio$' \
   || fail "three host backends: --backends not rendered, got '$got'"
 for flag in --ollama-endpoint --lemonade-endpoint --lmstudio-endpoint; do
-  echo "$got" | grep -q -- "^$flag=" \
+  echo "$got" | grep >/dev/null -- "^$flag=" \
     || fail "three host backends: $flag must render, got '$got'"
 done
 
 # kserve in the list brings its flags, the Kubernetes access and its Roles even
 # with wiring off — as `backend: kserve` alone does.
 got=$(args --set 'backends={ollama,kserve}' --set ollama.endpoint=http://172.21.0.1:11434 --set kagent.disableWiring=true)
-echo "$got" | grep -q -- '^--kserve-namespace=' \
+echo "$got" | grep >/dev/null -- '^--kserve-namespace=' \
   || fail "backends list with kserve: the kserve flags must render"
-echo "$got" | grep -q -- '^--in-cluster=true$' \
+echo "$got" | grep >/dev/null -- '^--in-cluster=true$' \
   || fail "backends list with kserve and wiring off: Kubernetes access expected"
 helm template mm "$CHART" --show-only templates/rbac.yaml --set 'backends={ollama,kserve}' --set kagent.disableWiring=true \
-  | grep -q -- '^  name: mm-model-manager-kserve$' \
+  | grep >/dev/null -- '^  name: mm-model-manager-kserve$' \
   || fail "backends list with kserve: the kserve Role must render"
 if helm template mm "$CHART" --show-only templates/rbac.yaml --set 'backends={ollama,lemonade}' --set kagent.disableWiring=true 2>/dev/null \
-  | grep -q -- 'kserve'; then
+  | grep >/dev/null -- 'kserve'; then
   fail "backends list without kserve renders kserve RBAC"
 fi
 
@@ -201,38 +203,38 @@ fi
 # renders with every RBAC set, wiring on or off, and not under downstream
 # OAuth, where the caller's RBAC governs.
 helm template mm "$CHART" --show-only templates/rbac.yaml --set kagent.disableWiring=true \
-  | grep -q -- '^  name: mm-model-manager-flux-inventory$' \
+  | grep >/dev/null -- '^  name: mm-model-manager-flux-inventory$' \
   || fail "the flux-inventory ClusterRole must render with wiring off"
 if helm template mm "$CHART" --show-only templates/rbac.yaml "${DEX[@]}" --set oauth.downstream.enabled=true 2>/dev/null \
-  | grep -q -- 'flux-inventory'; then
+  | grep >/dev/null -- 'flux-inventory'; then
   fail "downstream OAuth renders the flux-inventory ClusterRole"
 fi
 
 # The one-backend form is untouched: `backend: ollama` renders --backend=ollama
 # and no --backends.
 got=$(args --set backend=ollama)
-echo "$got" | grep -q -- '^--backend=ollama$' || fail "single backend: --backend=ollama expected, got '$got'"
-if echo "$got" | grep -q -- '^--backends='; then
+echo "$got" | grep >/dev/null -- '^--backend=ollama$' || fail "single backend: --backend=ollama expected, got '$got'"
+if echo "$got" | grep >/dev/null -- '^--backends='; then
   fail "single backend renders --backends: '$got'"
 fi
 
 # Zero backends is the default: no --backend and no --backends, Kubernetes
 # access for the backend documents, and POD_NAMESPACE for --namespace.
 got=$(args)
-if echo "$got" | grep -q -- '^--backends\?='; then
+if echo "$got" | grep >/dev/null -- '^--backends\?='; then
   fail "default values must render no static backend flag, got '$got'"
 fi
-echo "$got" | grep -q -- '^--in-cluster=true$' || fail "default values: Kubernetes access for backend documents expected, got '$got'"
+echo "$got" | grep >/dev/null -- '^--in-cluster=true$' || fail "default values: Kubernetes access for backend documents expected, got '$got'"
 helm template mm "$CHART" --show-only templates/deployment.yaml \
-  | grep -q 'name: POD_NAMESPACE' || fail "default values: POD_NAMESPACE env expected"
+  | grep >/dev/null 'name: POD_NAMESPACE' || fail "default values: POD_NAMESPACE env expected"
 
 # The backend documents Role renders with and without oauth.downstream; the
 # write verbs only without (the caller's RBAC governs under downstream).
 got=$(helm template mm "$CHART" --show-only templates/rbac-backends.yaml)
-echo "$got" | grep -q -- '"create", "update", "patch", "delete"' || fail "backend documents Role: write verbs expected without downstream OAuth"
+echo "$got" | grep >/dev/null -- '"create", "update", "patch", "delete"' || fail "backend documents Role: write verbs expected without downstream OAuth"
 got=$(helm template mm "$CHART" --show-only templates/rbac-backends.yaml "${DEX[@]}" --set oauth.downstream.enabled=true)
-echo "$got" | grep -q -- '"get", "list", "watch"' || fail "backend documents Role: read verbs expected under downstream OAuth"
-if echo "$got" | grep -q -- '"create"'; then
+echo "$got" | grep >/dev/null -- '"get", "list", "watch"' || fail "backend documents Role: read verbs expected under downstream OAuth"
+if echo "$got" | grep >/dev/null -- '"create"'; then
   fail "backend documents Role: no write verbs under downstream OAuth"
 fi
 
@@ -241,23 +243,23 @@ fi
 # no capability added, the pod's seccomp profile.
 got=$(helm template mm "$CHART" --show-only templates/cache-agent-daemonset.yaml \
   --set backend=kserve --set kserve.inventory.mode=daemonset --set kserve.cache.claimName=hf-cache)
-echo "$got" | grep -q -- '^        runAsNonRoot: true$' || fail "cache-agent: the pod does not set runAsNonRoot: true"
-echo "$got" | grep -q -- '^        fsGroup: 1000$' || fail "cache-agent: the pod does not set the cache fsGroup"
-echo "$got" | grep -q -- '^          type: RuntimeDefault$' || fail "cache-agent: the pod does not set seccomp RuntimeDefault"
-echo "$got" | grep -q -- '^            runAsUser: 1000$' || fail "cache-agent: the container does not run as uid 1000"
-if echo "$got" | grep -q -- 'runAsUser: 0\|runAsNonRoot: false\|^ *add:'; then
+echo "$got" | grep >/dev/null -- '^        runAsNonRoot: true$' || fail "cache-agent: the pod does not set runAsNonRoot: true"
+echo "$got" | grep >/dev/null -- '^        fsGroup: 1000$' || fail "cache-agent: the pod does not set the cache fsGroup"
+echo "$got" | grep >/dev/null -- '^          type: RuntimeDefault$' || fail "cache-agent: the pod does not set seccomp RuntimeDefault"
+echo "$got" | grep >/dev/null -- '^            runAsUser: 1000$' || fail "cache-agent: the container does not run as uid 1000"
+if echo "$got" | grep >/dev/null -- 'runAsUser: 0\|runAsNonRoot: false\|^ *add:'; then
   fail "cache-agent: root or an added capability rendered: '$got'"
 fi
 
 # With the kserve backend the pod may reach the served models' runtimes on the
 # workload port (the API interfaces a Ready model answers), and only then.
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true --set backend=kserve)
-echo "$got" | grep -A12 -- "The served models' runtimes" | grep -q -- 'app.kubernetes.io/part-of: llminferenceservice' \
+echo "$got" | grep -A12 -- "The served models' runtimes" | grep >/dev/null -- 'app.kubernetes.io/part-of: llminferenceservice' \
   || fail "networkpolicy: no egress to the served models' workload pods with the kserve backend"
-echo "$got" | grep -A14 -- "The served models' runtimes" | grep -q -- 'port: 8000$' \
+echo "$got" | grep -A14 -- "The served models' runtimes" | grep >/dev/null -- 'port: 8000$' \
   || fail "networkpolicy: the egress to the served models' runtimes is not port 8000"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true --set backend=ollama)
-if echo "$got" | grep -q -- 'llminferenceservice'; then
+if echo "$got" | grep >/dev/null -- 'llminferenceservice'; then
   fail "networkpolicy: egress to served models rendered without the kserve backend"
 fi
 
@@ -265,33 +267,33 @@ fi
 # the env and an egress rule on the collector's namespace and port, the
 # cluster-external form for a host that is not an in-cluster Service.
 got=$(helm template mm "$CHART" --show-only templates/deployment.yaml)
-if echo "$got" | grep -v -- 'OTEL_METRICS_EXPORTER\|OTEL_EXPORTER_PROMETHEUS_' | grep -q -- 'OTEL_'; then
+if echo "$got" | grep -v -- 'OTEL_METRICS_EXPORTER\|OTEL_EXPORTER_PROMETHEUS_' | grep >/dev/null -- 'OTEL_'; then
   fail "deployment: OTEL_ env rendered without observability.otel.endpoint"
 fi
 
 # Metrics: the Prometheus exporter on the metrics port by default; off, the
 # exporter is none, so an OTLP endpoint set for traces does not push metrics.
 got=$(helm template mm "$CHART" --show-only templates/deployment.yaml)
-echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep -q -- 'value: prometheus' \
+echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep >/dev/null -- 'value: prometheus' \
   || fail "deployment: metrics on by default, want OTEL_METRICS_EXPORTER=prometheus"
-echo "$got" | grep -q -- 'name: metrics$' || fail "deployment: no metrics container port"
+echo "$got" | grep >/dev/null -- 'name: metrics$' || fail "deployment: no metrics container port"
 got=$(helm template mm "$CHART" --show-only templates/deployment.yaml \
   --set observability.metrics.enabled=false --set observability.otel.endpoint=http://otlp-gateway.kube-system.svc:4317)
-echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep -q -- 'value: none' \
+echo "$got" | grep -A1 -- 'name: OTEL_METRICS_EXPORTER$' | grep >/dev/null -- 'value: none' \
   || fail "deployment: metrics off, want OTEL_METRICS_EXPORTER=none"
-if echo "$got" | grep -q -- 'name: metrics$'; then fail "deployment: metrics port rendered with metrics off"; fi
+if echo "$got" | grep >/dev/null -- 'name: metrics$'; then fail "deployment: metrics port rendered with metrics off"; fi
 got=$(helm template mm "$CHART" --set serviceMonitor.enabled=true --set observability.metrics.enabled=false)
-if echo "$got" | grep -q -- 'kind: ServiceMonitor'; then fail "ServiceMonitor rendered with metrics off"; fi
+if echo "$got" | grep >/dev/null -- 'kind: ServiceMonitor'; then fail "ServiceMonitor rendered with metrics off"; fi
 got=$(helm template mm "$CHART" --show-only templates/servicemonitor.yaml --set serviceMonitor.enabled=true \
   --set-json 'serviceMonitor.labels={"observability.giantswarm.io/tenant":"giantswarm"}')
-echo "$got" | grep -q -- '^    observability.giantswarm.io/tenant: giantswarm$' \
+echo "$got" | grep >/dev/null -- '^    observability.giantswarm.io/tenant: giantswarm$' \
   || fail "ServiceMonitor lacks serviceMonitor.labels"
-echo "$got" | grep -q -- '- port: metrics$' || fail "ServiceMonitor does not scrape the metrics port"
+echo "$got" | grep >/dev/null -- '- port: metrics$' || fail "ServiceMonitor does not scrape the metrics port"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
-echo "$got" | grep -B8 -- 'port: 9464$' | grep -q -- 'kubernetes.io/metadata.name: kube-system' \
+echo "$got" | grep -B8 -- 'port: 9464$' | grep >/dev/null -- 'kubernetes.io/metadata.name: kube-system' \
   || fail "networkpolicy: metrics port not admitted from kube-system"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
-if echo "$got" | grep -q -- 'OTLP collector'; then
+if echo "$got" | grep >/dev/null -- 'OTLP collector'; then
   fail "networkpolicy: OTLP egress rendered without observability.otel.endpoint"
 fi
 OTLP=(--set networkPolicy.enabled=true
@@ -301,18 +303,18 @@ got=$(helm template mm "$CHART" --show-only templates/deployment.yaml "${OTLP[@]
 for want in 'OTEL_EXPORTER_OTLP_ENDPOINT' 'value: "http://otel-collector.customer-otel.svc:14317"' \
             'value: "X-Scope-OrgID=acme"' 'value: "parentbased_traceidratio"' 'value: "0.1"' \
             'value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(K8S_POD_NAME),k8s.node.name=$(K8S_NODE_NAME)"'; do
-  echo "$got" | grep -qF -- "$want" || fail "deployment: OTLP env lacks '$want'"
+  echo "$got" | grep >/dev/null -F -- "$want" || fail "deployment: OTLP env lacks '$want'"
 done
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml "${OTLP[@]}")
-echo "$got" | grep -A6 -- 'OTLP collector' | grep -q -- 'kubernetes.io/metadata.name: customer-otel$' \
+echo "$got" | grep -A6 -- 'OTLP collector' | grep >/dev/null -- 'kubernetes.io/metadata.name: customer-otel$' \
   || fail "networkpolicy: the OTLP egress does not select the collector's namespace"
-echo "$got" | grep -A9 -- 'OTLP collector' | grep -q -- 'port: 14317$' \
+echo "$got" | grep -A9 -- 'OTLP collector' | grep >/dev/null -- 'port: 14317$' \
   || fail "networkpolicy: the OTLP egress is not on the collector's port"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true \
   --set observability.otel.endpoint=https://otlp.example.com)
-echo "$got" | grep -A6 -- 'OTLP collector' | grep -q -- 'cidr: 0.0.0.0/0$' \
+echo "$got" | grep -A6 -- 'OTLP collector' | grep >/dev/null -- 'cidr: 0.0.0.0/0$' \
   || fail "networkpolicy: the OTLP egress to an external collector is not an ipBlock"
-echo "$got" | grep -A9 -- 'OTLP collector' | grep -q -- 'port: 443$' \
+echo "$got" | grep -A9 -- 'OTLP collector' | grep >/dev/null -- 'port: 443$' \
   || fail "networkpolicy: the OTLP egress to an https collector without a port is not 443"
 
 # github.tokenExchange: commit mode with the person's grant fetched per
@@ -323,10 +325,10 @@ GHX=("${DEX[@]}" --set oauth.downstream.enabled=true --set github.enabled=true
      --set github.tokenExchange.tokenEndpoint=https://muster.example.test/oauth/token
      --set github.tokenExchange.audience=model-manager-app)
 got=$(mcpserver "${GHX[@]}" --set github.tokenExchange.existingSecret=gtx)
-echo "$got" | grep -qxF -- '    forwardToken: true' || fail "tokenExchange: the MCPServer does not forward the ID token"
-echo "$got" | grep -A1 -- '^    providerApps:$' | grep -qxF -- '      - "model-manager-app"' \
+echo "$got" | grep >/dev/null -xF -- '    forwardToken: true' || fail "tokenExchange: the MCPServer does not forward the ID token"
+echo "$got" | grep -A1 -- '^    providerApps:$' | grep >/dev/null -xF -- '      - "model-manager-app"' \
   || fail "tokenExchange: the MCPServer does not list the audience under providerApps"
-if echo "$got" | grep -q -- 'authorizationServer:\|forwardIdentity'; then
+if echo "$got" | grep >/dev/null -- 'authorizationServer:\|forwardIdentity'; then
   fail "tokenExchange: the MCPServer still pins the GitHub App"
 fi
 got=$(helm template mm "$CHART" "${GHX[@]}" --set github.tokenExchange.existingSecret=gtx)
@@ -335,36 +337,36 @@ for want in '--github-token-exchange-endpoint=https://muster.example.test/oauth/
             '--github-token-exchange-client-id-file=/etc/model-manager/github-token-exchange/client-id' \
             '--github-token-exchange-client-secret-file=/etc/model-manager/github-token-exchange/client-secret' \
             '--github-api-url=https://api.github.com' 'secretName: gtx'; do
-  echo "$got" | grep -qF -- "$want" || fail "tokenExchange: the Deployment lacks '$want'"
+  echo "$got" | grep >/dev/null -F -- "$want" || fail "tokenExchange: the Deployment lacks '$want'"
 done
-if echo "$got" | grep -q -- '--github-authorization-server\|--github-token-exchange-client-id=\|--github-grant-app\|kind: Secret'; then
+if echo "$got" | grep >/dev/null -- '--github-authorization-server\|--github-token-exchange-client-id=\|--github-grant-app\|kind: Secret'; then
   fail "tokenExchange with existingSecret: pin flag, client ID flag or a chart Secret rendered"
 fi
-if echo "$got" | grep -A4 -- '- name: github-token-exchange$' | grep -q -- 'items:'; then
+if echo "$got" | grep -A4 -- '- name: github-token-exchange$' | grep >/dev/null -- 'items:'; then
   fail "tokenExchange: the client Secret is not mounted whole"
 fi
 got=$(helm template mm "$CHART" "${GHX[@]}" --set github.tokenExchange.clientID=mm-client \
   --set github.tokenExchange.clientSecret=inline --set github.tokenExchange.caSecretName=broker-ca)
-echo "$got" | grep -qF -- '--github-token-exchange-client-id=mm-client' || fail "tokenExchange: clientID does not render the client ID flag"
-echo "$got" | grep -qF -- '--github-token-exchange-ca-file=/etc/model-manager/github-token-exchange-ca/ca.crt' \
+echo "$got" | grep >/dev/null -F -- '--github-token-exchange-client-id=mm-client' || fail "tokenExchange: clientID does not render the client ID flag"
+echo "$got" | grep >/dev/null -F -- '--github-token-exchange-ca-file=/etc/model-manager/github-token-exchange-ca/ca.crt' \
   || fail "tokenExchange: caSecretName does not render the CA flag"
 secret=$(helm template mm "$CHART" --show-only templates/github-token-exchange-secret.yaml "${GHX[@]}" \
   --set github.tokenExchange.clientID=mm-client --set github.tokenExchange.clientSecret=inline)
 for want in 'name: mm-model-manager-github-token-exchange' 'client-secret: "inline"' 'client-id: "mm-client"'; do
-  echo "$secret" | grep -qF -- "$want" || fail "tokenExchange inline clientSecret: the Secret lacks '$want'"
+  echo "$secret" | grep >/dev/null -F -- "$want" || fail "tokenExchange inline clientSecret: the Secret lacks '$want'"
 done
-echo "$got" | grep -qF -- 'secretName: mm-model-manager-github-token-exchange' \
+echo "$got" | grep >/dev/null -F -- 'secretName: mm-model-manager-github-token-exchange' \
   || fail "tokenExchange inline clientSecret: the Deployment does not mount the chart's Secret"
 # Without tokenExchange, the deprecated pin: forwardIdentity, no providerApps.
 got=$(mcpserver "${DEX[@]}" --set github.enabled=true)
-echo "$got" | grep -q -- 'forwardIdentity: true' || fail "the pin: the MCPServer lacks forwardIdentity"
-if echo "$got" | grep -q -- 'providerApps'; then fail "the pin: providerApps rendered"; fi
+echo "$got" | grep >/dev/null -- 'forwardIdentity: true' || fail "the pin: the MCPServer lacks forwardIdentity"
+if echo "$got" | grep >/dev/null -- 'providerApps'; then fail "the pin: providerApps rendered"; fi
 # Refusals.
 refused() {
   local want=$1; shift
   local out
   if out=$(helm template mm "$CHART" "$@" 2>&1); then fail "expected a refusal containing '$want'"; fi
-  echo "$out" | grep -qF -- "$want" || fail "refusal lacks '$want': $out"
+  echo "$out" | grep >/dev/null -F -- "$want" || fail "refusal lacks '$want': $out"
 }
 refused 'github.enabled is false' "${GHX[@]}" --set github.enabled=false --set github.tokenExchange.existingSecret=gtx
 refused 'github.tokenExchange.audience is required' "${GHX[@]}" --set github.tokenExchange.audience= --set github.tokenExchange.existingSecret=gtx
