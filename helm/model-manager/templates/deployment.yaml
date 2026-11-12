@@ -1,5 +1,6 @@
 apiVersion: apps/v1
 kind: Deployment
+{{- $githubExchange := include "model-manager.githubTokenExchange" . }}
 metadata:
   name: {{ include "model-manager.fullname" . }}
   namespace: {{ .Release.Namespace }}
@@ -178,22 +179,23 @@ spec:
             {{- if .Values.oauth.downstream.enabled }}
             - --downstream-oauth=true
             {{- end }}
-            {{- if .Values.github.enabled }}
-            - --github-authorization-server={{ .Values.github.authorizationServer.issuer }}
-            - --github-api-url={{ .Values.github.apiURL }}
+            {{- if $githubExchange }}
+            {{- with .Values.github.tokenExchange }}
+            - --github-token-exchange-endpoint={{ .tokenEndpoint }}
+            - --github-token-exchange-audience={{ .audience }}
+            {{- with .clientID }}
+            - --github-token-exchange-client-id={{ . }}
             {{- end }}
-            {{- with .Values.githubTokenExchange }}
-            {{- if .endpoint }}
-            - --github-token-exchange-endpoint={{ .endpoint }}
-            - --github-token-exchange-client-id={{ required "githubTokenExchange.clientID is required" .clientID }}
-            - --github-token-exchange-audience={{ required "githubTokenExchange.audience is required" .audience }}
+            - --github-token-exchange-client-id-file=/etc/model-manager/github-token-exchange/client-id
             - --github-token-exchange-client-secret-file=/etc/model-manager/github-token-exchange/client-secret
-            - --github-grant-app={{ required "githubTokenExchange.grantApp is required" .grantApp }}
-            - --github-api-url={{ $.Values.github.apiURL }}
             {{- if .caSecretName }}
             - --github-token-exchange-ca-file=/etc/model-manager/github-token-exchange-ca/ca.crt
             {{- end }}
             {{- end }}
+            - --github-api-url={{ .Values.github.apiURL }}
+            {{- else if .Values.github.enabled }}
+            - --github-authorization-server={{ .Values.github.authorizationServer.issuer }}
+            - --github-api-url={{ .Values.github.apiURL }}
             {{- end }}
             {{- if eq .Values.oauth.provider "dex" }}
             - --dex-issuer-url={{ include "model-manager.oauthDexIssuerURL" . }}
@@ -327,11 +329,11 @@ spec:
               mountPath: /etc/model-manager/idp-ca
               readOnly: true
             {{- end }}
-            {{- if .Values.githubTokenExchange.endpoint }}
+            {{- if $githubExchange }}
             - name: github-token-exchange
               mountPath: /etc/model-manager/github-token-exchange
               readOnly: true
-            {{- if .Values.githubTokenExchange.caSecretName }}
+            {{- if .Values.github.tokenExchange.caSecretName }}
             - name: github-token-exchange-ca
               mountPath: /etc/model-manager/github-token-exchange-ca
               readOnly: true
@@ -353,18 +355,15 @@ spec:
               - key: {{ include "model-manager.oauthDexCASecretKey" . }}
                 path: {{ include "model-manager.oauthDexCASecretKey" . }}
         {{- end }}
-        {{- if .Values.githubTokenExchange.endpoint }}
+        {{- if $githubExchange }}
         - name: github-token-exchange
           secret:
-            secretName: {{ required "githubTokenExchange.secretName is required" .Values.githubTokenExchange.secretName }}
+            secretName: {{ include "model-manager.githubTokenExchangeSecretName" . }}
             defaultMode: 0440
-            items:
-              - key: client-secret
-                path: client-secret
-        {{- if .Values.githubTokenExchange.caSecretName }}
+        {{- if .Values.github.tokenExchange.caSecretName }}
         - name: github-token-exchange-ca
           secret:
-            secretName: {{ .Values.githubTokenExchange.caSecretName }}
+            secretName: {{ .Values.github.tokenExchange.caSecretName }}
             items:
               - key: ca.crt
                 path: ca.crt

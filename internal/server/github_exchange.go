@@ -25,17 +25,16 @@ import (
 // GitHubExchangeConfig identifies a confidential RFC 8693 client and its
 // operator-controlled target. No caller can select the endpoint or target.
 type GitHubExchangeConfig struct {
-	TokenEndpoint    string
+	TokenEndpoint string
+	// ClientID wins over ClientIDFile, which is read at startup.
 	ClientID         string
+	ClientIDFile     string
 	ClientSecretFile string
-	// Audience is the broker target that releases the person's grant of
-	// the App GrantApp names.
+	// Audience is the RFC 8693 audience: the provider App muster keeps the
+	// person's grant under, also named in the grant_required answer.
 	Audience string
 	CAFile   string
 	APIURL   string
-	// GrantApp is the provider App muster keeps the person's grant under,
-	// named in the grant_required answer.
-	GrantApp string
 }
 
 // Validate checks required fields.
@@ -44,8 +43,8 @@ func (c GitHubExchangeConfig) Validate() error {
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		return errors.New("GitHub token exchange requires an HTTPS token endpoint without credentials, query or fragment")
 	}
-	if c.ClientID == "" || c.ClientSecretFile == "" || c.Audience == "" || c.GrantApp == "" {
-		return errors.New("GitHub token exchange requires a client ID, client secret file, target audience and grant App")
+	if (c.ClientID == "" && c.ClientIDFile == "") || c.ClientSecretFile == "" || c.Audience == "" {
+		return errors.New("GitHub token exchange requires a client ID or client ID file, a client secret file and an audience")
 	}
 	if c.APIURL != "" {
 		apiURL, err := url.Parse(c.APIURL)
@@ -62,6 +61,15 @@ func (c GitHubExchangeConfig) Validate() error {
 func NewGitHubExchange(configuration GitHubExchangeConfig) (gitops.GitHubUser, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, err
+	}
+	if configuration.ClientID == "" {
+		clientID, err := os.ReadFile(configuration.ClientIDFile)
+		if err != nil {
+			return nil, fmt.Errorf("read GitHub token exchange client ID file %s: %w", configuration.ClientIDFile, err)
+		}
+		if configuration.ClientID = strings.TrimSpace(string(clientID)); configuration.ClientID == "" {
+			return nil, fmt.Errorf("GitHub token exchange client ID file %s is empty", configuration.ClientIDFile)
+		}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if configuration.CAFile != "" {
@@ -88,7 +96,7 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client) 
 	// only that it is HTTPS.
 	exchanger := oidc.NewTokenExchangeClientWithOptions(oidc.TokenExchangeClientOptions{HTTPClient: client, Logger: slog.New(slog.DiscardHandler), AllowPrivateIP: true})
 	grantRequired := func(reason string) error {
-		return &gitops.ErrGrantRequired{App: configuration.GrantApp, Reason: fmt.Sprintf(reason, configuration.GrantApp, configuration.GrantApp)}
+		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
 	return func(ctx context.Context) (*identity.GitHub, error) {
 		_, ok := identity.FromContext(ctx)

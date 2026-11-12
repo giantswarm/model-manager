@@ -89,10 +89,10 @@ type serveOptions struct {
 	githubAPIURL                  string
 	githubExchangeEndpoint        string
 	githubExchangeClient          string
+	githubExchangeClientFile      string
 	githubExchangeSecretFile      string
 	githubExchangeAudience        string
 	githubExchangeCAFile          string
-	githubGrantApp                string
 
 	jobRetention time.Duration
 }
@@ -224,11 +224,11 @@ environment variable named next to it; flags win over the environment.`,
 	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
 	f.StringVar(&o.githubAuthorizationServer, "github-authorization-server", envOr("MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER", ""), "Issuer identity of the GitHub App muster pins this server's registration to (https://github.com/apps/giantswarm-model-manager): the bearer of every call is then the person's App user token, verified with GET /user and used for commit mode's pull request, and the person's IdP ID token arrives in X-Muster-Id-Token (MCPServer auth.forwardIdentity). Empty: the bearer is the forwarded IdP ID token and commit mode is not offered. Needs --enable-oauth (MODEL_MANAGER_GITHUB_AUTHORIZATION_SERVER)")
 	f.StringVar(&o.githubExchangeEndpoint, "github-token-exchange-endpoint", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT", ""), "RFC 8693 endpoint (muster's broker) that releases the person's GitHub App user grant for commit mode, in place of the App-pinned registration (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT)")
-	f.StringVar(&o.githubExchangeClient, "github-token-exchange-client-id", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID", ""), "Confidential token exchange client ID (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID)")
+	f.StringVar(&o.githubExchangeClient, "github-token-exchange-client-id", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID", ""), "Confidential token exchange client ID; wins over --github-token-exchange-client-id-file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID)")
+	f.StringVar(&o.githubExchangeClientFile, "github-token-exchange-client-id-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE", ""), "Mounted confidential client ID file, read at startup when --github-token-exchange-client-id is empty (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE)")
 	f.StringVar(&o.githubExchangeSecretFile, "github-token-exchange-client-secret-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE", ""), "Mounted confidential client secret file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE)")
-	f.StringVar(&o.githubExchangeAudience, "github-token-exchange-audience", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE", ""), "Broker target that releases the grant of the App --github-grant-app names (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE)")
+	f.StringVar(&o.githubExchangeAudience, "github-token-exchange-audience", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE", ""), "RFC 8693 audience: the provider App (muster's aggregator.providerApps name) whose grant the broker releases, named in grant_required answers (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE)")
 	f.StringVar(&o.githubExchangeCAFile, "github-token-exchange-ca-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE", ""), "Additional CA bundle for token exchange (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE)")
-	f.StringVar(&o.githubGrantApp, "github-grant-app", envOr("MODEL_MANAGER_GITHUB_GRANT_APP", ""), "Provider App (muster's aggregator.providerApps name) whose grant the token exchange audience releases, named in grant_required answers; required with --github-token-exchange-endpoint (MODEL_MANAGER_GITHUB_GRANT_APP)")
 	f.StringVar(&o.githubAPIURL, "github-api-url", envOr("MODEL_MANAGER_GITHUB_API_URL", server.DefaultGitHubAPIURL), "GitHub REST API base URL for GET /user and commit mode (MODEL_MANAGER_GITHUB_API_URL)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
@@ -388,7 +388,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		apiURL := o.githubAPIURL
 		app := o.githubAuthorizationServer
 		if o.githubExchangeEndpoint != "" {
-			app = o.githubGrantApp
+			app = o.githubExchangeAudience
 		}
 		committer := gitops.NewCommitter(app, func(token string) (gitops.Remote, error) {
 			return gitops.NewGitHub(token, apiURL)
@@ -641,14 +641,14 @@ func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) reg
 }
 
 func (o *serveOptions) gitHubExchangeConfig() server.GitHubExchangeConfig {
-	return server.GitHubExchangeConfig{TokenEndpoint: o.githubExchangeEndpoint, ClientID: o.githubExchangeClient, ClientSecretFile: o.githubExchangeSecretFile, Audience: o.githubExchangeAudience, CAFile: o.githubExchangeCAFile, APIURL: o.githubAPIURL, GrantApp: o.githubGrantApp}
+	return server.GitHubExchangeConfig{TokenEndpoint: o.githubExchangeEndpoint, ClientID: o.githubExchangeClient, ClientIDFile: o.githubExchangeClientFile, ClientSecretFile: o.githubExchangeSecretFile, Audience: o.githubExchangeAudience, CAFile: o.githubExchangeCAFile, APIURL: o.githubAPIURL}
 }
 
 // validateGitHubExchange checks the token exchange options: they replace
 // the App-pinned registration and need the caller's IdP token.
 func validateGitHubExchange(o *serveOptions) error {
 	if o.githubExchangeEndpoint == "" {
-		if o.githubExchangeClient != "" || o.githubExchangeSecretFile != "" || o.githubExchangeAudience != "" || o.githubExchangeCAFile != "" || o.githubGrantApp != "" {
+		if o.githubExchangeClient != "" || o.githubExchangeClientFile != "" || o.githubExchangeSecretFile != "" || o.githubExchangeAudience != "" || o.githubExchangeCAFile != "" {
 			return errors.New("GitHub token exchange options require --github-token-exchange-endpoint")
 		}
 		return nil

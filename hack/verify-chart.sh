@@ -315,6 +315,64 @@ echo "$got" | grep -A6 -- 'OTLP collector' | grep -q -- 'cidr: 0.0.0.0/0$' \
 echo "$got" | grep -A9 -- 'OTLP collector' | grep -q -- 'port: 443$' \
   || fail "networkpolicy: the OTLP egress to an https collector without a port is not 443"
 
+# github.tokenExchange: commit mode with the person's grant fetched per
+# commit. The MCPServer forwards the ID token and lists the audience under
+# providerApps (no App pin); the Deployment mounts the whole Secret and passes
+# the client ID file; inline clientSecret renders the chart's Secret.
+GHX=("${DEX[@]}" --set oauth.downstream.enabled=true --set github.enabled=true
+     --set github.tokenExchange.tokenEndpoint=https://muster.example.test/oauth/token
+     --set github.tokenExchange.audience=model-manager-app)
+got=$(mcpserver "${GHX[@]}" --set github.tokenExchange.existingSecret=gtx)
+echo "$got" | grep -qxF -- '    forwardToken: true' || fail "tokenExchange: the MCPServer does not forward the ID token"
+echo "$got" | grep -A1 -- '^    providerApps:$' | grep -qxF -- '      - "model-manager-app"' \
+  || fail "tokenExchange: the MCPServer does not list the audience under providerApps"
+if echo "$got" | grep -q -- 'authorizationServer:\|forwardIdentity'; then
+  fail "tokenExchange: the MCPServer still pins the GitHub App"
+fi
+got=$(helm template mm "$CHART" "${GHX[@]}" --set github.tokenExchange.existingSecret=gtx)
+for want in '--github-token-exchange-endpoint=https://muster.example.test/oauth/token' \
+            '--github-token-exchange-audience=model-manager-app' \
+            '--github-token-exchange-client-id-file=/etc/model-manager/github-token-exchange/client-id' \
+            '--github-token-exchange-client-secret-file=/etc/model-manager/github-token-exchange/client-secret' \
+            '--github-api-url=https://api.github.com' 'secretName: gtx'; do
+  echo "$got" | grep -qF -- "$want" || fail "tokenExchange: the Deployment lacks '$want'"
+done
+if echo "$got" | grep -q -- '--github-authorization-server\|--github-token-exchange-client-id=\|--github-grant-app\|kind: Secret'; then
+  fail "tokenExchange with existingSecret: pin flag, client ID flag or a chart Secret rendered"
+fi
+if echo "$got" | grep -A4 -- '- name: github-token-exchange$' | grep -q -- 'items:'; then
+  fail "tokenExchange: the client Secret is not mounted whole"
+fi
+got=$(helm template mm "$CHART" "${GHX[@]}" --set github.tokenExchange.clientID=mm-client \
+  --set github.tokenExchange.clientSecret=inline --set github.tokenExchange.caSecretName=broker-ca)
+echo "$got" | grep -qF -- '--github-token-exchange-client-id=mm-client' || fail "tokenExchange: clientID does not render the client ID flag"
+echo "$got" | grep -qF -- '--github-token-exchange-ca-file=/etc/model-manager/github-token-exchange-ca/ca.crt' \
+  || fail "tokenExchange: caSecretName does not render the CA flag"
+secret=$(helm template mm "$CHART" --show-only templates/github-token-exchange-secret.yaml "${GHX[@]}" \
+  --set github.tokenExchange.clientID=mm-client --set github.tokenExchange.clientSecret=inline)
+for want in 'name: mm-model-manager-github-token-exchange' 'client-secret: "inline"' 'client-id: "mm-client"'; do
+  echo "$secret" | grep -qF -- "$want" || fail "tokenExchange inline clientSecret: the Secret lacks '$want'"
+done
+echo "$got" | grep -qF -- 'secretName: mm-model-manager-github-token-exchange' \
+  || fail "tokenExchange inline clientSecret: the Deployment does not mount the chart's Secret"
+# Without tokenExchange, the deprecated pin: forwardIdentity, no providerApps.
+got=$(mcpserver "${DEX[@]}" --set github.enabled=true)
+echo "$got" | grep -q -- 'forwardIdentity: true' || fail "the pin: the MCPServer lacks forwardIdentity"
+if echo "$got" | grep -q -- 'providerApps'; then fail "the pin: providerApps rendered"; fi
+# Refusals.
+refused() {
+  local want=$1; shift
+  local out
+  if out=$(helm template mm "$CHART" "$@" 2>&1); then fail "expected a refusal containing '$want'"; fi
+  echo "$out" | grep -qF -- "$want" || fail "refusal lacks '$want': $out"
+}
+refused 'github.enabled is false' "${GHX[@]}" --set github.enabled=false --set github.tokenExchange.existingSecret=gtx
+refused 'github.tokenExchange.audience is required' "${GHX[@]}" --set github.tokenExchange.audience= --set github.tokenExchange.existingSecret=gtx
+refused 'existingSecret (preferred) or clientSecret' "${GHX[@]}"
+refused 'oauth.downstream.enabled' "${GHX[@]}" --set oauth.downstream.enabled=false --set github.tokenExchange.existingSecret=gtx
+refused 'github.tokenExchange.tokenEndpoint is required' --set github.tokenExchange.audience=model-manager-app
+refused 'githubTokenExchange' --set githubTokenExchange.endpoint=https://muster.example.test/oauth/token
+
 # The helm.sh/chart label is a valid label value (at most 63 characters,
 # alphanumeric at both ends) for any chart version: the cut of a long dev
 # version can land on ".", on "_" (from "+") or on a run like "--.". The

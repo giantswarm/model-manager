@@ -990,24 +990,34 @@ longer holds that a Kustomization with `prune: false` left behind (the answer
 names the Kustomization and offers `mode: apply`, which removes it live), and
 a Kustomization whose `targetNamespace` would move the objects.
 
-Commit mode needs the person's GitHub authority. The chart's `github.enabled`
-registers model-manager with muster pinned to its own user-to-server GitHub
-App `giantswarm-model-manager` (`--github-authorization-server`), with
+Commit mode needs the person's GitHub authority, offered with the chart's
+`github.enabled`. With `github.tokenExchange`, the MCPServer forwards the
+person's ID token as without commit mode, and only a commit asks for GitHub:
+model-manager exchanges the ID token at muster's RFC 8693 broker
+(`--github-token-exchange-endpoint`) for the person's user grant of the GitHub
+App `github.tokenExchange.audience` names, for that commit only, verifies it
+with `GET /user` and opens the pull request with it. Without the grant the MCP
+tool answers `grant_required` with `apps: [<audience>]`, and the MCPServer
+lists the audience under `auth.providerApps`, so muster turns the answer into
+that App's sign-in link (REST answers `auth_required`). The client ID comes
+from `--github-token-exchange-client-id`, else from the mounted Secret's
+`client-id` key. A call made by an agent acting for the person (an ID token
+with an `act` claim) is refused as `forbidden`.
+
+Deprecated: `github.enabled` without `github.tokenExchange` registers
+model-manager with muster pinned to its own user-to-server GitHub App
+`giantswarm-model-manager` (`--github-authorization-server`), with
 `auth.forwardIdentity: true`: muster runs the App's consent once per person
 and puts their App user token on every call as the bearer. model-manager
 verifies it with `GET /user` and opens the pull request with it. The person's
 IdP ID token arrives in `X-Muster-Id-Token` and is validated like a forwarded
 token, so apply mode and every read keep acting on Kubernetes as the person.
 The pin applies to the MCP endpoint only: the REST API keeps the person's ID
-token as its bearer, as the portal sends it. No other GitHub credential exists
-in the pod. Without the App's token the
-call answers `auth_required` (401), naming the consent
-(`core_auth_login server=model-manager`). Or, with `githubTokenExchange`, the
-registration keeps the forwarded ID token and only a commit asks for GitHub:
-model-manager fetches the person's App user grant from muster's RFC 8693 broker
-for that commit, and without one the MCP tool answers `grant_required` naming
-`githubTokenExchange.grantApp`, which muster turns into that App's sign-in link
-(REST answers `auth_required`). A server with neither answers
+token as its bearer, as the portal sends it. Without the App's token the call
+answers `auth_required` (401), naming the consent
+(`core_auth_login server=model-manager`).
+
+No other GitHub credential exists in the pod. A server with neither answers
 `unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
 `capabilities.commit`. The App has to be installed, with contents and
 pull-request write, on every repository a commit may target. On a kserve

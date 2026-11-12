@@ -16,6 +16,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/backend/kserve"
+	"github.com/giantswarm/model-manager/internal/server"
 )
 
 // remoteKServeDocument is a kserve document whose target is a workload
@@ -71,4 +72,36 @@ func TestBackendBuilderRemoteTarget(t *testing.T) {
 	b, err := backendBuilder(base(kserve.InventoryModePod), true, log)(doc)
 	require.NoError(t, err)
 	assert.Equal(t, &backend.Target{Cluster: "gpu01", Organization: "giantswarm"}, backend.TargetOf(b))
+}
+
+func TestValidateGitHubExchange(t *testing.T) {
+	exchange := func() *serveOptions {
+		return &serveOptions{oauthEnabled: true, downstreamOAuth: true, oauthProvider: server.ProviderDex,
+			githubExchangeEndpoint: "https://broker.example.com/token", githubExchangeAudience: "model-manager-app",
+			githubExchangeClientFile: "/mounted/client-id", githubExchangeSecretFile: "/mounted/client-secret"}
+	}
+	require.NoError(t, validateGitHubExchange(&serveOptions{}))
+	require.NoError(t, validateGitHubExchange(exchange()), "the client ID file stands in for the client ID flag")
+
+	o := exchange()
+	o.githubExchangeClient, o.githubExchangeClientFile = "model-manager", ""
+	require.NoError(t, validateGitHubExchange(o))
+
+	o = exchange()
+	o.githubExchangeClientFile = ""
+	require.Error(t, validateGitHubExchange(o), "neither client ID flag nor file")
+
+	o = exchange()
+	o.githubExchangeAudience = ""
+	require.Error(t, validateGitHubExchange(o))
+
+	o = exchange()
+	o.githubAuthorizationServer = "https://github.com/apps/giantswarm-model-manager"
+	require.Error(t, validateGitHubExchange(o), "the exchange replaces the pin")
+
+	o = exchange()
+	o.downstreamOAuth = false
+	require.Error(t, validateGitHubExchange(o))
+
+	require.Error(t, validateGitHubExchange(&serveOptions{githubExchangeAudience: "model-manager-app"}), "exchange options without an endpoint")
 }

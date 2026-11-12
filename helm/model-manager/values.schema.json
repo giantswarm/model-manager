@@ -101,6 +101,7 @@
                 },
                 "authorizationServer": {
                     "type": "object",
+                    "description": "Deprecated: the App pin, used when `github.enabled` and no `tokenExchange.tokenEndpoint`. Set `tokenExchange` instead.",
                     "additionalProperties": false,
                     "properties": {
                         "authorizationEndpoint": {
@@ -131,7 +132,7 @@
                         },
                         "issuer": {
                             "type": "string",
-                            "description": "The issuer identity the person's grant is filed under: the App's own, so the login App's GitHub grant stays separate. Also passed to the server, which names it in its refusals."
+                            "description": "Deprecated with `authorizationServer`. The issuer identity the person's grant is filed under: the App's own, so the login App's GitHub grant stays separate. Also passed to the server, which names it in its refusals."
                         },
                         "scopes": {
                             "type": "string",
@@ -145,37 +146,37 @@
                 },
                 "enabled": {
                     "type": "boolean",
-                    "description": "Register with muster pinned to the GitHub App `giantswarm-model-manager` and offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). The MCPServer's auth then pins the App as the authorization server — muster runs the App's consent once per person and puts their user token on every call, which this server verifies with `GET /user` and opens the pull request with — and sets `forwardIdentity: true`: muster forwards the person's IdP ID token in `X-Muster-Id-Token` next to it, validated as `oauth` validates a forwarded token, so apply mode keeps acting on Kubernetes as the person. One registration carries both tokens. Needs `oauth.enabled`. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
-                }
-            }
-        },
-        "githubTokenExchange": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "audience": {
-                    "type": "string",
-                    "description": "Broker target that releases the grant of the App `grantApp` names."
+                    "description": "Offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). Needs `oauth.enabled`. With `tokenExchange`, the MCPServer forwards the person's ID token as without commit mode and model-manager fetches their GitHub App user grant per commit. Without `tokenExchange`, the deprecated pin: the MCPServer's auth pins the App (`authorizationServer`) as the authorization server, muster runs the App's consent once per person and puts their user token on every call, which this server verifies with `GET /user` and opens the pull request with, and sets `forwardIdentity: true` so the person's IdP ID token arrives in `X-Muster-Id-Token` next to it. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
                 },
-                "caSecretName": {
-                    "type": "string",
-                    "description": "Optional existing Secret with ca.crt for the broker's private CA."
-                },
-                "clientID": {
-                    "type": "string",
-                    "description": "Confidential broker client ID, allowed to retrieve only that App grant."
-                },
-                "endpoint": {
-                    "type": "string",
-                    "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant per commit, in place of the `github` pin: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `grantApp`. Needs `oauth.enabled` with Dex and `oauth.downstream.enabled`. Empty: off."
-                },
-                "grantApp": {
-                    "type": "string",
-                    "description": "muster's name for the provider App (its `aggregator.providerApps` key) whose grant `audience` releases: the same GitHub App, installed with contents and pull-request write on every repository a commit targets. The MCPServer lists it under `auth.providerApps`, so muster answers `grant_required` with that App's sign-in link. Required with `endpoint`."
-                },
-                "secretName": {
-                    "type": "string",
-                    "description": "Existing Secret in the release namespace, containing client-secret."
+                "tokenExchange": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "audience": {
+                            "type": "string",
+                            "description": "RFC 8693 audience: muster's name for the provider App whose grant the broker releases (its `aggregator.providerApps` key), installed with contents and pull-request write on every repository a commit targets. Also the App named in `grant_required` and the MCPServer's `auth.providerApps`, so muster answers with that App's sign-in link. Required with `tokenEndpoint`."
+                        },
+                        "caSecretName": {
+                            "type": "string",
+                            "description": "Optional existing Secret with `ca.crt` for the broker's private CA."
+                        },
+                        "clientID": {
+                            "type": "string",
+                            "description": "Confidential broker client ID, allowed to retrieve only that App grant. Empty: read from the Secret's `client-id` key."
+                        },
+                        "clientSecret": {
+                            "type": "string",
+                            "description": "Confidential broker client secret, rendered into the `<fullname>-github-token-exchange` Secret when `existingSecret` is empty. Prefer `existingSecret`."
+                        },
+                        "existingSecret": {
+                            "type": "string",
+                            "description": "Existing Secret in the release namespace with `client-secret` (and `client-id` when `clientID` is empty); mounted whole."
+                        },
+                        "tokenEndpoint": {
+                            "type": "string",
+                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex and `oauth.downstream.enabled`. Empty: the deprecated `authorizationServer` pin."
+                        }
+                    }
                 }
             }
         },
