@@ -116,6 +116,35 @@ func TestCommitWithoutGitHubAuthorizationNamesTheConsent(t *testing.T) {
 	assert.Contains(t, err.Error(), "core_auth_login server=model-manager")
 }
 
+// TestCommitAsksForTheGrant: with the grant fetched per commit, a commit
+// without it answers the grant the person must give and opens nothing; with
+// it the pull request is opened as the person.
+func TestCommitAsksForTheGrant(t *testing.T) {
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- kagent.yaml\n")})
+	granted := false
+	c := committer(cluster(), fake).WithGitHubUser(func(context.Context) (*identity.GitHub, error) {
+		if !granted {
+			return nil, &ErrGrantRequired{App: "github", Reason: "grant it"}
+		}
+		return &identity.GitHub{Login: "jane", Token: "ghu_grant"}, nil
+	})
+	req := Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"}
+
+	_, err := c.Commit(context.Background(), req)
+	grant, ok := errors.AsType[*ErrGrantRequired](err)
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, "github", grant.App)
+	require.ErrorIs(t, err, ErrAuthRequired)
+	assert.Empty(t, fake.PullRequests())
+
+	granted = true
+	res, err := c.Commit(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "jane", res.Author)
+	assert.Len(t, fake.PullRequests(), 1)
+}
+
 func TestCommitRefusesAPlaintextSecret(t *testing.T) {
 	fake := commit.NewFake()
 	fake.AddBranch(repo, "main", map[string][]byte{})

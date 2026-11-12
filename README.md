@@ -1002,7 +1002,12 @@ The pin applies to the MCP endpoint only: the REST API keeps the person's ID
 token as its bearer, as the portal sends it. No other GitHub credential exists
 in the pod. Without the App's token the
 call answers `auth_required` (401), naming the consent
-(`core_auth_login server=model-manager`). A server without the pin answers
+(`core_auth_login server=model-manager`). Or, with `githubTokenExchange`, the
+registration keeps the forwarded ID token and only a commit asks for GitHub:
+model-manager fetches the person's App user grant from muster's RFC 8693 broker
+for that commit, and without one the MCP tool answers `grant_required` naming
+`githubTokenExchange.grantApp`, which muster turns into that App's sign-in link
+(REST answers `auth_required`). A server with neither answers
 `unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
 `capabilities.commit`. The App has to be installed, with contents and
 pull-request write, on every repository a commit may target. On a kserve

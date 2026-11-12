@@ -14,6 +14,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
+	"github.com/giantswarm/model-manager/internal/gitops"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -181,4 +182,20 @@ func TestNewMCPServer_AdvertisesTheGiantSwarmIcon(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &resp), string(raw))
 	assert.Equal(t, "model-manager", resp.Result.ServerInfo.Name)
 	assert.Equal(t, []mcp.Icon{brand.GiantSwarmIcon()}, resp.Result.ServerInfo.Icons)
+}
+
+func TestErrResultNamesTheMissingGrant(t *testing.T) {
+	res := errResult(fmt.Errorf("wire: %w", &gitops.ErrGrantRequired{App: "github", Reason: "grant it"}))
+	require.True(t, res.IsError)
+	require.Equal(t, "grant_required: grant it", res.Content[0].(mcp.TextContent).Text)
+	raw, err := json.Marshal(res)
+	require.NoError(t, err)
+	var wire struct {
+		StructuredContent map[string]any `json:"structuredContent"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	require.Equal(t, map[string]any{"status": "grant_required", "apps": []any{"github"}, "message": "grant it"}, wire.StructuredContent)
+
+	_, code := statusFor(&gitops.ErrGrantRequired{App: "github", Reason: "grant it"})
+	require.Equal(t, "auth_required", code, "REST keeps answering auth_required")
 }

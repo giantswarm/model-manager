@@ -40,6 +40,24 @@ var (
 // or with one GitHub refused; the message names the consent that gives one.
 var ErrAuthRequired = errors.New("GitHub authorization required")
 
+// ErrGrantRequired is a commit the person has not granted the GitHub App
+// for: the call needs their grant of App, which muster keeps. The MCP answer
+// names App so muster turns it into the App's sign-in. It is an
+// ErrAuthRequired.
+type ErrGrantRequired struct {
+	// App is the provider App, by muster's name for it.
+	App string
+	// Reason says what the grant is for.
+	Reason string
+}
+
+func (e *ErrGrantRequired) Error() string { return e.Reason }
+
+func (e *ErrGrantRequired) Unwrap() error { return ErrAuthRequired }
+
+// GitHubUser fetches the person's GitHub grant for one commit.
+type GitHubUser func(context.Context) (*identity.GitHub, error)
+
 // signIn is the one-time consent a commit needs.
 const signIn = "connect model-manager in muster (core_auth_login server=model-manager), then call again"
 
@@ -63,7 +81,10 @@ type RemoteFor func(token string) (Remote, error)
 type Committer struct {
 	app    string
 	remote RemoteFor
-	dyn    func(ctx context.Context) dynamic.Interface
+	// user fetches the person's grant per commit (nil: the pinned
+	// registration's token).
+	user GitHubUser
+	dyn  func(ctx context.Context) dynamic.Interface
 }
 
 // NewCommitter builds a Committer; app is the GitHub App whose user token
@@ -73,6 +94,13 @@ type Committer struct {
 // which reads the Flux objects.
 func NewCommitter(app string, remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
 	return &Committer{app: app, remote: remote, dyn: dyn}
+}
+
+// WithGitHubUser fetches the person's grant on demand for every commit, in
+// place of the token an App-pinned registration carries.
+func (c *Committer) WithGitHubUser(user GitHubUser) *Committer {
+	c.user = user
+	return c
 }
 
 // Result is the pull request a commit opened — or, dry run, would open —
@@ -193,6 +221,13 @@ type planned struct {
 // part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
 	gh, ok := identity.GitHubFromContext(ctx)
+	if c.user != nil {
+		var err error
+		if gh, err = c.user(ctx); err != nil {
+			return nil, err
+		}
+		ok = gh != nil && gh.Token != ""
+	}
 	if !ok {
 		return nil, fmt.Errorf("%w: commit mode opens the pull request with your GitHub authorization, and this call carries none: %s", ErrAuthRequired, signIn)
 	}

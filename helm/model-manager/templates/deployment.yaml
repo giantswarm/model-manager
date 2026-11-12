@@ -182,6 +182,19 @@ spec:
             - --github-authorization-server={{ .Values.github.authorizationServer.issuer }}
             - --github-api-url={{ .Values.github.apiURL }}
             {{- end }}
+            {{- with .Values.githubTokenExchange }}
+            {{- if .endpoint }}
+            - --github-token-exchange-endpoint={{ .endpoint }}
+            - --github-token-exchange-client-id={{ required "githubTokenExchange.clientID is required" .clientID }}
+            - --github-token-exchange-audience={{ required "githubTokenExchange.audience is required" .audience }}
+            - --github-token-exchange-client-secret-file=/etc/model-manager/github-token-exchange/client-secret
+            - --github-grant-app={{ required "githubTokenExchange.grantApp is required" .grantApp }}
+            - --github-api-url={{ $.Values.github.apiURL }}
+            {{- if .caSecretName }}
+            - --github-token-exchange-ca-file=/etc/model-manager/github-token-exchange-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.oauth.provider "dex" }}
             - --dex-issuer-url={{ include "model-manager.oauthDexIssuerURL" . }}
             - --dex-client-id={{ include "model-manager.oauthDexClientID" . }}
@@ -314,6 +327,16 @@ spec:
               mountPath: /etc/model-manager/idp-ca
               readOnly: true
             {{- end }}
+            {{- if .Values.githubTokenExchange.endpoint }}
+            - name: github-token-exchange
+              mountPath: /etc/model-manager/github-token-exchange
+              readOnly: true
+            {{- if .Values.githubTokenExchange.caSecretName }}
+            - name: github-token-exchange-ca
+              mountPath: /etc/model-manager/github-token-exchange-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
       volumes:
         - name: tmp
           {{- with .Values.tmpVolume.sizeLimit }}
@@ -329,6 +352,23 @@ spec:
             items:
               - key: {{ include "model-manager.oauthDexCASecretKey" . }}
                 path: {{ include "model-manager.oauthDexCASecretKey" . }}
+        {{- end }}
+        {{- if .Values.githubTokenExchange.endpoint }}
+        - name: github-token-exchange
+          secret:
+            secretName: {{ required "githubTokenExchange.secretName is required" .Values.githubTokenExchange.secretName }}
+            defaultMode: 0440
+            items:
+              - key: client-secret
+                path: client-secret
+        {{- if .Values.githubTokenExchange.caSecretName }}
+        - name: github-token-exchange-ca
+          secret:
+            secretName: {{ .Values.githubTokenExchange.caSecretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
