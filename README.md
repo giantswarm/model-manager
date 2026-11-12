@@ -999,10 +999,22 @@ App `github.tokenExchange.audience` names, for that commit only, verifies it
 with `GET /user` and opens the pull request with it. Without the grant the MCP
 tool answers `grant_required` with `apps: [<audience>]`, and the MCPServer
 lists the audience under `auth.providerApps`, so muster turns the answer into
-that App's sign-in link (REST answers `auth_required`). The client ID comes
-from `--github-token-exchange-client-id`, else from the mounted Secret's
+that App's sign-in link. REST answers `403` with code `grant_required` and
+the same `apps`. GitHub refusing the grant with `401` answers
+`grant_required` too. The client ID comes from
+`--github-token-exchange-client-id`, else from the mounted Secret's
 `client-id` key. A call made by an agent acting for the person (an ID token
-with an `act` claim) is refused as `forbidden`.
+with an `act` claim) is refused as `forbidden`. With `auth.providerApps`,
+muster also attaches the person's App token to every call it forwards, which
+model-manager ignores, until giantswarm/giantswarm#39227 lets a server name an
+App without receiving it.
+
+Fetching the person's GitHub grant from muster is a temporary deviation from
+the MCP 2025-11-25 authorization rules (no token passthrough, no third-party
+credentials), decided in giantswarm/giantswarm#39213; the exit is
+model-manager holding its own grant through URL elicitation and ID-JAG
+(giantswarm/giantswarm#39102). Installations stay on the pin until the
+end-to-end proof in agentlab.
 
 Deprecated: `github.enabled` without `github.tokenExchange` registers
 model-manager with muster pinned to its own user-to-server GitHub App

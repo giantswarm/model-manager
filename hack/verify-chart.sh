@@ -370,6 +370,8 @@ refused 'github.enabled is false' "${GHX[@]}" --set github.enabled=false --set g
 refused 'github.tokenExchange.audience is required' "${GHX[@]}" --set github.tokenExchange.audience= --set github.tokenExchange.existingSecret=gtx
 refused 'existingSecret (preferred) or clientSecret' "${GHX[@]}"
 refused 'oauth.downstream.enabled' "${GHX[@]}" --set oauth.downstream.enabled=false --set github.tokenExchange.existingSecret=gtx
+refused 'muster.mcpServer.auth.forwardToken' "${GHX[@]}" --set muster.mcpServer.auth.forwardToken=false --set github.tokenExchange.existingSecret=gtx
+refused 'pattern' "${GHX[@]}" --set github.tokenExchange.audience=Model_Manager --set github.tokenExchange.existingSecret=gtx
 refused 'github.tokenExchange.tokenEndpoint is required' --set github.tokenExchange.audience=model-manager-app
 refused 'githubTokenExchange' --set githubTokenExchange.endpoint=https://muster.example.test/oauth/token
 

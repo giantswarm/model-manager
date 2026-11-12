@@ -154,7 +154,8 @@
                     "properties": {
                         "audience": {
                             "type": "string",
-                            "description": "RFC 8693 audience: muster's name for the provider App whose grant the broker releases (its `aggregator.providerApps` key), installed with contents and pull-request write on every repository a commit targets. Also the App named in `grant_required` and the MCPServer's `auth.providerApps`, so muster answers with that App's sign-in link. Required with `tokenEndpoint`."
+                            "description": "RFC 8693 audience: muster's name for the provider App whose grant the broker releases (its `aggregator.providerApps` key), installed with contents and pull-request write on every repository a commit targets. Also the App named in `grant_required` and the MCPServer's `auth.providerApps`, so muster answers with that App's sign-in link. Required with `tokenEndpoint`.",
+                            "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$"
                         },
                         "caSecretName": {
                             "type": "string",
@@ -174,7 +175,7 @@
                         },
                         "tokenEndpoint": {
                             "type": "string",
-                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex and `oauth.downstream.enabled`. Empty: the deprecated `authorizationServer` pin."
+                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex, `oauth.downstream.enabled` and `muster.mcpServer.auth.forwardToken`. With `auth.providerApps`, muster also attaches the person's App token to every call until giantswarm/giantswarm#39227. Empty: the deprecated `authorizationServer` pin."
                         }
                     }
                 }

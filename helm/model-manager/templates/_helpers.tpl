@@ -239,8 +239,8 @@ protocol's (4317 gRPC, 4318 HTTP). Empty without an endpoint.
 {{/*
 "true" when github.tokenExchange is on (tokenEndpoint set), after refusing an
 incomplete or contradictory configuration: the exchange needs github.enabled,
-Dex OAuth with downstream OAuth (the person's ID token is the subject token),
-an audience, and a client secret (existingSecret or the inline clientSecret).
+Dex OAuth with downstream OAuth and muster's forwardToken (the person's ID
+token is the subject token), an audience, and a client secret (existingSecret or the inline clientSecret).
 */}}
 {{- define "model-manager.githubTokenExchange" -}}
 {{- $x := .Values.github.tokenExchange -}}
@@ -253,6 +253,9 @@ an audience, and a client secret (existingSecret or the inline clientSecret).
 {{- end -}}
 {{- if not $x.audience -}}
 {{- fail "github.tokenExchange.audience is required with github.tokenExchange.tokenEndpoint" -}}
+{{- end -}}
+{{- if not .Values.muster.mcpServer.auth.forwardToken -}}
+{{- fail "github.tokenExchange needs muster.mcpServer.auth.forwardToken: the exchange's subject is the forwarded ID token, and muster refuses auth.providerApps without it" -}}
 {{- end -}}
 {{- if not (or $x.existingSecret $x.clientSecret) -}}
 {{- fail "github.tokenExchange needs existingSecret (preferred) or clientSecret" -}}
