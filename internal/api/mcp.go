@@ -826,11 +826,16 @@ const statusGrantRequired = "grant_required"
 
 // errResult answers "<code>: <message>". A missing provider App grant also
 // carries {"status": "grant_required", "apps": [<app>]} as structured
-// content, which muster answers with the App's sign-in.
+// content, which muster answers with the App's sign-in, and that object
+// serialized in a second text block.
 func errResult(err error) *mcp.CallToolResult {
 	if grant, ok := errors.AsType[*gitops.ErrGrantRequired](err); ok {
+		structured := map[string]any{"status": statusGrantRequired, "apps": []string{grant.App}, "message": grant.Reason}
 		res := mcp.NewToolResultError(statusGrantRequired + ": " + grant.Reason)
-		res.StructuredContent = map[string]any{"status": statusGrantRequired, "apps": []string{grant.App}, "message": grant.Reason}
+		if data, err := json.Marshal(structured); err == nil {
+			res.Content = append(res.Content, mcp.NewTextContent(string(data)))
+		}
+		res.StructuredContent = structured
 		return res
 	}
 	_, code := statusFor(err)

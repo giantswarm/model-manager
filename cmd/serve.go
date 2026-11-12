@@ -386,19 +386,15 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		// fetched for the commit; the Flux objects that name the repository
 		// are read as the caller.
 		apiURL := o.githubAPIURL
-		app := o.githubAuthorizationServer
-		if o.githubExchangeEndpoint != "" {
-			app = o.githubExchangeAudience
-		}
-		committer := gitops.NewCommitter(app, func(token string) (gitops.Remote, error) {
+		committer := gitops.NewCommitter(o.githubAuthorizationServer, func(token string) (gitops.Remote, error) {
 			return gitops.NewGitHub(token, apiURL)
 		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
 		if o.githubExchangeEndpoint != "" {
-			user, err := server.NewGitHubExchange(o.gitHubExchangeConfig())
+			user, err := server.NewGitHubExchange(o.gitHubExchangeConfig(), log)
 			if err != nil {
 				return err
 			}
-			committer.WithGitHubUser(user)
+			committer.WithGitHubUser(o.githubExchangeAudience, user)
 		}
 		svc.WithCommitter(committer)
 	}

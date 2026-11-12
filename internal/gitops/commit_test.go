@@ -3,6 +3,7 @@ package gitops
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -123,7 +124,7 @@ func TestCommitAsksForTheGrant(t *testing.T) {
 	fake := commit.NewFake()
 	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- kagent.yaml\n")})
 	granted := false
-	c := committer(cluster(), fake).WithGitHubUser(func(context.Context) (*identity.GitHub, error) {
+	c := committer(cluster(), fake).WithGitHubUser("github", func(context.Context) (*identity.GitHub, error) {
 		if !granted {
 			return nil, &ErrGrantRequired{App: "github", Reason: "grant it"}
 		}
@@ -143,6 +144,63 @@ func TestCommitAsksForTheGrant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "jane", res.Author)
 	assert.Len(t, fake.PullRequests(), 1)
+}
+
+// refusingRemote is a remote whose repository check GitHub answers status.
+type refusingRemote struct {
+	FakeRemote
+	status int
+}
+
+func (r refusingRemote) Reachable(context.Context, commit.Repository) (bool, error) {
+	return false, &commit.AuthError{Op: "get repository", Status: r.status}
+}
+
+// TestCommitWithAFetchedGrantGitHubRefuses: with the grant fetched per
+// commit, GitHub's 401 asks for the grant again as grant_required, and its
+// 403 names the App by muster's name, never the server's login.
+func TestCommitWithAFetchedGrantGitHubRefuses(t *testing.T) {
+	user := func(context.Context) (*identity.GitHub, error) {
+		return &identity.GitHub{Login: "jane", Token: "ghu_grant"}, nil
+	}
+	request := Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"}
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c := NewCommitter("", func(string) (Remote, error) {
+				return refusingRemote{FakeRemote: FakeRemote{Fake: commit.NewFake()}, status: status}, nil
+			}, func(context.Context) dynamic.Interface { return cluster() }).WithGitHubUser("model-manager", user)
+
+			_, err := c.Commit(t.Context(), request)
+			require.ErrorIs(t, err, ErrAuthRequired)
+			assert.Contains(t, err.Error(), "core_auth_login app=model-manager")
+			assert.NotContains(t, err.Error(), "server=model-manager")
+			grant, isGrant := errors.AsType[*ErrGrantRequired](err)
+			require.Equal(t, status == http.StatusUnauthorized, isGrant, "%v", err)
+			if isGrant {
+				assert.Equal(t, "model-manager", grant.App)
+			}
+		})
+	}
+}
+
+// TestCommitWithAFetchedGrantNamesTheGrantedApp: a repository the grant does
+// not reach names the App by the grant muster keeps, not as a GitHub App
+// slug.
+func TestCommitWithAFetchedGrantNamesTheGrantedApp(t *testing.T) {
+	fake := commit.NewFake()
+	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("resources: []\n")})
+	c := NewCommitter("", func(string) (Remote, error) {
+		return FakeRemote{Fake: fake, Unreachable: []commit.Repository{repo}}, nil
+	},
+		func(context.Context) dynamic.Interface { return cluster() }).
+		WithGitHubUser("model-manager", func(context.Context) (*identity.GitHub, error) {
+			return &identity.GitHub{Login: "jane", Token: "ghu_grant"}, nil
+		})
+
+	_, err := c.Commit(t.Context(), Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"})
+	require.ErrorIs(t, err, ErrRepositoryUnavailable)
+	assert.Contains(t, err.Error(), "the GitHub App you granted in muster as model-manager (core_auth_login app=model-manager) is not installed on giantswarm/lab-gitops")
+	assert.NotContains(t, err.Error(), "the GitHub App model-manager ")
 }
 
 func TestCommitRefusesAPlaintextSecret(t *testing.T) {

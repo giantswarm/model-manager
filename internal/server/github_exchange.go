@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,8 +56,8 @@ func (c GitHubExchangeConfig) Validate() error {
 
 // NewGitHubExchange obtains the person's user grant on demand. Tokens are
 // neither cached nor attached to a session; only the returned request-local
-// identity holds one.
-func NewGitHubExchange(configuration GitHubExchangeConfig) (gitops.GitHubUser, error) {
+// identity holds one. log receives the broker's refusals.
+func NewGitHubExchange(configuration GitHubExchangeConfig, log *slog.Logger) (gitops.GitHubUser, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, err
 	}
@@ -71,26 +70,19 @@ func NewGitHubExchange(configuration GitHubExchangeConfig) (gitops.GitHubUser, e
 			return nil, fmt.Errorf("GitHub token exchange client ID file %s is empty", configuration.ClientIDFile)
 		}
 	}
+	roots, err := loadRootCAs(configuration.CAFile)
+	if err != nil {
+		return nil, err
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if configuration.CAFile != "" {
-		pem, err := os.ReadFile(configuration.CAFile) // #nosec G304 -- operator-provided path
-		if err != nil {
-			return nil, fmt.Errorf("read CA file %s: %w", configuration.CAFile, err)
-		}
-		roots, err := x509.SystemCertPool()
-		if err != nil {
-			roots = x509.NewCertPool()
-		}
-		if !roots.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("no CA certificate in %s", configuration.CAFile)
-		}
+	if roots != nil {
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	}
 	client := &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	return newGitHubExchange(configuration, client), nil
+	return newGitHubExchange(configuration, client, log), nil
 }
 
-func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client) gitops.GitHubUser {
+func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, log *slog.Logger) gitops.GitHubUser {
 	// The endpoint is operator configuration, never a caller's, and an
 	// in-cluster broker resolves to a private address: the client checks
 	// only that it is HTTPS.
@@ -123,13 +115,21 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client) 
 			ClientSecret:       strings.TrimSpace(string(secret)),
 		})
 		if err != nil {
-			if refusal, ok := errors.AsType[*oidc.TokenExchangeError](err); ok {
-				if refusal.StatusCode == http.StatusBadRequest && refusal.Code == "invalid_target" {
-					return nil, grantRequired("this call opens a pull request as you with your grant of the GitHub App %s in muster, which you have not given: grant it (core_auth_login app=%s), then call again")
-				}
-				return nil, errors.New("GitHub authorization service refused the exchange")
+			refusal, ok := errors.AsType[*oidc.TokenExchangeError](err)
+			if !ok {
+				return nil, fmt.Errorf("%w: GitHub authorization service is unavailable", backend.ErrUnavailable)
 			}
-			return nil, errors.New("GitHub authorization service is unavailable")
+			log.WarnContext(ctx, "GitHub token exchange refused", "audience", configuration.Audience, "status", refusal.StatusCode, "error", refusal.Code, "errorDescription", refusal.Description)
+			// The broker answers invalid_target for a person without the
+			// grant, with a description that does not tell it apart from an
+			// audience the client may not request.
+			if refusal.StatusCode == http.StatusBadRequest && refusal.Code == "invalid_target" {
+				return nil, grantRequired("this call opens a pull request as you with your grant of the GitHub App muster keeps as %s, which you have not given: grant it (core_auth_login app=%s), then call again")
+			}
+			if refusal.StatusCode >= http.StatusInternalServerError {
+				return nil, fmt.Errorf("%w: GitHub authorization service is unavailable", backend.ErrUnavailable)
+			}
+			return nil, fmt.Errorf("GitHub authorization service refused model-manager's token exchange (%s): check the token exchange client and audience", refusal.Code)
 		}
 		if !strings.EqualFold(result.TokenType, "Bearer") || result.IssuedTokenType != oidc.TokenTypeAccessToken || result.ExpiresIn <= 0 || result.RefreshToken != "" {
 			return nil, errors.New("GitHub authorization service returned an invalid access token response")
@@ -146,14 +146,17 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client) 
 		request.Header.Set("Accept", "application/vnd.github+json")
 		response, err := client.Do(request)
 		if err != nil {
-			return nil, errors.New("GitHub user verification is unavailable")
+			return nil, fmt.Errorf("%w: GitHub user verification is unavailable", backend.ErrUnavailable)
 		}
 		defer func() { _ = response.Body.Close() }()
+		if response.StatusCode == http.StatusUnauthorized {
+			return nil, grantRequired("GitHub refused your grant of the GitHub App muster keeps as %s: grant it again in muster (core_auth_login app=%s), then call again")
+		}
 		var user struct {
 			Login string `json:"login"`
 		}
 		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&user) != nil || user.Login == "" {
-			return nil, grantRequired("GitHub refused your grant of the GitHub App %s: grant it again in muster (core_auth_login app=%s), then call again")
+			return nil, fmt.Errorf("%w: GitHub user verification answered status %d", backend.ErrUnavailable, response.StatusCode)
 		}
 		return &identity.GitHub{Login: user.Login, Token: result.AccessToken}, nil
 	}

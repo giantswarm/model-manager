@@ -1,15 +1,20 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/giantswarm/mcp-oauth/providers/oidc"
@@ -32,31 +37,97 @@ func unsignedJWT(claims string) string {
 	return encode([]byte(`{"alg":"RS256"}`)) + "." + encode([]byte(claims)) + ".signature"
 }
 
+// brokerRequest is what the test broker and GitHub API saw of one request.
+type brokerRequest struct {
+	method, path, authorization, forwardedIdentity string
+	form                                           url.Values
+	client, secret                                 string
+	basicAuth                                      bool
+}
+
+// recorder keeps the requests a test server received, for assertions on the
+// test goroutine.
+type recorder struct {
+	mu       sync.Mutex
+	requests []brokerRequest
+}
+
+func (r *recorder) record(request *http.Request) {
+	seen := brokerRequest{method: request.Method, path: request.URL.Path, authorization: request.Header.Get("Authorization"), forwardedIdentity: request.Header.Get("X-Muster-Id-Token")}
+	if request.ParseForm() == nil {
+		seen.form = request.PostForm
+	}
+	seen.client, seen.secret, seen.basicAuth = request.BasicAuth()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, seen)
+}
+
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = nil
+}
+
+func (r *recorder) on(path string) []brokerRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var matching []brokerRequest
+	for _, request := range r.requests {
+		if request.path == path {
+			matching = append(matching, request)
+		}
+	}
+	return matching
+}
+
+func (r *recorder) paths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var paths []string
+	for _, request := range r.requests {
+		paths = append(paths, request.path)
+	}
+	return paths
+}
+
 func TestGitHubExchange(t *testing.T) {
-	for _, scenario := range []string{"success", "delegated actor", "missing identity token", "no grant", "broker error", "redirect", "invalid token type", "refresh token", "missing expiry", "GitHub refuses"} {
+	type expectation struct {
+		grantRequired bool
+		sentinel      error
+		exchanges     int
+		warned        bool
+	}
+	for scenario, want := range map[string]expectation{
+		"success":                {exchanges: 2},
+		"delegated actor":        {sentinel: backend.ErrForbidden},
+		"missing identity token": {sentinel: gitops.ErrAuthRequired},
+		"no grant":               {grantRequired: true, exchanges: 1, warned: true},
+		"client refused":         {exchanges: 1, warned: true},
+		"broker error":           {sentinel: backend.ErrUnavailable, exchanges: 1, warned: true},
+		"redirect":               {exchanges: 1, warned: true},
+		"invalid token type":     {exchanges: 1},
+		"refresh token":          {exchanges: 1},
+		"missing expiry":         {exchanges: 1},
+		"GitHub refuses":         {grantRequired: true, exchanges: 1},
+		"GitHub fails":           {sentinel: backend.ErrUnavailable, exchanges: 1},
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			secretFile := filepath.Join(t.TempDir(), "client-secret")
 			require.NoError(t, os.WriteFile(secretFile, []byte("fixture-secret"), 0o600))
-			exchanges, verifications := 0, 0
+			var seen recorder
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen.record(r)
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/token" {
-					exchanges++
-					require.Equal(t, http.MethodPost, r.Method)
-					require.NoError(t, r.ParseForm())
-					require.Equal(t, oidc.GrantTypeTokenExchange, r.Form.Get("grant_type"))
-					require.Equal(t, personToken, r.Form.Get("subject_token"))
-					require.Equal(t, oidc.TokenTypeIDToken, r.Form.Get("subject_token_type"))
-					require.Equal(t, "manager-app", r.Form.Get("audience"))
-					require.Empty(t, r.Form.Get("actor_token"))
-					client, secret, ok := r.BasicAuth()
-					require.True(t, ok)
-					require.Equal(t, "manager-client", client)
-					require.Equal(t, "fixture-secret", secret)
 					switch scenario {
 					case "no grant":
 						w.WriteHeader(http.StatusBadRequest)
-						_, _ = fmt.Fprint(w, `{"error":"invalid_target","error_description":"do not expose fixture-secret"}`)
+						_, _ = fmt.Fprint(w, `{"error":"invalid_target","error_description":"the requested audience cannot be served"}`)
+						return
+					case "client refused":
+						w.WriteHeader(http.StatusUnauthorized)
+						_, _ = fmt.Fprint(w, `{"error":"invalid_client","error_description":"client authentication failed"}`)
 						return
 					case "broker error":
 						w.WriteHeader(http.StatusInternalServerError)
@@ -68,24 +139,23 @@ func TestGitHubExchange(t *testing.T) {
 						return
 					}
 					result := oidc.TokenExchangeResponse{AccessToken: "fixture-user-grant", TokenType: "Bearer", IssuedTokenType: oidc.TokenTypeAccessToken, ExpiresIn: 300} // #nosec G101 -- synthetic grants served by the test broker
-					if scenario == "invalid token type" {
+					switch scenario {
+					case "invalid token type":
 						result.IssuedTokenType = oidc.TokenTypeIDToken
-					}
-					if scenario == "refresh token" {
+					case "refresh token":
 						result.RefreshToken = "fixture-refresh"
-					}
-					if scenario == "missing expiry" {
+					case "missing expiry":
 						result.ExpiresIn = 0
 					}
-					require.NoError(t, json.NewEncoder(w).Encode(result)) // #nosec G117 -- the fixture is a token endpoint
+					_ = json.NewEncoder(w).Encode(result) // #nosec G117 -- the fixture is a token endpoint
 					return
 				}
-				require.Equal(t, "/user", r.URL.Path, "credentials must never follow a redirect")
-				verifications++
-				require.Empty(t, r.Header.Get("X-Muster-Id-Token"))
-				require.Equal(t, "Bearer fixture-user-grant", r.Header.Get("Authorization"))
-				if scenario == "GitHub refuses" {
+				switch scenario {
+				case "GitHub refuses":
 					w.WriteHeader(http.StatusUnauthorized)
+					return
+				case "GitHub fails":
+					w.WriteHeader(http.StatusBadGateway)
 					return
 				}
 				_, _ = fmt.Fprint(w, `{"login":"alice"}`)
@@ -95,6 +165,8 @@ func TestGitHubExchange(t *testing.T) {
 			client := upstream.Client()
 			client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 			configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app", APIURL: upstream.URL}
+			var logs bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&logs, nil))
 			ctx := identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"})
 			switch scenario {
 			case "delegated actor":
@@ -103,33 +175,57 @@ func TestGitHubExchange(t *testing.T) {
 			default:
 				ctx = identity.ContextWithToken(ctx, personToken)
 			}
-			resolve := newGitHubExchange(configuration, client)
+			resolve := newGitHubExchange(configuration, client, log)
 			result, err := resolve(ctx)
 			if scenario == "success" {
 				require.NoError(t, err)
 				require.Equal(t, &identity.GitHub{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
 				_, err = resolve(ctx)
 				require.NoError(t, err)
-				require.Equal(t, 2, exchanges)
-				require.Equal(t, 2, verifications, "user grants are not cached")
-				return
+				require.Len(t, seen.on("/user"), 2, "user grants are not cached")
+			} else {
+				require.Error(t, err)
+				require.Nil(t, result)
+				for _, value := range []string{personToken, "fixture-secret", "fixture-user-grant", "fixture-refresh"} {
+					require.NotContains(t, err.Error(), value)
+				}
+				grant, isGrant := errors.AsType[*gitops.ErrGrantRequired](err)
+				require.Equal(t, want.grantRequired, isGrant, "%v", err)
+				if isGrant {
+					require.Equal(t, "manager-app", grant.App, "grant_required names the audience")
+				}
+				if want.sentinel != nil {
+					require.ErrorIs(t, err, want.sentinel)
+				}
 			}
-			require.Error(t, err)
-			require.Nil(t, result)
-			for _, value := range []string{personToken, "fixture-secret", "fixture-user-grant", "fixture-refresh"} {
-				require.NotContains(t, err.Error(), value)
+
+			exchanges := seen.on("/token")
+			require.Len(t, exchanges, want.exchanges)
+			for _, exchange := range exchanges {
+				require.Equal(t, http.MethodPost, exchange.method)
+				require.Equal(t, oidc.GrantTypeTokenExchange, exchange.form.Get("grant_type"))
+				require.Equal(t, personToken, exchange.form.Get("subject_token"))
+				require.Equal(t, oidc.TokenTypeIDToken, exchange.form.Get("subject_token_type"))
+				require.Equal(t, "manager-app", exchange.form.Get("audience"))
+				require.Empty(t, exchange.form.Get("actor_token"))
+				require.True(t, exchange.basicAuth)
+				require.Equal(t, "manager-client", exchange.client)
+				require.Equal(t, "fixture-secret", exchange.secret)
 			}
-			if scenario == "no grant" || scenario == "GitHub refuses" {
-				grant, ok := errors.AsType[*gitops.ErrGrantRequired](err)
-				require.True(t, ok)
-				require.Equal(t, "manager-app", grant.App, "grant_required names the audience")
+			for _, path := range seen.paths() {
+				require.Contains(t, []string{"/token", "/user"}, path, "credentials must never follow a redirect")
 			}
-			if scenario == "delegated actor" {
-				require.ErrorIs(t, err, backend.ErrForbidden)
+			for _, verification := range seen.on("/user") {
+				require.Empty(t, verification.forwardedIdentity)
+				require.Equal(t, "Bearer fixture-user-grant", verification.authorization)
 			}
-			if scenario == "missing identity token" || scenario == "delegated actor" {
-				require.Zero(t, exchanges)
+			require.Equal(t, want.warned, strings.Contains(logs.String(), "GitHub token exchange refused"), logs.String())
+			if scenario == "client refused" {
+				require.Contains(t, logs.String(), `error=invalid_client errorDescription="client authentication failed"`)
+				require.Contains(t, err.Error(), "invalid_client")
 			}
+			require.NotContains(t, logs.String(), "fixture-secret")
+			require.NotContains(t, logs.String(), personToken)
 		})
 	}
 }
@@ -156,13 +252,12 @@ func TestGitHubExchangeConfiguration(t *testing.T) {
 }
 
 func TestGitHubExchangeClientID(t *testing.T) {
-	var clients []string
+	var seen recorder
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/token" {
-			client, _, _ := r.BasicAuth()
-			clients = append(clients, client)
-			require.NoError(t, json.NewEncoder(w).Encode(oidc.TokenExchangeResponse{AccessToken: "fixture-user-grant", TokenType: "Bearer", IssuedTokenType: oidc.TokenTypeAccessToken, ExpiresIn: 300})) // #nosec G101,G117 -- synthetic broker response
+			_ = json.NewEncoder(w).Encode(oidc.TokenExchangeResponse{AccessToken: "fixture-user-grant", TokenType: "Bearer", IssuedTokenType: oidc.TokenTypeAccessToken, ExpiresIn: 300}) // #nosec G101,G117 -- synthetic broker response
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"login":"alice"}`)
@@ -188,14 +283,16 @@ func TestGitHubExchangeClientID(t *testing.T) {
 		{name: "flag without file", clientID: "flag-client", clientIDFile: filepath.Join(dir, "missing"), want: "flag-client"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			clients = nil
+			seen.reset()
 			configuration := base
 			configuration.ClientID, configuration.ClientIDFile = tc.clientID, tc.clientIDFile
-			resolve, err := NewGitHubExchange(configuration)
+			resolve, err := NewGitHubExchange(configuration, slog.New(slog.DiscardHandler))
 			require.NoError(t, err)
 			_, err = resolve(ctx)
 			require.NoError(t, err)
-			require.Equal(t, []string{tc.want}, clients)
+			exchanges := seen.on("/token")
+			require.Len(t, exchanges, 1)
+			require.Equal(t, tc.want, exchanges[0].client)
 		})
 	}
 
@@ -203,7 +300,7 @@ func TestGitHubExchangeClientID(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			configuration := base
 			configuration.ClientIDFile = file
-			_, err := NewGitHubExchange(configuration)
+			_, err := NewGitHubExchange(configuration, slog.New(slog.DiscardHandler))
 			require.Error(t, err)
 		})
 	}

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -187,6 +190,7 @@ func TestNewMCPServer_AdvertisesTheGiantSwarmIcon(t *testing.T) {
 func TestErrResultNamesTheMissingGrant(t *testing.T) {
 	res := errResult(fmt.Errorf("wire: %w", &gitops.ErrGrantRequired{App: "github", Reason: "grant it"}))
 	require.True(t, res.IsError)
+	require.Len(t, res.Content, 2)
 	require.Equal(t, "grant_required: grant it", res.Content[0].(mcp.TextContent).Text)
 	raw, err := json.Marshal(res)
 	require.NoError(t, err)
@@ -195,7 +199,31 @@ func TestErrResultNamesTheMissingGrant(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(raw, &wire))
 	require.Equal(t, map[string]any{"status": "grant_required", "apps": []any{"github"}, "message": "grant it"}, wire.StructuredContent)
+	var serialized map[string]any
+	require.NoError(t, json.Unmarshal([]byte(res.Content[1].(mcp.TextContent).Text), &serialized), "the second text block is the structured content")
+	require.Equal(t, wire.StructuredContent, serialized)
+}
 
-	_, code := statusFor(&gitops.ErrGrantRequired{App: "github", Reason: "grant it"})
-	require.Equal(t, "auth_required", code, "REST keeps answering auth_required")
+func TestRESTErrorStatus(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+		code   string
+		apps   []string
+	}{
+		"missing grant":    {err: fmt.Errorf("wire: %w", &gitops.ErrGrantRequired{App: "github", Reason: "grant it"}), status: http.StatusForbidden, code: "grant_required", apps: []string{"github"}},
+		"delegated caller": {err: fmt.Errorf("%w: not an agent", backend.ErrForbidden), status: http.StatusForbidden, code: "forbidden"},
+		"pinned token":     {err: fmt.Errorf("%w: connect", gitops.ErrAuthRequired), status: http.StatusUnauthorized, code: "auth_required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			NewREST(nil, slog.New(slog.DiscardHandler)).writeError(recorder, tc.err)
+			require.Equal(t, tc.status, recorder.Code)
+			var body errorBody
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+			require.Equal(t, tc.code, body.Error.Code)
+			require.Equal(t, tc.apps, body.Error.Apps)
+			require.Equal(t, tc.err.Error(), body.Error.Message)
+		})
+	}
 }
