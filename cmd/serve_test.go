@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/pem"
 	"log/slog"
 	"net/http"
@@ -107,24 +106,33 @@ func TestValidateGitHubExchange(t *testing.T) {
 	require.Error(t, validateGitHubExchange(&serveOptions{githubExchangeAudience: "model-manager-app"}), "exchange options without an endpoint")
 }
 
-func TestWarnDeprecatedOAuthOptions(t *testing.T) {
+func TestAllowPrivateOAuthURLs(t *testing.T) {
 	tests := []struct {
-		name             string
-		allowPrivateURLs bool
-		wantWarning      bool
+		name        string
+		environment string
+		arguments   []string
+		wantError   bool
 	}{
-		{name: "allow-private-oauth-urls set", allowPrivateURLs: true, wantWarning: true},
-		{name: "allow-private-oauth-urls unset"},
+		{name: "default"},
+		{name: "obsolete flag", arguments: []string{"--allow-private-oauth-urls=true"}, wantError: true},
+		{name: "obsolete environment", environment: "true", wantError: true},
+		{name: "false environment", environment: "false"},
+		{name: "flag overrides environment", environment: "true", arguments: []string{"--allow-private-oauth-urls=false"}},
+		{name: "true flag overrides false environment", environment: "false", arguments: []string{"--allow-private-oauth-urls=true"}, wantError: true},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var output bytes.Buffer
-			warnDeprecatedOAuthOptions(&serveOptions{dexAllowPrivateIP: tc.allowPrivateURLs}, slog.New(slog.NewTextHandler(&output, nil)))
-			if !tc.wantWarning {
-				assert.Empty(t, output.String())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", test.environment)
+			command := newServeCmd()
+			require.NoError(t, command.ParseFlags(test.arguments))
+			flag := command.Flags().Lookup("allow-private-oauth-urls")
+			require.True(t, flag.Hidden)
+			require.NotNil(t, command.PreRunE)
+			if !test.wantError {
+				require.NoError(t, command.PreRunE(command, nil))
 				return
 			}
-			assert.Contains(t, output.String(), "--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect")
+			require.ErrorContains(t, command.PreRunE(command, nil), "--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) is no longer supported: remove it; the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
 		})
 	}
 }

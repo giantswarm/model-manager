@@ -907,6 +907,8 @@ operations answer 501.
 
 ## Identity
 
+Configuration upgrades: [OAuth migration](docs/oauth-migration.md).
+
 With `--enable-oauth` model-manager is an OAuth 2.1 resource server
 ([mcp-oauth](https://github.com/giantswarm/mcp-oauth)) in front of both the
 MCP endpoint and the REST API: every call needs a bearer token the platform

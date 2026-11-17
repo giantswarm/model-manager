@@ -1,0 +1,15 @@
+suite: obsolete Dex private URL setting
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: refuses the obsolete true value
+    set:
+      oauth.dex.allowPrivateURLs: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "allowPrivateURLs.*value must be false"
+  - it: omits the obsolete flag by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --allow-private-oauth-urls=true
