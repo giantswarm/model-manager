@@ -141,6 +141,12 @@ func newServeCmd() *cobra.Command {
 		Short: "Run the REST + MCP server",
 		Long: `Run the model-manager server. Every flag can also be set through the
 environment variable named next to it; flags win over the environment.`,
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			if o.dexAllowPrivateIP {
+				return errors.New("--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) is no longer supported: remove it; the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			o.backendNameSet = cmd.Flags().Changed("backend") || os.Getenv("MODEL_MANAGER_BACKEND") != ""
 			return runServe(cmd.Context(), o)
@@ -215,7 +221,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.dexClientID, "dex-client-id", envOr("DEX_CLIENT_ID", ""), "Dex client ID (DEX_CLIENT_ID)")
 	f.StringVar(&o.dexClientSecret, "dex-client-secret", envOr("DEX_CLIENT_SECRET", ""), "Dex client secret (DEX_CLIENT_SECRET)")
 	f.StringVar(&o.dexCAFile, "dex-ca-file", envOr("DEX_CA_FILE", ""), "PEM CA bundle of a Dex with a private certificate; verifies discovery, token and JWKS calls (DEX_CA_FILE)")
-	f.BoolVar(&o.dexAllowPrivateIP, "allow-private-oauth-urls", envBool("MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", false), "Let the Dex issuer resolve to a private or loopback address, an in-cluster Dex (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS)")
+	f.BoolVar(&o.dexAllowPrivateIP, "allow-private-oauth-urls", envBool("MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", false), "Obsolete; true is refused. Remove this setting (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS)")
+	_ = f.MarkDeprecated("allow-private-oauth-urls", "remove it; Dex reaches private addresses and follows the proxy environment without it")
 	f.StringVar(&o.googleClientID, "google-client-id", envOr("GOOGLE_CLIENT_ID", ""), "Google OAuth client ID (GOOGLE_CLIENT_ID)")
 	f.StringVar(&o.googleClientSecret, "google-client-secret", envOr("GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret (GOOGLE_CLIENT_SECRET)")
 	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens — the platform client muster forwards tokens for and the portal logs in with (OAUTH_TRUSTED_AUDIENCES)")
@@ -426,7 +433,6 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			DexClientID:                   o.dexClientID,
 			DexClientSecret:               o.dexClientSecret,
 			DexCAFile:                     o.dexCAFile,
-			DexAllowPrivateIP:             o.dexAllowPrivateIP,
 			GoogleClientID:                o.googleClientID,
 			GoogleClientSecret:            o.googleClientSecret,
 			TrustedAudiences:              splitList(o.oauthTrustedAudiences),

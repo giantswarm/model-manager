@@ -93,12 +93,9 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		})
 	})
 
-	// mcp-oauth rejects IP-literal issuers even with private IPs allowed; a
-	// hostname that resolves to loopback (localhost, like the agentlab Dex) is
-	// what AllowPrivateIP is for. httptest's certificate has no localhost SAN,
-	// so mint one.
+	// The issuer must use a hostname and its certificate must cover that hostname.
 	srv := httptest.NewUnstartedServer(mux)
-	cert := selfSignedLocalhost(t)
+	cert := selfSignedServerCertificate(t, "localhost")
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -113,14 +110,14 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	return idp
 }
 
-func selfSignedLocalhost(t *testing.T) tls.Certificate {
+func selfSignedServerCertificate(t *testing.T, host string) tls.Certificate {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "localhost"},
-		DNSNames:              []string{"localhost"},
+		Subject:               pkix.Name{CommonName: host},
+		DNSNames:              []string{host},
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
@@ -156,7 +153,6 @@ func (f *fakeIdP) config(downstream bool) OAuthConfig {
 		DexClientID:        "agent-platform",
 		DexClientSecret:    "lab-only",
 		DexCAFile:          f.caFile,
-		DexAllowPrivateIP:  true,
 		TrustedAudiences:   []string{"agent-platform"},
 		SSOAllowPrivateIPs: true,
 		DownstreamOAuth:    downstream,

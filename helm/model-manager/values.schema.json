@@ -745,8 +745,8 @@
                     "additionalProperties": false,
                     "properties": {
                         "allowPrivateURLs": {
-                            "type": "boolean",
-                            "description": "Let the issuer resolve to a private or loopback address (an in-cluster Dex)."
+                            "description": "Must remain false; true is refused. Remove this obsolete setting: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it.",
+                            "const": false
                         },
                         "caSecret": {
                             "type": "object",
