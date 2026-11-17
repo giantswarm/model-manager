@@ -188,8 +188,9 @@ oauth:
     clientID: ""
     # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
     clientSecret: ""
-    # -- Must remain false; true is refused. Remove this obsolete setting: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it.
-    allowPrivateURLs: false  # @schema const: false
+    # -- Deprecated, no effect: the Dex client reaches private addresses and
+    # follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it.
+    allowPrivateURLs: false
     # -- Secret with the CA of a Dex that serves a private certificate;
     # mounted and passed as `--dex-ca-file`. Empty name falls back to
     # `global.identity.ca.secretName` / `global.identity.ca.key`.
