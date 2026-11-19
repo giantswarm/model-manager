@@ -160,11 +160,11 @@ func TestGitHubExchange(t *testing.T) {
 				}
 				_, _ = fmt.Fprint(w, `{"login":"alice"}`)
 			})
-			upstream := httptest.NewTLSServer(handler)
+			upstream := newLocalhostTLSServer(t, handler)
 			defer upstream.Close()
 			client := upstream.Client()
 			client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-			configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app", APIURL: upstream.URL}
+			configuration := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app", APIURL: localhostURL(upstream)}
 			var logs bytes.Buffer
 			log := slog.New(slog.NewTextHandler(&logs, nil))
 			ctx := identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"})
@@ -253,7 +253,7 @@ func TestGitHubExchangeConfiguration(t *testing.T) {
 
 func TestGitHubExchangeClientID(t *testing.T) {
 	var seen recorder
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newLocalhostTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/token" {
@@ -272,7 +272,7 @@ func TestGitHubExchangeClientID(t *testing.T) {
 	require.NoError(t, os.WriteFile(idFile, []byte("file-client\n"), 0o600))
 	emptyFile := filepath.Join(dir, "empty")
 	require.NoError(t, os.WriteFile(emptyFile, nil, 0o600))
-	base := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientSecretFile: secretFile, Audience: "manager-app", CAFile: caFile, APIURL: upstream.URL}
+	base := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientSecretFile: secretFile, Audience: "manager-app", CAFile: caFile, APIURL: localhostURL(upstream)}
 	ctx := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"}), personToken)
 
 	for _, tc := range []struct {
@@ -304,4 +304,19 @@ func TestGitHubExchangeClientID(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestGitHubExchangeRefusesIPLiteralPrivateEndpoint(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer upstream.Close()
+	secretFile := filepath.Join(t.TempDir(), "client-secret")
+	require.NoError(t, os.WriteFile(secretFile, []byte("fixture-secret"), 0o600))
+	configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app"}
+	ctx := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"}), personToken)
+
+	result, err := newGitHubExchange(configuration, upstream.Client(), slog.New(slog.DiscardHandler))(ctx)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Zero(t, requests, "the endpoint is refused before any request")
 }

@@ -219,9 +219,15 @@ oauth:
   # but not the platform client — is accepted without listing its client here.
   trustedAudiences: []
   sso:
-    # -- Let the IdP's JWKS endpoint resolve to a private address when
-    # validating forwarded tokens (an in-cluster Dex).
+    # -- Deprecated, no effect: the issuer host of the configured provider may
+    # resolve to a private address for its JWKS without it; list any other JWKS
+    # host in allowPrivateIPJWKSHosts.
     allowPrivateIPs: false
+    # -- Hosts, other than the issuer's own, whose JWKS may resolve to an
+    # RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts
+    # on another host. Exact hostnames, no port. Loopback and link-local stay
+    # refused.
+    allowPrivateIPJWKSHosts: []  # @schema item: string
   # -- Accept unauthenticated dynamic client registration (labs only).
   allowPublicClientRegistration: false
   downstream:
