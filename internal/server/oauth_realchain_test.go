@@ -99,6 +99,7 @@ func newPrivateIdP(t *testing.T, keysHost string) *privateIdP {
 	idp.caFile = filepath.Join(t.TempDir(), "ca.crt")
 	require.NoError(t, os.WriteFile(idp.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}), 0o600))
 
+	bypassProxy(t, privateIssuerHost, privateKeysHost)
 	resolveTestHosts(t, ip, privateIssuerHost, privateKeysHost)
 	return idp
 }
@@ -135,6 +136,23 @@ func selfSignedFor(t *testing.T, hosts []string) tls.Certificate {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	require.NoError(t, err)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// bypassProxy clears the inherited proxy variables, then skips when the
+// process-wide proxy setting, read once by net/http, still routes the test
+// hosts through a proxy that cannot resolve them.
+func bypassProxy(t *testing.T, hosts ...string) {
+	t.Helper()
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(name, "")
+	}
+	for _, h := range hosts {
+		req, err := http.NewRequest(http.MethodGet, "https://"+h+"/", nil)
+		require.NoError(t, err)
+		if proxy, _ := http.ProxyFromEnvironment(req); proxy != nil {
+			t.Skipf("the process proxy setting routes %s through %s", h, proxy.Host)
+		}
+	}
 }
 
 // resolveTestHosts answers A queries for hosts with ip, through a DNS server
@@ -228,7 +246,11 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 	t.Helper()
 	o, err := newOAuth(cfg, "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
-	t.Cleanup(func() { o.shutdown(t.Context()) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		o.shutdown(ctx)
+	})
 	var caller string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller = identity.Caller(r.Context())
