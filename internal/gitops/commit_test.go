@@ -56,17 +56,27 @@ func cluster(extra ...runtime.Object) dynamic.Interface {
 	}, objs...)
 }
 
-// testApp is the GitHub App the committer's refusals name.
-const testApp = "https://github.com/apps/giantswarm-model-manager"
+// testApp is muster's name for the provider App the committer's refusals
+// name.
+const testApp = "model-manager"
+
+// personKey carries the person's grant in a test's context, where the
+// production grant fetch asks muster's broker.
+type personKey struct{}
 
 // committer commits through fake, whose unreachable repositories the
-// person's token does not reach.
+// person's token does not reach, with the grant asPerson put on the call's
+// context (none: the person has not granted the App).
 func committer(dyn dynamic.Interface, fake *commit.Fake, unreachable ...commit.Repository) *Committer {
-	return NewCommitter(testApp, func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) dynamic.Interface { return dyn })
+	return NewCommitter(func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) dynamic.Interface { return dyn }).
+		WithGitHubUser(testApp, func(ctx context.Context) (*identity.GitHub, error) {
+			gh, _ := ctx.Value(personKey{}).(*identity.GitHub)
+			return gh, nil
+		})
 }
 
 func asPerson() context.Context {
-	return identity.ContextWithGitHub(context.Background(), &identity.GitHub{Login: "jane", Token: "ghu_x"})
+	return context.WithValue(context.Background(), personKey{}, &identity.GitHub{Login: "jane", Token: "ghu_x"})
 }
 
 func modelConfig(name string) *unstructured.Unstructured {
@@ -166,7 +176,7 @@ func TestCommitWithAFetchedGrantGitHubRefuses(t *testing.T) {
 	request := Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"}
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			c := NewCommitter("", func(string) (Remote, error) {
+			c := NewCommitter(func(string) (Remote, error) {
 				return refusingRemote{FakeRemote: FakeRemote{Fake: commit.NewFake()}, status: status}, nil
 			}, func(context.Context) dynamic.Interface { return cluster() }).WithGitHubUser("model-manager", user)
 
@@ -189,7 +199,7 @@ func TestCommitWithAFetchedGrantGitHubRefuses(t *testing.T) {
 func TestCommitWithAFetchedGrantNamesTheGrantedApp(t *testing.T) {
 	fake := commit.NewFake()
 	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("resources: []\n")})
-	c := NewCommitter("", func(string) (Remote, error) {
+	c := NewCommitter(func(string) (Remote, error) {
 		return FakeRemote{Fake: fake, Unreachable: []commit.Repository{repo}}, nil
 	},
 		func(context.Context) dynamic.Interface { return cluster() }).

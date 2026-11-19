@@ -80,28 +80,24 @@ type RemoteFor func(token string) (Remote, error)
 // Committer lands rendered objects in the repository that owns their
 // namespace, as one pull request opened as the person.
 type Committer struct {
-	app    string
 	remote RemoteFor
-	// user fetches the person's grant per commit (nil: the pinned
-	// registration's token); grantApp is muster's name for the provider App
-	// that grant is of.
+	// user fetches the person's grant per commit (nil: every commit is
+	// refused); grantApp is muster's name for the provider App that grant is
+	// of.
 	user     GitHubUser
 	grantApp string
 	dyn      func(ctx context.Context) dynamic.Interface
 }
 
-// NewCommitter builds a Committer; app is the GitHub App whose user token
-// opens the pull request (https://github.com/apps/giantswarm-model-manager),
-// named in a refusal of a repository it is not installed on; dyn is the
-// Kubernetes client of the call (the caller's own under downstream OAuth),
-// which reads the Flux objects.
-func NewCommitter(app string, remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
-	return &Committer{app: app, remote: remote, dyn: dyn}
+// NewCommitter builds a Committer; dyn is the Kubernetes client of the call
+// (the caller's own under downstream OAuth), which reads the Flux objects.
+// It commits once WithGitHubUser names the person's grant.
+func NewCommitter(remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
+	return &Committer{remote: remote, dyn: dyn}
 }
 
-// WithGitHubUser fetches the person's grant on demand for every commit, in
-// place of the token an App-pinned registration carries; app is muster's
-// name for the provider App the grant is of, named in refusals.
+// WithGitHubUser fetches the person's grant on demand for every commit; app
+// is muster's name for the provider App the grant is of, named in refusals.
 func (c *Committer) WithGitHubUser(app string, user GitHubUser) *Committer {
 	c.grantApp, c.user = app, user
 	return c
@@ -224,15 +220,14 @@ type planned struct {
 // written; a repository the App's token does not reach is one, reported per
 // part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
-	gh, ok := identity.GitHubFromContext(ctx)
+	var gh *identity.GitHub
 	if c.user != nil {
 		var err error
 		if gh, err = c.user(ctx); err != nil {
 			return nil, err
 		}
-		ok = gh != nil && gh.Token != ""
 	}
-	if !ok {
+	if gh == nil || gh.Token == "" {
 		return nil, fmt.Errorf("%w: commit mode opens the pull request with your GitHub authorization, and this call carries none: %s", ErrAuthRequired, signIn)
 	}
 	var remote Remote
@@ -325,11 +320,8 @@ func (c *Committer) reachable(ctx context.Context, remote Remote, reached map[co
 // and the App to install on it.
 func (c *Committer) unreachable(loc location, part Part) error {
 	app := "model-manager's GitHub App"
-	switch {
-	case c.grantApp != "":
+	if c.grantApp != "" {
 		app = "the GitHub App you granted in muster as " + c.grantApp + " (core_auth_login app=" + c.grantApp + ")"
-	case c.app != "":
-		app = "the GitHub App " + c.app
 	}
 	return fmt.Errorf("%w: %s is not installed on %s, where the %s for %s go (GitHub answers 404 for a repository the App's token does not reach, or that you cannot see): an owner of %s installs the App on %s with contents and pull requests read and write, then call again",
 		ErrRepositoryUnavailable, app, loc.Repository, part.what(), part.on(), loc.Repository.Owner, loc.Repository)

@@ -83,13 +83,13 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 	// health endpoints above stay open for the probes.
 	rest := http.NewServeMux()
 	api.NewREST(svc, log).Register(rest)
-	mux.Handle(api.Prefix+"/", s.guard(rest, false))
+	mux.Handle(api.Prefix+"/", s.guard(rest))
 
 	if cfg.MCPEnabled && mcpSrv != nil {
 		// mcp-go reads a POST body whole before validating it
 		// (CVE-2026-108859): the bound keeps that read to what the REST API accepts.
 		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath))
-		mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler, true), maxMCPBodyBytes))
+		mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler), maxMCPBodyBytes))
 	}
 
 	s.http = &http.Server{
@@ -110,13 +110,12 @@ func traced(r *http.Request) bool {
 	return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 }
 
-// guard requires an authenticated caller when OAuth is on; mcp is the MCP
-// endpoint, the one the GitHub App pin applies to.
-func (s *Server) guard(next http.Handler, mcp bool) http.Handler {
+// guard requires an authenticated caller when OAuth is on.
+func (s *Server) guard(next http.Handler) http.Handler {
 	if s.oauth == nil {
 		return next
 	}
-	return s.oauth.protect(next, mcp)
+	return s.oauth.protect(next)
 }
 
 // Handler exposes the mux (tests).

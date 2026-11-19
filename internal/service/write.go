@@ -124,8 +124,9 @@ func (s *Service) WithCommitter(c *gitops.Committer) *Service {
 	return s
 }
 
-// ErrCommitUnavailable is mode commit on a server without its GitHub App pin.
-var ErrCommitUnavailable = fmt.Errorf("%w: mode commit (a pull request opened as you) is not offered by this server: it is not registered with its GitHub App (chart value github.enabled), so it holds no GitHub authorization of yours — use mode apply", backend.ErrUnsupported)
+// ErrCommitUnavailable is mode commit on a server that fetches no GitHub
+// grant.
+var ErrCommitUnavailable = fmt.Errorf("%w: mode commit (a pull request opened as you) is not offered by this server: it fetches no GitHub authorization of yours (chart values github.enabled and github.tokenExchange) — use mode apply", backend.ErrUnsupported)
 
 // CommitView is a write in commit mode: the plan and the pull request.
 type CommitView struct {

@@ -12,10 +12,7 @@ requests the requiredAudiences at login. Without OAuth muster connects
 anonymously. With github.tokenExchange the registration forwards the ID token
 and lists the token exchange audience under providerApps: a commit
 without the person's grant answers grant_required naming it, which muster turns
-into that App's sign-in. With github.enabled and no tokenExchange (deprecated)
-the auth pins the GitHub App giantswarm-model-manager instead: the bearer is
-the person's App user token (commit mode's pull request) and forwardIdentity
-puts the ID token in X-Muster-Id-Token next to it.
+into that App's sign-in.
 */}}
 apiVersion: muster.giantswarm.io/v1alpha1
 kind: MCPServer
@@ -44,31 +41,7 @@ spec:
   {{- with .Values.muster.mcpServer.description }}
   description: {{ . | quote }}
   {{- end }}
-  {{- if and .Values.oauth.enabled .Values.github.enabled (not $githubExchange) }}
-  {{- with .Values.github.authorizationServer }}
-  auth:
-    type: oauth
-    authorizationServer:
-      issuer: {{ .issuer | quote }}
-      {{- with .expectedIssuer }}
-      expectedIssuer: {{ . | quote }}
-      {{- end }}
-      authorizationEndpoint: {{ .authorizationEndpoint | quote }}
-      tokenEndpoint: {{ .tokenEndpoint | quote }}
-      {{- with .scopes }}
-      scopes: {{ . | quote }}
-      {{- end }}
-      clientCredentialsSecretRef:
-        name: {{ .clientCredentialsSecretRef.name | quote }}
-        namespace: {{ .clientCredentialsSecretRef.namespace | default $.Release.Namespace | quote }}
-      grantScope: {{ .grantScope | quote }}
-    forwardIdentity: true
-    {{- with $.Values.muster.mcpServer.auth.requiredAudiences }}
-    requiredAudiences:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-  {{- end }}
-  {{- else if .Values.oauth.enabled }}
+  {{- if .Values.oauth.enabled }}
   auth:
     type: oauth
     forwardToken: {{ .Values.muster.mcpServer.auth.forwardToken }}
