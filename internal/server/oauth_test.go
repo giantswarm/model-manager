@@ -331,7 +331,6 @@ func TestUntrustedAudienceIsRefused(t *testing.T) {
 	assert.NotContains(t, logs.String(), "refused")
 }
 
-
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled
 // server: probes stay open, the API and the MCP endpoint demand a token.
 func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
