@@ -238,7 +238,8 @@ protocol's (4317 gRPC, 4318 HTTP). Empty without an endpoint.
 
 {{/*
 "true" when github.tokenExchange is on (tokenEndpoint set), after refusing an
-incomplete or contradictory configuration: the exchange needs github.enabled,
+incomplete or contradictory configuration: github.enabled needs the exchange,
+and the exchange needs github.enabled,
 Dex OAuth with downstream OAuth and muster's forwardToken (the person's ID
 token is the subject token), an audience, and a client secret (existingSecret or the inline clientSecret).
 */}}
@@ -263,6 +264,8 @@ token is the subject token), an audience, and a client secret (existingSecret or
 true
 {{- else if or $x.audience $x.clientID $x.clientSecret $x.existingSecret $x.caSecretName -}}
 {{- fail "github.tokenExchange.tokenEndpoint is required when any other github.tokenExchange value is set" -}}
+{{- else if .Values.github.enabled -}}
+{{- fail "github.enabled needs github.tokenExchange.tokenEndpoint: commit mode fetches the person's GitHub grant per commit from muster's broker (github.tokenExchange)" -}}
 {{- end -}}
 {{- end }}
 

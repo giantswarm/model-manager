@@ -97,10 +97,6 @@ func TestValidateGitHubExchange(t *testing.T) {
 	require.Error(t, validateGitHubExchange(o))
 
 	o = exchange()
-	o.githubAuthorizationServer = "https://github.com/apps/giantswarm-model-manager"
-	require.Error(t, validateGitHubExchange(o), "the exchange replaces the pin")
-
-	o = exchange()
 	o.downstreamOAuth = false
 	require.Error(t, validateGitHubExchange(o))
 

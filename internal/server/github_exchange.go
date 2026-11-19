@@ -21,6 +21,9 @@ import (
 	"github.com/giantswarm/model-manager/internal/identity"
 )
 
+// DefaultGitHubAPIURL is GitHub's REST API.
+const DefaultGitHubAPIURL = "https://api.github.com"
+
 // GitHubExchangeConfig identifies a confidential RFC 8693 client and its
 // operator-controlled target. No caller can select the endpoint or target.
 type GitHubExchangeConfig struct {

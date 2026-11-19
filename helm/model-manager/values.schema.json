@@ -99,54 +99,9 @@
                     "type": "string",
                     "description": "GitHub's REST API, for `GET /user` and the pull request."
                 },
-                "authorizationServer": {
-                    "type": "object",
-                    "description": "Deprecated: the App pin, used when `github.enabled` and no `tokenExchange.tokenEndpoint`. Set `tokenExchange` instead.",
-                    "additionalProperties": false,
-                    "properties": {
-                        "authorizationEndpoint": {
-                            "type": "string",
-                            "description": "GitHub's authorize endpoint (GitHub publishes no discovery document)."
-                        },
-                        "clientCredentialsSecretRef": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Secret with the App's OAuth client under `client-id` and `client-secret`."
-                                },
-                                "namespace": {
-                                    "type": "string",
-                                    "description": "Namespace of that Secret; empty is the release namespace."
-                                }
-                            }
-                        },
-                        "expectedIssuer": {
-                            "type": "string",
-                            "description": "The issuer GitHub puts in the RFC 9207 `iss` parameter of its authorization response, `https://github.com/login/oauth` for every App. Empty omits the field."
-                        },
-                        "grantScope": {
-                            "type": "string",
-                            "description": "`subject`: the grant belongs to the person, not to one login session."
-                        },
-                        "issuer": {
-                            "type": "string",
-                            "description": "Deprecated with `authorizationServer`. The issuer identity the person's grant is filed under: the App's own, so the login App's GitHub grant stays separate. Also passed to the server, which names it in its refusals."
-                        },
-                        "scopes": {
-                            "type": "string",
-                            "description": "The OAuth `scope` parameter, only for an authorization server that needs one (a lab's stand-in); empty for GitHub, whose App permissions are the App's. Empty omits the field."
-                        },
-                        "tokenEndpoint": {
-                            "type": "string",
-                            "description": "GitHub's token endpoint."
-                        }
-                    }
-                },
                 "enabled": {
                     "type": "boolean",
-                    "description": "Offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). Needs `oauth.enabled`. With `tokenExchange`, the MCPServer forwards the person's ID token as without commit mode and model-manager fetches their GitHub App user grant per commit. Without `tokenExchange`, the deprecated pin: the MCPServer's auth pins the App (`authorizationServer`) as the authorization server, muster runs the App's consent once per person and puts their user token on every call, which this server verifies with `GET /user` and opens the pull request with, and sets `forwardIdentity: true` so the person's IdP ID token arrives in `X-Muster-Id-Token` next to it. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
+                    "description": "Offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). Needs `oauth.enabled` and `tokenExchange`: the MCPServer forwards the person's ID token as without commit mode and model-manager fetches their GitHub App user grant per commit. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
                 },
                 "tokenExchange": {
                     "type": "object",
@@ -175,7 +130,7 @@
                         },
                         "tokenEndpoint": {
                             "type": "string",
-                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex, `oauth.downstream.enabled` and `muster.mcpServer.auth.forwardToken`. With `auth.providerApps`, muster also attaches the person's App token to every call until giantswarm/giantswarm#39227. Empty: the deprecated `authorizationServer` pin."
+                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex, `oauth.downstream.enabled` and `muster.mcpServer.auth.forwardToken`. With `auth.providerApps`, muster also attaches the person's App token to every call until giantswarm/giantswarm#39227. Required with `github.enabled`."
                         }
                     }
                 }

@@ -251,12 +251,6 @@ func TestServerConfig(t *testing.T) {
 	}, serverConfig(cfg, pool), "no private-address allowance: the issuer host is covered by the library")
 }
 
-// TestRefusalHeaderIsQuoted keeps a description inside the quoted-string of
-// the WWW-Authenticate challenge.
-func TestRefusalHeaderIsQuoted(t *testing.T) {
-	assert.Equal(t, `a\"b\\c d e`, headerQuoted("a\"b\\c\r\nd\ne"))
-}
-
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled
 // server: probes stay open, the API and the MCP endpoint demand a token.
 func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {

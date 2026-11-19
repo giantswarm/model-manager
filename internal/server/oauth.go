@@ -72,10 +72,6 @@ type OAuthConfig struct {
 	// audience). The ServiceAccount holds no permissions then, so a request
 	// that yields no IdP token to present is refused (401).
 	DownstreamOAuth bool
-	// GitHub, when set, pins the registration to the App: the bearer is the
-	// person's App user token and the IdP ID token arrives in
-	// ForwardedIdentityHeader (GitHubPin).
-	GitHub *GitHubPin
 }
 
 // Validate checks required fields.
@@ -120,7 +116,6 @@ type oauthRuntime struct {
 	cfg     OAuthConfig
 	mcpPath string
 	log     *slog.Logger
-	github  *gitHubGuard
 }
 
 func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime, error) {
@@ -143,13 +138,7 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 	}
 	log.Info("OAuth resource server enabled", "provider", cfg.provider(), "issuer", cfg.BaseURL,
 		"trustedAudiences", cfg.TrustedAudiences, "downstreamOAuth", cfg.DownstreamOAuth)
-	o := &oauthRuntime{server: srv, handler: handler.New(srv, log), store: store, cfg: cfg, mcpPath: mcpPath, log: log}
-	if cfg.GitHub != nil {
-		if o.github, err = newGitHubGuard(*cfg.GitHub, log); err != nil {
-			return nil, err
-		}
-	}
-	return o, nil
+	return &oauthRuntime{server: srv, handler: handler.New(srv, log), store: store, cfg: cfg, mcpPath: mcpPath, log: log}, nil
 }
 
 // serverConfig is the mcp-oauth server configuration for cfg: this server's
@@ -228,17 +217,9 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
 // server's own access tokens, or a forwarded IdP id_token whose audience is
-// trusted) and then attaches the caller to the request. pinned is the MCP
-// endpoint of a registration pinned to the App: the GitHub bearer is
-// verified first and the forwarded ID token is what mcp-oauth validates. The
-// REST API is never pinned — the portal calls it with the person's ID token
-// as the bearer.
-func (o *oauthRuntime) protect(next http.Handler, pinned bool) http.Handler {
-	h := o.handler.ValidateToken(o.attachIdentity(next))
-	if pinned && o.github != nil {
-		return o.github.protect(h)
-	}
-	return h
+// trusted) and then attaches the caller to the request.
+func (o *oauthRuntime) protect(next http.Handler) http.Handler {
+	return o.handler.ValidateToken(o.attachIdentity(next))
 }
 
 // attachIdentity translates the validated mcp-oauth user into the request's
@@ -313,13 +294,6 @@ func (o *oauthRuntime) refuseWithoutToken(w http.ResponseWriter, r *http.Request
 // errInvalidToken is the RFC 6750 error code for a bearer the resource
 // server does not accept.
 const errInvalidToken = "invalid_token"
-
-// headerQuoted escapes s for an RFC 7230 quoted-string header parameter; the
-// audiences come from the caller's token, so nothing of them may break out of
-// the quotes or the header line.
-func headerQuoted(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\r\n", " ", "\r", " ", "\n", " ").Replace(s)
-}
 
 func (o *oauthRuntime) shutdown(ctx context.Context) {
 	// Shutdown stops the stores it was given.
