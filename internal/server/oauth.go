@@ -63,9 +63,6 @@ type OAuthConfig struct {
 	// kube-apiserver trusts them (the chart passes both). Empty: only tokens
 	// this server issued itself.
 	TrustedAudiences []string
-	// loopbackJWKS lets the JWKS endpoint resolve to loopback, which
-	// mcp-oauth refuses for any issuer host.
-	loopbackJWKS bool
 	// AllowPublicClientRegistration lets MCP clients register over DCR
 	// without a token (labs only).
 	AllowPublicClientRegistration bool
@@ -139,16 +136,7 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 		return nil, err
 	}
 	store := memory.New()
-	serverCfg := &oauth.ServerConfig{
-		Issuer:                        cfg.BaseURL,
-		AllowRefreshTokenRotation:     true,
-		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
-		MaxClientsPerIP:               10,
-		TrustedAudiences:              cfg.TrustedAudiences,
-		AllowPrivateIPJWKS:            cfg.loopbackJWKS, //nolint:staticcheck // SA1019: only a loopback issuer needs the blanket
-		JWKSRootCAs:                   rootCAs,
-	}
-	srv, err := oauth.NewServer(provider, store, store, store, serverCfg, log,
+	srv, err := oauth.NewServer(provider, store, store, store, serverConfig(cfg, rootCAs), log,
 		oauth.WithAuditor(security.NewAuditor(log, true)))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: server: %w", err)
@@ -162,6 +150,20 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 		}
 	}
 	return o, nil
+}
+
+// serverConfig is the mcp-oauth server configuration for cfg: this server's
+// own issuer, the audiences it trusts as forwarded bearers and the CA bundle
+// for the issuer's JWKS.
+func serverConfig(cfg OAuthConfig, rootCAs *x509.CertPool) *oauth.ServerConfig {
+	return &oauth.ServerConfig{
+		Issuer:                        cfg.BaseURL,
+		AllowRefreshTokenRotation:     true,
+		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
+		MaxClientsPerIP:               10,
+		TrustedAudiences:              cfg.TrustedAudiences,
+		JWKSRootCAs:                   rootCAs,
+	}
 }
 
 func newProvider(cfg OAuthConfig, rootCAs *x509.CertPool, log *slog.Logger) (providers.Provider, error) {

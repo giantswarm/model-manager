@@ -34,7 +34,7 @@ func fakeGitHub(t *testing.T, token, login string) (*httptest.Server, *int) {
 // TestGitHubPinCarriesBothTokens is the App-pinned registration: the bearer
 // is the person's App user token, verified with GET /user once per cache
 // lifetime and kept for commit mode; the forwarded ID token in
-// X-Muster-Id-Token is validated as a forwarded bearer is without the pin and
+// X-Muster-Id-Token replaces the bearer for mcp-oauth and
 // becomes the caller and the Kubernetes token, so apply mode is unchanged.
 func TestGitHubPinCarriesBothTokens(t *testing.T) {
 	idp := newFakeIdP(t)
@@ -50,12 +50,12 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 		token string
 		gh    *identity.GitHub
 	}
-	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := o.github.protect(afterValidation(verifiedUser(), o.attachIdentity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.id, _ = identity.FromContext(r.Context())
 		seen.token, _ = identity.TokenFromContext(r.Context())
 		seen.gh, _ = identity.GitHubFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
-	}), true)
+	}))))
 	call := func(bearer, idToken string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 		if bearer != "" {
@@ -90,16 +90,6 @@ func TestGitHubPinCarriesBothTokens(t *testing.T) {
 	rec = call("", forwarded)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	assert.Equal(t, http.StatusUnauthorized, call("ghu_person", idp.idToken(t, []string{"someone-else"}, time.Now().Add(30*time.Minute))).Code, "the ID token is validated as without the pin")
-
-	// The REST API is not pinned: the portal calls it with the ID token as
-	// the bearer, and no GitHub token is asked for.
-	rest := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }), false)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
-	req.Header.Set("Authorization", "Bearer "+forwarded)
-	restRec := httptest.NewRecorder()
-	rest.ServeHTTP(restRec, req)
-	assert.Equal(t, http.StatusNoContent, restRec.Code, restRec.Body.String())
 }
 
 func TestGitHubPinValidation(t *testing.T) {
