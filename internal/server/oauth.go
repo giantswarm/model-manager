@@ -63,6 +63,11 @@ type OAuthConfig struct {
 	// kube-apiserver trusts them (the chart passes both). Empty: only tokens
 	// this server issued itself.
 	TrustedAudiences []string
+	// AllowPrivateIPJWKSHosts lists the hosts, other than the issuer's own,
+	// whose JWKS may resolve to RFC 1918 and RFC 4193 addresses: a jwks_uri
+	// the IdP's discovery document puts on another host. The issuer host needs
+	// no entry. Loopback, link-local and metadata addresses stay refused.
+	AllowPrivateIPJWKSHosts []string
 	// AllowPublicClientRegistration lets MCP clients register over DCR
 	// without a token (labs only).
 	AllowPublicClientRegistration bool
@@ -151,6 +156,7 @@ func serverConfig(cfg OAuthConfig, rootCAs *x509.CertPool) *oauth.ServerConfig {
 		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
 		MaxClientsPerIP:               10,
 		TrustedAudiences:              cfg.TrustedAudiences,
+		AllowPrivateIPJWKSHosts:       cfg.AllowPrivateIPJWKSHosts,
 		JWKSRootCAs:                   rootCAs,
 	}
 }

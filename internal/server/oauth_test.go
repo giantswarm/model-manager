@@ -240,15 +240,21 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 
 func TestServerConfig(t *testing.T) {
 	pool := x509.NewCertPool()
-	cfg := OAuthConfig{BaseURL: "https://mm.example.com", TrustedAudiences: []string{"agent-platform", "kubernetes"}, AllowPublicClientRegistration: true}
+	cfg := OAuthConfig{
+		BaseURL:                       "https://mm.example.com",
+		TrustedAudiences:              []string{"agent-platform", "kubernetes"},
+		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
+		AllowPublicClientRegistration: true,
+	}
 	assert.Equal(t, &oauth.ServerConfig{
 		Issuer:                        "https://mm.example.com",
 		AllowRefreshTokenRotation:     true,
 		AllowPublicClientRegistration: true,
 		MaxClientsPerIP:               10,
 		TrustedAudiences:              []string{"agent-platform", "kubernetes"},
+		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
 		JWKSRootCAs:                   pool,
-	}, serverConfig(cfg, pool), "no private-address allowance: the issuer host is covered by the library")
+	}, serverConfig(cfg, pool), "only the listed JWKS hosts may resolve privately; the issuer host is covered by the library")
 }
 
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled

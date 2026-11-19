@@ -173,6 +173,9 @@ spec:
             {{- if .Values.oauth.sso.allowPrivateIPs }}
             - --sso-allow-private-ips=true
             {{- end }}
+            {{- with .Values.oauth.sso.allowPrivateIPJWKSHosts }}
+            - --sso-allow-private-ip-jwks-hosts={{ join "," . }}
+            {{- end }}
             {{- if .Values.oauth.allowPublicClientRegistration }}
             - --allow-public-client-registration=true
             {{- end }}
