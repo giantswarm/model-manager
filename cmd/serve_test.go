@@ -109,22 +109,23 @@ func TestValidateGitHubExchange(t *testing.T) {
 
 func TestWarnDeprecatedOAuthOptions(t *testing.T) {
 	tests := []struct {
-		name             string
-		allowPrivateURLs bool
-		wantWarning      bool
+		name     string
+		options  serveOptions
+		wantWarn string
 	}{
-		{name: "allow-private-oauth-urls set", allowPrivateURLs: true, wantWarning: true},
-		{name: "allow-private-oauth-urls unset"},
+		{name: "allow-private-oauth-urls set", options: serveOptions{dexAllowPrivateIP: true}, wantWarn: "--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect"},
+		{name: "sso-allow-private-ips set", options: serveOptions{ssoAllowPrivateIPs: true}, wantWarn: "--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect"},
+		{name: "none set"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
-			warnDeprecatedOAuthOptions(&serveOptions{dexAllowPrivateIP: tc.allowPrivateURLs}, slog.New(slog.NewTextHandler(&output, nil)))
-			if !tc.wantWarning {
+			warnDeprecatedOAuthOptions(&tc.options, slog.New(slog.NewTextHandler(&output, nil)))
+			if tc.wantWarn == "" {
 				assert.Empty(t, output.String())
 				return
 			}
-			assert.Contains(t, output.String(), "--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect")
+			assert.Contains(t, output.String(), tc.wantWarn)
 		})
 	}
 }

@@ -150,15 +150,15 @@ func (f *fakeIdP) idToken(t *testing.T, aud []string, exp time.Time) string {
 
 func (f *fakeIdP) config(downstream bool) OAuthConfig {
 	return OAuthConfig{
-		BaseURL:            "http://localhost:8080",
-		Provider:           ProviderDex,
-		DexIssuerURL:       f.issuer,
-		DexClientID:        "agent-platform",
-		DexClientSecret:    "lab-only",
-		DexCAFile:          f.caFile,
-		TrustedAudiences:   []string{"agent-platform"},
-		SSOAllowPrivateIPs: true,
-		DownstreamOAuth:    downstream,
+		BaseURL:          "http://localhost:8080",
+		Provider:         ProviderDex,
+		DexIssuerURL:     f.issuer,
+		DexClientID:      "agent-platform",
+		DexClientSecret:  "lab-only",
+		DexCAFile:        f.caFile,
+		TrustedAudiences: []string{"agent-platform"},
+		loopbackJWKS:     true,
+		DownstreamOAuth:  downstream,
 	}
 }
 
@@ -372,4 +372,20 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	token := idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute))
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/api/v1/backend", token))
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/.well-known/oauth-authorization-server", ""), "metadata stays public")
+}
+
+// newLocalhostTLSServer serves TLS with a certificate that covers the
+// hostname localhost.
+func newLocalhostTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{selfSignedLocalhost(t)}, MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// localhostURL is the server's base URL with the hostname localhost.
+func localhostURL(srv *httptest.Server) string {
+	return strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
 }

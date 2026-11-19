@@ -219,8 +219,8 @@ oauth:
   # but not the platform client — is accepted without listing its client here.
   trustedAudiences: []
   sso:
-    # -- Let the IdP's JWKS endpoint resolve to a private address when
-    # validating forwarded tokens (an in-cluster Dex).
+    # -- Deprecated, no effect: the issuer host of the configured provider may
+    # resolve to a private address for its JWKS without it.
     allowPrivateIPs: false
   # -- Accept unauthenticated dynamic client registration (labs only).
   allowPublicClientRegistration: false
