@@ -196,7 +196,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 		seen.id, seen.ok = identity.FromContext(r.Context())
 		seen.token, _ = identity.TokenFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
-	}), false)
+	}))
 
 	call := func(bearer string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
@@ -242,7 +242,7 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller = identity.Caller(r.Context())
 		_, hasToken = identity.TokenFromContext(r.Context())
-	}), false)
+	}))
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))
 	rec := httptest.NewRecorder()
@@ -293,7 +293,7 @@ func TestUntrustedAudienceIsRefused(t *testing.T) {
 			seen.id, seen.ok = identity.FromContext(r.Context())
 			seen.token, _ = identity.TokenFromContext(r.Context())
 			w.WriteHeader(http.StatusNoContent)
-		}), false)
+		}))
 		return func(bearer string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 			req.Header.Set("Authorization", "Bearer "+bearer)
@@ -329,12 +329,6 @@ func TestUntrustedAudienceIsRefused(t *testing.T) {
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
 	assert.Equal(t, portal, seen.token)
 	assert.NotContains(t, logs.String(), "refused")
-}
-
-// TestRefusalHeaderIsQuoted keeps a description inside the quoted-string of
-// the WWW-Authenticate challenge.
-func TestRefusalHeaderIsQuoted(t *testing.T) {
-	assert.Equal(t, `a\"b\\c d e`, headerQuoted("a\"b\\c\r\nd\ne"))
 }
 
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled

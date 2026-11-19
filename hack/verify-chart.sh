@@ -340,7 +340,7 @@ for want in '--github-token-exchange-endpoint=https://muster.example.test/oauth/
   echo "$got" | grep >/dev/null -F -- "$want" || fail "tokenExchange: the Deployment lacks '$want'"
 done
 if echo "$got" | grep >/dev/null -- '--github-authorization-server\|--github-token-exchange-client-id=\|--github-grant-app\|kind: Secret'; then
-  fail "tokenExchange with existingSecret: pin flag, client ID flag or a chart Secret rendered"
+  fail "tokenExchange with existingSecret: an obsolete flag, the client ID flag or a chart Secret rendered"
 fi
 if echo "$got" | grep -A4 -- '- name: github-token-exchange$' | grep >/dev/null -- 'items:'; then
   fail "tokenExchange: the client Secret is not mounted whole"
@@ -357,10 +357,6 @@ for want in 'name: mm-model-manager-github-token-exchange' 'client-secret: "inli
 done
 echo "$got" | grep >/dev/null -F -- 'secretName: mm-model-manager-github-token-exchange' \
   || fail "tokenExchange inline clientSecret: the Deployment does not mount the chart's Secret"
-# Without tokenExchange, the deprecated pin: forwardIdentity, no providerApps.
-got=$(mcpserver "${DEX[@]}" --set github.enabled=true)
-echo "$got" | grep >/dev/null -- 'forwardIdentity: true' || fail "the pin: the MCPServer lacks forwardIdentity"
-if echo "$got" | grep >/dev/null -- 'providerApps'; then fail "the pin: providerApps rendered"; fi
 # Refusals.
 refused() {
   local want=$1; shift
@@ -369,6 +365,8 @@ refused() {
   echo "$out" | grep >/dev/null -F -- "$want" || fail "refusal lacks '$want': $out"
 }
 refused 'github.enabled is false' "${GHX[@]}" --set github.enabled=false --set github.tokenExchange.existingSecret=gtx
+refused 'github.enabled needs github.tokenExchange.tokenEndpoint' "${DEX[@]}" --set github.enabled=true
+refused 'github.enabled needs github.tokenExchange.tokenEndpoint' "${DEX[@]}" --set github.enabled=true --set muster.mcpServer.enabled=true
 refused 'github.tokenExchange.audience is required' "${GHX[@]}" --set github.tokenExchange.audience= --set github.tokenExchange.existingSecret=gtx
 refused 'existingSecret (preferred) or clientSecret' "${GHX[@]}"
 refused 'oauth.downstream.enabled' "${GHX[@]}" --set oauth.downstream.enabled=false --set github.tokenExchange.existingSecret=gtx

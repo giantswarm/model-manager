@@ -1013,23 +1013,10 @@ Fetching the person's GitHub grant from muster is a temporary deviation from
 the MCP 2025-11-25 authorization rules (no token passthrough, no third-party
 credentials), decided in giantswarm/giantswarm#39213; the exit is
 model-manager holding its own grant through URL elicitation and ID-JAG
-(giantswarm/giantswarm#39102). Installations stay on the pin until the
-end-to-end proof in agentlab.
+(giantswarm/giantswarm#39102).
 
-Deprecated: `github.enabled` without `github.tokenExchange` registers
-model-manager with muster pinned to its own user-to-server GitHub App
-`giantswarm-model-manager` (`--github-authorization-server`), with
-`auth.forwardIdentity: true`: muster runs the App's consent once per person
-and puts their App user token on every call as the bearer. model-manager
-verifies it with `GET /user` and opens the pull request with it. The person's
-IdP ID token arrives in `X-Muster-Id-Token` and is validated like a forwarded
-token, so apply mode and every read keep acting on Kubernetes as the person.
-The pin applies to the MCP endpoint only: the REST API keeps the person's ID
-token as its bearer, as the portal sends it. Without the App's token the call
-answers `auth_required` (401), naming the consent
-(`core_auth_login server=model-manager`).
-
-No other GitHub credential exists in the pod. A server with neither answers
+`github.enabled` without `github.tokenExchange` fails the chart. No other
+GitHub credential exists in the pod. A server without the exchange answers
 `unsupported` for `mode: commit`, and `get_backend`/`list_backends` report
 `capabilities.commit`. The App has to be installed, with contents and
 pull-request write, on every repository a commit may target. On a kserve
