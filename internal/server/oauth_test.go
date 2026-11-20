@@ -175,6 +175,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	idp := newFakeIdP(t)
 	o, err := newOAuth(idp.config(true), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
+	require.True(t, o.server.Config.EnableClientIDMetadataDocuments)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
 	var seen struct {
@@ -247,13 +248,14 @@ func TestServerConfig(t *testing.T) {
 		AllowPublicClientRegistration: true,
 	}
 	assert.Equal(t, &oauth.ServerConfig{
-		Issuer:                        "https://mm.example.com",
-		AllowRefreshTokenRotation:     true,
-		AllowPublicClientRegistration: true,
-		MaxClientsPerIP:               10,
-		TrustedAudiences:              []string{"agent-platform", "kubernetes"},
-		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
-		JWKSRootCAs:                   pool,
+		EnableClientIDMetadataDocuments: true,
+		Issuer:                          "https://mm.example.com",
+		AllowRefreshTokenRotation:       true,
+		AllowPublicClientRegistration:   true,
+		MaxClientsPerIP:                 10,
+		TrustedAudiences:                []string{"agent-platform", "kubernetes"},
+		AllowPrivateIPJWKSHosts:         []string{"keys.internal.example"},
+		JWKSRootCAs:                     pool,
 	}, serverConfig(cfg, pool), "only the listed JWKS hosts may resolve privately; the issuer host is covered by the library")
 }
 
