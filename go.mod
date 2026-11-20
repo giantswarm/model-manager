@@ -7,7 +7,7 @@ toolchain go1.27.4
 require (
 	github.com/giantswarm/gitops-commit v0.11.10
 	github.com/giantswarm/mcp-oauth v1.15.1
-	github.com/giantswarm/mcp-toolkit v0.5.3
+	github.com/giantswarm/mcp-toolkit v0.5.4
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/go-containerregistry v0.22.1
 	github.com/mark3labs/mcp-go v1.6.0
