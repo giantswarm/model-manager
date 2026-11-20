@@ -175,6 +175,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	idp := newFakeIdP(t)
 	o, err := newOAuth(idp.config(true), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
+	require.True(t, o.server.Config.EnableClientIDMetadataDocuments)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
 	var seen struct {

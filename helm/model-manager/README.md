@@ -1,5 +1,8 @@
 # model-manager
 
+CIMD is enabled by default. DCR is deprecated by MCP 2026-07-28 and remains a
+compatibility fallback; see the [OAuth registration guide](../../docs/oauth-client-registration.md).
+
 Model management service for the Agent Platform — backend-abstracted (ollama, kserve, lemonade) inventory, pull with progress, load/unload, delete and kagent ModelConfig wiring, exposed as REST and MCP
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`
