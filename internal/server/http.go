@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/giantswarm/mcp-toolkit/health"
+	"github.com/giantswarm/mcp-toolkit/httpx"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -33,9 +35,10 @@ type Config struct {
 
 // Server is the assembled HTTP server.
 type Server struct {
-	http  *http.Server
-	oauth *oauthRuntime
-	log   *slog.Logger
+	http   *http.Server
+	oauth  *oauthRuntime
+	log    *slog.Logger
+	health *health.Health
 }
 
 // New builds the server.
@@ -47,18 +50,8 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		cfg.MCPPath = "/mcp"
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	// Readiness deliberately does not track the serving backend: when the host
-	// Ollama is down the API must stay reachable so clients can render the
-	// backend's health from GET /api/v1/backend (healthy=false) instead of
-	// getting connection errors from an unready Service.
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	healthState := health.New()
+	healthState.Mount(mux)
 	mux.HandleFunc("GET /backendz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -69,7 +62,7 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	s := &Server{log: log}
+	s := &Server{log: log, health: healthState}
 	if cfg.OAuth != nil {
 		o, err := newOAuth(*cfg.OAuth, cfg.MCPPath, log)
 		if err != nil {
@@ -99,6 +92,7 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		// No WriteTimeout: MCP streams and long pulls outlive any fixed value.
 		IdleTimeout: 120 * time.Second,
 	}
+	healthState.SetReady(true)
 	return s, nil
 }
 
@@ -123,29 +117,26 @@ func (s *Server) Handler() http.Handler { return s.http.Handler }
 
 // Run serves until ctx is done, then shuts down gracefully.
 func (s *Server) Run(ctx context.Context) error {
-	errCh := make(chan error, 1)
-	go func() {
-		s.log.Info("listening", "addr", s.http.Addr)
-		if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("http server: %w", err)
-		}
-		return nil
-	case <-ctx.Done():
+	servingContext, cancelServing := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelServing()
+	stop := context.AfterFunc(ctx, func() {
+		s.health.SetReady(false)
+		cancelServing()
+	})
+	defer stop()
+	s.log.Info("listening", "addr", s.http.Addr)
+	err := httpx.Run(servingContext, s.http, 15*time.Second)
+	s.health.SetReady(false)
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = errors.Join(err, s.http.Close())
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if s.oauth != nil {
 		s.oauth.shutdown(shutdownCtx)
 	}
-	if err := s.http.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+	if err != nil {
+		return fmt.Errorf("http server: %w", err)
 	}
 	s.log.Info("server stopped")
 	return nil
