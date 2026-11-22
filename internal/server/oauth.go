@@ -3,22 +3,21 @@ package server
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	oauth "github.com/giantswarm/mcp-oauth"
 	"github.com/giantswarm/mcp-oauth/handler"
-	"github.com/giantswarm/mcp-oauth/providers"
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers/dex"
 	"github.com/giantswarm/mcp-oauth/providers/google"
 	"github.com/giantswarm/mcp-oauth/security"
-	"github.com/giantswarm/mcp-oauth/storage/memory"
+	oauthserver "github.com/giantswarm/mcp-oauth/server"
 
+	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/identity"
 )
 
@@ -117,7 +116,7 @@ func (c OAuthConfig) provider() string {
 type oauthRuntime struct {
 	server  *oauth.Server
 	handler *handler.Handler
-	store   *memory.Store
+	cleanup func(context.Context) error
 	cfg     OAuthConfig
 	mcpPath string
 	log     *slog.Logger
@@ -127,23 +126,25 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	rootCAs, err := loadRootCAs(cfg.DexCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("oauth: %w", err)
+	redirect := strings.TrimSuffix(cfg.BaseURL, "/") + "/oauth/callback"
+	settings := oauthconfig.Settings{Server: serverConfig(cfg, nil), RootCAFile: cfg.DexCAFile, Logger: log}
+	settings.Server.ResourceMetadataByPath = map[string]oauthserver.ProtectedResourceConfig{api.Prefix: {}}
+	if mcpPath != "" && mcpPath != "/" {
+		settings.Server.ResourceMetadataByPath[mcpPath] = oauthserver.ProtectedResourceConfig{}
 	}
-	provider, err := newProvider(cfg, rootCAs, log)
-	if err != nil {
-		return nil, err
+	if cfg.provider() == ProviderGoogle {
+		settings.Google = &google.Config{ClientID: cfg.GoogleClientID, ClientSecret: cfg.GoogleClientSecret, RedirectURL: redirect}
+	} else {
+		settings.Dex = &dex.Config{IssuerURL: cfg.DexIssuerURL, ClientID: cfg.DexClientID, ClientSecret: cfg.DexClientSecret, RedirectURL: redirect, Logger: log}
 	}
-	store := memory.New()
-	srv, err := oauth.NewServer(provider, store, store, store, serverConfig(cfg, rootCAs), log,
+	runtime, cleanup, err := oauthconfig.Setup(settings,
 		oauth.WithAuditor(security.NewAuditor(log, true)))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: server: %w", err)
 	}
 	log.Info("OAuth resource server enabled", "provider", cfg.provider(), "issuer", cfg.BaseURL,
 		"trustedAudiences", cfg.TrustedAudiences, "downstreamOAuth", cfg.DownstreamOAuth)
-	return &oauthRuntime{server: srv, handler: handler.New(srv, log), store: store, cfg: cfg, mcpPath: mcpPath, log: log}, nil
+	return &oauthRuntime{server: runtime.Server, handler: runtime.Handler, cleanup: cleanup, cfg: cfg, mcpPath: mcpPath, log: log}, nil
 }
 
 // serverConfig is the mcp-oauth server configuration for cfg: this server's
@@ -162,71 +163,19 @@ func serverConfig(cfg OAuthConfig, rootCAs *x509.CertPool) *oauth.ServerConfig {
 	}
 }
 
-func newProvider(cfg OAuthConfig, rootCAs *x509.CertPool, log *slog.Logger) (providers.Provider, error) {
-	redirect := strings.TrimSuffix(cfg.BaseURL, "/") + "/oauth/callback"
-	switch cfg.provider() {
-	case ProviderGoogle:
-		p, err := google.NewProvider(&google.Config{
-			ClientID:     cfg.GoogleClientID,
-			ClientSecret: cfg.GoogleClientSecret,
-			RedirectURL:  redirect,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("oauth: google provider: %w", err)
-		}
-		return p, nil
-	default:
-		p, err := dex.NewProvider(&dex.Config{
-			IssuerURL:    cfg.DexIssuerURL,
-			ClientID:     cfg.DexClientID,
-			ClientSecret: cfg.DexClientSecret,
-			RedirectURL:  redirect,
-			RootCAs:      rootCAs,
-			Logger:       log,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("oauth: dex provider: %w", err)
-		}
-		return p, nil
-	}
-}
-
-// loadRootCAs is the system pool plus the PEM bundle at caFile; (nil, nil)
-// without a file, selecting the system trust everywhere the pool is used.
-func loadRootCAs(caFile string) (*x509.CertPool, error) {
-	if caFile == "" {
-		return nil, nil
-	}
-	pem, err := os.ReadFile(caFile) // #nosec G304 -- operator-provided path
-	if err != nil {
-		return nil, fmt.Errorf("read CA file %s: %w", caFile, err)
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool()
-	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no CA certificate in %s", caFile)
-	}
-	return pool, nil
-}
-
 func (o *oauthRuntime) register(mux *http.ServeMux) {
-	o.handler.RegisterAuthorizationServerMetadataRoutes(mux)
-	o.handler.RegisterProtectedResourceMetadataRoutes(mux, o.mcpPath)
-	mux.HandleFunc("/oauth/authorize", o.handler.ServeAuthorization)
-	mux.HandleFunc("/oauth/token", o.handler.ServeToken)
-	mux.HandleFunc("/oauth/callback", o.handler.ServeCallback)
-	mux.HandleFunc("/oauth/register", o.handler.ServeClientRegistration)
-	mux.HandleFunc("/oauth/revoke", o.handler.ServeTokenRevocation)
-	mux.HandleFunc("/oauth/introspect", o.handler.ServeTokenIntrospection)
+	o.handler.RegisterOAuthRoutes(mux, handler.OAuthRoutesOptions{MCPPath: o.mcpPath, IncludeMetadata: true})
 }
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
 // server's own access tokens, or a forwarded IdP id_token whose audience is
 // trusted) and then attaches the caller to the request.
 func (o *oauthRuntime) protect(next http.Handler) http.Handler {
-	return o.handler.ValidateToken(o.attachIdentity(next))
+	protected := o.attachIdentity(next)
+	if o.cfg.DownstreamOAuth {
+		protected = o.handler.RequireProviderIDToken(protected)
+	}
+	return o.handler.ValidateToken(protected)
 }
 
 // attachIdentity translates the validated mcp-oauth user into the request's
@@ -250,61 +199,20 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 		}
 		ctx = identity.ContextWith(ctx, id)
 		if o.cfg.DownstreamOAuth {
-			bearer := bearerToken(r)
-			tok := o.downstreamToken(ctx, bearer, info)
-			if tok == "" {
-				o.refuseWithoutToken(w, r, id)
+			token, err := handler.ProviderIDTokenFromContext(ctx)
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			ctx = identity.ContextWithToken(ctx, tok)
+			ctx = identity.ContextWithToken(ctx, token)
 		}
 		o.log.Debug("authenticated request", "caller", id.String(), "source", id.Source, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func bearerToken(r *http.Request) string {
-	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-}
-
-func (o *oauthRuntime) downstreamToken(ctx context.Context, bearer string, info *providers.UserInfo) string {
-	if bearer == "" {
-		return ""
-	}
-	if info.IsSSO() {
-		return bearer
-	}
-	tok, err := o.store.GetToken(ctx, bearer)
-	if err != nil || tok == nil {
-		return ""
-	}
-	// mcp-oauth keeps the provider's id_token as the oauth2 token extra.
-	idToken, _ := tok.Extra("id_token").(string)
-	return idToken
-}
-
-// refuseWithoutToken answers 401 for a caller mcp-oauth authenticated whose
-// bearer yields no IdP token to present to the Kubernetes API: a token this
-// server issued with no IdP id_token stored next to it. An id_token for an
-// untrusted audience never gets here; mcp-oauth refuses it and logs its aud
-// next to the trusted audiences.
-func (o *oauthRuntime) refuseWithoutToken(w http.ResponseWriter, r *http.Request, id *identity.Identity) {
-	const desc = "no IdP token to present to the Kubernetes API (the ServiceAccount holds no permissions)"
-	o.log.Warn("request refused: "+desc, "caller", id.String(), "source", id.Source, "path", r.URL.Path)
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s", error="%s", error_description="%s"`,
-		o.server.Config.ProtectedResourceMetadataEndpoint(), errInvalidToken, desc))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": errInvalidToken, "error_description": desc})
-}
-
-// errInvalidToken is the RFC 6750 error code for a bearer the resource
-// server does not accept.
-const errInvalidToken = "invalid_token"
-
 func (o *oauthRuntime) shutdown(ctx context.Context) {
-	// Shutdown stops the stores it was given.
-	if err := o.server.Shutdown(ctx); err != nil {
+	if err := o.cleanup(ctx); err != nil {
 		o.log.Warn("oauth server shutdown", "error", err)
 	}
 }

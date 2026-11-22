@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 
+	oauthhandler "github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
 	"github.com/giantswarm/mcp-oauth/providers/oidc"
 	"github.com/stretchr/testify/require"
 
@@ -27,10 +29,7 @@ import (
 
 // JWTs with a placeholder signature: the server validated the bearer before
 // the exchange reads it.
-var (
-	personToken    = unsignedJWT(`{"sub":"alice"}`)
-	delegatedToken = unsignedJWT(`{"sub":"alice","act":{"sub":"agent"}}`)
-)
+var personToken = unsignedJWT(`{"sub":"alice"}`)
 
 func unsignedJWT(claims string) string {
 	encode := base64.RawURLEncoding.EncodeToString
@@ -99,18 +98,19 @@ func TestGitHubExchange(t *testing.T) {
 		warned        bool
 	}
 	for scenario, want := range map[string]expectation{
-		"success":                {exchanges: 2},
-		"delegated actor":        {sentinel: backend.ErrForbidden},
-		"missing identity token": {sentinel: gitops.ErrAuthRequired},
-		"no grant":               {grantRequired: true, exchanges: 1, warned: true},
-		"client refused":         {exchanges: 1, warned: true},
-		"broker error":           {sentinel: backend.ErrUnavailable, exchanges: 1, warned: true},
-		"redirect":               {exchanges: 1, warned: true},
-		"invalid token type":     {exchanges: 1},
-		"refresh token":          {exchanges: 1},
-		"missing expiry":         {exchanges: 1},
-		"GitHub refuses":         {grantRequired: true, exchanges: 1},
-		"GitHub fails":           {sentinel: backend.ErrUnavailable, exchanges: 1},
+		"success":                   {exchanges: 2},
+		"delegated actor":           {sentinel: backend.ErrForbidden},
+		"missing identity token":    {sentinel: gitops.ErrAuthRequired},
+		"missing verified identity": {sentinel: gitops.ErrAuthRequired},
+		"no grant":                  {grantRequired: true, exchanges: 1, warned: true},
+		"client refused":            {exchanges: 1, warned: true},
+		"broker error":              {sentinel: backend.ErrUnavailable, exchanges: 1, warned: true},
+		"redirect":                  {exchanges: 1, warned: true},
+		"invalid token type":        {exchanges: 1},
+		"refresh token":             {exchanges: 1},
+		"missing expiry":            {exchanges: 1},
+		"GitHub refuses":            {grantRequired: true, exchanges: 1},
+		"GitHub fails":              {sentinel: backend.ErrUnavailable, exchanges: 1},
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			secretFile := filepath.Join(t.TempDir(), "client-secret")
@@ -167,11 +167,15 @@ func TestGitHubExchange(t *testing.T) {
 			configuration := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app", APIURL: localhostURL(upstream)}
 			var logs bytes.Buffer
 			log := slog.New(slog.NewTextHandler(&logs, nil))
-			ctx := identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"})
+			user := &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test", TokenSource: providers.TokenSourceSSO}
+			ctx := oauthhandler.ContextWithUserInfo(t.Context(), user)
 			switch scenario {
 			case "delegated actor":
-				ctx = identity.ContextWithToken(ctx, delegatedToken)
+				user.ActorIssuer, user.ActorSubject = "https://agents.example.test", "agent"
+				ctx = identity.ContextWithToken(ctx, personToken)
 			case "missing identity token":
+			case "missing verified identity":
+				ctx = identity.ContextWithToken(t.Context(), personToken)
 			default:
 				ctx = identity.ContextWithToken(ctx, personToken)
 			}
@@ -273,7 +277,7 @@ func TestGitHubExchangeClientID(t *testing.T) {
 	emptyFile := filepath.Join(dir, "empty")
 	require.NoError(t, os.WriteFile(emptyFile, nil, 0o600))
 	base := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientSecretFile: secretFile, Audience: "manager-app", CAFile: caFile, APIURL: localhostURL(upstream)}
-	ctx := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"}), personToken)
+	ctx := identity.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	for _, tc := range []struct {
 		name, clientID, clientIDFile, want string
@@ -313,7 +317,7 @@ func TestGitHubExchangeRefusesIPLiteralPrivateEndpoint(t *testing.T) {
 	secretFile := filepath.Join(t.TempDir(), "client-secret")
 	require.NoError(t, os.WriteFile(secretFile, []byte("fixture-secret"), 0o600))
 	configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app"}
-	ctx := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Subject: "alice"}), personToken)
+	ctx := identity.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	result, err := newGitHubExchange(configuration, upstream.Client(), slog.New(slog.DiscardHandler))(ctx)
 	require.Error(t, err)

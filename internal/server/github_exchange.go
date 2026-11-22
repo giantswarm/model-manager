@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers/oidc"
 
 	"github.com/giantswarm/model-manager/internal/backend"
@@ -73,7 +75,7 @@ func NewGitHubExchange(configuration GitHubExchangeConfig, log *slog.Logger) (gi
 			return nil, fmt.Errorf("GitHub token exchange client ID file %s is empty", configuration.ClientIDFile)
 		}
 	}
-	roots, err := loadRootCAs(configuration.CAFile)
+	roots, err := oauthconfig.LoadRootCAs(configuration.CAFile)
 	if err != nil {
 		return nil, err
 	}
@@ -93,14 +95,14 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
 	return func(ctx context.Context) (*identity.GitHub, error) {
-		_, ok := identity.FromContext(ctx)
+		validatedUser, ok := handler.UserInfoFromContext(ctx)
 		subjectToken, hasToken := identity.TokenFromContext(ctx)
-		if !ok || !hasToken || subjectToken == "" {
+		if !ok || validatedUser == nil || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken || subjectToken == "" {
 			return nil, fmt.Errorf("%w: commit mode needs your verified platform identity to fetch your GitHub authorization", gitops.ErrAuthRequired)
 		}
 		// A delegated caller (an agent acting for the person) never receives
 		// the person's GitHub grant.
-		if claims, err := oidc.ParseUnverifiedClaims(subjectToken); err != nil || claims["act"] != nil {
+		if validatedUser.IsOBO() {
 			return nil, fmt.Errorf("%w: commit mode opens the pull request as you, and only you, not an agent acting for you, can authorize it", backend.ErrForbidden)
 		}
 		secret, err := os.ReadFile(configuration.ClientSecretFile)
