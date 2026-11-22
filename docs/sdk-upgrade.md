@@ -3,6 +3,8 @@
 The server uses native mcp-go stateless streamable HTTP. It does not require a
 session identifier between requests. HTTP clients negotiating `2024-11-05`,
 `2025-03-26`, `2025-06-18` and `2025-11-25` remain covered by transport tests.
+Native 2026-07-28 clients use `server/discover` and per-request metadata;
+discovery and an actual tool call are covered with the mcp-go client.
 Browser callers must send a same-origin Origin. Non-browser clients can omit it.
 
 Tool calls default to a 30-second deadline and a 128 KiB complete JSON result

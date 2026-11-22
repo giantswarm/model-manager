@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -114,6 +116,25 @@ func TestMCPNativeStatelessCompatibilityAndOrigin(t *testing.T) {
 			require.NotContains(t, string(encoded), `"error":`)
 		})
 	}
+	t.Run("2026-07-28", func(t *testing.T) {
+		native, err := client.NewStreamableHttpClient(host.URL + "/mcp")
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, native.Close()) })
+		require.NoError(t, native.Start(t.Context()))
+		initialized, err := native.Initialize(t.Context(), mcp.InitializeRequest{})
+		require.NoError(t, err)
+		require.Equal(t, mcp.ProtocolVersion20260728, initialized.ProtocolVersion)
+		discovered, err := native.Discover(t.Context(), mcp.DiscoverRequest{})
+		require.NoError(t, err)
+		require.Contains(t, discovered.SupportedVersions, mcp.ProtocolVersion20260728)
+		request := mcp.CallToolRequest{}
+		request.Params.Name = api.ToolGetInfo
+		result, err := native.CallTool(t.Context(), request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		require.True(t, result.ResultType.IsComplete())
+		require.Contains(t, result.Content[0].(mcp.TextContent).Text, "backends")
+	})
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
 		request, err := http.NewRequestWithContext(t.Context(), method, host.URL+"/mcp", nil)
 		require.NoError(t, err)
