@@ -35,7 +35,7 @@ type KServeOptions struct {
 	// ClientsFor, when set, returns the clients a call should use for ctx —
 	// the caller's own (downstream OAuth: the request carries the caller's
 	// IdP token) or the ServiceAccount's. Nil always uses Dynamic/Clientset.
-	ClientsFor func(ctx context.Context) (kubernetes.Interface, dynamic.Interface)
+	ClientsFor func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error)
 
 	// DiscoveryNamespace / DiscoveryConfigMap locate the ModelServingConfig
 	// ConfigMap (default: model-manager's own namespace,

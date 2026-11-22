@@ -506,6 +506,16 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 		PresetNamespace: o.DiscoveryNamespace,
 		PresetSelector:  DefaultPresetSelector,
 	}
+	if c.opts.ClientsFor != nil {
+		clientset, dynamicClient, err := c.opts.ClientsFor(ctx)
+		if err == nil && (clientset == nil || dynamicClient == nil) {
+			err = fmt.Errorf("caller Kubernetes clients are unavailable")
+		}
+		if err != nil {
+			s.DiscoveryError, s.ServingError = err.Error(), err.Error()
+			return s, err
+		}
+	}
 	var errs []error
 	if doc, err := c.discover(ctx); err != nil {
 		s.DiscoveryError = err.Error()
@@ -599,32 +609,46 @@ func (c *config) resolve(ctx context.Context) (settings, error) {
 // target's configured client carries no credential: it is tried only when
 // there is no caller's, so a refusal of the caller is never retried — and
 // masked — anonymously. Empty without either.
-func (c *config) clientsets(ctx context.Context) []kubernetes.Interface {
+func (c *config) clientsets(ctx context.Context) ([]kubernetes.Interface, error) {
 	var out []kubernetes.Interface
 	if c.opts.ClientsFor != nil {
-		if caller, _ := c.opts.ClientsFor(ctx); caller != nil && caller != c.opts.Clientset {
+		caller, _, err := c.opts.ClientsFor(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if caller == nil {
+			return nil, fmt.Errorf("caller Kubernetes clientset is unavailable")
+		}
+		if caller != c.opts.Clientset {
 			out = append(out, caller)
 		}
 	}
 	if c.opts.Clientset != nil && (len(out) == 0 || c.opts.Target.Local()) {
 		out = append(out, c.opts.Clientset)
 	}
-	return out
+	return out, nil
 }
 
 // dynamics returns the dynamic clients a resolve tries, in the order and on
 // the terms of clientsets: the caller's, then the configured one.
-func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
+func (c *config) dynamics(ctx context.Context) ([]dynamic.Interface, error) {
 	var out []dynamic.Interface
 	if c.opts.ClientsFor != nil {
-		if _, caller := c.opts.ClientsFor(ctx); caller != nil && caller != c.opts.Dynamic {
+		_, caller, err := c.opts.ClientsFor(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if caller == nil {
+			return nil, fmt.Errorf("caller Kubernetes dynamic client is unavailable")
+		}
+		if caller != c.opts.Dynamic {
 			out = append(out, caller)
 		}
 	}
 	if c.opts.Dynamic != nil && (len(out) == 0 || c.opts.Target.Local()) {
 		out = append(out, c.opts.Dynamic)
 	}
-	return out
+	return out, nil
 }
 
 // controlPlane looks for the llm-d controller by the well-known
@@ -637,7 +661,11 @@ func (c *config) dynamics(ctx context.Context) []dynamic.Interface {
 // is absent.
 func (c *config) controlPlane(ctx context.Context) (namespace, image string, err error) {
 	var errs []error
-	for _, dyn := range c.dynamics(ctx) {
+	clients, err := c.dynamics(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	for _, dyn := range clients {
 		list, err := dyn.Resource(llmisvcConfigGVR).List(ctx, metav1.ListOptions{FieldSelector: "metadata.name=" + wellKnownTemplateConfig})
 		if err != nil {
 			errs = append(errs, err)
@@ -662,7 +690,11 @@ func (c *config) controlPlane(ctx context.Context) (namespace, image string, err
 // the kind is absent.
 func (c *config) apiServed(ctx context.Context, gvr schema.GroupVersionResource) (bool, error) {
 	var errs []error
-	for _, cs := range c.clientsets(ctx) {
+	clients, err := c.clientsets(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, cs := range clients {
 		list, err := cs.Discovery().ServerResourcesForGroupVersion(gvr.GroupVersion().String())
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -696,7 +728,11 @@ func (c *config) discover(ctx context.Context) (*discoveryDoc, error) {
 		cm   *corev1.ConfigMap
 		errs []error
 	)
-	for _, cs := range c.clientsets(ctx) {
+	clients, err := c.clientsets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, cs := range clients {
 		got, err := cs.CoreV1().ConfigMaps(o.DiscoveryNamespace).Get(ctx, o.DiscoveryConfigMap, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil, nil

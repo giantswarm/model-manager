@@ -185,7 +185,11 @@ func (sv served) agentEndpoint() backend.AgentEndpoint {
 // node their workload runs on.
 func (b *Backend) listServed(ctx context.Context) ([]served, error) {
 	s := b.cfg.settings(ctx)
-	list, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list %ss in %s: %w", kindLLMInferenceService, s.Namespace, err)
 	}
@@ -325,7 +329,12 @@ func (b *Backend) predictorPods(ctx context.Context, s settings) map[string]pred
 // nameLabel value; of several pods for one name (a rollout, a replacement)
 // the one that outranks the others stays.
 func (b *Backend) podsByName(ctx context.Context, namespace, selector, nameLabel string, out map[string]*corev1.Pod) {
-	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		b.log.Warn("caller Kubernetes clients unavailable", "error", err)
+		return
+	}
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		b.log.Warn("listing workload pods failed", "namespace", namespace, "selector", selector, "error", err)
 		return
@@ -518,7 +527,11 @@ func parseServed(obj *unstructured.Unstructured, idx presetIndex, s settings) se
 // its Kustomization held to the inventory (gitops.Applying) — the one owner
 // resolution the read (list_loaded), the load and the unload act on.
 func (b *Backend) owned(ctx context.Context, obj *unstructured.Unstructured, sv served) (served, error) {
-	owner, err := gitops.Applying(ctx, b.dynamic(ctx), obj)
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return sv, err
+	}
+	owner, err := gitops.Applying(ctx, client, obj)
 	if err != nil {
 		return sv, err
 	}
@@ -690,7 +703,11 @@ func quantityValue(v any) int64 {
 // getServing fetches the LLMInferenceService of the name; nil when there is
 // none.
 func (b *Backend) getServing(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	obj, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := client.Resource(llmisvcGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -701,7 +718,11 @@ func (b *Backend) getServing(ctx context.Context, namespace, name string) (*unst
 }
 
 func (b *Backend) createOnce(ctx context.Context, obj *unstructured.Unstructured) error {
-	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := client.Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{FieldManager: ManagedByValue}); err != nil {
 		return fmt.Errorf("create %s %s/%s: %w", obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
 	return nil
@@ -709,7 +730,11 @@ func (b *Backend) createOnce(ctx context.Context, obj *unstructured.Unstructured
 
 func (b *Backend) deleteServing(ctx context.Context, namespace, name string) error {
 	propagation := metav1.DeletePropagationForeground
-	err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return err
+	}
+	err = client.Resource(llmisvcGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete %s %s/%s: %w", kindLLMInferenceService, namespace, name, err)
 	}

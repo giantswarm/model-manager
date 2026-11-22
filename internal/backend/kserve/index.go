@@ -138,7 +138,12 @@ func (b *Backend) readIndex(ctx context.Context) map[string]indexEntry {
 	}
 	b.index.mu.Unlock()
 	s := b.cfg.settings(ctx)
-	cm, err := b.k8s(ctx).CoreV1().ConfigMaps(s.Namespace).Get(ctx, b.opts.CacheIndexConfigMap, metav1.GetOptions{})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		b.warnIndex("caller Kubernetes clients unavailable", s.Namespace, err)
+		return map[string]indexEntry{}
+	}
+	cm, err := client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, b.opts.CacheIndexConfigMap, metav1.GetOptions{})
 	var entries map[string]indexEntry
 	switch {
 	case err == nil:
@@ -307,7 +312,11 @@ func (b *Backend) forgetStale(ctx context.Context, deleted []served) {
 func (b *Backend) updateIndex(ctx context.Context, mutate func(map[string]indexEntry) bool) error {
 	s := b.cfg.settings(ctx)
 	name := b.opts.CacheIndexConfigMap
-	cms := b.k8s(ctx).CoreV1().ConfigMaps(s.Namespace)
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return err
+	}
+	cms := client.CoreV1().ConfigMaps(s.Namespace)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		cm, err := cms.Get(ctx, name, metav1.GetOptions{})

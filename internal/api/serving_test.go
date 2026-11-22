@@ -723,6 +723,8 @@ func TestServingMCPTools(t *testing.T) {
 	out, isErr := callTool(t, srv, ToolListPresets, nil)
 	require.False(t, isErr, out)
 	assert.Contains(t, out, `"name": "tiny"`)
+	require.Empty(t, fb.presets[0].Backend)
+	require.Nil(t, fb.presets[0].Target)
 
 	out, isErr = callTool(t, srv, ToolSearchModels, map[string]any{argQuery: "tiny", argLimit: 3})
 	require.False(t, isErr, out)

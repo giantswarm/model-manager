@@ -1091,7 +1091,7 @@ type Targeter interface {
 // the target as the caller, which reads a namespace's Flux provenance there
 // for commit mode.
 type TargetClient interface {
-	TargetDynamic(ctx context.Context) dynamic.Interface
+	TargetDynamic(ctx context.Context) (dynamic.Interface, error)
 }
 
 // TargetOf returns b's target identity, nil when b has none.

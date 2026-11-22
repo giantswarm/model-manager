@@ -72,7 +72,7 @@ func newRegistrationFixtureBuilding(t *testing.T, build registry.Builder, static
 	reg := registry.New(client, testNamespace, build, svc, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
-	store := registry.NewStore(func(context.Context) kubernetes.Interface { return client }, testNamespace)
+	store := registry.NewStore(func(context.Context) (kubernetes.Interface, error) { return client, nil }, testNamespace)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithBackendStore(store))
 	t.Cleanup(cancel)
 	return &registrationFixture{client: client, svc: svc, wirer: fw, srv: srv, cancel: cancel}

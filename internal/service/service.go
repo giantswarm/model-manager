@@ -1204,6 +1204,7 @@ func (s *Service) Presets(ctx context.Context, name string) ([]backend.Preset, E
 		if err != nil {
 			return nil, err
 		}
+		presets = slices.Clone(presets)
 		for i := range presets {
 			presets[i].Backend = b.Name()
 			presets[i].Target = backend.TargetOf(b)

@@ -140,11 +140,11 @@ func unauthorizedClients() (kubernetes.Interface, dynamic.Interface) {
 // clients, as the server does with downstream OAuth; requests without one keep
 // using the ServiceAccount's.
 func (f *fixture) callerClients(cs kubernetes.Interface, dyn dynamic.Interface) {
-	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
+	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
 		if _, ok := identity.TokenFromContext(ctx); ok {
-			return cs, dyn
+			return cs, dyn, nil
 		}
-		return nil, nil
+		return f.cs, f.dyn, nil
 	}
 	f.b.opts.ClientsFor = clientsFor
 	f.b.cfg.opts.ClientsFor = clientsFor

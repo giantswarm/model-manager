@@ -123,18 +123,12 @@ func (c *Clients) ForToken(token string) (*Clients, error) {
 	return user, nil
 }
 
-// For returns the clients a call should use: the caller's when ctx carries a
-// caller token (downstream OAuth), else the ServiceAccount's. There is no
-// fallback from a caller to the ServiceAccount: with downstream OAuth the
-// ServiceAccount holds no permissions, so a token that expired since the
-// request came in — a job following a download for longer than the token
-// lives — keeps being presented and the apiserver answers 401; the job fails
-// with that error, attributed to the caller, and the operation stays bounded
-// by the caller's own credential.
-func (c *Clients) For(ctx context.Context) *Clients {
+// For selects caller clients when a token is present, including after expiry.
+// Calls without a token use the explicitly configured base clients.
+func (c *Clients) For(ctx context.Context) (*Clients, error) {
 	token, ok := identity.TokenFromContext(ctx)
 	if !ok {
-		return c
+		return c, nil
 	}
 	key := sha256.Sum256([]byte(token))
 	now := time.Now()
@@ -148,8 +142,7 @@ func (c *Clients) For(ctx context.Context) *Clients {
 		}
 		clients, err := c.ForToken(token)
 		if err != nil {
-			c.log.Warn("caller-token Kubernetes clients unavailable, using the ServiceAccount", "error", err, identity.LogAttr(ctx))
-			return c
+			return nil, fmt.Errorf("caller-token Kubernetes clients: %w", err)
 		}
 		e = &callerEntry{clients: clients, expires: identity.TokenExpiry(token)}
 		c.byUser[key] = e
@@ -159,7 +152,7 @@ func (c *Clients) For(ctx context.Context) *Clients {
 		c.log.Warn("caller token expired; the Kubernetes API will reject the remaining calls of this operation (the ServiceAccount holds no permissions)",
 			identity.LogAttr(ctx), "expired", e.expires.UTC().Format(time.RFC3339))
 	}
-	return e.clients
+	return e.clients, nil
 }
 
 // evictLocked drops expired entries, and when nothing expired the whole cache

@@ -67,7 +67,7 @@ type Backend struct {
 	serverHTTP *http.Client
 	// targetREST is the caller's REST client toward a remote target, whose
 	// Service proxy reaches the runtimes there (origin.go).
-	targetREST func(context.Context) *rest.RESTClient
+	targetREST func(context.Context) (*rest.RESTClient, error)
 
 	// index is the driver's copy of the cache index ConfigMap (index.go).
 	index cacheIndex
@@ -102,23 +102,33 @@ type Backend struct {
 
 // k8s returns the typed client a call should use: the caller's own when ctx
 // carries a caller token (downstream OAuth), else the ServiceAccount's.
-func (b *Backend) k8s(ctx context.Context) kubernetes.Interface {
+func (b *Backend) k8s(ctx context.Context) (kubernetes.Interface, error) {
 	if b.opts.ClientsFor != nil {
-		if cs, _ := b.opts.ClientsFor(ctx); cs != nil {
-			return cs
+		clientset, _, err := b.opts.ClientsFor(ctx)
+		if err != nil {
+			return nil, err
 		}
+		if clientset == nil {
+			return nil, fmt.Errorf("caller Kubernetes clientset is unavailable")
+		}
+		return clientset, nil
 	}
-	return b.cs
+	return b.cs, nil
 }
 
 // dynamic is k8s for the dynamic client (LLMInferenceServices).
-func (b *Backend) dynamic(ctx context.Context) dynamic.Interface {
+func (b *Backend) dynamic(ctx context.Context) (dynamic.Interface, error) {
 	if b.opts.ClientsFor != nil {
-		if _, dyn := b.opts.ClientsFor(ctx); dyn != nil {
-			return dyn
+		_, client, err := b.opts.ClientsFor(ctx)
+		if err != nil {
+			return nil, err
 		}
+		if client == nil {
+			return nil, fmt.Errorf("caller Kubernetes dynamic client is unavailable")
+		}
+		return client, nil
 	}
-	return b.dyn
+	return b.dyn, nil
 }
 
 // Factory builds the driver from backend.Options.
@@ -215,7 +225,12 @@ func (b *Backend) Info(ctx context.Context) backend.Info {
 		// one way agents on the installation reach a model served there.
 		AgentEndpoint: s.GatewayEndpoint,
 	}
-	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		info.Message = "caller Kubernetes clients unavailable"
+		return info
+	}
+	if _, err := client.Resource(llmisvcGVR).Namespace(s.Namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		info.Message = fmt.Sprintf("%s API not available in %s: %v", kindLLMInferenceService, s.Namespace, err)
 		return info
 	}
@@ -1164,7 +1179,12 @@ func (b *Backend) hubToken(ctx context.Context) string {
 	}
 	b.mu.Unlock()
 	s := b.cfg.settings(ctx)
-	sec, err := b.k8s(ctx).CoreV1().Secrets(s.Namespace).Get(ctx, b.opts.HFTokenSecret, metav1.GetOptions{})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		b.log.Warn("caller Kubernetes clients unavailable", "error", err)
+		return ""
+	}
+	sec, err := client.CoreV1().Secrets(s.Namespace).Get(ctx, b.opts.HFTokenSecret, metav1.GetOptions{})
 	tok := ""
 	if err != nil {
 		b.log.Warn("reading the hub token Secret failed", "secret", s.Namespace+"/"+b.opts.HFTokenSecret, "error", err)
@@ -1183,7 +1203,9 @@ func (b *Backend) tokenConfigured(ctx context.Context) bool {
 
 // TargetDynamic is the backend's client of its target as the caller
 // (backend.TargetClient).
-func (b *Backend) TargetDynamic(ctx context.Context) dynamic.Interface { return b.dynamic(ctx) }
+func (b *Backend) TargetDynamic(ctx context.Context) (dynamic.Interface, error) {
+	return b.dynamic(ctx)
+}
 
 // Target is the cluster the backend acts on (backend.Targeter); nil for the
 // local cluster.

@@ -80,7 +80,11 @@ func (c *Catalog) FitCheck(ctx context.Context, req backend.FitRequest) (*backen
 func (c *Catalog) read(ctx context.Context) (settings, []*servingPreset, error) {
 	s := c.cfg.settings(ctx)
 	var errs []error
-	for _, cs := range c.cfg.clientsets(ctx) {
+	clients, err := c.cfg.clientsets(ctx)
+	if err != nil {
+		return s, nil, err
+	}
+	for _, cs := range clients {
 		presets, warnings, err := listPresets(ctx, cs, s)
 		if err != nil {
 			errs = append(errs, err)

@@ -272,7 +272,11 @@ func parsePreset(raw []byte, source string) (*servingPreset, error) {
 // ConfigMaps are skipped and reported through the returned warnings so one
 // bad preset does not hide the rest.
 func (b *Backend) presets(ctx context.Context) ([]*servingPreset, []string, error) {
-	out, warnings, err := listPresets(ctx, b.k8s(ctx), b.cfg.settings(ctx))
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	out, warnings, err := listPresets(ctx, client, b.cfg.settings(ctx))
 	if err != nil {
 		return nil, nil, err
 	}

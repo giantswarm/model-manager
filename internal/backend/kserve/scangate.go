@@ -58,7 +58,11 @@ func (b *Backend) scanAllowed(ctx context.Context, loc cacheLocation) scanVerdic
 // poolNodeExists reports whether a node carries every label of the pool
 // selector.
 func (b *Backend) poolNodeExists(ctx context.Context, selector map[string]string) (bool, error) {
-	list, err := b.k8s(ctx).CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(selector).String(), Limit: 1})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return false, err
+	}
+	list, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(selector).String(), Limit: 1})
 	if err != nil {
 		return false, fmt.Errorf("list nodes: %w", err)
 	}

@@ -738,7 +738,12 @@ func eventTime(e *corev1.Event, first bool) time.Time {
 func (b *Backend) podEvents(ctx context.Context, p *corev1.Pod) []corev1.Event {
 	ctx, cancel := context.WithTimeout(ctx, eventsTimeout)
 	defer cancel()
-	list, err := b.k8s(ctx).CoreV1().Events(p.Namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.uid=" + string(p.UID)})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		b.log.Warn("caller Kubernetes clients unavailable", "error", err)
+		return nil
+	}
+	list, err := client.CoreV1().Events(p.Namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.uid=" + string(p.UID)})
 	if err != nil {
 		b.log.Warn("listing the predictor pod's events failed; phases are read from the pod alone", "pod", p.Name, "error", err)
 		return nil
@@ -771,7 +776,12 @@ func (b *Backend) crashLog(ctx context.Context, p *corev1.Pod, cs *corev1.Contai
 // nodeGPUs maps every node to its allocatable accelerator count; nil when
 // nodes cannot be read.
 func (b *Backend) nodeGPUs(ctx context.Context, gpuResource string) map[string]int64 {
-	nodes, err := b.k8s(ctx).CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		b.log.Warn("caller Kubernetes clients unavailable", "error", err)
+		return nil
+	}
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		b.log.Warn("listing nodes for the served models' phases failed", "error", err)
 		return nil

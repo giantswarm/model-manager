@@ -158,12 +158,12 @@ func (r *Registry) forgetLocked(configMap, problem string) {
 // Store writes backend documents as the caller: ClientFor returns the
 // clients a request should use (the caller's own under downstream OAuth).
 type Store struct {
-	clientFor func(ctx context.Context) kubernetes.Interface
+	clientFor func(ctx context.Context) (kubernetes.Interface, error)
 	namespace string
 }
 
 // NewStore builds a Store over the documents in namespace.
-func NewStore(clientFor func(ctx context.Context) kubernetes.Interface, namespace string) *Store {
+func NewStore(clientFor func(ctx context.Context) (kubernetes.Interface, error), namespace string) *Store {
 	return &Store{clientFor: clientFor, namespace: namespace}
 }
 
@@ -172,7 +172,11 @@ func (s *Store) Namespace() string { return s.namespace }
 
 // Get reads the document of the backend name; absent is backend.ErrNotFound.
 func (s *Store) Get(ctx context.Context, name backend.Name) (*backend.Document, error) {
-	cm, err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Get(ctx, backend.DocumentName(name), metav1.GetOptions{})
+	client, err := s.clientFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cm, err := client.CoreV1().ConfigMaps(s.namespace).Get(ctx, backend.DocumentName(name), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("%w: no %s backend document in %s", backend.ErrNotFound, name, s.namespace)
 	}
@@ -196,7 +200,11 @@ func (s *Store) Apply(ctx context.Context, doc *backend.Document) (created bool,
 	if err != nil {
 		return false, err
 	}
-	cms := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace)
+	client, err := s.clientFor(ctx)
+	if err != nil {
+		return false, err
+	}
+	cms := client.CoreV1().ConfigMaps(s.namespace)
 	existing, err := cms.Get(ctx, cm.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
@@ -214,7 +222,11 @@ func (s *Store) Apply(ctx context.Context, doc *backend.Document) (created bool,
 // Remove deletes the document of the backend name; it reports whether one
 // existed.
 func (s *Store) Remove(ctx context.Context, name backend.Name) (bool, error) {
-	err := s.clientFor(ctx).CoreV1().ConfigMaps(s.namespace).Delete(ctx, backend.DocumentName(name), metav1.DeleteOptions{})
+	client, err := s.clientFor(ctx)
+	if err != nil {
+		return false, err
+	}
+	err = client.CoreV1().ConfigMaps(s.namespace).Delete(ctx, backend.DocumentName(name), metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
