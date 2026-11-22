@@ -40,7 +40,8 @@ make helm-docs      # regenerate helm/model-manager/README.md
 - `internal/identity` — the authenticated caller on the request context and,
   with `--downstream-oauth`, the caller's IdP token the Kubernetes clients use.
 - `internal/kube` — Kubernetes clients: the ServiceAccount's, and per-caller
-  ones built from the caller's token. Caller-client construction failures stop
+  ones selected through the independent `mcp-toolkit/k8s` module. Local cluster
+  configuration and remote diagnostics belong here. Caller-client construction failures stop
   the operation without selecting ServiceAccount clients. Expired tokens remain
   on Kubernetes requests so the API server's rejection is returned.
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.

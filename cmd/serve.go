@@ -293,8 +293,8 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	// Kubernetes access: required by the kserve driver and by runtime
 	// backend registration (the documents are ConfigMaps), optional (wiring
 	// only) otherwise.
-	var clients *kube.Clients
-	if c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster, Logger: log}); err != nil {
+	var clients *kube.Factory
+	if c, err := kube.New(kube.Config{Kubeconfig: o.kubeconfig, Context: o.kubeContext, InCluster: o.inCluster}); err != nil {
 		if hasKServe {
 			return fmt.Errorf("the kserve backend needs Kubernetes access: %w", err)
 		}
@@ -638,7 +638,7 @@ func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) reg
 				if !callerOnly {
 					return nil, fmt.Errorf("kserve target %s: --downstream-oauth is off, and a remote target is reached only with the caller's token (model-manager holds no credential for it): every call there would be anonymous", t.Cluster)
 				}
-				tc, err := kube.NewForTarget(t.APIServer, []byte(t.CABundle), log)
+				tc, err := kube.NewForTarget(t.APIServer, []byte(t.CABundle))
 				if err != nil {
 					return nil, err
 				}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -25,7 +24,7 @@ import (
 // call without a caller token is anonymous there and refused by the target.
 // A 401 or 403 the target answers carries the precondition the call missed
 // (explainAuth), on every client these clients hand out.
-func NewForTarget(apiServer string, caBundle []byte, log *slog.Logger) (*Clients, error) {
+func NewForTarget(apiServer string, caBundle []byte) (*Factory, error) {
 	if apiServer == "" {
 		return nil, fmt.Errorf("target apiserver is empty")
 	}
@@ -37,10 +36,6 @@ func NewForTarget(apiServer string, caBundle []byte, log *slog.Logger) (*Clients
 	c, err := fromRESTConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("target %s: %w", apiServer, err)
-	}
-	c.wrap = wrap
-	if log != nil {
-		c.log = log
 	}
 	return c, nil
 }

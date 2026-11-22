@@ -67,7 +67,7 @@ func testJWT(t *testing.T, claims map[string]any) string {
 // apiserver keeps its code and reason and says what to fix.
 func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 	srv, ca := fakeTargetAPIServer(t)
-	tc, err := NewForTarget(srv.URL, ca, nil)
+	tc, err := NewForTarget(srv.URL, ca)
 	require.NoError(t, err)
 	get := func(ctx context.Context) error {
 		caller, err := tc.For(ctx)
