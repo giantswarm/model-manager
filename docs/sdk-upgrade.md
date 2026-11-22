@@ -38,6 +38,10 @@ it is not an OAuth configuration or generic MCP transport responsibility.
 | In-memory jobs | random job ID; deduplication by operation/backend/model | Drain or cancel at shutdown; job state is not persisted |
 | Job requestedBy | display attribution only, email or subject | No authorization or ownership mapping |
 
+Job progress and cancellation are process-wide: an authenticated caller can
+inspect and cancel another caller's job. Review that shared-access contract
+before enabling multi-user access; `requestedBy` is not an authorization check.
+
 These keys do not change to user ownership during this upgrade. There is no
 email-based account migration to run. Tool audit identity uses validated issuer,
 subject and actor. Kubernetes authorization continues to use the caller's
