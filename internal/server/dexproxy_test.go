@@ -65,14 +65,17 @@ func TestDexProviderProxyChild(t *testing.T) {
 	if os.Getenv(dexProxyChildEnv) != "1" {
 		t.Skip("child process of TestDexProviderFollowsProxyEnvironment")
 	}
-	_, err := newProvider(OAuthConfig{
+	runtime, err := newOAuth(OAuthConfig{
 		BaseURL:         "https://model-manager.example.com",
 		Provider:        ProviderDex,
 		DexIssuerURL:    "https://example.com",
 		DexClientID:     "model-manager",
 		DexClientSecret: "secret",
-	}, nil, slog.New(slog.DiscardHandler))
-	t.Logf("newProvider: %v", err)
+	}, "/mcp", slog.New(slog.DiscardHandler))
+	if runtime != nil {
+		t.Cleanup(func() { runtime.shutdown(context.WithoutCancel(t.Context())) })
+	}
+	t.Logf("OAuth setup: %v", err)
 }
 
 func environmentWithoutProxy() []string {

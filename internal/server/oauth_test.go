@@ -172,8 +172,10 @@ func afterValidation(info *providers.UserInfo, next http.Handler) http.Handler {
 // client; once mcp-oauth has validated it, the request carries the caller and,
 // with downstream OAuth, the caller's token.
 func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
-	idp := newFakeIdP(t)
-	o, err := newOAuth(idp.config(true), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	idp := newPrivateIdP(t, "")
+	configuration := idp.config()
+	configuration.DownstreamOAuth = true
+	o, err := newOAuth(configuration, "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	require.True(t, o.server.Config.EnableClientIDMetadataDocuments)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
@@ -189,11 +191,11 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	forwarded := idp.idToken(t, []string{"agent-platform"}, time.Now().Add(30*time.Minute))
+	forwarded := idp.idToken(t, []string{"agent-platform"})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+forwarded)
 	rec := httptest.NewRecorder()
-	afterValidation(verifiedUser(), o.attachIdentity(next)).ServeHTTP(rec, req)
+	o.protect(next).ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	require.True(t, seen.ok, "the caller reaches the handler")
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
@@ -204,12 +206,10 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 
 	// A bearer this server issued carries the IdP id_token stored next to it;
 	// without one, downstream OAuth has nothing to act with.
-	issued := verifiedUser()
-	issued.TokenSource = providers.TokenSourceOAuth
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer issued-by-this-server")
 	rec = httptest.NewRecorder()
-	afterValidation(issued, o.attachIdentity(next)).ServeHTTP(rec, req)
+	o.protect(next).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	// Nothing admitted, nothing attached.
