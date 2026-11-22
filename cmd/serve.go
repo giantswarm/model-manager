@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/mcp-toolkit/metrics"
+	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
@@ -68,8 +69,10 @@ type serveOptions struct {
 	defaultKeepAlive  string
 	reconcileInterval time.Duration
 
-	mcpEnabled bool
-	mcpPath    string
+	mcpEnabled       bool
+	mcpPath          string
+	toolTimeout      time.Duration
+	maxResponseBytes int
 
 	oauthEnabled                  bool
 	oauthBaseURL                  string
@@ -148,6 +151,8 @@ environment variable named next to it; flags win over the environment.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("MODEL_MANAGER_LISTEN", ":8080"), "Listen address (MODEL_MANAGER_LISTEN)")
+	f.DurationVar(&o.toolTimeout, "tool-timeout", envDuration("MODEL_MANAGER_TOOL_TIMEOUT", 30*time.Second), "MCP tool deadline; nonpositive disables (MODEL_MANAGER_TOOL_TIMEOUT)")
+	f.IntVar(&o.maxResponseBytes, "max-response-bytes", envInt("MODEL_MANAGER_MAX_RESPONSE_BYTES", 128*1024), "Maximum complete JSON MCP tool result; nonpositive disables (MODEL_MANAGER_MAX_RESPONSE_BYTES)")
 	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", ""), "Static serving backend: ollama|kserve|lemonade|lmstudio — the one-backend form of --backends. Empty, like --backends, starts with no backend: backends are then registered at runtime with add_backend (MODEL_MANAGER_BACKEND)")
 	f.StringVar(&o.namespace, "namespace", envOr("MODEL_MANAGER_NAMESPACE", envOr("POD_NAMESPACE", "")), "model-manager's own namespace, where backend documents (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true) are watched and written; empty disables runtime registration (MODEL_MANAGER_NAMESPACE, POD_NAMESPACE)")
 	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,lmstudio,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
@@ -420,6 +425,11 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		reg     *registry.Registry
 		mcpOpts []api.Option
 	)
+	toolTimeout := o.toolTimeout
+	if toolTimeout == 0 {
+		toolTimeout = -1
+	}
+	mcpOpts = append(mcpOpts, api.WithToolPolicy(toolpolicy.Options{Timeout: toolTimeout, MaxResultBytes: o.maxResponseBytes, Logger: log, User: validatedToolIdentity}))
 	switch {
 	case clients == nil:
 		// Already warned above.

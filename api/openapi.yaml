@@ -296,6 +296,7 @@ paths:
                 properties:
                   job: { $ref: "#/components/schemas/Job" }
                   created: { type: boolean }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "501": { $ref: "#/components/responses/Unsupported" }
   /api/v1/models/load:
@@ -372,12 +373,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Model" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: an LLMInferenceService of that name exists for another model or is not managed by model-manager; or the reference exists on several backends and none was named
           content:
-            application/json:
+            application/problem+json:
               schema: { $ref: "#/components/schemas/Error" }
         "412": { $ref: "#/components/responses/DoesNotFit" }
         "501": { $ref: "#/components/responses/Unsupported" }
@@ -426,6 +428,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FitResult" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
@@ -592,6 +595,7 @@ paths:
                   backend: { type: string, description: the backend the model was unloaded from }
                   model: { type: string }
                   loaded: { type: boolean, const: false }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Ambiguous" }
@@ -628,12 +632,13 @@ paths:
                   backend: { type: string, description: the backend the model was wired on }
                   model: { type: string }
                   modelConfig: { $ref: "#/components/schemas/ModelConfigRef" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: a ModelConfig with the derived name exists but is not managed by model-manager; or the reference exists on several backends and none was named
           content:
-            application/json:
+            application/problem+json:
               schema: { $ref: "#/components/schemas/Error" }
         "501": { $ref: "#/components/responses/Unsupported" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -665,6 +670,7 @@ paths:
                   backend: { type: string, description: the backend whose ModelConfig was removed; absent when nothing was found }
                   model: { type: string }
                   modelConfig: { type: "null" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "409": { $ref: "#/components/responses/Ambiguous" }
         "501": { $ref: "#/components/responses/Unsupported" }
@@ -736,54 +742,64 @@ components:
       description: "Restrict the operation to one configured backend (`GET /api/v1/backends` lists them). Reads without it aggregate every backend; a reference without it is resolved to the one backend holding it. An unknown or unconfigured name answers 400."
       schema: { $ref: "#/components/schemas/BackendName" }
   responses:
+    RequestTooLarge:
+      description: request body exceeds 1 MiB
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
     Ambiguous:
       description: the reference exists on several backends and the request named none — repeat it with `backend`
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     NotFound:
       description: model or job not found
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     InvalidRequest:
       description: malformed request
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     Unsupported:
       description: the backend/deployment does not offer this operation (capability flag is false)
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     Forbidden:
       description: the cluster refused the caller — model-manager acts as the caller, so their own Kubernetes RBAC decides; not retryable
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     BackendError:
       description: the serving backend failed or is unreachable
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     DoesNotFit:
       description: "the fit check refused the model (kserve) — the numbers do not fit, or the named node is not a serving target (eligible=false on GET /api/v1/nodes); the message says which"
       content:
-        application/json:
+        application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
     Error:
       type: object
-      required: [error]
+      required: [type, title, status, error]
       properties:
+        type: { type: string, example: "about:blank" }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
         error:
           type: object
           required: [code, message]
           properties:
             code:
               type: string
-              enum: [not_found, invalid_request, no_backend, unsupported, conflict, gitops_owned, auth_required, forbidden, does_not_fit, unavailable, backend_error]
+              enum: [not_found, invalid_request, request_too_large, no_backend, unsupported, conflict, gitops_owned, auth_required, grant_required, repository_unavailable, forbidden, does_not_fit, unavailable, backend_error]
             message: { type: string }
+            apps: { type: array, items: { type: string } }
     BackendName:
       type: string
       enum: [ollama, kserve, lemonade, lmstudio]

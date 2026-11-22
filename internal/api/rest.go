@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/giantswarm/mcp-toolkit/httpx"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	spec "github.com/giantswarm/model-manager/api"
@@ -338,9 +339,9 @@ func (h *REST) cancelJob(w http.ResponseWriter, r *http.Request) {
 // "model" (load / fit-check on preset-driven backends).
 func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request, presetOK ...bool) (modelRequest, bool) {
 	var req modelRequest
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
-		h.writeError(w, fmt.Errorf("%w: read body: %v", backend.ErrInvalid, err))
+		h.writeError(w, fmt.Errorf("%w: read body: %w", backend.ErrInvalid, err))
 		return req, false
 	}
 	if len(strings.TrimSpace(string(body))) == 0 {
@@ -368,12 +369,15 @@ func (h *REST) writeError(w http.ResponseWriter, err error) {
 	if grant, ok := errors.AsType[*gitops.ErrGrantRequired](err); ok {
 		detail.Apps = []string{grant.App}
 	}
-	writeJSON(w, status, errorBody{Error: detail})
+	httpx.WriteProblem(w, httpx.Problem{Status: status, Detail: detail.Message, Extensions: map[string]any{"error": detail}})
 }
 
 // statusFor maps domain errors to HTTP status and a stable code clients can
 // switch on.
 func statusFor(err error) (int, string) {
+	if _, oversized := errors.AsType[*http.MaxBytesError](err); oversized {
+		return http.StatusRequestEntityTooLarge, "request_too_large"
+	}
 	switch {
 	case errors.Is(err, backend.ErrNotFound), errors.Is(err, jobs.ErrNotFound):
 		return http.StatusNotFound, "not_found"

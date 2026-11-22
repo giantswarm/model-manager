@@ -56,7 +56,7 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		if err := svc.Ready(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -81,8 +81,8 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 	if cfg.MCPEnabled && mcpSrv != nil {
 		// mcp-go reads a POST body whole before validating it
 		// (CVE-2026-108859): the bound keeps that read to what the REST API accepts.
-		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath))
-		mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler), maxMCPBodyBytes))
+		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath), mcpserver.WithStateLess(true))
+		mux.Handle(cfg.MCPPath, httpx.ProtectOrigin(http.MaxBytesHandler(s.guard(mcpHandler), maxMCPBodyBytes)))
 	}
 
 	s.http = &http.Server{

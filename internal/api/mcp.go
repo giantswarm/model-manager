@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/giantswarm/mcp-toolkit/brand"
+	policy "github.com/giantswarm/mcp-toolkit/middleware/mcpgo"
 	"github.com/giantswarm/mcp-toolkit/tooldesc"
+	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -191,15 +193,16 @@ type Info struct {
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
 // build is what get_info and the MCP server identity report as the version.
 func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *mcpserver.MCPServer {
+	t := &tools{svc: svc, build: build, policy: toolpolicy.Options{MaxResultBytes: 128 * 1024}}
+	for _, option := range opts {
+		option(t)
+	}
 	s := mcpserver.NewMCPServer("model-manager", build.Version, append(tracingOptions(),
+		policy.New(t.policy),
 		brand.WithGiantSwarmIcon(),
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet: list_backends and get_info then answer an empty list with backendsReason saying that no backend is registered and how to register one. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)...)
-	t := &tools{svc: svc, build: build}
-	for _, o := range opts {
-		o(t)
-	}
 	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetInfo,
@@ -408,9 +411,15 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 }
 
 type tools struct {
-	svc   *service.Service
-	build buildinfo.Info
-	store *registry.Store // nil: no Kubernetes access, registration tools refuse
+	policy toolpolicy.Options
+	svc    *service.Service
+	build  buildinfo.Info
+	store  *registry.Store // nil: no Kubernetes access, registration tools refuse
+}
+
+// WithToolPolicy supplies resolved tool limits, audit identity and telemetry.
+func WithToolPolicy(options toolpolicy.Options) Option {
+	return func(target *tools) { target.policy = options }
 }
 
 func (t *tools) getInfo(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

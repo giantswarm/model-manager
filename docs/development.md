@@ -54,6 +54,15 @@ make helm-docs      # regenerate helm/model-manager/README.md
 Healthy readiness returns `ready` and remains independent of backend availability;
 `/backendz` reports backend availability separately.
 
+MCP uses the native stateless streamable HTTP transport. Browser requests must
+have a same-origin Origin on every method; non-browser clients may omit it.
+`--tool-timeout` (`MODEL_MANAGER_TOOL_TIMEOUT`, default `30s`) bounds a tool call;
+`--max-response-bytes` (`MODEL_MANAGER_MAX_RESPONSE_BYTES`, default `131072`)
+bounds the complete JSON result. Nonpositive values disable the respective limit.
+Audit entries contain validated issuer, subject, actor, tool and outcome only.
+REST errors use `application/problem+json` and retain the `error.code` and
+`error.message` fields. Request bodies over 1 MiB return 413, including chunked bodies.
+
 Shutdown revokes readiness before a 15-second HTTP drain. OAuth resources stay
 available during draining, then have a separate five-second cleanup budget.
 After the HTTP deadline, remaining connections are closed. Handlers that ignore
