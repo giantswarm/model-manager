@@ -221,7 +221,11 @@ func (b *Backend) addCopies(ctx context.Context, existing *unstructured.Unstruct
 	if dryRun {
 		return obj, nodes, nil
 	}
-	if _, err := b.dynamic(ctx).Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{FieldManager: ManagedByValue}); err != nil {
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := client.Resource(llmisvcGVR).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{FieldManager: ManagedByValue}); err != nil {
 		return nil, nil, fmt.Errorf("update %s %s/%s: %w", kindLLMInferenceService, obj.GetNamespace(), obj.GetName(), err)
 	}
 	return obj, nodes, nil

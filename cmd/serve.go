@@ -319,9 +319,12 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		opts.KServe.Clientset = clients.Clientset
 		// Per-call clients: the caller's own when the request carries the
 		// caller's token (downstream OAuth), the ServiceAccount's otherwise.
-		opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
-			c := clients.For(ctx)
-			return c.Clientset, c.Dynamic
+		opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
+			caller, err := clients.For(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			return caller.Clientset, caller.Dynamic, nil
 		}
 	}
 	backends := make([]backend.Backend, 0, len(names))
@@ -358,7 +361,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			}
 		}
 		k := wiring.NewKagent(clients.Dynamic, openapi.ToClientWithContext(clients.Discovery.OpenAPIV3()), o.kagentNamespace, apiVersion, o.modelConfigPrefix, o.instance).
-			WithClientFor(func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic })
+			WithClientFor(func(ctx context.Context) (dynamic.Interface, error) {
+				caller, err := clients.For(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return caller.Dynamic, nil
+			})
 		if setting.Pinned == "" {
 			// A group or version cut-over under the running process is
 			// followed within a minute, and at once by a call that misses the
@@ -398,7 +407,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		}
 		svc.WithCommitter(gitops.NewCommitter(func(token string) (gitops.Remote, error) {
 			return gitops.NewGitHub(token, apiURL)
-		}, func(ctx context.Context) dynamic.Interface { return clients.For(ctx).Dynamic }).WithGitHubUser(o.githubExchangeAudience, user))
+		}, func(ctx context.Context) (dynamic.Interface, error) {
+			caller, err := clients.For(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return caller.Dynamic, nil
+		}).WithGitHubUser(o.githubExchangeAudience, user))
 	}
 
 	var (
@@ -412,7 +427,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		log.Warn("runtime backend registration off: --namespace (POD_NAMESPACE) is empty")
 	default:
 		reg = registry.New(clients.Clientset, o.namespace, backendBuilder(opts, o.downstreamOAuth, log), svc, log)
-		store := registry.NewStore(func(ctx context.Context) kubernetes.Interface { return clients.For(ctx).Clientset }, o.namespace)
+		store := registry.NewStore(func(ctx context.Context) (kubernetes.Interface, error) {
+			caller, err := clients.For(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return caller.Clientset, nil
+		}, o.namespace)
 		mcpOpts = append(mcpOpts, api.WithBackendStore(store))
 	}
 	if len(backends) == 0 {
@@ -622,9 +643,12 @@ func backendBuilder(base backend.Options, callerOnly bool, log *slog.Logger) reg
 					return nil, err
 				}
 				opts.KServe.Dynamic, opts.KServe.Clientset = tc.Dynamic, tc.Clientset
-				opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
-					c := tc.For(ctx)
-					return c.Clientset, c.Dynamic
+				opts.KServe.ClientsFor = func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
+					caller, err := tc.For(ctx)
+					if err != nil {
+						return nil, nil, err
+					}
+					return caller.Clientset, caller.Dynamic, nil
 				}
 			} else if opts.KServe.Clientset == nil {
 				return nil, fmt.Errorf("the kserve backend needs Kubernetes access")

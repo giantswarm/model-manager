@@ -42,7 +42,10 @@ func (b *Backend) serverOrigin(ctx context.Context, name, namespace string) (ser
 	if why := b.callerless(ctx, "model server read"); why != "" {
 		return serverOrigin{}, why
 	}
-	rc := b.targetREST(ctx)
+	rc, err := b.targetREST(ctx)
+	if err != nil {
+		return serverOrigin{}, "caller Kubernetes clients unavailable: " + err.Error()
+	}
 	if rc == nil || rc.Client == nil {
 		return serverOrigin{}, fmt.Sprintf("no REST client for the remote target %s to reach the model server through its Service proxy", b.opts.Target.Cluster)
 	}
@@ -51,9 +54,13 @@ func (b *Backend) serverOrigin(ctx context.Context, name, namespace string) (ser
 
 // callerREST is the core/v1 REST client of the call's clients: toward a
 // remote target, the caller's.
-func (b *Backend) callerREST(ctx context.Context) *rest.RESTClient {
-	rc, _ := b.k8s(ctx).CoreV1().RESTClient().(*rest.RESTClient)
-	return rc
+func (b *Backend) callerREST(ctx context.Context) (*rest.RESTClient, error) {
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rc, _ := client.CoreV1().RESTClient().(*rest.RESTClient)
+	return rc, nil
 }
 
 // workloadProxyPath is the apiserver path proxying to the workload Service

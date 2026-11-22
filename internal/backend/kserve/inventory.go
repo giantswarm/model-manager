@@ -362,7 +362,11 @@ func (b *Backend) agentPod(ctx context.Context, namespace, node string) (*corev1
 	if node != "" {
 		opts.FieldSelector = "spec.nodeName=" + node
 	}
-	pods, err := b.k8s(ctx).CoreV1().Pods(namespace).List(ctx, opts)
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("list cache-agent pods in %s: %w", namespace, err)
 	}
@@ -486,7 +490,10 @@ func cacheJobPoll(interval time.Duration) time.Duration {
 // pod to finish, returns the pod's logs and the node it ran on, and deletes
 // the Job with its pod.
 func (b *Backend) runCacheJob(ctx context.Context, pod *corev1.Pod) (logs, node string, err error) {
-	cs := b.k8s(ctx)
+	cs, err := b.k8s(ctx)
+	if err != nil {
+		return "", "", err
+	}
 	jobs := cs.BatchV1().Jobs(pod.Namespace)
 	pods := cs.CoreV1().Pods(pod.Namespace)
 	job, err := jobs.Create(ctx, cacheJob(pod), metav1.CreateOptions{FieldManager: ManagedByValue})
@@ -545,7 +552,11 @@ func (b *Backend) podLog(ctx context.Context, namespace, name string, opts corev
 	if b.logs != nil {
 		return b.logs(ctx, namespace, name, opts)
 	}
-	rc, err := b.k8s(ctx).CoreV1().Pods(namespace).GetLogs(name, &opts).Stream(ctx)
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return "", err
+	}
+	rc, err := client.CoreV1().Pods(namespace).GetLogs(name, &opts).Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read logs of %s: %w", name, err)
 	}

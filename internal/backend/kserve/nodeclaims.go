@@ -104,7 +104,11 @@ func nodeClaimName(claim, node string) string {
 // cache claim.
 func (b *Backend) nodeCaches(ctx context.Context, s settings) (map[string]string, error) {
 	sel := labels.SelectorFromSet(b.labels(map[string]string{ComponentLabel: nodeCacheComponent})).String()
-	list, err := b.k8s(ctx).CoreV1().PersistentVolumeClaims(s.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.CoreV1().PersistentVolumeClaims(s.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
 		return nil, fmt.Errorf("list node cache claims in %s: %w", s.Namespace, err)
 	}
@@ -129,7 +133,11 @@ func (b *Backend) ensureNodeClaim(ctx context.Context, loc cacheLocation, node s
 		return name, nil
 	}
 	s := b.cfg.settings(ctx)
-	pvcs := b.k8s(ctx).CoreV1().PersistentVolumeClaims(s.Namespace)
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return "", err
+	}
+	pvcs := client.CoreV1().PersistentVolumeClaims(s.Namespace)
 	base, err := pvcs.Get(ctx, loc.Claim, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("get cache claim %s/%s: %w", s.Namespace, loc.Claim, err)

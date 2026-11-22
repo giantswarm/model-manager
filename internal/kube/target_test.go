@@ -70,7 +70,11 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 	tc, err := NewForTarget(srv.URL, ca, nil)
 	require.NoError(t, err)
 	get := func(ctx context.Context) error {
-		_, err := tc.For(ctx).Clientset.CoreV1().ConfigMaps("ns").Get(ctx, "x", metav1.GetOptions{})
+		caller, err := tc.For(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = caller.Clientset.CoreV1().ConfigMaps("ns").Get(ctx, "x", metav1.GetOptions{})
 		return err
 	}
 
@@ -84,7 +88,9 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 		assert.Contains(t, err.Error(), srv.URL)
 		assert.True(t, strings.HasPrefix(err.Error(), "Unauthorized — "), "the apiserver's own message, decoded: %q", err.Error())
 
-		_, err = tc.For(identity.ContextWithToken(context.Background(), tok)).Dynamic.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("ns").Get(context.Background(), "x", metav1.GetOptions{})
+		caller, err := tc.For(identity.ContextWithToken(t.Context(), tok))
+		require.NoError(t, err)
+		_, err = caller.Dynamic.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("ns").Get(t.Context(), "x", metav1.GetOptions{})
 		assert.True(t, apierrors.IsUnauthorized(err), "the dynamic client (JSON) too: %v", err)
 		assert.True(t, strings.HasPrefix(err.Error(), "Unauthorized — "), "%q", err.Error())
 	})

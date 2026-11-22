@@ -68,7 +68,7 @@ type personKey struct{}
 // person's token does not reach, with the grant asPerson put on the call's
 // context (none: the person has not granted the App).
 func committer(dyn dynamic.Interface, fake *commit.Fake, unreachable ...commit.Repository) *Committer {
-	return NewCommitter(func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) dynamic.Interface { return dyn }).
+	return NewCommitter(func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) (dynamic.Interface, error) { return dyn, nil }).
 		WithGitHubUser(testApp, func(ctx context.Context) (*identity.GitHub, error) {
 			gh, _ := ctx.Value(personKey{}).(*identity.GitHub)
 			return gh, nil
@@ -178,7 +178,7 @@ func TestCommitWithAFetchedGrantGitHubRefuses(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			c := NewCommitter(func(string) (Remote, error) {
 				return refusingRemote{FakeRemote: FakeRemote{Fake: commit.NewFake()}, status: status}, nil
-			}, func(context.Context) dynamic.Interface { return cluster() }).WithGitHubUser("model-manager", user)
+			}, func(context.Context) (dynamic.Interface, error) { return cluster(), nil }).WithGitHubUser("model-manager", user)
 
 			_, err := c.Commit(t.Context(), request)
 			require.ErrorIs(t, err, ErrAuthRequired)
@@ -202,7 +202,7 @@ func TestCommitWithAFetchedGrantNamesTheGrantedApp(t *testing.T) {
 	c := NewCommitter(func(string) (Remote, error) {
 		return FakeRemote{Fake: fake, Unreachable: []commit.Repository{repo}}, nil
 	},
-		func(context.Context) dynamic.Interface { return cluster() }).
+		func(context.Context) (dynamic.Interface, error) { return cluster(), nil }).
 		WithGitHubUser("model-manager", func(context.Context) (*identity.GitHub, error) {
 			return &identity.GitHub{Login: "jane", Token: "ghu_grant"}, nil
 		})
@@ -392,7 +392,7 @@ func servingRequest(target dynamic.Interface) Request {
 	isvc := obj("serving.kserve.io/v1alpha2", "LLMInferenceService", "model-serving", "qwen3", map[string]any{"app.kubernetes.io/managed-by": "model-manager"}, map[string]any{"model": map[string]any{"name": "qwen3"}})
 	return Request{
 		Namespace: "model-serving", Write: []*unstructured.Unstructured{isvc},
-		Cluster: &Cluster{Name: "wc", Dynamic: func(context.Context) dynamic.Interface { return target }},
+		Cluster: &Cluster{Name: "wc", Dynamic: func(context.Context) (dynamic.Interface, error) { return target, nil }},
 		Also:    []Part{{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3")}}},
 		Verb:    "serve", Subject: "qwen3", Tool: "load_model", Summary: "Serves qwen3",
 	}

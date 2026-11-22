@@ -270,7 +270,11 @@ func budgetOf(n *corev1.Node, gpuResource, source string) nodeBudget {
 // each judged against its allocatable memory and without the GPU pool's
 // selector and taint (settings.forPreset).
 func (b *Backend) nodes(ctx context.Context, loc cacheLocation, p *servingPreset) ([]nodeBudget, error) {
-	list, err := b.k8s(ctx).CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
@@ -365,7 +369,11 @@ func (b *Backend) claimLocation(ctx context.Context, s settings) (cacheLocation,
 		loc.Bound = true
 		return loc, nil
 	}
-	pvc, err := b.k8s(ctx).CoreV1().PersistentVolumeClaims(s.Namespace).Get(ctx, s.CacheClaim, metav1.GetOptions{})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return loc, err
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims(s.Namespace).Get(ctx, s.CacheClaim, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		loc.Missing = true
 		return loc, nil
@@ -377,7 +385,7 @@ func (b *Backend) claimLocation(ctx context.Context, s settings) (cacheLocation,
 		return loc, nil
 	}
 	loc.Bound, loc.Volume = true, pvc.Spec.VolumeName
-	pv, err := b.k8s(ctx).CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsForbidden(err) || errors.IsNotFound(err) {
 			// Without PV access the cache is treated as shared; the scan runs

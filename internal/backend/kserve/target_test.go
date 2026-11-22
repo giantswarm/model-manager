@@ -56,11 +56,11 @@ func newRemoteFixture(t *testing.T) *remoteFixture {
 	}
 	anonCS.PrependReactor("*", "*", deny)
 	anonDyn.PrependReactor("*", "*", deny)
-	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
+	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
 		if _, ok := identity.TokenFromContext(ctx); ok {
-			return f.cs, f.dyn
+			return f.cs, f.dyn, nil
 		}
-		return anonCS, anonDyn
+		return anonCS, anonDyn, nil
 	}
 	for _, o := range []*backend.KServeOptions{&f.b.opts, &f.b.cfg.opts} {
 		o.Clientset, o.Dynamic, o.ClientsFor, o.Target = anonCS, anonDyn, clientsFor, testTarget
@@ -232,11 +232,11 @@ func TestRemoteTargetDetachedWork(t *testing.T) {
 func TestRemoteTargetRefusalIsNotRetriedAnonymously(t *testing.T) {
 	rf := newRemoteFixture(t)
 	cs, dyn := unauthorizedClients()
-	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface) {
+	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
 		if _, ok := identity.TokenFromContext(ctx); ok {
-			return cs, dyn
+			return cs, dyn, nil
 		}
-		return rf.anonCS, rf.anonDyn
+		return rf.anonCS, rf.anonDyn, nil
 	}
 	rf.b.opts.ClientsFor, rf.b.cfg.opts.ClientsFor = clientsFor, clientsFor
 	rf.resetSettings()
@@ -326,7 +326,7 @@ func statusAnswer(code int32, message string) *http.Response {
 // callerTargetREST is the target's core/v1 REST client as kube.NewForTarget
 // builds it for a call: the caller's token when ctx carries one, the
 // fixture's transport underneath.
-func (f *fixture) callerTargetREST(ctx context.Context) *rest.RESTClient {
+func (f *fixture) callerTargetREST(ctx context.Context) (*rest.RESTClient, error) {
 	cfg := &rest.Config{Host: testTarget.APIServer, Transport: f}
 	if token, ok := identity.TokenFromContext(ctx); ok {
 		cfg.BearerToken = token
@@ -334,7 +334,7 @@ func (f *fixture) callerTargetREST(ctx context.Context) *rest.RESTClient {
 	cs, err := kubernetes.NewForConfig(cfg)
 	require.NoError(f.t, err)
 	rc, _ := cs.CoreV1().RESTClient().(*rest.RESTClient)
-	return rc
+	return rc, nil
 }
 
 // readyTiny loads the tiny preset on the target as the caller and has

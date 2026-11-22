@@ -86,13 +86,13 @@ type Committer struct {
 	// of.
 	user     GitHubUser
 	grantApp string
-	dyn      func(ctx context.Context) dynamic.Interface
+	dyn      func(ctx context.Context) (dynamic.Interface, error)
 }
 
 // NewCommitter builds a Committer; dyn is the Kubernetes client of the call
 // (the caller's own under downstream OAuth), which reads the Flux objects.
 // It commits once WithGitHubUser names the person's grant.
-func NewCommitter(remote RemoteFor, dyn func(ctx context.Context) dynamic.Interface) *Committer {
+func NewCommitter(remote RemoteFor, dyn func(ctx context.Context) (dynamic.Interface, error)) *Committer {
 	return &Committer{remote: remote, dyn: dyn}
 }
 
@@ -187,7 +187,7 @@ type Part struct {
 // runs and applies to the remote one through spec.kubeConfig.
 type Cluster struct {
 	Name    string
-	Dynamic func(ctx context.Context) dynamic.Interface
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
 }
 
 // parts are the request's parts, the first one first.
@@ -388,7 +388,11 @@ func (c *Committer) inDirectory(ctx context.Context, remote Remote, loc location
 		case err != nil && !errors.Is(err, commit.ErrFileNotFound):
 			return c.commitError(err)
 		case removal:
-			kept, err := Kept(ctx, c.dyn(ctx), obj)
+			client, err := c.dyn(ctx)
+			if err != nil {
+				return err
+			}
+			kept, err := Kept(ctx, client, obj)
 			if err != nil {
 				return err
 			}
@@ -473,9 +477,15 @@ func (c *Committer) locate(ctx context.Context, part Part, target Target) (locat
 // namespaceOwner is the Flux object the part's namespace carries, read on
 // the cluster the part lands on.
 func (c *Committer) namespaceOwner(ctx context.Context, part Part) (*Owner, error) {
-	dyn := c.dyn(ctx)
+	var dyn dynamic.Interface
+	var err error
 	if part.Cluster != nil {
-		dyn = part.Cluster.Dynamic(ctx)
+		dyn, err = part.Cluster.Dynamic(ctx)
+	} else {
+		dyn, err = c.dyn(ctx)
+	}
+	if err != nil {
+		return nil, err
 	}
 	ns, err := dyn.Resource(namespaceGVR).Get(ctx, part.Namespace, metav1.GetOptions{})
 	if err != nil {
@@ -516,7 +526,10 @@ func (c *Committer) resolve(ctx context.Context, owner *Owner, part Part) (locat
 // the location is the one Kustomization in its namespace applying through
 // the same Secret.
 func (c *Committer) resolveRemote(ctx context.Context, owner *Owner, part Part) (location, error) {
-	dyn := c.dyn(ctx)
+	dyn, err := c.dyn(ctx)
+	if err != nil {
+		return location{}, err
+	}
 	elsewhere := fmt.Sprintf("pass repository, branch and path of a directory a Flux Kustomization applies to %s", part.on())
 	if owner.Kind == KindKustomization {
 		ks, err := c.owner(ctx, KustomizationGVR, owner, part)
@@ -560,7 +573,11 @@ func (c *Committer) resolveRemote(ctx context.Context, owner *Owner, part Part) 
 // that does not exist is a stale provenance label — a namespace left behind by
 // a removed release — and refused: the label no longer says where the files go.
 func (c *Committer) owner(ctx context.Context, gvr schema.GroupVersionResource, owner *Owner, part Part) (*unstructured.Unstructured, error) {
-	obj, err := c.dyn(ctx).Resource(gvr).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	client, err := c.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := client.Resource(gvr).Namespace(owner.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("%w: namespace %s on %s is labelled as applied by %s, which does not exist on model-manager's own cluster (a leftover of a removed release): commit mode needs the repository — pass repository, branch and path, or use mode apply", backend.ErrInvalid, part.Namespace, part.on(), owner)
 	}
@@ -580,7 +597,10 @@ func kubeConfigSecret(obj *unstructured.Unstructured) string {
 // Kustomization whose targetNamespace would move the part's objects out of
 // its namespace refused.
 func (c *Committer) locationOf(ctx context.Context, owner *Owner, ks *unstructured.Unstructured, part Part) (location, error) {
-	dyn := c.dyn(ctx)
+	dyn, err := c.dyn(ctx)
+	if err != nil {
+		return location{}, err
+	}
 	if target := nested(ks, "spec", "targetNamespace"); target != "" {
 		for _, obj := range append(slices.Clone(part.Write), part.Remove...) {
 			if obj.GetNamespace() != target {

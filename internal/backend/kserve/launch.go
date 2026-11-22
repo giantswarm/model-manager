@@ -648,7 +648,12 @@ func (b *Backend) launchFacts(ctx context.Context, events []corev1.Event) launch
 	lf.Claim = m[1]
 	ctx, cancel := context.WithTimeout(ctx, eventsTimeout)
 	defer cancel()
-	obj, err := b.dynamic(ctx).Resource(nodeClaimGVR).Get(ctx, lf.Claim, metav1.GetOptions{})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		lf.ClaimErr = err
+		return lf
+	}
+	obj, err := client.Resource(nodeClaimGVR).Get(ctx, lf.Claim, metav1.GetOptions{})
 	switch {
 	case err == nil:
 		lf.State = parseClaim(obj)
@@ -705,7 +710,11 @@ func (b *Backend) poolConstraints(ctx context.Context, pool string) (constraints
 	if pool == "" {
 		return constraints{}, "", nil
 	}
-	obj, err := b.dynamic(ctx).Resource(nodePoolGVR).Get(ctx, pool, metav1.GetOptions{})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return constraints{}, "", err
+	}
+	obj, err := client.Resource(nodePoolGVR).Get(ctx, pool, metav1.GetOptions{})
 	if err != nil {
 		return constraints{}, "", err
 	}
@@ -723,7 +732,11 @@ func (b *Backend) nodeClassZones(ctx context.Context, class string) ([]string, e
 	if class == "" {
 		return nil, nil
 	}
-	obj, err := b.dynamic(ctx).Resource(nodeClassGVR).Get(ctx, class, metav1.GetOptions{})
+	client, err := b.dynamic(ctx)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := client.Resource(nodeClassGVR).Get(ctx, class, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +769,11 @@ func (b *Backend) launchRefusals(ctx context.Context, pool string) ([]launchRefu
 	if pool == "" {
 		return nil, nil
 	}
-	list, err := b.k8s(ctx).CoreV1().Events(karpenterEventsNamespace).List(ctx, metav1.ListOptions{FieldSelector: "type=" + corev1.EventTypeWarning + ",involvedObject.kind=" + kindNodeClaim})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.CoreV1().Events(karpenterEventsNamespace).List(ctx, metav1.ListOptions{FieldSelector: "type=" + corev1.EventTypeWarning + ",involvedObject.kind=" + kindNodeClaim})
 	if err != nil {
 		return nil, err
 	}

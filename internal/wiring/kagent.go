@@ -236,7 +236,7 @@ type Wirer interface {
 // Kagent is the Wirer over kagent's ModelConfig CRD.
 type Kagent struct {
 	client    dynamic.Interface
-	clientFor func(ctx context.Context) dynamic.Interface
+	clientFor func(ctx context.Context) (dynamic.Interface, error)
 	openAPI   openapi.ClientWithContext
 	namespace string
 	prefix    string
@@ -430,20 +430,25 @@ func retried[T any](k *Kagent, call func() (T, error)) (T, error) {
 
 // WithClientFor makes every call pick its client from ctx (downstream OAuth:
 // the caller's own clients when the request carries the caller's token, the
-// ServiceAccount's otherwise). fn returning nil falls back to the base client.
-func (k *Kagent) WithClientFor(fn func(ctx context.Context) dynamic.Interface) *Kagent {
+// ServiceAccount's otherwise). Selection errors stop the operation.
+func (k *Kagent) WithClientFor(fn func(ctx context.Context) (dynamic.Interface, error)) *Kagent {
 	k.clientFor = fn
 	return k
 }
 
 // dyn is the client for this call.
-func (k *Kagent) dyn(ctx context.Context) dynamic.Interface {
+func (k *Kagent) dyn(ctx context.Context) (dynamic.Interface, error) {
 	if k.clientFor != nil {
-		if c := k.clientFor(ctx); c != nil {
-			return c
+		client, err := k.clientFor(ctx)
+		if err != nil {
+			return nil, err
 		}
+		if client == nil {
+			return nil, fmt.Errorf("caller Kubernetes dynamic client is unavailable")
+		}
+		return client, nil
 	}
-	return k.client
+	return k.client, nil
 }
 
 // Namespace returns the target namespace.
@@ -585,7 +590,11 @@ func (k *Kagent) render(ctx context.Context, model string, ep backend.AgentEndpo
 	}
 	r := p.rendered()
 	if obj := p.provenance(); obj != nil {
-		if r.GitOps, err = gitops.Applying(ctx, k.dyn(ctx), obj); err != nil {
+		client, err := k.dyn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if r.GitOps, err = gitops.Applying(ctx, client, obj); err != nil {
 			return nil, err
 		}
 	}
@@ -646,7 +655,11 @@ func (k *Kagent) plan(ctx context.Context, model string, ep backend.AgentEndpoin
 	if ep.Name != "" {
 		target = k.prefixed(ep.Name)
 	}
-	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := client.Resource(k.resource()).Namespace(k.namespace)
 	// The derived name may already belong to the same reference on ANOTHER
 	// backend (one model-manager, several backends): that ModelConfig keeps
 	// the plain name, this one gets the backend appended. The annotation
@@ -726,7 +739,11 @@ func (k *Kagent) ensure(ctx context.Context, model string, ep backend.AgentEndpo
 			return nil, err
 		}
 	}
-	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := client.Resource(k.resource()).Namespace(k.namespace)
 	name, desired, existing := p.name, p.desired, p.existing
 	if existing == nil {
 		if p.secret != nil {
@@ -781,7 +798,11 @@ func (k *Kagent) refuseGitOps(ctx context.Context, obj *unstructured.Unstructure
 	if obj == nil {
 		return nil
 	}
-	return gitops.Refuse(ctx, k.dyn(ctx), obj)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return err
+	}
+	return gitops.Refuse(ctx, client, obj)
 }
 
 // Writable implements Wirer. Only a setting that needs the served schema
@@ -819,7 +840,11 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string, scop
 	// One Flux applies from git is removed in git (commit mode), whoever
 	// rendered it; a live one — or one its Kustomization left behind — only
 	// in scope (kept).
-	owner, err := gitops.Applying(ctx, k.dyn(ctx), obj)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := gitops.Applying(ctx, client, obj)
 	if err != nil {
 		return nil, err
 	}
@@ -833,7 +858,7 @@ func (k *Kagent) removal(ctx context.Context, b backend.Name, model string, scop
 		}
 	}
 	r := &Rendered{Name: obj.GetName(), Objects: []*unstructured.Unstructured{obj}, GitOps: owner}
-	sec, err := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
+	sec, err := client.Resource(secretGVR).Namespace(k.namespace).Get(ctx, placeholderSecretName(obj.GetName()), metav1.GetOptions{})
 	switch {
 	case err == nil && sec.GetLabels()[ManagedByLabel] == ManagedByValue:
 		r.Objects = append(r.Objects, sec)
@@ -907,8 +932,12 @@ func (k *Kagent) referrers(ctx context.Context, obj *unstructured.Unstructured) 
 		ns = k.namespace
 	}
 	var refs []string
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, r := range referenceResources {
-		list, err := k.dyn(ctx).Resource(gv.WithResource(r)).Namespace(ns).List(ctx, metav1.ListOptions{})
+		list, err := client.Resource(gv.WithResource(r)).Namespace(ns).List(ctx, metav1.ListOptions{})
 		switch {
 		case errors.IsNotFound(err):
 			continue
@@ -956,7 +985,11 @@ func references(v any, ns, name string) bool {
 // removeObj deletes a ModelConfig this instance created and its placeholder
 // Secret.
 func (k *Kagent) removeObj(ctx context.Context, name string) error {
-	res := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return err
+	}
+	res := client.Resource(k.resource()).Namespace(k.namespace)
 	if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelConfig %s/%s: %w", k.namespace, name, err)
 	}
@@ -968,13 +1001,17 @@ func (k *Kagent) removeObj(ctx context.Context, name string) error {
 // it behind; a Secret of anyone else's, one Flux applies from git, or none
 // at all is left alone.
 func (k *Kagent) removePlaceholderSecret(ctx context.Context, mcName string) error {
-	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return err
+	}
+	secrets := client.Resource(secretGVR).Namespace(k.namespace)
 	secretName := placeholderSecretName(mcName)
 	sec, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil || sec.GetLabels()[ManagedByLabel] != ManagedByValue {
 		return nil
 	}
-	owner, err := gitops.Applying(ctx, k.dyn(ctx), sec)
+	owner, err := gitops.Applying(ctx, client, sec)
 	if err != nil || owner != nil {
 		return err
 	}
@@ -1010,7 +1047,11 @@ func (k *Kagent) List(ctx context.Context) ([]ModelConfigRef, error) {
 }
 
 func (k *Kagent) list(ctx context.Context) ([]ModelConfigRef, error) {
-	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: ManagedByLabel + "=" + ManagedByValue,
 	})
 	if err != nil {
@@ -1040,7 +1081,11 @@ func (k *Kagent) ListAll(ctx context.Context) ([]ModelConfigRef, error) {
 }
 
 func (k *Kagent) listAll(ctx context.Context) ([]ModelConfigRef, error) {
-	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
@@ -1074,7 +1119,11 @@ func (k *Kagent) prefixed(name string) string {
 // backend; an empty b matches any label.
 func (k *Kagent) find(ctx context.Context, b backend.Name, model string) (*unstructured.Unstructured, error) {
 	selector := ManagedByLabel + "=" + ManagedByValue
-	list, err := k.dyn(ctx).Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.Resource(k.resource()).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("list ModelConfigs in %s: %w", k.namespace, err)
 	}
@@ -1117,7 +1166,11 @@ func (k *Kagent) legacyGitOps(ctx context.Context, selector string) ([]unstructu
 		return nil, nil
 	}
 	gvr.Group = LegacyKagentGroup
-	list, err := k.dyn(ctx).Resource(gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.Resource(gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	switch {
 	case errors.IsNotFound(err), errors.IsForbidden(err):
 		return nil, nil
@@ -1234,8 +1287,12 @@ func (k *Kagent) build(name, model string, ep backend.AgentEndpoint) *unstructur
 func (k *Kagent) ensurePlaceholderSecret(ctx context.Context, mcName string) error {
 	sec := k.placeholderSecret(mcName)
 	name := sec.GetName()
-	secrets := k.dyn(ctx).Resource(secretGVR).Namespace(k.namespace)
-	_, err := secrets.Get(ctx, name, metav1.GetOptions{})
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return err
+	}
+	secrets := client.Resource(secretGVR).Namespace(k.namespace)
+	_, err = secrets.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return nil
 	}
@@ -1278,7 +1335,11 @@ func placeholderSecretName(mcName string) string {
 // Kustomization left behind is reported as written live.
 func (k *Kagent) ref(ctx context.Context, obj *unstructured.Unstructured) (*ModelConfigRef, error) {
 	ref := toRef(obj)
-	owner, err := gitops.Applying(ctx, k.dyn(ctx), obj)
+	client, err := k.dyn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := gitops.Applying(ctx, client, obj)
 	if err != nil {
 		return nil, err
 	}

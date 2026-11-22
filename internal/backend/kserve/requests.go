@@ -31,7 +31,11 @@ func (b *Backend) roomOn(ctx context.Context, n nodeBudget, p *servingPreset) po
 	if p == nil {
 		return podRoom{}
 	}
-	list, err := b.k8s(ctx).CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", n.Name).String()})
+	client, err := b.k8s(ctx)
+	if err != nil {
+		return podRoom{Why: "caller Kubernetes clients unavailable: " + err.Error()}
+	}
+	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", n.Name).String()})
 	if err != nil {
 		b.log.Warn("listing the pods of a node failed", "node", n.Name, "error", err)
 		return podRoom{Why: "listing its pods failed: " + err.Error()}
