@@ -42,6 +42,23 @@ make helm-docs      # regenerate helm/model-manager/README.md
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 - `helm/model-manager` — the chart.
 
+## HTTP health, logging and shutdown
+
+`/healthz` and `/readyz` accept GET and HEAD and reject other methods with
+405 and `Allow: GET, HEAD`. Probe responses include `Cache-Control: no-store`.
+Healthy readiness returns `ready` and remains independent of backend availability;
+`/backendz` reports backend availability separately.
+
+Shutdown revokes readiness before a 15-second HTTP drain. OAuth resources stay
+available during draining, then have a separate five-second cleanup budget.
+After the HTTP deadline, remaining connections are closed. Handlers that ignore
+cancellation and job waiting can still delay process exit; the deployment's
+termination grace period must also accommodate jobs and telemetry flushing.
+
+Logs use text on stderr without OTLP configuration and honor `--verbose`.
+With OTLP configured, logs are exported and mirrored as JSON to stderr.
+Log flushing runs after command success or failure.
+
 ## Local loop against a host Ollama and a Lemonade Server at once
 
 ```sh
