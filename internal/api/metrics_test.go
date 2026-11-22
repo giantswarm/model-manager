@@ -18,7 +18,7 @@ func TestRegisteredToolDuration(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { require.NoError(t, provider.Shutdown(t.Context())) })
-	svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	server := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithToolPolicy(toolpolicy.Options{Meter: provider.Meter(TracerName)}))
 	_, failed := callTool(t, server, ToolGetInfo, nil)
 	require.False(t, failed)
@@ -48,7 +48,7 @@ func TestRegisteredToolDuration(t *testing.T) {
 }
 
 func TestRegisteredToolWholeResultLimit(t *testing.T) {
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	for _, limit := range []int{32, 0, -1} {
 		server := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithToolPolicy(toolpolicy.Options{MaxResultBytes: limit}))
 		_, failed := callTool(t, server, ToolGetInfo, nil)

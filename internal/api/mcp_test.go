@@ -57,7 +57,7 @@ func callTool(t *testing.T, srv interface {
 func TestMCPToolsMirrorREST(t *testing.T) {
 	fb := newFakeBackend()
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	// tools/list exposes every tool.
@@ -144,7 +144,7 @@ func TestGetInfo(t *testing.T) {
 	build := buildinfo.Info{Version: "0.24.0", Commit: "6e3caf2", Date: "2026-09-16T08:00:00Z"}
 
 	t.Run("a backend and wiring", func(t *testing.T) {
-		svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), newFakeWirer(), &service.WiringInfo{Namespace: "kagent", APIVersion: "kagent.dev/v1alpha3"}, service.Config{AutoWire: true}, nil)
+		svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(jobs.WithAnonymousAccess(true)), newFakeWirer(), &service.WiringInfo{Namespace: "kagent", APIVersion: "kagent.dev/v1alpha3"}, service.Config{AutoWire: true}, nil)
 		text, isErr := callTool(t, NewMCPServer(svc, build), ToolGetInfo, nil)
 		require.False(t, isErr, text)
 		var info Info
@@ -158,7 +158,7 @@ func TestGetInfo(t *testing.T) {
 	})
 
 	t.Run("no backend, no wiring", func(t *testing.T) {
-		svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+		svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 		text, isErr := callTool(t, NewMCPServer(svc, buildinfo.Info{Version: "dev", Commit: "abcdef1-dirty", Date: "unknown"}), ToolGetInfo, nil)
 		require.False(t, isErr, text)
 		var raw map[string]any

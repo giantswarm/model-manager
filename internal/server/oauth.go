@@ -194,6 +194,11 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 			return
 		}
 		id := &identity.Identity{Issuer: info.Issuer, Subject: info.ID, ActorIssuer: info.ActorIssuer, ActorSubject: info.ActorSubject, Email: info.Email, Name: info.Name, Groups: info.Groups, Source: identity.SourceOAuth}
+		id.ClientID = info.ClientID
+		id.Scopes, _ = handler.ScopesFromContext(ctx)
+		if len(id.Scopes) == 0 {
+			id.Scopes = info.Scopes
+		}
 		if info.IsSSO() {
 			id.Source = identity.SourceSSO
 		}

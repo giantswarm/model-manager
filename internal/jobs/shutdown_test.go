@@ -17,7 +17,7 @@ func TestJobsHaveApplicationLifetime(t *testing.T) {
 		lifetime, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		manager := NewManager(WithLifetime(lifetime))
-		caller := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Subject: "user"}), "expired-caller-token")
+		caller := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "user", ClientID: "cli"}), "expired-caller-token")
 		entered := make(chan struct{})
 		job, created, err := manager.Start(StartRequest{Type: TypePull, Model: "model", Context: caller}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 			require.Equal(t, "user", identity.Caller(ctx))
@@ -36,7 +36,7 @@ func TestJobsHaveApplicationLifetime(t *testing.T) {
 		finished, err := manager.Get(job.ID)
 		require.NoError(t, err)
 		require.Equal(t, PhaseCancelled, finished.Phase)
-		_, _, err = manager.Start(StartRequest{Model: "later"}, func(context.Context, func(backend.Progress)) (any, error) {
+		_, _, err = manager.Start(StartRequest{Model: "later", Context: caller}, func(context.Context, func(backend.Progress)) (any, error) {
 			t.Error("new operation started during shutdown")
 			return nil, nil
 		})
@@ -47,7 +47,7 @@ func TestJobsHaveApplicationLifetime(t *testing.T) {
 
 func TestShutdownDoesNotWaitForeverForUncooperativeJob(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		manager := NewManager()
+		manager := NewManager(WithAnonymousAccess(true))
 		entered, release := make(chan struct{}), make(chan struct{})
 		job, _, err := manager.Start(StartRequest{Model: "stuck"}, func(context.Context, func(backend.Progress)) (any, error) { close(entered); <-release; return nil, nil })
 		require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestShutdownDoesNotWaitForeverForUncooperativeJob(t *testing.T) {
 func TestStartRejectsExpiredApplicationLifetime(t *testing.T) {
 	lifetime, cancel := context.WithCancel(t.Context())
 	cancel()
-	manager := NewManager(WithLifetime(lifetime))
+	manager := NewManager(WithAnonymousAccess(true), WithLifetime(lifetime))
 	_, created, err := manager.Start(StartRequest{Model: "late"}, func(context.Context, func(backend.Progress)) (any, error) {
 		t.Error("operation started after application stopped")
 		return nil, nil

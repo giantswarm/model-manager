@@ -60,7 +60,7 @@ func newMultiFixture(t *testing.T, backends ...backend.Backend) *multiFixture {
 		backends = []backend.Backend{ollama, lemonade}
 	}
 	fw := newFakeWirer()
-	svc := service.New(backends, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
+	svc := service.New(backends, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -292,7 +292,7 @@ func TestUnwireRemovesTheModelConfigOfABackendNoLongerRegistered(t *testing.T) {
 	// No backend registered at all: the ModelConfig still goes.
 	fw := newFakeWirer()
 	wiredOn(fw, backend.NameKServe, "qwen3-8b")
-	svc := service.New(nil, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)

@@ -36,6 +36,10 @@ type Identity struct {
 	// ActorIssuer and ActorSubject identify a validated delegated actor together.
 	ActorIssuer  string
 	ActorSubject string
+	// ClientID identifies the validated OAuth client when available.
+	ClientID string
+	// Scopes are the validated token's current grant.
+	Scopes []string
 	// Email is the caller's email when the IdP provided one.
 	Email string
 	// Name is the display name when the IdP provided one.

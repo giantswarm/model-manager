@@ -403,22 +403,20 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		tooldesc.Describe("List pull and load jobs, newest first, with backend, phase and progress.",
-			"On kserve a pull job carries the node whose cache receives the download and the preset it is for."),
+		tooldesc.Describe("List your pull and load tasks, newest first, with backend, phase and progress.",
+			"Tasks are bound to the validated user, client and actor. Kubernetes tasks require current access to their backing resource."),
 		backendArg("to list jobs of"),
 		readOnly(),
-		mcp.WithOpenWorldHintAnnotation(false),
 	), t.listJobs)
 
 	s.AddTool(mcp.NewTool(ToolGetJob,
-		tooldesc.Describe("Get one job: backend, phase, progress, error, and the ModelConfig created on success.", ""),
+		tooldesc.Describe("Get one of your tasks: backend, phase, progress, error, and the ModelConfig created on success.", "Other callers' task IDs return not_found; Kubernetes resource access is checked on every request."),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id from pull_model")),
 		readOnly(),
-		mcp.WithOpenWorldHintAnnotation(false),
 	), t.getJob)
 
 	s.AddTool(mcp.NewTool(ToolCancelJob,
-		tooldesc.Describe("Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).", ""),
+		tooldesc.Describe("Cancel your pull or load task; a KServe download or serving resource continues independently.", "KServe cancellation stops this task's tracking and follow-up wiring. Stop shared Kubernetes work through its resource API with the required RBAC permissions; unload_model stops serving."),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id")),
 		dryRunArg("the job it would cancel"),
 		mcp.WithReadOnlyHintAnnotation(false),
@@ -726,39 +724,39 @@ func unwiredView(model string, u *service.Unwired) map[string]any {
 	return out
 }
 
-func (t *tools) listJobs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	list, err := t.svc.Jobs(req.GetString(argBackend, ""))
+func (t *tools) listJobs(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	list, err := t.svc.Jobs(ctx, req.GetString(argBackend, ""))
 	if err != nil {
 		return errResult(err), nil
 	}
 	return jsonResult(map[string]any{"jobs": list})
 }
 
-func (t *tools) getJob(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (t *tools) getJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString(argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
-	job, err := t.svc.Job(id)
+	job, err := t.svc.Job(ctx, id)
 	if err != nil {
 		return errResult(err), nil
 	}
 	return jsonResult(job)
 }
 
-func (t *tools) cancelJob(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (t *tools) cancelJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString(argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
 	if req.GetBool(argDryRun, false) {
-		job, err := t.svc.PlanCancel(id)
+		job, err := t.svc.PlanCancel(ctx, id)
 		if err != nil {
 			return errResult(err), nil
 		}
 		return jsonResult(map[string]any{argDryRun: true, keyJob: job})
 	}
-	job, err := t.svc.CancelJob(id)
+	job, err := t.svc.CancelJob(ctx, id)
 	if err != nil {
 		return errResult(err), nil
 	}

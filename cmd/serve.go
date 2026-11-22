@@ -403,7 +403,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "instance", k.Instance(), "autoWire", o.autoWire)
 	}
 
-	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention), jobs.WithLifetime(ctx))
+	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention), jobs.WithLifetime(ctx), jobs.WithAnonymousAccess(!o.oauthEnabled))
 	defer func() {
 		stop()
 		if err := jm.Shutdown(budget.WorkContext()); err != nil {

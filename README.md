@@ -856,17 +856,17 @@ scheduling by the registered backend document (`docs/backends.md`).
 ## Jobs, restarts and replicas
 
 Jobs (`GET /api/v1/jobs`) live in process memory: the chart runs one replica
-and clients poll one server. On kserve a pull job carries the `node` whose
-cache receives the download and the `preset` it is for — what the request
-named, or what model-manager picked itself after the fit check — so any
-client (another tab, an agent through MCP) can place the download without
-remembering the request; ollama jobs carry neither. A restart loses the job
-list, not the work — kserve pulls are Kubernetes Jobs that model-manager
-re-adopts on start (`GET /api/v1/jobs` lists them again as running pulls,
-node and preset read back from the Job's annotations), a kserve `load` is
-recovered by the reconcile loop that wires ready LLMInferenceServices without a
-job, and an ollama or lemonade pull simply is re-issued (Ollama resumes the layers
-it has, Lemonade the files).
+and clients poll one server. Authenticated task access requires the same
+validated issuer, subject, OAuth client and current actor, plus current access
+to the backing Kubernetes resource. Cancelling a KServe task detaches its
+observer; shared Kubernetes work continues.
+
+A restart loses private handles. The next pull creates a fresh private handle
+and can join a matching Kubernetes download through caller RBAC. Application
+reconciliation, when enabled, adopts downloads and wires ready serving objects
+without assigning its tasks to a user. Ollama and Lemonade pulls are reissued
+and resume downloaded data. See [task access and recovery](docs/sdk-upgrade.md)
+for identity requirements and the explicit local development mode.
 A persistent job store is deliberately not built until a second replica or a
 job history across restarts is needed; until then, treat the job list as a
 progress view, and the backend (Jobs, LLMInferenceServices, Ollama) as the truth.

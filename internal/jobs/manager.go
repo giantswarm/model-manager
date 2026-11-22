@@ -6,7 +6,6 @@ package jobs
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"sort"
 	"sync"
@@ -40,15 +39,18 @@ const (
 
 // ErrNotFound means no job has that id.
 var (
-	ErrNotFound     = errors.New("job not found")
-	ErrShuttingDown = errors.New("job manager is shutting down")
+	ErrNotFound         = errors.New("job not found")
+	ErrShuttingDown     = errors.New("job manager is shutting down")
+	ErrIdentityRequired = errors.New("complete caller identity required")
 )
 
 // Job is a snapshot of one operation. Values returned by the manager are
 // copies; mutate nothing.
 type Job struct {
-	ID   string `json:"id"`
-	Type Type   `json:"type"`
+	// Scope binds application coordination to the original backend instance.
+	Scope string `json:"-"`
+	ID    string `json:"id"`
+	Type  Type   `json:"type"`
 	// Backend is the driver the job runs on; with several backends the same
 	// reference pulled on two of them is two jobs.
 	Backend backend.Name `json:"backend,omitempty"`
@@ -77,6 +79,8 @@ type Job struct {
 	// InferenceService or LLMInferenceService name), so a reader can refer
 	// to it; empty when the backend listed none.
 	Resource string `json:"resource,omitempty"`
+	// Object identifies the Kubernetes resource followed by this task.
+	Object *backend.JobObject `json:"object,omitempty"`
 	// RequestedBy is the caller who started the job (email, else the IdP
 	// subject) when the request was authenticated; empty for jobs the service
 	// starts on its own (adopted downloads).
@@ -94,20 +98,24 @@ func (j Job) Done() bool {
 type RunFunc func(ctx context.Context, report func(backend.Progress)) (any, error)
 
 type entry struct {
-	job    Job
-	cancel context.CancelFunc
-	done   chan struct{} // closed once the job reached a terminal phase
+	job       Job
+	owner     principal
+	key       operationKey
+	authorize func(context.Context, Job) error
+	cancel    context.CancelFunc
+	done      chan struct{} // closed once the job reached a terminal phase
 }
 
 // Manager owns the job table.
 type Manager struct {
-	mu        sync.Mutex
-	jobs      map[string]*entry
-	retention time.Duration
-	maxJobs   int
-	newID     func() string
-	lifetime  context.Context
-	stopping  bool
+	mu             sync.Mutex
+	jobs           map[string]*entry
+	retention      time.Duration
+	maxJobs        int
+	newID          func() string
+	lifetime       context.Context
+	stopping       bool
+	allowAnonymous bool
 }
 
 // Option configures a Manager.
@@ -121,6 +129,9 @@ func WithMaxJobs(n int) Option { return func(m *Manager) { m.maxJobs = n } }
 
 // WithLifetime cancels every job when its application owner stops.
 func WithLifetime(ctx context.Context) Option { return func(m *Manager) { m.lifetime = ctx } }
+
+// WithAnonymousAccess enables the explicit single-user development mode.
+func WithAnonymousAccess(allowed bool) Option { return func(m *Manager) { m.allowAnonymous = allowed } }
 
 // NewManager builds a Manager.
 func NewManager(opts ...Option) *Manager {
@@ -148,7 +159,8 @@ type StartRequest struct {
 	// identity and, with downstream OAuth, the caller's token — are inherited
 	// by the job's own context so the job's Kubernetes writes are made as the
 	// caller for as long as the token lives; its cancellation is not (the job
-	// outlives the HTTP request). Nil starts the job without a caller.
+	// outlives the HTTP request). Nil requires application-owned work or
+	// explicit anonymous mode.
 	Context context.Context
 	// Node and Preset are what the request named (or what a re-adopted
 	// download Job carries); the backend refines them through Progress.
@@ -156,31 +168,68 @@ type StartRequest struct {
 	Preset string
 	// Resource is the serving object a load job follows.
 	Resource string
+	Object   *backend.JobObject
+	// Parameters distinguishes effective operation settings beyond placement.
+	Parameters string
+	// Scope separates backend instances and target namespaces.
+	Scope string
+	// ApplicationOwned identifies work started by the application reconciler.
+	ApplicationOwned bool
+	// Authorize checks current resource access before returning or cancelling a task.
+	Authorize func(context.Context, Job) error
 }
 
-// Start begins a job in the background and returns its initial snapshot. If a
-// job of the same type for the same model on the same backend is still
-// pending/running, that job is returned instead and created is false.
+// Start deduplicates active tasks only within one principal, grant, backend
+// instance and complete operation parameters.
 func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stopping || m.lifetime.Err() != nil {
-		return Job{}, false, ErrShuttingDown
-	}
-	m.pruneLocked()
-	for _, e := range m.jobs {
-		if e.job.Type == req.Type && e.job.Backend == req.Backend && e.job.Model == req.Model && !e.job.Done() {
-			return e.job, false, nil
-		}
-	}
 	parent := req.Context
 	if parent == nil {
 		parent = context.Background()
 	}
+	if err := parent.Err(); err != nil {
+		return Job{}, false, err
+	}
+	owner, err := callerPrincipal(parent)
+	if err != nil {
+		return Job{}, false, err
+	}
+	if owner == (principal{}) && !m.allowAnonymous && !req.ApplicationOwned {
+		return Job{}, false, ErrIdentityRequired
+	}
+	key := operationKey{Owner: owner, Type: req.Type, Backend: req.Backend, Model: req.Model, Node: req.Node, Preset: req.Preset, Resource: req.Resource, Wire: req.Wire, Parameters: req.Parameters, Grant: grantKey(parent), Scope: req.Scope}
+	if req.Object != nil {
+		key.Object = *req.Object
+	}
+	initial := Job{Type: req.Type, Backend: req.Backend, Model: req.Model, Node: req.Node, Preset: req.Preset, Resource: req.Resource, Wire: req.Wire, Object: req.Object}
+	if req.Authorize != nil {
+		if err := req.Authorize(parent, initial); err != nil {
+			return Job{}, false, err
+		}
+	}
+	m.mu.Lock()
+	if m.stopping || m.lifetime.Err() != nil {
+		m.mu.Unlock()
+		return Job{}, false, ErrShuttingDown
+	}
+	m.pruneLocked()
+	for _, e := range m.jobs {
+		if e.key == key && !e.job.Done() {
+			existing, authorize := snapshot(e.job), e.authorize
+			m.mu.Unlock()
+			if authorize != nil {
+				if err := authorize(parent, existing); err != nil {
+					return Job{}, false, err
+				}
+			}
+			return existing, false, nil
+		}
+	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	stopLifetime := context.AfterFunc(m.lifetime, cancel)
 	e := &entry{
+		owner: owner, key: key, authorize: req.Authorize,
 		job: Job{
+			Scope:       req.Scope,
 			ID:          m.newID(),
 			Type:        req.Type,
 			Backend:     req.Backend,
@@ -191,14 +240,17 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, er
 			Node:        req.Node,
 			Preset:      req.Preset,
 			Resource:    req.Resource,
+			Object:      cloneObject(req.Object),
 			RequestedBy: identity.Caller(parent),
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
 	m.jobs[e.job.ID] = e
+	createdJob := snapshot(e.job)
+	m.mu.Unlock()
 	go func() { defer stopLifetime(); defer cancel(); m.run(ctx, e.job.ID, e.done, fn) }()
-	return e.job, true, nil
+	return createdJob, true, nil
 }
 
 func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn RunFunc) {
@@ -210,6 +262,10 @@ func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn Run
 	})
 	report := func(p backend.Progress) {
 		m.update(id, func(j *Job) {
+			if p.Object != nil && j.Object == nil {
+				j.Object = cloneObject(p.Object)
+				j.Resource = p.Object.Name
+			}
 			if p.Status != "" {
 				j.Status = p.Status
 			}
@@ -278,7 +334,7 @@ func (m *Manager) Get(id string) (Job, error) {
 	if !ok {
 		return Job{}, ErrNotFound
 	}
-	return e.job, nil
+	return snapshot(e.job), nil
 }
 
 // List returns all jobs, newest first.
@@ -288,7 +344,7 @@ func (m *Manager) List() []Job {
 	m.pruneLocked()
 	out := make([]Job, 0, len(m.jobs))
 	for _, e := range m.jobs {
-		out = append(out, e.job)
+		out = append(out, snapshot(e.job))
 	}
 	sort.Slice(out, func(i, k int) bool {
 		if out[i].CreatedAt.Equal(out[k].CreatedAt) {
@@ -387,9 +443,5 @@ func (m *Manager) pruneLocked() {
 }
 
 func randomID() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return hex.EncodeToString([]byte(time.Now().Format(time.RFC3339Nano)))[:16]
-	}
-	return hex.EncodeToString(b)
+	return rand.Text()
 }

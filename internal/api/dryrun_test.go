@@ -25,7 +25,7 @@ func TestWireAndUnwireDryRunWriteNothing(t *testing.T) {
 	fb := newFakeBackend()
 	fb.models["qwen3:0.6b"] = backend.Model{Name: "qwen3:0.6b"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	text, isErr := callTool(t, srv, ToolWireModel, map[string]any{"model": "qwen3:0.6b", "dryRun": true})
@@ -74,7 +74,7 @@ func TestGitOpsOwnedAnswersItsOwnCode(t *testing.T) {
 func TestCommitModeRefusals(t *testing.T) {
 	fb := newFakeBackend()
 	fb.models["qwen3:0.6b"] = backend.Model{Name: "qwen3:0.6b"}
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), newFakeWirer(), &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), newFakeWirer(), &service.WiringInfo{Namespace: "kagent"}, service.Config{}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	text, isErr := callTool(t, srv, ToolWireModel, map[string]any{"model": "qwen3:0.6b", "mode": "commit"})
@@ -107,7 +107,7 @@ func TestOperationalDryRunsDoNothing(t *testing.T) {
 	fb := newFakeBackend()
 	fb.models["qwen3:0.6b"] = backend.Model{Name: "qwen3:0.6b"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	for tool, args := range map[string]map[string]any{

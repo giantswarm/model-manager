@@ -251,9 +251,10 @@ paths:
       tags: [models, jobs]
       summary: Start importing a model; returns a job immediately
       description: |
-        Starts a background import and returns `202` with the job. If an import
-        of the same reference is already pending/running, that job is returned
-        with `created: false`. Poll `GET /api/v1/jobs/{id}` for progress. On
+        Starts a background import and returns `202` with a private job. A pending
+        import with the same principal, client, actor, grant, backend instance
+        and operation settings is returned with `created: false` after checking
+        current resource access. Poll `GET /api/v1/jobs/{id}` for progress. On
         success the model is wired into kagent (job `result` carries the
         ModelConfig reference) unless `wire` is false or the server's autoWire
         is off. On kserve the job echoes `preset` and `node`: the values the
@@ -679,7 +680,7 @@ paths:
   /api/v1/jobs:
     get:
       tags: [jobs]
-      summary: List jobs, newest first, of one or every backend
+      summary: List caller-owned jobs with current backend access, newest first
       operationId: listJobs
       x-mcp-tool: list_jobs
       parameters:
@@ -696,6 +697,8 @@ paths:
                   jobs:
                     type: array
                     items: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/jobs/{id}:
     parameters:
       - name: id
@@ -704,7 +707,7 @@ paths:
         schema: { type: string }
     get:
       tags: [jobs]
-      summary: One job with progress
+      summary: One caller-owned job with progress and current backend access
       operationId: getJob
       x-mcp-tool: get_job
       responses:
@@ -713,10 +716,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BackendError" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [jobs]
-      summary: Cancel a running job
+      summary: Cancel a caller-owned task without deleting shared Kubernetes work
       operationId: cancelJob
       x-mcp-tool: cancel_job
       responses:
@@ -725,6 +731,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BackendError" }
         "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
@@ -742,6 +751,11 @@ components:
       description: "Restrict the operation to one configured backend (`GET /api/v1/backends` lists them). Reads without it aggregate every backend; a reference without it is resolved to the one backend holding it. An unknown or unconfigured name answers 400."
       schema: { $ref: "#/components/schemas/BackendName" }
   responses:
+    Unauthorized:
+      description: a validated task identity or current backend credential is required
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
     RequestTooLarge:
       description: request body exceeds 1 MiB
       content:
@@ -1100,6 +1114,16 @@ components:
         startedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
         wire: { type: boolean, description: whether the job wires the model on success }
+        object:
+          type: object
+          description: original Kubernetes resource identity; contains no credentials
+          properties:
+            group: { type: string }
+            version: { type: string }
+            resource: { type: string }
+            namespace: { type: string }
+            name: { type: string }
+            uid: { type: string }
         node:
           type: string
           description: "kserve — node whose cache receives the download: the one the request named, else the one model-manager picked after the fit check. Absent on ollama, lemonade and lmstudio, and on a shared cache."

@@ -200,6 +200,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	require.True(t, seen.ok, "the caller reaches the handler")
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
 	assert.Equal(t, "sub-admin", seen.id.Subject)
+	assert.Equal(t, "agent-platform", seen.id.ClientID)
 	assert.Equal(t, []string{"platform-admins"}, seen.id.Groups)
 	assert.Equal(t, identity.SourceSSO, seen.id.Source)
 	assert.Equal(t, forwarded, seen.token, "downstream OAuth: the forwarded id_token is what the Kubernetes API will see")
@@ -263,7 +264,7 @@ func TestServerConfig(t *testing.T) {
 // server: probes stay open, the API and the MCP endpoint demand a token.
 func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	idp := newFakeIdP(t)
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	cfg := idp.config(false)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true, OAuth: &cfg}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)

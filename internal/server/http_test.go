@@ -23,6 +23,8 @@ import (
 // downBackend is a backend whose upstream never answers.
 type downBackend struct{}
 
+func (downBackend) JobScope(context.Context) string { return "unavailable-backend" }
+
 func (downBackend) Name() backend.Name                 { return backend.NameOllama }
 func (downBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 func (downBackend) Info(context.Context) backend.Info {
@@ -44,7 +46,7 @@ func (downBackend) AgentEndpoint(model string) backend.AgentEndpoint {
 }
 
 func TestReadinessDoesNotTrackBackend(t *testing.T) {
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
@@ -64,7 +66,7 @@ func TestReadinessDoesNotTrackBackend(t *testing.T) {
 
 // A body beyond the bound is refused, and the endpoint keeps answering.
 func TestMCPBodyIsBounded(t *testing.T) {
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
@@ -86,7 +88,7 @@ func TestMCPBodyIsBounded(t *testing.T) {
 }
 
 func TestMCPNativeStatelessCompatibilityAndOrigin(t *testing.T) {
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	server, err := New(Config{MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	host := httptest.NewServer(server.Handler())

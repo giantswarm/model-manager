@@ -23,7 +23,7 @@ import (
 func TestAuthenticatedRequestsAndDrain(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 	configuration := idp.config()
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	server, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true, OAuth: &configuration}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	addresses := make(chan string, 1)
@@ -134,7 +134,7 @@ func TestAuthenticatedRequestsAndDrain(t *testing.T) {
 
 func TestSharedShutdownDeadlineClosesRequestsBeforeOAuthCleanup(t *testing.T) {
 	configuration := newPrivateIdP(t, "").config()
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	var once sync.Once
 	var shutdownContext context.Context
 	factory := func() context.Context {

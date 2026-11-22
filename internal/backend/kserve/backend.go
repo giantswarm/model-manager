@@ -15,6 +15,7 @@ package kserve
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -43,13 +44,14 @@ type logReader func(ctx context.Context, namespace, name string, opts corev1.Pod
 
 // Backend is the kserve driver.
 type Backend struct {
-	opts backend.KServeOptions
-	cfg  *config
-	cs   kubernetes.Interface
-	dyn  dynamic.Interface
-	hub  *hubClient
-	inv  *inventory
-	log  *slog.Logger
+	jobScope string
+	opts     backend.KServeOptions
+	cfg      *config
+	cs       kubernetes.Interface
+	dyn      dynamic.Interface
+	hub      *hubClient
+	inv      *inventory
+	log      *slog.Logger
 
 	// callerlessLog: the first detached work skipped for want of a caller
 	// on a remote target is logged (target.go).
@@ -161,12 +163,13 @@ func New(opts backend.KServeOptions) (*Backend, error) {
 	}
 	log := slog.Default().With("backend", "kserve")
 	b := &Backend{
-		opts: opts,
-		cfg:  newConfig(opts, log),
-		cs:   opts.Clientset,
-		dyn:  opts.Dynamic,
-		inv:  newInventory(),
-		log:  log,
+		jobScope: rand.Text(),
+		opts:     opts,
+		cfg:      newConfig(opts, log),
+		cs:       opts.Clientset,
+		dyn:      opts.Dynamic,
+		inv:      newInventory(),
+		log:      log,
 
 		webhookWait: DefaultWebhookStartWait,
 	}
@@ -498,6 +501,7 @@ func (b *Backend) ListLoaded(ctx context.Context) ([]backend.LoadedModel, error)
 	out := make([]backend.LoadedModel, 0, len(servedList))
 	for _, sv := range servedList {
 		lm := backend.LoadedModel{
+			Object:    &backend.JobObject{Group: llmisvcGVR.Group, Version: llmisvcGVR.Version, Resource: llmisvcGVR.Resource, Namespace: sv.Namespace, Name: sv.Name, UID: sv.UID},
 			Name:      sv.Model,
 			Endpoint:  sv.URL,
 			Node:      sv.Node,
@@ -588,7 +592,7 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 		return err
 	}
 	b.log.Info("download job", "job", job.Name, "model", plan.Repo, "dir", plan.Dir, "node", nodeOrAny(dl.Node), "adopted", adopted, "bytesTotal", res.DownloadBytes)
-	return b.watchJob(ctx, dl, progress)
+	return b.watchJob(ctx, dl, job, progress)
 }
 
 // Delete implements backend.Backend: removes the cache directory. A model

@@ -18,7 +18,7 @@ import (
 // docsServer registers every tool: the set does not depend on the backends
 // or the configuration.
 var docsServer = sync.OnceValue(func() *mcpserver.MCPServer {
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	return NewMCPServer(svc, buildinfo.Info{Version: "docs"})
 })
 
@@ -53,7 +53,7 @@ func TestReadOnlyToolsAreNotDestructive(t *testing.T) {
 
 func TestToolEffectsIncludeInventoryWrites(t *testing.T) {
 	inventory := map[string]bool{ToolListModels: true, ToolGetModel: true, ToolListLoadedModels: true, ToolCheckFit: true, ToolListNodes: true}
-	local := map[string]bool{ToolGetInfo: true, ToolListJobs: true, ToolGetJob: true}
+	local := map[string]bool{ToolGetInfo: true}
 	for _, registered := range docsServer().ListTools() {
 		tool := registered.Tool
 		require.NotNil(t, tool.Annotations.OpenWorldHint, tool.Name)

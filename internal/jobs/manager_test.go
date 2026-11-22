@@ -33,7 +33,7 @@ func startJob(t *testing.T, manager *Manager, request StartRequest, run RunFunc)
 }
 
 func TestStartRunsAndReportsProgress(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "smollm2:135m", Wire: true}, func(_ context.Context, report func(backend.Progress)) (any, error) {
 		report(backend.Progress{Status: "pulling manifest"})
 		report(backend.Progress{Status: "pulling", BytesCompleted: 50, BytesTotal: 200})
@@ -55,7 +55,7 @@ func TestStartRunsAndReportsProgress(t *testing.T) {
 }
 
 func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	// The request named a preset but left the node open: the job echoes the
 	// preset at once and takes the node the backend reports once it picked one.
 	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "org/tiny", Preset: "tiny"}, func(_ context.Context, report func(backend.Progress)) (any, error) {
@@ -84,7 +84,7 @@ func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
 }
 
 func TestStartJoinsActiveJobForSameModel(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	release := make(chan struct{})
 	first, created := startJob(t, m, StartRequest{Type: TypePull, Model: "a:1"}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 		<-release
@@ -104,7 +104,7 @@ func TestStartJoinsActiveJobForSameModel(t *testing.T) {
 }
 
 func TestFailureAndCancel(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	failed, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "bad:1"}, func(context.Context, func(backend.Progress)) (any, error) {
 		return nil, errors.New("manifest not found")
 	})
@@ -133,7 +133,7 @@ func TestFailureAndCancel(t *testing.T) {
 
 func TestListOrderAndPrune(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m := NewManager(WithRetention(time.Hour), WithMaxJobs(1))
+		m := NewManager(WithAnonymousAccess(true), WithRetention(time.Hour), WithMaxJobs(1))
 		a, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "a:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 		waitDone(t, m, a.ID)
 		time.Sleep(time.Minute)
@@ -150,9 +150,9 @@ func TestListOrderAndPrune(t *testing.T) {
 }
 
 func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	reqCtx, cancelReq := context.WithCancel(identity.ContextWithToken(
-		identity.ContextWith(t.Context(), &identity.Identity{Subject: "sub-1", Email: "admin@lab.local"}), "caller-token"))
+		identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
 	release := make(chan struct{})
 	var seenCaller, seenToken string
 	var seenErr error
@@ -180,7 +180,7 @@ func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 }
 
 func TestStartDedupesPerBackend(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	block := make(chan struct{})
 	run := func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 		select {

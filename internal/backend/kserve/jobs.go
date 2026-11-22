@@ -3,6 +3,7 @@ package kserve
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -105,7 +106,19 @@ type downloadPlan struct {
 	Claim string
 }
 
-func (p downloadPlan) jobName() string { return prefixed(jobPrefix, p.Dir) }
+func (p downloadPlan) jobName() string {
+	if p.Node == "" && p.Claim == "" {
+		return prefixed(jobPrefix, p.Dir)
+	}
+	encoded, _ := json.Marshal(struct{ Dir, Node, Claim string }{Dir: p.Dir, Node: p.Node, Claim: p.Claim})
+	digest := sha256.Sum256(encoded)
+	suffix := fmt.Sprintf("-%x", digest[:8])
+	directory := p.Dir
+	if limit := maxNameLength - len(jobPrefix) - len(suffix); len(directory) > limit {
+		directory = strings.TrimRight(directory[:limit], "-")
+	}
+	return jobPrefix + directory + suffix
+}
 
 func (p downloadPlan) storageURI() string {
 	if p.Revision != "" {
@@ -292,12 +305,25 @@ func (b *Backend) ensureJob(ctx context.Context, plan downloadPlan) (job *batchv
 	}
 	jobs := client.BatchV1().Jobs(s.Namespace)
 	existing, err := jobs.Get(ctx, plan.jobName(), metav1.GetOptions{})
+	legacy := prefixed(jobPrefix, plan.Dir)
+	if errors.IsNotFound(err) && legacy != plan.jobName() {
+		candidate, legacyErr := jobs.Get(ctx, legacy, metav1.GetOptions{})
+		if legacyErr != nil && !errors.IsNotFound(legacyErr) {
+			return nil, false, legacyErr
+		}
+		if legacyErr == nil && !jobFinished(candidate) && candidate.DeletionTimestamp == nil && downloadMatches(candidate, plan) {
+			existing, err = candidate, nil
+		}
+	}
 	switch {
 	case err == nil:
 		if existing.Labels[ManagedByLabel] != ManagedByValue {
 			return nil, false, fmt.Errorf("%w: Job %s/%s exists but is not managed by %s", backend.ErrConflict, s.Namespace, existing.Name, ManagedByValue)
 		}
 		if !jobFinished(existing) && existing.DeletionTimestamp == nil {
+			if !downloadMatches(existing, plan) {
+				return nil, false, fmt.Errorf("%w: active download targets a different cache or revision", backend.ErrConflict)
+			}
 			return existing, true, nil
 		}
 		if err := b.deleteJob(ctx, s.Namespace, existing.Name); err != nil {
@@ -310,10 +336,35 @@ func (b *Backend) ensureJob(ctx context.Context, plan downloadPlan) (job *batchv
 		return nil, false, fmt.Errorf("get Job %s/%s: %w", s.Namespace, plan.jobName(), err)
 	}
 	created, err := jobs.Create(ctx, b.buildJob(plan, s), metav1.CreateOptions{FieldManager: ManagedByValue})
+	if errors.IsAlreadyExists(err) {
+		concurrent, getErr := jobs.Get(ctx, plan.jobName(), metav1.GetOptions{})
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		if concurrent.Labels[ManagedByLabel] != ManagedByValue || !downloadMatches(concurrent, plan) || jobFinished(concurrent) || concurrent.DeletionTimestamp != nil {
+			return nil, false, backend.ErrConflict
+		}
+		return concurrent, true, nil
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("create download Job %s/%s: %w", s.Namespace, plan.jobName(), err)
 	}
 	return created, false, nil
+}
+
+func downloadMatches(job *batchv1.Job, plan downloadPlan) bool {
+	if job.Labels[ManagedByLabel] != ManagedByValue || job.Annotations[DirAnnotation] != plan.Dir || job.Annotations[ModelAnnotation] != plan.Repo || job.Annotations[RevisionAnnotation] != plan.Revision || job.Annotations[NodeAnnotation] != plan.Node {
+		return false
+	}
+	if plan.Claim == "" {
+		return true
+	}
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == plan.Claim {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Backend) deleteJob(ctx context.Context, namespace, name string) error {
@@ -379,14 +430,13 @@ func jobSucceeded(j *batchv1.Job) bool {
 // watchJob follows a download Job until it finishes, reporting bytes on disk
 // (from the pod's PROGRESS lines) against the expected total. Every sample
 // carries the plan's node and preset so the job echoes where the download
-// lands, including the node the fit check picked. Cancelling ctx deletes the
-// Job; partial files stay so a retry resumes.
-func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func(backend.Progress)) error {
-	s := b.cfg.settings(ctx)
-	name := plan.jobName()
+// lands, including the node the fit check picked. Cancellation detaches this
+// observer; the shared download is controlled through the Kubernetes API.
+func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, backing *batchv1.Job, progress func(backend.Progress)) error {
+	name := backing.Name
 	report := func(status string, done int64) {
 		if progress != nil {
-			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal, Node: plan.Node, Preset: plan.Preset})
+			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal, Node: plan.Node, Preset: plan.Preset, Object: &backend.JobObject{Group: "batch", Version: "v1", Resource: "jobs", Namespace: backing.Namespace, Name: backing.Name, UID: string(backing.UID)}})
 		}
 	}
 	report("download job created", 0)
@@ -398,14 +448,20 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 		return err
 	}
 	for {
-		job, err := client.BatchV1().Jobs(s.Namespace).Get(ctx, name, metav1.GetOptions{})
+		job, err := client.BatchV1().Jobs(backing.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("download Job %s/%s disappeared", s.Namespace, name)
+			return fmt.Errorf("download Job %s/%s disappeared", backing.Namespace, name)
 		}
 		if err != nil {
+			if errors.IsUnauthorized(err) || errors.IsForbidden(err) {
+				return err
+			}
 			b.log.Warn("polling download Job failed", "job", name, "error", err)
 		} else {
-			pod := b.latestJobPod(ctx, s.Namespace, name)
+			if backing.UID != "" && job.UID != backing.UID {
+				return fmt.Errorf("%w: download resource replaced", backend.ErrConflict)
+			}
+			pod := b.latestJobPod(ctx, backing.Namespace, name)
 			if pod != nil {
 				if n, ok := b.podProgress(ctx, pod); ok && n > lastBytes {
 					lastBytes = n
@@ -429,7 +485,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 				report("waiting for the download pod", lastBytes)
 			case pod.Status.Phase == corev1.PodPending:
 				if reason := podStuckReason(pod); reason != "" {
-					_ = b.deleteJob(ctx, s.Namespace, name)
+					_ = b.deleteJob(ctx, backing.Namespace, name)
 					return fmt.Errorf("download pod cannot start: %s", reason)
 				}
 				report("starting the download pod", lastBytes)
@@ -439,15 +495,6 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, progress func
 		}
 		select {
 		case <-ctx.Done():
-			// The cleanup outlives the cancelled call but not its caller: the
-			// Job is deleted with the caller's token (downstream OAuth, a
-			// remote target), not anonymously.
-			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			if err := b.deleteJob(dctx, s.Namespace, name); err != nil {
-				b.log.Warn("deleting cancelled download Job failed", "job", name, "error", err)
-			}
-			cancel()
-			b.inv.invalidate()
 			return ctx.Err()
 		case <-ticker.C:
 		}

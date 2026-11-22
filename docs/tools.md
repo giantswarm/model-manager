@@ -120,7 +120,9 @@ One backend per name (default: the kind); kserve takes one per serving cluster, 
 ## `cancel_job`
 
 ```text
-Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).
+Cancel your pull or load task; a KServe download or serving resource continues independently.
+
+KServe cancellation stops this task's tracking and follow-up wiring. Stop shared Kubernetes work through its resource API with the required RBAC permissions; unload_model stops serving.
 ```
 
 ```json
@@ -271,7 +273,9 @@ Report this server's build, its tool names, the configured backends and, with ag
 ## `get_job`
 
 ```text
-Get one job: backend, phase, progress, error, and the ModelConfig created on success.
+Get one of your tasks: backend, phase, progress, error, and the ModelConfig created on success.
+
+Other callers' task IDs return not_found; Kubernetes resource access is checked on every request.
 ```
 
 ```json
@@ -335,9 +339,9 @@ Call it first: most tools take an optional backend. An empty list comes with bac
 ## `list_jobs`
 
 ```text
-List pull and load jobs, newest first, with backend, phase and progress.
+List your pull and load tasks, newest first, with backend, phase and progress.
 
-On kserve a pull job carries the node whose cache receives the download and the preset it is for.
+Tasks are bound to the validated user, client and actor. Kubernetes tasks require current access to their backing resource.
 ```
 
 ```json

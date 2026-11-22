@@ -37,17 +37,37 @@ it is not an OAuth configuration or generic MCP transport responsibility.
 | Serving resources and cache indexes | backend, namespace, model and Kubernetes resource identity | Keep resource names and Kubernetes RBAC |
 | Backend documents | ConfigMap namespace/name and backend name | Keep ConfigMaps and explicit targets |
 | GitOps ownership | Flux object and repository path | Keep Flux provenance and provider grants |
-| In-memory jobs | random job ID; deduplication by operation/backend/model | Drain or cancel at shutdown; job state is not persisted |
+| In-memory tasks | validated issuer/subject/client/current actor; grant and complete parameters scope deduplication | New private handles after restart; join backing work through caller RBAC |
 | Job requestedBy | display attribution only, email or subject | No authorization or ownership mapping |
 
-Job progress and cancellation are process-wide: an authenticated caller can
-inspect and cancel another caller's job. Review that shared-access contract
-before enabling multi-user access; `requestedBy` is not an authorization check.
+Job progress and cancellation require the same validated issuer, subject, OAuth
+client and current delegated actor. Unknown and foreign task IDs return 404;
+lists omit inaccessible tasks. `requestedBy` is display attribution only. A
+changed email does not change ownership. A different connector, client or actor
+does not acquire access by presenting the same email. Missing or ambiguous
+client identity is refused: forwarded ID tokens need a signed `azp` or a single
+audience; supported access tokens carry their validated client binding.
 
-These keys do not change to user ownership during this upgrade. There is no
-email-based account migration to run. Tool audit identity uses validated issuer,
-subject and actor. Kubernetes authorization continues to use the caller's
-credential. Before any future persisted owner-key change, require verified
+Kubernetes task reads and cancellation recheck resource access using the current
+caller's credential and the original resource namespace/name/UID. Resource
+replacement is refused. For a garbage-collected object, a SelfSubjectAccessReview
+checks the caller's current named-resource read permission before returning task
+history. Permission-review errors fail closed. A refreshed credential can read
+an owned task, but does not reuse a worker holding an older credential.
+
+Cancelling a KServe task stops its observer and follow-up wiring; it does not
+delete a shared download or serving object. Stop the underlying work through the
+Kubernetes resource API with the appropriate RBAC permissions, or use
+`unload_model` to stop serving. These operations use the acting caller's
+authority. The Kubernetes Job controller owns execution of submitted downloads.
+Downloads on different node caches have distinct Job identities; a matching
+existing Job can be joined after the caller's Kubernetes access is checked.
+
+Task state is in memory, so restart requires a new private handle. A fresh pull
+can join an existing matching download through the caller's Kubernetes access.
+Application-owned recovered tasks are not assigned to a user or exposed as user
+tasks. No credentials are stored in resource ownership annotations. There is no
+email-based account migration. Before any future persisted owner-key change, require verified
 issuer/subject mappings, reject collisions and unresolved mappings, and verify
 repeat execution before cutover. An email match alone is insufficient.
 
@@ -82,9 +102,9 @@ through the installation's approved channel before changing network access.
 Notice draft:
 
 ```text
-The model-manager update adds default tool limits of 30 seconds and 128 KiB; REST bodies over 1 MiB return 413.
-MCP becomes stateless, browser calls require same-origin Origin, and chart ingress is limited to configured gateways and scrapers.
-Existing authenticated clients remain supported. Refresh rejected credentials through sign-in; report access failures before rollout proceeds.
+The model-manager update adds private user/client/actor-bound task handles, default tool limits of 30 seconds and 128 KiB, and REST 413 above 1 MiB.
+Cancelling a KServe task stops tracking; shared downloads continue. Resource operations retain caller RBAC, and chart ingress is limited to configured gateways and scrapers.
+Refresh rejected credentials through sign-in. Confirm client identity claims and report access failures before rollout; authentication remains enforced during recovery.
 ```
 
 If a supported client loses access, check its negotiated version, Origin,

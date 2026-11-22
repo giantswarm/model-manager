@@ -68,7 +68,7 @@ func newRegistrationFixtureBuilding(t *testing.T, build registry.Builder, static
 	t.Helper()
 	client := kubefake.NewSimpleClientset()
 	fw := newFakeWirer()
-	svc := service.New(static, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: testNamespace}, nil)
+	svc := service.New(static, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: testNamespace}, nil)
 	reg := registry.New(client, testNamespace, build, svc, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = reg.Run(ctx) }()
@@ -516,7 +516,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 }
 
 func TestNoStoreRefusesRegistration(t *testing.T) {
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 	text, isErr := callTool(t, srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://x"})
 	assert.True(t, isErr)
@@ -529,7 +529,7 @@ func TestNoStoreRefusesRegistration(t *testing.T) {
 func TestRegisterDocumentClearsTheReportAtomically(t *testing.T) {
 	static := newFakeBackend()
 	static.name = backend.NameLMStudio
-	svc := service.New([]backend.Backend{static}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{static}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	svc.DeregisterDocument("", "model-backend-ollama", "spec.endpoint: required for ollama")
 	svc.DeregisterDocument("", "model-backend-lmstudio", "spec.endpoint: required for lmstudio")
 
@@ -553,7 +553,7 @@ func TestRegisterDocumentClearsTheReportAtomically(t *testing.T) {
 func TestDeregisterDocumentReportsAtomically(t *testing.T) {
 	static := newFakeBackend()
 	static.name = backend.NameLMStudio
-	svc := service.New([]backend.Backend{static}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{static}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	ollama := newFakeBackend()
 	ollama.name = backend.NameOllama
 	require.NoError(t, svc.RegisterDocument(ollama, backend.SourcePerson, "model-backend-ollama"))

@@ -313,7 +313,7 @@ func (h *REST) unwire(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) listJobs(w http.ResponseWriter, r *http.Request) {
-	list, err := h.svc.Jobs(backendQuery(r))
+	list, err := h.svc.Jobs(r.Context(), backendQuery(r))
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -322,7 +322,7 @@ func (h *REST) listJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) getJob(w http.ResponseWriter, r *http.Request) {
-	job, err := h.svc.Job(r.PathValue("id"))
+	job, err := h.svc.Job(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -331,7 +331,7 @@ func (h *REST) getJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *REST) cancelJob(w http.ResponseWriter, r *http.Request) {
-	job, err := h.svc.CancelJob(r.PathValue("id"))
+	job, err := h.svc.CancelJob(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -383,6 +383,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusRequestEntityTooLarge, "request_too_large"
 	}
 	switch {
+	case errors.Is(err, jobs.ErrIdentityRequired):
+		return http.StatusUnauthorized, "auth_required"
 	case apierrors.IsUnauthorized(err):
 		return http.StatusUnauthorized, "auth_required"
 	case errors.Is(err, backend.ErrNotFound), errors.Is(err, jobs.ErrNotFound):
