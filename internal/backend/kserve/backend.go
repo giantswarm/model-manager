@@ -1139,7 +1139,7 @@ func (b *Backend) ListNodes(ctx context.Context) ([]backend.NodeInfo, error) {
 				cache.BytesUsed += e.Bytes
 			}
 			if snap.Err != nil {
-				cache.Error = snap.Err.Error()
+				cache.Error = backend.PublicErrorMessage(snap.Err)
 			}
 		}
 		out = append(out, nodeView(n, reserved[n.Name], cache))

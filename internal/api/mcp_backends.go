@@ -85,6 +85,7 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 		mcp.WithBoolean(argDryRun, mcp.Description("Render the document and the ConfigMap without writing (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): write the ConfigMap as you. commit is not available yet")),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.addBackend)
@@ -98,6 +99,7 @@ func (t *tools) registerBackendTools(s *mcpserver.MCPServer) {
 		mcp.WithBoolean(argDryRun, mcp.Description("Report the ConfigMap and ModelConfigs that would be removed (default false)")),
 		mcp.WithString(argMode, mcp.Description("apply (default): delete as you. commit is not available yet")),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.removeBackend)
@@ -230,7 +232,7 @@ func (t *tools) addBackend(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		// by the registry in one step; list_backends shows it.
 		for _, d := range t.svc.InvalidDocuments() {
 			if d.ConfigMap == cm.Name {
-				out["error"] = d.Error
+				out["error"] = "backend document is invalid"
 			}
 		}
 	}

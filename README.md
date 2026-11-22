@@ -1054,3 +1054,6 @@ variables the chart renders from `observability.otel.*`).
 ## Development
 
 See [docs/development.md](docs/development.md).
+
+See [the MCP policy and access upgrade guide](docs/sdk-upgrade.md) for transport
+compatibility, limits, ownership, network selectors and authenticated recovery.

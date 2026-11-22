@@ -1,15 +1,32 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCallerLogIdentityExcludesProfileData(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	caller := &Identity{Issuer: "https://dex.example.test", Subject: "subject", ActorIssuer: "https://actor.example.test", ActorSubject: "agent", Email: "private@example.test", Groups: []string{"private-group"}}
+	logger.Info("operation", LogAttr(ContextWith(t.Context(), caller)))
+	require.Contains(t, output.String(), `"issuer":"https://dex.example.test"`)
+	require.Contains(t, output.String(), `"subject":"subject"`)
+	require.Contains(t, output.String(), `"actor_subject":"agent"`)
+	require.NotContains(t, output.String(), caller.Email)
+	require.NotContains(t, output.String(), caller.Groups[0])
+	for _, invalid := range []*Identity{{Subject: "subject"}, {Issuer: caller.Issuer}, {Issuer: caller.Issuer, Subject: "subject", ActorSubject: "agent"}} {
+		require.Equal(t, "unavailable", LogAttr(ContextWith(t.Context(), invalid)).Value.String())
+	}
+}
 
 func TestContextRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -18,13 +35,15 @@ func TestContextRoundTrip(t *testing.T) {
 	assert.Equal(t, "service-account", LogAttr(ctx).Value.String())
 	assert.Equal(t, "", Caller(ctx))
 
-	id := &Identity{Subject: "sub-1", Email: "admin@lab.local", Groups: []string{"platform-admins"}, Source: SourceSSO}
+	id := &Identity{Issuer: "https://idp.example.test", Subject: "sub-1", Email: "admin@lab.local", Groups: []string{"platform-admins"}, Source: SourceSSO}
 	ctx = ContextWith(ctx, id)
 	got, ok := FromContext(ctx)
 	require.True(t, ok)
 	assert.Equal(t, id, got)
 	assert.Equal(t, "admin@lab.local", Caller(ctx))
-	assert.Equal(t, "admin@lab.local", LogAttr(ctx).Value.String())
+	assert.Equal(t, "caller", LogAttr(ctx).Key)
+	assert.Equal(t, "issuer", LogAttr(ctx).Value.Group()[0].Key)
+	assert.Equal(t, id.Issuer, LogAttr(ctx).Value.Group()[0].Value.String())
 
 	assert.Equal(t, "sub-1", (&Identity{Subject: "sub-1"}).String(), "email wins, subject is the fallback")
 	assert.Equal(t, "", (*Identity)(nil).String())

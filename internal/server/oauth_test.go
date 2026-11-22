@@ -156,7 +156,7 @@ func TestOAuthConfigValidation(t *testing.T) {
 // verifiedUser is the user mcp-oauth hands on once it has validated a
 // forwarded IdP id_token.
 func verifiedUser() *providers.UserInfo {
-	return &providers.UserInfo{ID: "sub-admin", Email: "admin@lab.local", EmailVerified: true, Name: "Lab Admin", Groups: []string{"platform-admins"}, TokenSource: providers.TokenSourceSSO}
+	return &providers.UserInfo{Issuer: "https://idp.example.test", ID: "sub-admin", Email: "admin@lab.local", EmailVerified: true, Name: "Lab Admin", Groups: []string{"platform-admins"}, TokenSource: providers.TokenSourceSSO}
 }
 
 // afterValidation runs next as if mcp-oauth had validated the bearer and

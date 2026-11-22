@@ -162,7 +162,7 @@ func TestMultiBackendOneBackendDownDoesNotBlankTheOther(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, "the readable backend's models are returned")
 	assert.Len(t, body["models"], 1)
 	errs := body["errors"].(map[string]any)
-	assert.Contains(t, errs["lemonade"], "connection refused")
+	assert.Equal(t, "backend request failed", errs["lemonade"])
 	assert.NotContains(t, errs, "ollama")
 
 	// Filtered to the failing backend the read fails as it always did.

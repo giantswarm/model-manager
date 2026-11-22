@@ -51,6 +51,13 @@ func New(cfg Config) (*Factory, error) {
 }
 
 func fromRESTConfig(restCfg *rest.Config) (*Factory, error) {
+	restCfg = rest.CopyConfig(restCfg)
+	if restCfg.QPS == 0 {
+		restCfg.QPS = 100
+	}
+	if restCfg.Burst == 0 {
+		restCfg.Burst = 200
+	}
 	dyn, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("dynamic client: %w", err)

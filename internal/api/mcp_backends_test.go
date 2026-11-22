@@ -287,13 +287,8 @@ func TestAddBackendDryRunAndApply(t *testing.T) {
 	assert.Contains(t, text, `"source": "cluster-manager"`)
 }
 
-// TestAddBackendNamesAReadTimeRefusal: a document the registry refuses to
-// build (a remote kserve target without downstream OAuth) is answered with
-// the reason, not a bare registered: false; a registered document edited
-// into the refusal drops its backend in the same step that reports it.
-func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
+func TestAddBackendReportsInvalidDocumentWithoutDetails(t *testing.T) {
 	const refusedEndpoint = "http://remote-target:11434"
-	const refusal = "build ollama backend: kserve target wc1: --downstream-oauth is off"
 	f := newRegistrationFixtureBuilding(t, func(doc *backend.Document) (backend.Backend, error) {
 		if doc.Spec.Endpoint == refusedEndpoint {
 			return nil, errors.New("kserve target wc1: --downstream-oauth is off")
@@ -303,13 +298,12 @@ func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
 		return fb, nil
 	})
 
-	// A new document: not loaded, and the answer names the refusal.
 	text, isErr := callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: refusedEndpoint})
 	require.False(t, isErr, text)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal([]byte(text), &out))
 	assert.Equal(t, false, out["registered"])
-	assert.Equal(t, refusal, out["error"])
+	assert.Equal(t, "backend document is invalid", out["error"])
 
 	// Registered, then edited into the refusal: dropped and reported.
 	text, isErr = callTool(t, f.srv, ToolAddBackend, map[string]any{argKind: "ollama", argEndpoint: "http://ollama:11434"})
@@ -330,7 +324,7 @@ func TestAddBackendNamesAReadTimeRefusal(t *testing.T) {
 	invalid := f.backends(t)["invalid"].([]any)
 	require.Len(t, invalid, 1)
 	assert.Equal(t, "model-backend-ollama", invalid[0].(map[string]any)["configMap"])
-	assert.Equal(t, refusal, invalid[0].(map[string]any)["error"])
+	assert.Equal(t, "backend document is invalid", invalid[0].(map[string]any)["error"])
 }
 
 func TestStaticBackendConflictMessageHasOnePrefix(t *testing.T) {
@@ -481,7 +475,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 	assert.Empty(t, out["backends"])
 	invalid := out["invalid"].([]any)[0].(map[string]any)
 	assert.Equal(t, "model-backend-ollama", invalid["configMap"])
-	assert.Equal(t, "spec.endpoint: required for ollama", invalid["error"])
+	assert.Equal(t, "backend document is invalid", invalid["error"])
 
 	// Fixing the document loads it and clears the report.
 	bad.Data[backend.DocumentKey] = goodOllamaDocument
@@ -499,7 +493,7 @@ func TestInvalidDocumentIsReportedNotLoaded(t *testing.T) {
 	require.Eventually(t, func() bool { return len(f.svc.InvalidDocuments()) == 1 }, 5*time.Second, 20*time.Millisecond)
 	out = f.backends(t)
 	assert.Empty(t, out["backends"])
-	assert.Equal(t, "build ollama backend: unbuildable endpoint", out["invalid"].([]any)[0].(map[string]any)["error"])
+	assert.Equal(t, "backend document is invalid", out["invalid"].([]any)[0].(map[string]any)["error"])
 
 	bad.Data[backend.DocumentKey] = goodOllamaDocument
 	_, err = f.client.CoreV1().ConfigMaps(testNamespace).Update(context.Background(), bad, metav1.UpdateOptions{})

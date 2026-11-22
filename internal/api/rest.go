@@ -118,7 +118,11 @@ func backendQuery(r *http.Request) string {
 // withErrors adds the per-backend failures of an aggregate read to a body.
 func withErrors(body map[string]any, errs service.Errors) map[string]any {
 	if len(errs) > 0 {
-		body["errors"] = errs
+		failures := make(map[backend.Name]string, len(errs))
+		for name := range errs {
+			failures[name] = "backend request failed"
+		}
+		body["errors"] = failures
 	}
 	return body
 }
@@ -363,9 +367,9 @@ func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request, preset
 func (h *REST) writeError(w http.ResponseWriter, err error) {
 	status, code := statusFor(err)
 	if status >= http.StatusInternalServerError {
-		h.log.Error("request failed", "status", status, "error", err)
+		h.log.Error("request failed", "status", status, "code", code)
 	}
-	detail := errorDetail{Code: code, Message: err.Error()}
+	detail := errorDetail{Code: code, Message: publicErrorMessage(err)}
 	if grant, ok := errors.AsType[*gitops.ErrGrantRequired](err); ok {
 		detail.Apps = []string{grant.App}
 	}
@@ -379,6 +383,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusRequestEntityTooLarge, "request_too_large"
 	}
 	switch {
+	case apierrors.IsUnauthorized(err):
+		return http.StatusUnauthorized, "auth_required"
 	case errors.Is(err, backend.ErrNotFound), errors.Is(err, jobs.ErrNotFound):
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, backend.ErrNoBackend):
@@ -400,7 +406,7 @@ func statusFor(err error) (int, string) {
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, backend.ErrUnfit):
 		return http.StatusPreconditionFailed, "does_not_fit"
-	case errors.Is(err, backend.ErrUnavailable):
+	case errors.Is(err, backend.ErrUnavailable), errors.Is(err, jobs.ErrShuttingDown):
 		return http.StatusServiceUnavailable, "unavailable"
 	case errors.Is(err, backend.ErrForbidden), apierrors.IsForbidden(err):
 		// The cluster refused the caller: their own RBAC decides, not a
@@ -414,6 +420,20 @@ func statusFor(err error) (int, string) {
 func isGrantRequired(err error) bool {
 	_, ok := errors.AsType[*gitops.ErrGrantRequired](err)
 	return ok
+}
+
+func publicErrorMessage(err error) string {
+	if errors.Is(err, service.ErrAllBackendsFailed) {
+		return service.ErrAllBackendsFailed.Error()
+	}
+	if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
+		return backend.PublicErrorMessage(err)
+	}
+	status, _ := statusFor(err)
+	if status >= http.StatusInternalServerError {
+		return backend.PublicErrorMessage(err)
+	}
+	return err.Error()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

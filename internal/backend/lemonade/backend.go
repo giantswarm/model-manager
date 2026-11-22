@@ -455,12 +455,14 @@ func mapErr(err error, name string) error {
 	}
 	msg := strings.ToLower(apiErr.Message)
 	switch {
+	case apiErr.Code == "unknown_model":
+		return fmt.Errorf("%w: %s; imported models require the user namespace", backend.ErrNotFound, name)
 	case apiErr.Status == http.StatusNotFound,
 		apiErr.Code == "model_not_found", apiErr.Code == "unknown_model", apiErr.Code == "not_found",
 		strings.Contains(msg, "not found"):
-		return fmt.Errorf("%w: %s: %s", backend.ErrNotFound, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrNotFound, name)
 	case apiErr.Status == http.StatusBadRequest, apiErr.Status == http.StatusUnprocessableEntity:
-		return fmt.Errorf("%w: %s: %s", backend.ErrInvalid, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrInvalid, name)
 	}
 	return err
 }

@@ -50,3 +50,18 @@ func TestReadOnlyToolsAreNotDestructive(t *testing.T) {
 		require.Equal(t, mcp.ToBoolPtr(true), a.IdempotentHint, "%s is read-only but not reported idempotent", st.Tool.Name)
 	}
 }
+
+func TestToolEffectsIncludeInventoryWrites(t *testing.T) {
+	inventory := map[string]bool{ToolListModels: true, ToolGetModel: true, ToolListLoadedModels: true, ToolCheckFit: true, ToolListNodes: true}
+	local := map[string]bool{ToolGetInfo: true, ToolListJobs: true, ToolGetJob: true}
+	for _, registered := range docsServer().ListTools() {
+		tool := registered.Tool
+		require.NotNil(t, tool.Annotations.OpenWorldHint, tool.Name)
+		require.Equal(t, mcp.ToBoolPtr(!local[tool.Name]), tool.Annotations.OpenWorldHint, tool.Name)
+		if inventory[tool.Name] {
+			require.Equal(t, mcp.ToBoolPtr(false), tool.Annotations.ReadOnlyHint, tool.Name)
+			require.Equal(t, mcp.ToBoolPtr(false), tool.Annotations.IdempotentHint, tool.Name)
+			require.Contains(t, tool.Description, inventoryEffects)
+		}
+	}
+}

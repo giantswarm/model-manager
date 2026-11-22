@@ -801,8 +801,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	}
 	require.NotNil(t, cache)
 	assert.Equal(t, InventoryModeDaemonSet, cache.Inventory)
-	assert.Contains(t, cache.Error, "no ready cache-agent pod on "+testCacheNode)
-	assert.Contains(t, cache.Error, "app.kubernetes.io/instance=mm")
+	assert.Equal(t, "backend request failed", cache.Error)
 	assert.Equal(t, 0, cache.Models)
 	pods, err := f.cs.CoreV1().Pods(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
@@ -823,7 +822,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	require.NoError(t, err)
 	for _, n := range nodes {
 		if n.Name == testCacheNode {
-			assert.Contains(t, n.Cache.Error, "no ready cache-agent pod")
+			assert.Equal(t, "backend request failed", n.Cache.Error)
 		}
 	}
 
@@ -878,7 +877,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	require.NoError(t, err)
 	for _, n := range nodes {
 		if n.Name == testCacheNode {
-			assert.Contains(t, n.Cache.Error, "HTTP 500")
+			assert.Equal(t, "backend request failed", n.Cache.Error)
 		}
 	}
 }

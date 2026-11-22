@@ -63,11 +63,22 @@ Audit entries contain validated issuer, subject, actor, tool and outcome only.
 REST errors use `application/problem+json` and retain the `error.code` and
 `error.message` fields. Request bodies over 1 MiB return 413, including chunked bodies.
 
-Shutdown revokes readiness before a 15-second HTTP drain. OAuth resources stay
-available during draining, then have a separate five-second cleanup budget.
-After the HTTP deadline, remaining connections are closed. Handlers that ignore
-cancellation and job waiting can still delay process exit; the deployment's
-termination grace period must also accommodate jobs and telemetry flushing.
+Shutdown revokes readiness before draining active requests. `--shutdown-timeout`
+(`MODEL_MANAGER_SHUTDOWN_TIMEOUT`, default `25s`) sets one process deadline and
+must exceed five seconds. The final five seconds are reserved for telemetry.
+HTTP draining has a 15-second phase limit; OAuth cleanup and background jobs
+share the remaining work budget. Connections are closed at the HTTP deadline.
+Jobs stop admission and receive process cancellation while retaining their
+caller's credential. An expired credential is never replaced by a ServiceAccount.
+Jobs that ignore cancellation cannot extend shutdown waiting beyond the budget.
+Keep the pod's termination grace period longer than the configured process budget.
+
+Validate gateway/scraper selectors, legacy overrides, explicit monitor tenant and
+local mode with `tests/chart-policy.sh <kube-context>`; it renders templates only.
+
+Public backend failures retain stable codes and backend names but omit upstream
+error bodies and credential-bearing URL components. Inventory tools advertise
+write effects because KServe inventory can create scan Jobs and reconcile indexes.
 
 Logs use text on stderr without OTLP configuration and honor `--verbose`.
 With OTLP configured, logs are exported and mirrored as JSON to stderr.

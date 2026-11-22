@@ -1,4 +1,5 @@
 {{- if and .Values.observability.metrics.enabled .Values.serviceMonitor.enabled }}
+{{- $tenant := required "serviceMonitor.labels[observability.giantswarm.io/tenant] must be set" (index .Values.serviceMonitor.labels "observability.giantswarm.io/tenant") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -6,7 +7,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "model-manager.labels" . | nindent 4 }}
-    {{- with .Values.serviceMonitor.labels }}
+    observability.giantswarm.io/tenant: {{ $tenant | quote }}
+    {{- with omit .Values.serviceMonitor.labels "observability.giantswarm.io/tenant" }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:

@@ -39,7 +39,10 @@ const (
 )
 
 // ErrNotFound means no job has that id.
-var ErrNotFound = errors.New("job not found")
+var (
+	ErrNotFound     = errors.New("job not found")
+	ErrShuttingDown = errors.New("job manager is shutting down")
+)
 
 // Job is a snapshot of one operation. Values returned by the manager are
 // copies; mutate nothing.
@@ -102,9 +105,9 @@ type Manager struct {
 	jobs      map[string]*entry
 	retention time.Duration
 	maxJobs   int
-	now       func() time.Time
 	newID     func() string
-	wg        sync.WaitGroup
+	lifetime  context.Context
+	stopping  bool
 }
 
 // Option configures a Manager.
@@ -116,8 +119,8 @@ func WithRetention(d time.Duration) Option { return func(m *Manager) { m.retenti
 // WithMaxJobs caps the number of finished jobs kept (default 200).
 func WithMaxJobs(n int) Option { return func(m *Manager) { m.maxJobs = n } }
 
-// WithClock replaces the clock (tests).
-func WithClock(now func() time.Time) Option { return func(m *Manager) { m.now = now } }
+// WithLifetime cancels every job when its application owner stops.
+func WithLifetime(ctx context.Context) Option { return func(m *Manager) { m.lifetime = ctx } }
 
 // NewManager builds a Manager.
 func NewManager(opts ...Option) *Manager {
@@ -125,8 +128,8 @@ func NewManager(opts ...Option) *Manager {
 		jobs:      map[string]*entry{},
 		retention: 24 * time.Hour,
 		maxJobs:   200,
-		now:       time.Now,
 		newID:     randomID,
+		lifetime:  context.Background(),
 	}
 	for _, o := range opts {
 		o(m)
@@ -158,13 +161,16 @@ type StartRequest struct {
 // Start begins a job in the background and returns its initial snapshot. If a
 // job of the same type for the same model on the same backend is still
 // pending/running, that job is returned instead and created is false.
-func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
+func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopping || m.lifetime.Err() != nil {
+		return Job{}, false, ErrShuttingDown
+	}
 	m.pruneLocked()
 	for _, e := range m.jobs {
 		if e.job.Type == req.Type && e.job.Backend == req.Backend && e.job.Model == req.Model && !e.job.Done() {
-			return e.job, false
+			return e.job, false, nil
 		}
 	}
 	parent := req.Context
@@ -172,6 +178,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stopLifetime := context.AfterFunc(m.lifetime, cancel)
 	e := &entry{
 		job: Job{
 			ID:          m.newID(),
@@ -179,7 +186,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 			Backend:     req.Backend,
 			Model:       req.Model,
 			Phase:       PhasePending,
-			CreatedAt:   m.now(),
+			CreatedAt:   time.Now(),
 			Wire:        req.Wire,
 			Node:        req.Node,
 			Preset:      req.Preset,
@@ -190,16 +197,14 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool) {
 		done:   make(chan struct{}),
 	}
 	m.jobs[e.job.ID] = e
-	m.wg.Add(1)
-	go m.run(ctx, e.job.ID, e.done, fn)
-	return e.job, true
+	go func() { defer stopLifetime(); defer cancel(); m.run(ctx, e.job.ID, e.done, fn) }()
+	return e.job, true, nil
 }
 
 func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn RunFunc) {
-	defer m.wg.Done()
 	defer close(done)
 	m.update(id, func(j *Job) {
-		t := m.now()
+		t := time.Now()
 		j.Phase = PhaseRunning
 		j.StartedAt = &t
 	})
@@ -228,9 +233,16 @@ func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn Run
 			}
 		})
 	}
-	result, err := fn(ctx, report)
+	var result any
+	err := ctx.Err()
+	if err == nil {
+		result, err = fn(ctx, report)
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	m.update(id, func(j *Job) {
-		t := m.now()
+		t := time.Now()
 		j.FinishedAt = &t
 		switch {
 		case err != nil && errors.Is(err, context.Canceled) && ctx.Err() != nil:
@@ -238,7 +250,7 @@ func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn Run
 			j.Error = "cancelled"
 		case err != nil:
 			j.Phase = PhaseFailed
-			j.Error = err.Error()
+			j.Error = backend.PublicErrorMessage(err)
 		default:
 			j.Phase = PhaseSucceeded
 			j.Result = result
@@ -320,12 +332,40 @@ func (m *Manager) Await(ctx context.Context, id string) (Job, error) {
 	return m.Get(id)
 }
 
-// Wait blocks until all running jobs finished (shutdown, tests).
-func (m *Manager) Wait() { m.wg.Wait() }
+// Shutdown stops admission, cancels active jobs and waits within ctx's deadline.
+// Jobs that ignore cancellation cannot extend the caller's shutdown budget.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.mu.Lock()
+	m.stopping = true
+	done := make([]<-chan struct{}, 0, len(m.jobs))
+	for _, entry := range m.jobs {
+		entry.cancel()
+		done = append(done, entry.done)
+	}
+	m.mu.Unlock()
+	for _, finished := range done {
+		select {
+		case <-finished:
+			continue
+		default:
+		}
+		select {
+		case <-finished:
+		case <-ctx.Done():
+			select {
+			case <-finished:
+				continue
+			default:
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
+}
 
 // pruneLocked drops finished jobs beyond the retention window or count cap.
 func (m *Manager) pruneLocked() {
-	cutoff := m.now().Add(-m.retention)
+	cutoff := time.Now().Add(-m.retention)
 	finished := make([]*entry, 0)
 	for id, e := range m.jobs {
 		if !e.job.Done() || e.job.FinishedAt == nil {

@@ -455,6 +455,14 @@ func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 
 func (s *Service) describe(ctx context.Context, b backend.Backend, source string) BackendResponse {
 	resp := BackendResponse{Info: b.Info(ctx), Source: source, Capabilities: s.capabilities(b)}
+	resp.Endpoint = publicEndpoint(resp.Endpoint)
+	resp.AgentEndpoint = publicEndpoint(resp.AgentEndpoint)
+	if resp.Message != "" {
+		resp.Message = "backend reported a warning"
+		if !resp.Healthy {
+			resp.Message = backend.ErrUnavailable.Error()
+		}
+	}
 	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
 	// that is the default a client should report — not the driver's fallback.
 	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
@@ -524,12 +532,14 @@ func serveLifecycle(b backend.Backend) (backend.ServeLifecycle, bool) {
 // aggregateError is the failure of an aggregate read on every backend; it
 // unwraps to the first failure so the API maps it as that backend would.
 type aggregateError struct {
-	msg   string
 	first error
 }
 
-func (e *aggregateError) Error() string { return e.msg }
-func (e *aggregateError) Unwrap() error { return e.first }
+// ErrAllBackendsFailed identifies an aggregate failure without upstream details.
+var ErrAllBackendsFailed = errors.New("every backend failed")
+
+func (e *aggregateError) Error() string   { return ErrAllBackendsFailed.Error() }
+func (e *aggregateError) Unwrap() []error { return []error{ErrAllBackendsFailed, e.first} }
 
 // aggregate reads from every target and collects per-backend failures. A
 // single target's failure is returned as is; all targets failing is an
@@ -538,7 +548,6 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 	out := []T{}
 	errs := Errors{}
 	var first error
-	var msgs []string
 	for _, b := range targets {
 		items, err := fetch(b)
 		if err != nil {
@@ -546,7 +555,6 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 				first = err
 			}
 			errs[b.Name()] = err.Error()
-			msgs = append(msgs, fmt.Sprintf("%s: %v", b.Name(), err))
 			continue
 		}
 		out = append(out, items...)
@@ -555,7 +563,7 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 		if len(targets) == 1 {
 			return nil, nil, first
 		}
-		return nil, nil, &aggregateError{msg: "every backend failed: " + strings.Join(msgs, "; "), first: first}
+		return nil, nil, &aggregateError{first: first}
 	}
 	if len(errs) == 0 {
 		errs = nil
@@ -736,14 +744,17 @@ func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, e
 		return jobs.Job{}, false, fmt.Errorf("%w: models on %s are wired when loaded (served), not when pulled", backend.ErrInvalid, b.Name())
 	}
 	req := backend.PullRequest{Ref: ref, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
-	job, created := s.startPull(ctx, b, req, doWire)
+	job, created, err := s.startPull(ctx, b, req, doWire)
+	if err != nil {
+		return jobs.Job{}, false, err
+	}
 	if created {
 		s.log.Info("pull started", "backend", b.Name(), "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	}
 	return job, created, nil
 }
 
-func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.PullRequest, doWire bool) (jobs.Job, bool) {
+func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.PullRequest, doWire bool) (jobs.Job, bool, error) {
 	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Backend: b.Name(), Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset, Context: ctx},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			if err := b.Pull(jobCtx, req, report); err != nil {
@@ -879,7 +890,7 @@ func (s *Service) wire(ctx context.Context, b backend.Backend, model, reason str
 	ref, err := s.wireModel(ctx, b, model, backend.WireOptions{})
 	if err != nil {
 		s.log.Warn("wiring failed", "backend", b.Name(), "model", model, "occasion", reason, "error", err, identity.LogAttr(ctx))
-		return &WiringResult{Reason: WiringFailed, Error: err.Error()}
+		return &WiringResult{Reason: WiringFailed, Error: backend.PublicErrorMessage(err)}
 	}
 	if !ref.Managed {
 		reason = AlreadyWired
@@ -917,7 +928,7 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 			object = running.Kind + " " + running.Resource
 		}
 	}
-	job, created := s.jobs.Start(start,
+	job, created, err := s.jobs.Start(start,
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			report(backend.Progress{Status: "waiting for " + object + " to become ready"})
 			if err := sl.WaitReady(jobCtx, model); err != nil {
@@ -934,6 +945,10 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 			report(backend.Progress{Status: "wired"})
 			return mc, nil
 		})
+	if err != nil {
+		s.log.Info("load progress tracking stopped", "backend", b.Name())
+		return
+	}
 	if created {
 		s.log.Info("load job started", "backend", b.Name(), "model", model, "job", job.ID, identity.LogAttr(ctx))
 	}
@@ -1405,7 +1420,10 @@ func (s *Service) adoptPulls(ctx context.Context, b backend.Backend) {
 		return
 	}
 	for _, req := range pulls {
-		job, created := s.startPull(ctx, b, req, false)
+		job, created, err := s.startPull(ctx, b, req, false)
+		if err != nil {
+			return
+		}
 		if created {
 			s.log.Info("adopted running pull", "backend", b.Name(), "model", req.Ref, "job", job.ID)
 		}

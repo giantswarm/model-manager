@@ -181,11 +181,13 @@ can stay empty.
 | httpRoute.hostnames | list | `[]` | Hostnames matched by the route. |
 | httpRoute.annotations | object | `{}` | Annotations on the HTTPRoute. |
 | httpRoute.labels | object | `{}` | Labels on the HTTPRoute. |
-| networkPolicy.enabled | bool | `false` | Create a Kubernetes NetworkPolicy for the pod. |
-| networkPolicy.ingressNamespaces | list | `[]` | Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only. |
+| networkPolicy.enabled | bool | `true` | Create a Kubernetes NetworkPolicy for the pod. |
+| networkPolicy.gatewayPeers | list | `[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"muster"}}},{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"agentgateway"}}}]` | NetworkPolicy peers allowed to reach the API. Pod selectors alone match the release namespace. Configure the actual gateway data-plane selector when using an HTTPRoute with another gateway implementation. |
+| networkPolicy.ingressNamespaces | list | `[]` | Legacy additional namespaces allowed to reach the API. Each explicitly configured namespace allows all its pods (label kubernetes.io/metadata.name). |
 | networkPolicy.egressCIDRs | list | `[]` | Extra egress CIDRs (the host Ollama, Lemonade or LM Studio endpoint, e.g. 172.21.0.1/32). |
 | networkPolicy.allowKubeAPI | bool | `true` | Allow egress to the Kubernetes API server (needed for wiring and by the kserve backend). |
-| networkPolicy.metricsNamespaces | list | `["kube-system"]` | Namespaces allowed to scrape the metrics port (label kubernetes.io/metadata.name), when `observability.metrics.enabled`. |
+| networkPolicy.metricsPeers | list | `[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}},"podSelector":{"matchLabels":{"app.kubernetes.io/instance":"alloy-metrics","app.kubernetes.io/name":"alloy"}}}]` | NetworkPolicy peers allowed to scrape metrics when enabled. |
+| networkPolicy.metricsNamespaces | list | `[]` | Legacy additional namespaces allowed to scrape metrics. Each explicitly configured namespace allows all its pods. |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.annotations | object | `{}` | Annotations on the ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name (generated when empty). |
@@ -244,7 +246,7 @@ can stay empty.
 | observability.metrics.port | int | `9464` | Port of the metrics listener, apart from the API port so an HTTPRoute or the OAuth guard never covers it. |
 | serviceMonitor.enabled | bool | `false` | Render a ServiceMonitor for the `metrics` port. Also needs `observability.metrics.enabled`; the meta chart turns this on with the tenant label. |
 | serviceMonitor.interval | string | `""` | Scrape interval; empty uses the Prometheus Operator default. |
-| serviceMonitor.labels | object | `{}` | Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant. |
+| serviceMonitor.labels | object | `{"observability.giantswarm.io/tenant":"giantswarm"}` | Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant. |
 | extraArgs | list | `[]` | Extra container arguments. |
 | extraEnv | list | `[]` | Extra environment variables. |
 | nodeSelector | object | `{}` | Node selector. |

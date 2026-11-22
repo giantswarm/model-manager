@@ -335,7 +335,7 @@ func mapErr(err error, name string) error {
 	if errors.As(err, &apiErr) {
 		msg := strings.ToLower(apiErr.Message)
 		if apiErr.Status == http.StatusNotFound || strings.Contains(msg, "not found") || strings.Contains(msg, "file does not exist") {
-			return fmt.Errorf("%w: %s: %s", backend.ErrNotFound, name, apiErr.Message)
+			return fmt.Errorf("%w: %s", backend.ErrNotFound, name)
 		}
 	}
 	return err
