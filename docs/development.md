@@ -74,7 +74,8 @@ Jobs that ignore cancellation cannot extend shutdown waiting beyond the budget.
 Keep the pod's termination grace period longer than the configured process budget.
 
 Validate gateway/scraper selectors, legacy overrides, explicit monitor tenant and
-local mode with `tests/chart-policy.sh <kube-context>`; it renders templates only.
+local mode with `helm --kube-context <context> unittest helm/model-manager`;
+these checks render templates only and run in the chart CI workflow.
 
 Public backend failures retain stable codes and backend names but omit upstream
 error bodies and credential-bearing URL components. Inventory tools advertise
