@@ -25,7 +25,7 @@ func PublicErrorMessage(err error) string {
 	case errors.Is(err, ErrUnsupported):
 		return err.Error()
 	}
-	for _, known := range []error{ErrNotFound, ErrUnsupported, ErrForbidden, ErrConflict, ErrInvalid, ErrUnfit, ErrUnavailable, ErrGitOpsOwned} {
+	for _, known := range []error{ErrNotFound, ErrForbidden, ErrConflict, ErrInvalid, ErrUnfit, ErrUnavailable, ErrGitOpsOwned} {
 		if errors.Is(err, known) {
 			return known.Error()
 		}

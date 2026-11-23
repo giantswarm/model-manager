@@ -253,20 +253,12 @@ func warnDeprecatedOAuthOptions(o *serveOptions, log *slog.Logger) {
 func runServe(ctx context.Context, o *serveOptions) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	budget, _ := ctx.Value(shutdownBudgetKey{}).(*shutdownBudget)
-	if budget == nil {
-		timeout := o.shutdownTimeout
-		if timeout == 0 {
-			timeout = defaultShutdownTimeout
-		}
-		var err error
-		budget, err = newShutdownBudget(ctx, timeout)
-		if err != nil {
-			return err
-		}
-		defer budget.Close()
+	// The root command owns the budget so log flushing shares its deadline.
+	budget, ok := ctx.Value(shutdownBudgetKey{}).(*shutdownBudget)
+	if !ok {
+		return errors.New("serve requires the root command's shutdown budget")
 	}
-	stopBudget := context.AfterFunc(ctx, func() { budget.Context() })
+	stopBudget := context.AfterFunc(ctx, budget.Start)
 	defer stopBudget()
 	log := slog.Default()
 	warnDeprecatedOAuthOptions(o, log)

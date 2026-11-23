@@ -29,7 +29,8 @@ func newShutdownBudget(parent context.Context, timeout time.Duration) (*shutdown
 	return &shutdownBudget{parent: context.WithoutCancel(parent), timeout: timeout}, nil
 }
 
-func (b *shutdownBudget) start() {
+// Start begins the shutdown deadline once; later calls keep the first deadline.
+func (b *shutdownBudget) Start() {
 	b.once.Do(func() {
 		b.process, b.cancel = context.WithTimeout(b.parent, b.timeout)
 		deadline, _ := b.process.Deadline()
@@ -37,6 +38,6 @@ func (b *shutdownBudget) start() {
 	})
 }
 
-func (b *shutdownBudget) Context() context.Context     { b.start(); return b.process }
-func (b *shutdownBudget) WorkContext() context.Context { b.start(); return b.work }
-func (b *shutdownBudget) Close()                       { b.start(); b.cancelWork(); b.cancel() }
+func (b *shutdownBudget) Context() context.Context     { b.Start(); return b.process }
+func (b *shutdownBudget) WorkContext() context.Context { b.Start(); return b.work }
+func (b *shutdownBudget) Close()                       { b.Start(); b.cancelWork(); b.cancel() }
