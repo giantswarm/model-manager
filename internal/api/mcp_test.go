@@ -214,6 +214,7 @@ func TestRESTErrorStatus(t *testing.T) {
 		"missing grant":    {err: fmt.Errorf("wire: %w", &gitops.ErrGrantRequired{App: "github", Reason: "grant it"}), status: http.StatusForbidden, code: "grant_required", apps: []string{"github"}},
 		"delegated caller": {err: fmt.Errorf("%w: not an agent", backend.ErrForbidden), status: http.StatusForbidden, code: "forbidden"},
 		"pinned token":     {err: fmt.Errorf("%w: connect", gitops.ErrAuthRequired), status: http.StatusUnauthorized, code: "auth_required"},
+		"no client bound":  {err: jobs.ErrIdentityRequired, status: http.StatusForbidden, code: "forbidden"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

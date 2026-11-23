@@ -45,15 +45,15 @@ client and current delegated actor. Unknown and foreign task IDs return 404;
 lists omit inaccessible tasks. `requestedBy` is display attribution only. A
 changed email does not change ownership. A different connector, client or actor
 does not acquire access by presenting the same email. Missing or ambiguous
-client identity is refused: forwarded ID tokens need a signed `azp` or a single
-audience; supported access tokens carry their validated client binding.
+client identity is refused with 403: forwarded ID tokens need a signed `azp` or
+a single audience; supported access tokens carry their validated client binding.
 
 Kubernetes task reads and cancellation recheck resource access using the current
 caller's credential and the original resource namespace/name/UID. Resource
-replacement is refused. For a garbage-collected object, a SelfSubjectAccessReview
-checks the caller's current named-resource read permission before returning task
-history. Permission-review errors fail closed. A refreshed credential can read
-an owned task, but does not reuse a worker holding an older credential.
+replacement is refused, and lists omit that task. A garbage-collected object
+still requires the caller's read permission: the API server authorizes the read
+before reporting the object as missing. A refreshed credential can read an
+owned task, but does not reuse a worker holding an older credential.
 
 Cancelling a KServe task stops its observer and follow-up wiring; it does not
 delete a shared download or serving object. Stop the underlying work through the
@@ -87,8 +87,10 @@ When using an HTTPRoute, configure the actual gateway's data-plane selector.
 ServiceMonitors require `serviceMonitor.labels.observability.giantswarm.io/tenant`,
 defaulting to `giantswarm`. Set the intended tenant before enabling a monitor.
 
-For a local cluster using host backends, either set the host's explicit
-`networkPolicy.egressCIDRs` or disable NetworkPolicy for that development
+Egress allows DNS, port 443 and 6443 (with `allowKubeAPI`), the OTLP collector
+and the KServe serving namespace. A backend on another port, such as an
+in-cluster or host Ollama, Lemonade or LM Studio endpoint, needs its address in
+`networkPolicy.egressCIDRs`, or NetworkPolicy disabled for that development
 installation with `--set networkPolicy.enabled=false`. Keep OAuth enabled
 where the server is reachable by other users.
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -307,6 +308,8 @@ func (m *Manager) run(ctx context.Context, id string, done chan struct{}, fn Run
 		case err != nil:
 			j.Phase = PhaseFailed
 			j.Error = backend.PublicErrorMessage(err)
+			// The public message omits upstream detail; operators need the cause.
+			slog.Warn("job failed", "job", id, "type", j.Type, "backend", j.Backend, "model", j.Model, "error", err)
 		default:
 			j.Phase = PhaseSucceeded
 			j.Result = result

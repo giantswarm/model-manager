@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/giantswarm/mcp-toolkit/brand"
@@ -868,6 +870,9 @@ func errResult(err error) *mcp.CallToolResult {
 		res.StructuredContent = structured
 		return res
 	}
-	_, code := statusFor(err)
+	status, code := statusFor(err)
+	if status >= http.StatusInternalServerError {
+		slog.Error("tool call failed", "code", code, "error", err)
+	}
 	return mcp.NewToolResultError(code + ": " + strings.TrimPrefix(publicErrorMessage(err), code+": "))
 }

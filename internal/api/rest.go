@@ -367,7 +367,7 @@ func (h *REST) decodeModelRequest(w http.ResponseWriter, r *http.Request, preset
 func (h *REST) writeError(w http.ResponseWriter, err error) {
 	status, code := statusFor(err)
 	if status >= http.StatusInternalServerError {
-		h.log.Error("request failed", "status", status, "code", code)
+		h.log.Error("request failed", "status", status, "code", code, "error", err)
 	}
 	detail := errorDetail{Code: code, Message: publicErrorMessage(err)}
 	if grant, ok := errors.AsType[*gitops.ErrGrantRequired](err); ok {
@@ -384,7 +384,9 @@ func statusFor(err error) (int, string) {
 	}
 	switch {
 	case errors.Is(err, jobs.ErrIdentityRequired):
-		return http.StatusUnauthorized, "auth_required"
+		// The bearer is valid but names no single client or actor; signing in
+		// again with the same client cannot change that.
+		return http.StatusForbidden, "forbidden"
 	case apierrors.IsUnauthorized(err):
 		return http.StatusUnauthorized, "auth_required"
 	case errors.Is(err, backend.ErrNotFound), errors.Is(err, jobs.ErrNotFound):

@@ -698,6 +698,7 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Job" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/jobs/{id}:
     parameters:
@@ -752,7 +753,7 @@ components:
       schema: { $ref: "#/components/schemas/BackendName" }
   responses:
     Unauthorized:
-      description: a validated task identity or current backend credential is required
+      description: the cluster rejected the caller's credential — sign in again
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -782,7 +783,7 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
     Forbidden:
-      description: the cluster refused the caller — model-manager acts as the caller, so their own Kubernetes RBAC decides; not retryable
+      description: the cluster refused the caller — model-manager acts as the caller, so their own Kubernetes RBAC decides — or the token names no single OAuth client or actor; not retryable
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }

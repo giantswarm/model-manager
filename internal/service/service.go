@@ -1430,6 +1430,7 @@ func (s *Service) adoptPulls(ctx context.Context, b backend.Backend) {
 	for _, req := range pulls {
 		job, created, err := s.startPull(ctx, b, req, false, true)
 		if err != nil {
+			s.log.Warn("adopting running pull failed", "backend", b.Name(), "model", req.Ref, "error", err)
 			return
 		}
 		if created {
