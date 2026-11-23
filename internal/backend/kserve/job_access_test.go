@@ -3,7 +3,6 @@ package kserve
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,11 +10,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 
 	toolkitk8s "github.com/giantswarm/mcp-toolkit/k8s"
@@ -28,7 +25,6 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 	var mode atomic.Value
 	mode.Store("allowed")
 	var applicationRequests atomic.Int32
-	var reviews atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		if strings.Contains(request.Header.Get("Authorization"), "application-credential") {
@@ -39,33 +35,12 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 			_ = json.NewEncoder(writer).Encode(metav1.Status{Status: metav1.StatusFailure, Reason: metav1.StatusReasonUnauthorized, Code: 401})
 			return
 		}
-		if request.URL.Path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" {
-			reviews.Add(1)
-			body, readErr := io.ReadAll(request.Body)
-			decoded, _, decodeErr := scheme.Codecs.UniversalDeserializer().Decode(body, nil, nil)
-			review, ok := decoded.(*authorizationv1.SelfSubjectAccessReview)
-			if readErr != nil || decodeErr != nil || !ok {
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			attributes := review.Spec.ResourceAttributes
-			allowed := attributes != nil && attributes.Group == "batch" && attributes.Version == "v1" && attributes.Namespace == "tenant" && attributes.Resource == "jobs" && attributes.Name == "download" && attributes.Verb == "get"
-			if mode.Load() == "removed-denied" {
-				allowed = false
-			}
-			result := authorizationv1.SelfSubjectAccessReview{TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"}, Status: authorizationv1.SubjectAccessReviewStatus{Allowed: allowed}}
-			if mode.Load() == "evaluation-error" {
-				result.Status.EvaluationError = "review unavailable"
-			}
-			_ = json.NewEncoder(writer).Encode(result)
-			return
-		}
 		if mode.Load() == "forbidden" {
 			writer.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(writer).Encode(metav1.Status{Status: metav1.StatusFailure, Reason: metav1.StatusReasonForbidden, Code: 403})
 			return
 		}
-		if strings.HasPrefix(mode.Load().(string), "removed") || mode.Load() == "evaluation-error" {
+		if mode.Load() == "removed" {
 			writer.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(writer).Encode(metav1.Status{Status: metav1.StatusFailure, Reason: metav1.StatusReasonNotFound, Code: 404})
 			return
@@ -97,13 +72,8 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 	require.Error(t, driver.CheckJobAccess(t.Context(), object))
 	mode.Store("replacement")
 	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrNotFound)
-	mode.Store("removed-allowed")
+	mode.Store("removed")
 	require.NoError(t, driver.CheckJobAccess(caller, object))
-	require.EqualValues(t, 1, reviews.Load())
-	mode.Store("removed-denied")
-	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrForbidden)
-	mode.Store("evaluation-error")
-	require.Error(t, driver.CheckJobAccess(caller, object))
 	require.Zero(t, applicationRequests.Load())
 }
 

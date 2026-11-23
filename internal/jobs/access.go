@@ -111,7 +111,7 @@ func (m *Manager) ListFor(ctx context.Context, backendName backend.Name) ([]Job,
 		visible, err := m.GetFor(ctx, job.ID)
 		if err == nil {
 			out = append(out, visible)
-		} else if !errors.Is(err, ErrNotFound) && !errors.Is(err, backend.ErrForbidden) && !apierrors.IsForbidden(err) {
+		} else if !hiddenFromList(err) {
 			return nil, err
 		}
 		if ctx.Err() != nil {
@@ -119,6 +119,12 @@ func (m *Manager) ListFor(ctx context.Context, backendName backend.Name) ([]Job,
 		}
 	}
 	return out, nil
+}
+
+// hiddenFromList reports access outcomes that remove one task from a list
+// without failing it: another owner, revoked access, or a replaced resource.
+func hiddenFromList(err error) bool {
+	return errors.Is(err, ErrNotFound) || errors.Is(err, backend.ErrNotFound) || errors.Is(err, backend.ErrForbidden) || apierrors.IsForbidden(err)
 }
 
 // CancelFor cancels only the caller's task after checking current backend access.

@@ -233,6 +233,24 @@ func TestDeduplicatedTaskChecksItsDiscoveredResource(t *testing.T) {
 	require.False(t, current.Done())
 }
 
+func TestTaskListOmitsTasksWhoseResourceWasReplaced(t *testing.T) {
+	manager := managedJobs(t)
+	caller := authenticatedCaller(t, "alice")
+	for _, model := range []string{"current", "replaced"} {
+		_, _, err := manager.Start(StartRequest{Type: TypePull, Model: model, Context: caller, Authorize: func(_ context.Context, job Job) error {
+			if job.ID != "" && model == "replaced" {
+				return backend.ErrNotFound
+			}
+			return nil
+		}}, blockingOperation)
+		require.NoError(t, err)
+	}
+	visible, err := manager.ListFor(caller, "")
+	require.NoError(t, err)
+	require.Len(t, visible, 1)
+	require.Equal(t, "current", visible[0].Model)
+}
+
 func TestTaskListChecksOnlyTheSelectedBackend(t *testing.T) {
 	manager := managedJobs(t)
 	caller := authenticatedCaller(t, "alice")

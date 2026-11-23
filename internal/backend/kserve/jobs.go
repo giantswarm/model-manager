@@ -436,7 +436,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, backing *batc
 	name := backing.Name
 	report := func(status string, done int64) {
 		if progress != nil {
-			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal, Node: plan.Node, Preset: plan.Preset, Object: &backend.JobObject{Group: "batch", Version: "v1", Resource: "jobs", Namespace: backing.Namespace, Name: backing.Name, UID: string(backing.UID)}})
+			progress(backend.Progress{Status: status, BytesCompleted: done, BytesTotal: plan.BytesTotal, Node: plan.Node, Preset: plan.Preset, Object: &backend.JobObject{Group: downloadJobGVR.Group, Version: downloadJobGVR.Version, Resource: downloadJobGVR.Resource, Namespace: backing.Namespace, Name: backing.Name, UID: string(backing.UID)}})
 		}
 	}
 	report("download job created", 0)
