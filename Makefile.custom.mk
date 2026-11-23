@@ -1,11 +1,10 @@
 ##@ Development
 
 BINARY := model-manager
-GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 .PHONY: build-linux-amd64
-build-linux-amd64: ## Build the linux/amd64 binary the Dockerfile expects.
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=dev-$(GIT_SHA) -X main.commit=$(GIT_SHA)" -o $(BINARY)-linux-amd64 .
+build-linux-amd64: ## Build the linux/amd64 binary the Dockerfile expects, stamped into pkg/project as the release pipeline does (version from gitsemver).
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s $(LDFLAGS)" -o $(BINARY)-linux-amd64 .
 
 .PHONY: docker-build
 docker-build: build-linux-amd64 ## Build a local dev image (TAG=model-manager:dev).
