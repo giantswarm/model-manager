@@ -1,2 +1,2 @@
-CVE-2026-107325 until=2026-12-07 # go.mongodb.org/mongo-driver@v1.17.10
+CVE-2026-107325 until=2027-01-04 # go.mongodb.org/mongo-driver@v1.17.10
 CVE-2026-128100 until=2026-12-18 # github.com/hashicorp/vault/api@v1.23.0 since=2026-11-18
