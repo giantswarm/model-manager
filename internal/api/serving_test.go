@@ -248,7 +248,7 @@ func newServingFixtureOf(t *testing.T, wrap func(*fakeServing) backend.Backend) 
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny", Path: "tiny", Node: "n1"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{wrap(fb)}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{wrap(fb)}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}, service.Config{AutoWire: true, DefaultKeepAlive: "5m", ReconcileInterval: 5 * time.Millisecond}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -624,7 +624,7 @@ func TestServingRestartDuringColdStartLeavesAWiredModel(t *testing.T) {
 
 	// The process restarts: a new service over the same cluster state (the
 	// backend's objects, the ModelConfigs) with an empty job table.
-	restarted := service.New([]backend.Backend{f.backend}, jobs.NewManager(), f.wirer, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, CallerOnly: true}, nil)
+	restarted := service.New([]backend.Backend{f.backend}, jobs.NewManager(jobs.WithAnonymousAccess(true)), f.wirer, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, CallerOnly: true}, nil)
 	mux := http.NewServeMux()
 	NewREST(restarted, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -717,7 +717,7 @@ func TestServingMCPTools(t *testing.T) {
 	fb := newFakeServing()
 	fb.models["org/tiny"] = backend.Model{Name: "org/tiny", SizeBytes: 10, Preset: "tiny"}
 	fw := newFakeWirer()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	srv := NewMCPServer(svc, buildinfo.Info{Version: "test"})
 
 	out, isErr := callTool(t, srv, ToolListPresets, nil)
@@ -769,7 +769,7 @@ func TestServingMCPTools(t *testing.T) {
 	assert.Contains(t, out, "wired when loaded")
 
 	// The ollama-shaped fake answers unsupported for the kserve tools.
-	plain := NewMCPServer(service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(), nil, nil, service.Config{}, nil), buildinfo.Info{Version: "test"})
+	plain := NewMCPServer(service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil), buildinfo.Info{Version: "test"})
 	for _, tool := range []string{ToolListPresets, ToolListNodes} {
 		out, isErr = callTool(t, plain, tool, nil)
 		assert.True(t, isErr, tool)

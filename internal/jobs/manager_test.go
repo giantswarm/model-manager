@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -17,22 +18,23 @@ import (
 
 func waitDone(t *testing.T, m *Manager, id string) Job {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		j, err := m.Get(id)
-		require.NoError(t, err)
-		if j.Done() {
-			return j
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("job %s did not finish", id)
-	return Job{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	job, err := m.Await(ctx, id)
+	require.NoError(t, err)
+	return job
+}
+
+func startJob(t *testing.T, manager *Manager, request StartRequest, run RunFunc) (Job, bool) {
+	t.Helper()
+	job, created, err := manager.Start(request, run)
+	require.NoError(t, err)
+	return job, created
 }
 
 func TestStartRunsAndReportsProgress(t *testing.T) {
-	m := NewManager()
-	job, created := m.Start(StartRequest{Type: TypePull, Model: "smollm2:135m", Wire: true}, func(_ context.Context, report func(backend.Progress)) (any, error) {
+	m := NewManager(WithAnonymousAccess(true))
+	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "smollm2:135m", Wire: true}, func(_ context.Context, report func(backend.Progress)) (any, error) {
 		report(backend.Progress{Status: "pulling manifest"})
 		report(backend.Progress{Status: "pulling", BytesCompleted: 50, BytesTotal: 200})
 		report(backend.Progress{Status: "pulling", BytesCompleted: 150, BytesTotal: 200})
@@ -53,10 +55,10 @@ func TestStartRunsAndReportsProgress(t *testing.T) {
 }
 
 func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	// The request named a preset but left the node open: the job echoes the
 	// preset at once and takes the node the backend reports once it picked one.
-	job, created := m.Start(StartRequest{Type: TypePull, Model: "org/tiny", Preset: "tiny"}, func(_ context.Context, report func(backend.Progress)) (any, error) {
+	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "org/tiny", Preset: "tiny"}, func(_ context.Context, report func(backend.Progress)) (any, error) {
 		report(backend.Progress{Status: "download job created", Node: "gpu1", Preset: "tiny"})
 		report(backend.Progress{Status: "downloading", BytesCompleted: 5, BytesTotal: 10})
 		return nil, nil
@@ -69,12 +71,12 @@ func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
 	assert.Equal(t, "tiny", done.Preset, "a sample without placement leaves the values alone")
 
 	// A named node is echoed in the initial snapshot already.
-	pinned, _ := m.Start(StartRequest{Type: TypePull, Model: "org/other", Node: "gpu2"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	pinned, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "org/other", Node: "gpu2"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 	assert.Equal(t, "gpu2", pinned.Node)
 	assert.Empty(t, pinned.Preset)
 
 	// Backends without placement never set either; the JSON omits both.
-	bare, _ := m.Start(StartRequest{Type: TypePull, Model: "smollm2:135m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	bare, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "smollm2:135m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 	raw, err := json.Marshal(waitDone(t, m, bare.ID))
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), `"node"`)
@@ -82,36 +84,37 @@ func TestStartEchoesPlacementAndProgressRefinesIt(t *testing.T) {
 }
 
 func TestStartJoinsActiveJobForSameModel(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	release := make(chan struct{})
-	first, created := m.Start(StartRequest{Type: TypePull, Model: "a:1"}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
+	first, created := startJob(t, m, StartRequest{Type: TypePull, Model: "a:1"}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 		<-release
 		return nil, nil
 	})
 	require.True(t, created)
-	second, created := m.Start(StartRequest{Type: TypePull, Model: "a:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	second, created := startJob(t, m, StartRequest{Type: TypePull, Model: "a:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 	assert.False(t, created)
 	assert.Equal(t, first.ID, second.ID)
-	other, created := m.Start(StartRequest{Type: TypePull, Model: "b:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	other, created := startJob(t, m, StartRequest{Type: TypePull, Model: "b:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 	assert.True(t, created)
 	assert.NotEqual(t, first.ID, other.ID)
 	close(release)
-	m.Wait()
+	waitDone(t, m, first.ID)
+	waitDone(t, m, other.ID)
 	assert.Len(t, m.List(), 2)
 }
 
 func TestFailureAndCancel(t *testing.T) {
-	m := NewManager()
-	failed, _ := m.Start(StartRequest{Type: TypePull, Model: "bad:1"}, func(context.Context, func(backend.Progress)) (any, error) {
+	m := NewManager(WithAnonymousAccess(true))
+	failed, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "bad:1"}, func(context.Context, func(backend.Progress)) (any, error) {
 		return nil, errors.New("manifest not found")
 	})
 	j := waitDone(t, m, failed.ID)
 	assert.Equal(t, PhaseFailed, j.Phase)
-	assert.Equal(t, "manifest not found", j.Error)
+	assert.Equal(t, "backend request failed", j.Error)
 
 	started := make(chan struct{})
 	var once sync.Once
-	running, _ := m.Start(StartRequest{Type: TypePull, Model: "slow:1"}, func(ctx context.Context, report func(backend.Progress)) (any, error) {
+	running, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "slow:1"}, func(ctx context.Context, report func(backend.Progress)) (any, error) {
 		once.Do(func() { close(started) })
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -129,31 +132,31 @@ func TestFailureAndCancel(t *testing.T) {
 }
 
 func TestListOrderAndPrune(t *testing.T) {
-	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
-	clock := func() time.Time { return now }
-	m := NewManager(WithClock(clock), WithRetention(time.Hour), WithMaxJobs(1))
-	a, _ := m.Start(StartRequest{Type: TypePull, Model: "a:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
-	waitDone(t, m, a.ID)
-	now = now.Add(time.Minute)
-	b, _ := m.Start(StartRequest{Type: TypePull, Model: "b:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
-	waitDone(t, m, b.ID)
+	synctest.Test(t, func(t *testing.T) {
+		m := NewManager(WithAnonymousAccess(true), WithRetention(time.Hour), WithMaxJobs(1))
+		a, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "a:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+		waitDone(t, m, a.ID)
+		time.Sleep(time.Minute)
+		b, _ := startJob(t, m, StartRequest{Type: TypePull, Model: "b:1"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+		waitDone(t, m, b.ID)
 
-	list := m.List()
-	require.Len(t, list, 1, "maxJobs keeps only the newest finished job")
-	assert.Equal(t, b.ID, list[0].ID)
+		list := m.List()
+		require.Len(t, list, 1, "maxJobs keeps only the newest finished job")
+		assert.Equal(t, b.ID, list[0].ID)
 
-	now = now.Add(2 * time.Hour)
-	assert.Empty(t, m.List(), "retention window drops finished jobs")
+		time.Sleep(2 * time.Hour)
+		assert.Empty(t, m.List(), "retention window drops finished jobs")
+	})
 }
 
 func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	reqCtx, cancelReq := context.WithCancel(identity.ContextWithToken(
-		identity.ContextWith(context.Background(), &identity.Identity{Subject: "sub-1", Email: "admin@lab.local"}), "caller-token"))
+		identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
 	release := make(chan struct{})
 	var seenCaller, seenToken string
 	var seenErr error
-	job, created := m.Start(StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
+	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 		seenCaller = identity.Caller(ctx)
 		seenToken, _ = identity.TokenFromContext(ctx)
 		<-release
@@ -171,13 +174,13 @@ func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 	assert.Equal(t, "caller-token", seenToken, "and the caller's token for downstream Kubernetes calls")
 	assert.NoError(t, seenErr, "the request's cancellation does not reach the job")
 
-	anon, _ := m.Start(StartRequest{Type: TypeLoad, Model: "m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
+	anon, _ := startJob(t, m, StartRequest{Type: TypeLoad, Model: "m"}, func(context.Context, func(backend.Progress)) (any, error) { return nil, nil })
 	assert.Empty(t, anon.RequestedBy, "jobs the service starts on its own carry no caller")
 	waitDone(t, m, anon.ID)
 }
 
 func TestStartDedupesPerBackend(t *testing.T) {
-	m := NewManager()
+	m := NewManager(WithAnonymousAccess(true))
 	block := make(chan struct{})
 	run := func(ctx context.Context, _ func(backend.Progress)) (any, error) {
 		select {
@@ -186,15 +189,16 @@ func TestStartDedupesPerBackend(t *testing.T) {
 		}
 		return nil, nil
 	}
-	ollama, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameOllama, Model: "shared:1b"}, run)
+	ollama, created := startJob(t, m, StartRequest{Type: TypePull, Backend: backend.NameOllama, Model: "shared:1b"}, run)
 	require.True(t, created)
 	assert.Equal(t, backend.NameOllama, ollama.Backend)
-	lemonade, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
+	lemonade, created := startJob(t, m, StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
 	require.True(t, created, "the same reference on another backend is another job")
 	assert.NotEqual(t, ollama.ID, lemonade.ID)
-	joined, created := m.Start(StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
+	joined, created := startJob(t, m, StartRequest{Type: TypePull, Backend: backend.NameLemonade, Model: "shared:1b"}, run)
 	assert.False(t, created, "the same (type, backend, model) joins the running job")
 	assert.Equal(t, lemonade.ID, joined.ID)
 	close(block)
-	m.Wait()
+	waitDone(t, m, ollama.ID)
+	waitDone(t, m, lemonade.ID)
 }

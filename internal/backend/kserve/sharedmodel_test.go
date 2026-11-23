@@ -80,7 +80,7 @@ func TestSharedModelIsWiredToTheChosenPresetsRoute(t *testing.T) {
 	ctx := context.Background()
 	f.setDiscoveryOpts(ctx, discoveryOpts{gateway: "https://models.example.com"})
 	w := &recordingWirer{refs: map[string]wiring.ModelConfigRef{}}
-	svc := service.New([]backend.Backend{f.b}, jobs.NewManager(), w, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
+	svc := service.New([]backend.Backend{f.b}, jobs.NewManager(jobs.WithAnonymousAccess(true)), w, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true}, nil)
 	const route = "https://models.example.com/model-serving/" + alt
 
 	plan, err := svc.PlanLoad(ctx, service.LoadOptions{Backend: string(backend.NameKServe), Preset: alt})

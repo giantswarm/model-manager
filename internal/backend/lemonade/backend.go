@@ -11,6 +11,7 @@ package lemonade
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -50,6 +51,7 @@ var loading = backend.Loading{OnDemand: true, IdleEviction: false}
 
 // Backend is the lemonade driver.
 type Backend struct {
+	jobScope  string
 	client    *Client
 	endpoint  string
 	agentHost string
@@ -80,7 +82,7 @@ func New(opts backend.LemonadeOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc, opts.LoadTimeout), endpoint: endpoint, agentHost: agentHost, now: time.Now}, nil
+	return &Backend{jobScope: rand.Text(), client: NewClient(endpoint, hc, opts.LoadTimeout), endpoint: endpoint, agentHost: agentHost, now: time.Now}, nil
 }
 
 // NewWithClient builds the driver around an existing client (tests).
@@ -88,8 +90,11 @@ func NewWithClient(c *Client, endpoint, agentHost string) *Backend {
 	if agentHost == "" {
 		agentHost = endpoint
 	}
-	return &Backend{client: c, endpoint: endpoint, agentHost: agentHost, now: time.Now}
+	return &Backend{jobScope: rand.Text(), client: c, endpoint: endpoint, agentHost: agentHost, now: time.Now}
 }
+
+// JobScope identifies this configured backend instance.
+func (b *Backend) JobScope(context.Context) string { return b.jobScope }
 
 // Name implements backend.Backend.
 func (b *Backend) Name() backend.Name { return backend.NameLemonade }
@@ -455,12 +460,14 @@ func mapErr(err error, name string) error {
 	}
 	msg := strings.ToLower(apiErr.Message)
 	switch {
+	case apiErr.Code == "unknown_model":
+		return fmt.Errorf("%w: %s; imported models require the user namespace", backend.ErrNotFound, name)
 	case apiErr.Status == http.StatusNotFound,
-		apiErr.Code == "model_not_found", apiErr.Code == "unknown_model", apiErr.Code == "not_found",
+		apiErr.Code == "model_not_found", apiErr.Code == "not_found",
 		strings.Contains(msg, "not found"):
-		return fmt.Errorf("%w: %s: %s", backend.ErrNotFound, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrNotFound, name)
 	case apiErr.Status == http.StatusBadRequest, apiErr.Status == http.StatusUnprocessableEntity:
-		return fmt.Errorf("%w: %s: %s", backend.ErrInvalid, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrInvalid, name)
 	}
 	return err
 }

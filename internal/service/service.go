@@ -8,6 +8,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -455,6 +456,14 @@ func (s *Service) capabilities(b backend.Backend) backend.Capabilities {
 
 func (s *Service) describe(ctx context.Context, b backend.Backend, source string) BackendResponse {
 	resp := BackendResponse{Info: b.Info(ctx), Source: source, Capabilities: s.capabilities(b)}
+	resp.Endpoint = publicEndpoint(resp.Endpoint)
+	resp.AgentEndpoint = publicEndpoint(resp.AgentEndpoint)
+	if resp.Message != "" {
+		resp.Message = "backend reported a warning"
+		if !resp.Healthy {
+			resp.Message = backend.ErrUnavailable.Error()
+		}
+	}
 	// Load applies cfg.DefaultKeepAlive before the driver sees the request, so
 	// that is the default a client should report — not the driver's fallback.
 	if resp.Loading.KeepAliveDefault != "" && s.cfg.DefaultKeepAlive != "" {
@@ -524,12 +533,14 @@ func serveLifecycle(b backend.Backend) (backend.ServeLifecycle, bool) {
 // aggregateError is the failure of an aggregate read on every backend; it
 // unwraps to the first failure so the API maps it as that backend would.
 type aggregateError struct {
-	msg   string
 	first error
 }
 
-func (e *aggregateError) Error() string { return e.msg }
-func (e *aggregateError) Unwrap() error { return e.first }
+// ErrAllBackendsFailed identifies an aggregate failure without upstream details.
+var ErrAllBackendsFailed = errors.New("every backend failed")
+
+func (e *aggregateError) Error() string   { return ErrAllBackendsFailed.Error() }
+func (e *aggregateError) Unwrap() []error { return []error{ErrAllBackendsFailed, e.first} }
 
 // aggregate reads from every target and collects per-backend failures. A
 // single target's failure is returned as is; all targets failing is an
@@ -538,7 +549,6 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 	out := []T{}
 	errs := Errors{}
 	var first error
-	var msgs []string
 	for _, b := range targets {
 		items, err := fetch(b)
 		if err != nil {
@@ -546,7 +556,6 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 				first = err
 			}
 			errs[b.Name()] = err.Error()
-			msgs = append(msgs, fmt.Sprintf("%s: %v", b.Name(), err))
 			continue
 		}
 		out = append(out, items...)
@@ -555,7 +564,7 @@ func aggregate[T any](targets []backend.Backend, fetch func(backend.Backend) ([]
 		if len(targets) == 1 {
 			return nil, nil, first
 		}
-		return nil, nil, &aggregateError{msg: "every backend failed: " + strings.Join(msgs, "; "), first: first}
+		return nil, nil, &aggregateError{first: first}
 	}
 	if len(errs) == 0 {
 		errs = nil
@@ -736,15 +745,18 @@ func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, e
 		return jobs.Job{}, false, fmt.Errorf("%w: models on %s are wired when loaded (served), not when pulled", backend.ErrInvalid, b.Name())
 	}
 	req := backend.PullRequest{Ref: ref, Preset: strings.TrimSpace(opts.Preset), Node: strings.TrimSpace(opts.Node)}
-	job, created := s.startPull(ctx, b, req, doWire)
+	job, created, err := s.startPull(ctx, b, req, doWire, false)
+	if err != nil {
+		return jobs.Job{}, false, err
+	}
 	if created {
 		s.log.Info("pull started", "backend", b.Name(), "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
 	}
 	return job, created, nil
 }
 
-func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.PullRequest, doWire bool) (jobs.Job, bool) {
-	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Backend: b.Name(), Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset, Context: ctx},
+func (s *Service) startPull(ctx context.Context, b backend.Backend, req backend.PullRequest, doWire, applicationOwned bool) (jobs.Job, bool, error) {
+	return s.jobs.Start(jobs.StartRequest{Type: jobs.TypePull, Backend: b.Name(), Model: req.Ref, Wire: doWire, Node: req.Node, Preset: req.Preset, Context: ctx, Authorize: jobAuthorizer(b), ApplicationOwned: applicationOwned, Scope: b.JobScope(ctx)},
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			if err := b.Pull(jobCtx, req, report); err != nil {
 				return nil, err
@@ -769,6 +781,11 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	b, m, req, err := s.loadTarget(ctx, opts)
 	if err != nil {
 		return nil, err
+	}
+	if _, serves := serveLifecycle(b); serves && s.cfg.AutoWire && s.wirer != nil {
+		if err := s.jobs.CheckCaller(ctx); err != nil {
+			return nil, err
+		}
 	}
 	keepAlive := req.KeepAlive
 	res := &backend.LoadResult{}
@@ -820,7 +837,9 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 			if view.Wiring.ModelConfig != nil {
 				view.ModelConfig = view.Wiring.ModelConfig
 			}
-			s.startLoadJob(ctx, b, sl, m.Name, ref, view.Running)
+			if err := s.startLoadJob(ctx, b, sl, m.Name, ref, view.Running, req); err != nil {
+				return nil, err
+			}
 			return view, nil
 		}
 		if _, err := s.wireModel(ctx, b, m.Name, backend.WireOptions{}); err != nil {
@@ -879,7 +898,7 @@ func (s *Service) wire(ctx context.Context, b backend.Backend, model, reason str
 	ref, err := s.wireModel(ctx, b, model, backend.WireOptions{})
 	if err != nil {
 		s.log.Warn("wiring failed", "backend", b.Name(), "model", model, "occasion", reason, "error", err, identity.LogAttr(ctx))
-		return &WiringResult{Reason: WiringFailed, Error: err.Error()}
+		return &WiringResult{Reason: WiringFailed, Error: backend.PublicErrorMessage(err)}
 	}
 	if !ref.Managed {
 		reason = AlreadyWired
@@ -908,16 +927,18 @@ func (s *Service) loadedView(ctx context.Context, b backend.Backend, m *backend.
 // the load, nil when it lists none. The job lives in this process: a
 // restart drops it, and loses nothing but its progress entry. ref is what
 // the wiring resolves the endpoint by (servedRef).
-func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model, ref string, running *backend.LoadedModel) {
-	start := jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx}
+func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backend.ServeLifecycle, model, ref string, running *backend.LoadedModel, request backend.LoadRequest) error {
+	parameters, _ := json.Marshal(request)
+	start := jobs.StartRequest{Type: jobs.TypeLoad, Backend: b.Name(), Model: model, Wire: true, Context: ctx, Authorize: jobAuthorizer(b), Scope: b.JobScope(ctx), Parameters: string(parameters)}
 	object := model
 	if running != nil {
 		start.Resource, start.Preset = running.Resource, running.Preset
+		start.Object = running.Object
 		if running.Kind != "" && running.Resource != "" {
 			object = running.Kind + " " + running.Resource
 		}
 	}
-	job, created := s.jobs.Start(start,
+	job, created, err := s.jobs.Start(start,
 		func(jobCtx context.Context, report func(backend.Progress)) (any, error) {
 			report(backend.Progress{Status: "waiting for " + object + " to become ready"})
 			if err := sl.WaitReady(jobCtx, model); err != nil {
@@ -934,9 +955,13 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 			report(backend.Progress{Status: "wired"})
 			return mc, nil
 		})
+	if err != nil {
+		return err
+	}
 	if created {
 		s.log.Info("load job started", "backend", b.Name(), "model", model, "job", job.ID, identity.LogAttr(ctx))
 	}
+	return nil
 }
 
 // UnloadView is what an unload answers: the backend the model was on, the
@@ -966,7 +991,7 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 	s.log.Info("model unloaded", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
 	view := &UnloadView{Backend: b.Name(), Model: strings.TrimSpace(ref)}
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
-		s.endLoadJob(ctx, b.Name(), model)
+		s.endLoadJob(ctx, b, model)
 		var left *wiring.NotOwnedError
 		switch err := s.wirer.Remove(ctx, b.Name(), model, wiring.CreatedHere); {
 		case errors.As(err, &left):
@@ -1333,29 +1358,27 @@ func namesOf(bs []backend.Backend) []backend.Name {
 }
 
 // Jobs lists jobs, newest first, of the named backend or of all.
-func (s *Service) Jobs(name string) ([]jobs.Job, error) {
-	all := s.jobs.List()
-	if strings.TrimSpace(name) == "" {
-		return all, nil
-	}
-	b, err := s.named(name)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]jobs.Job, 0, len(all))
-	for _, j := range all {
-		if j.Backend == b.Name() {
-			out = append(out, j)
+func (s *Service) Jobs(ctx context.Context, name string) ([]jobs.Job, error) {
+	var selected backend.Name
+	if strings.TrimSpace(name) != "" {
+		driver, err := s.named(name)
+		if err != nil {
+			return nil, err
 		}
+		selected = driver.Name()
 	}
-	return out, nil
+	return s.jobs.ListFor(ctx, selected)
 }
 
 // Job returns one job.
-func (s *Service) Job(id string) (jobs.Job, error) { return s.jobs.Get(id) }
+func (s *Service) Job(ctx context.Context, id string) (jobs.Job, error) {
+	return s.jobs.GetFor(ctx, id)
+}
 
 // CancelJob cancels a running job.
-func (s *Service) CancelJob(id string) (jobs.Job, error) { return s.jobs.Cancel(id) }
+func (s *Service) CancelJob(ctx context.Context, id string) (jobs.Job, error) {
+	return s.jobs.CancelFor(ctx, id)
+}
 
 // Run performs the background duties until ctx ends: adopting pulls that
 // survived a restart (PullAdopter backends); on ServeLifecycle backends,
@@ -1405,7 +1428,11 @@ func (s *Service) adoptPulls(ctx context.Context, b backend.Backend) {
 		return
 	}
 	for _, req := range pulls {
-		job, created := s.startPull(ctx, b, req, false)
+		job, created, err := s.startPull(ctx, b, req, false, true)
+		if err != nil {
+			s.log.Warn("adopting running pull failed", "backend", b.Name(), "model", req.Ref, "error", err)
+			return
+		}
 		if created {
 			s.log.Info("adopted running pull", "backend", b.Name(), "model", req.Ref, "job", job.ID)
 		}
@@ -1431,7 +1458,7 @@ func (s *Service) reconcileWiring(ctx context.Context, b backend.Backend) {
 		if _, ok := wired.lookup(l.Name, &l); ok {
 			continue // model-manager's own, or someone else's (the portal)
 		}
-		if s.hasActiveJob(jobs.TypeLoad, b.Name(), l.Name) {
+		if s.hasActiveJob(rctx, jobs.TypeLoad, b, l.Name) {
 			continue
 		}
 		if _, err := s.wireModel(rctx, b, servedRef(l.Name, l.Preset), backend.WireOptions{}); err != nil {
@@ -1505,23 +1532,25 @@ func thinkString(think *bool) string {
 // waits for it to end: a readiness poll that read the object before the
 // unload deleted it would otherwise re-wire the ModelConfig the unload is
 // about to remove.
-func (s *Service) endLoadJob(ctx context.Context, b backend.Name, model string) {
+func (s *Service) endLoadJob(ctx context.Context, b backend.Backend, model string) {
+	scope := b.JobScope(ctx)
 	for _, j := range s.jobs.List() {
-		if j.Type != jobs.TypeLoad || j.Backend != b || j.Model != model || j.Done() {
+		if j.Type != jobs.TypeLoad || j.Backend != b.Name() || j.Scope != scope || j.Model != model || j.Done() {
 			continue
 		}
 		if _, err := s.jobs.Cancel(j.ID); err != nil {
 			continue
 		}
 		if _, err := s.jobs.Await(ctx, j.ID); err != nil {
-			s.log.Warn("waiting for the load job to end failed", "backend", b, "model", model, "job", j.ID, "error", err)
+			s.log.Warn("waiting for the load job to end failed", "backend", b.Name(), "model", model, "job", j.ID, "error", err)
 		}
 	}
 }
 
-func (s *Service) hasActiveJob(t jobs.Type, b backend.Name, model string) bool {
+func (s *Service) hasActiveJob(ctx context.Context, t jobs.Type, b backend.Backend, model string) bool {
+	scope := b.JobScope(ctx)
 	for _, j := range s.jobs.List() {
-		if j.Type == t && j.Backend == b && j.Model == model && !j.Done() {
+		if j.Type == t && j.Backend == b.Name() && j.Scope == scope && j.Model == model && !j.Done() {
 			return true
 		}
 	}

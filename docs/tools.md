@@ -6,17 +6,17 @@ Generated from the registered tools (`make tools-doc`); through muster every too
 |---|---|
 | `add_backend` | write, destructive |
 | `cancel_job` | write, destructive |
-| `check_fit` | read-only |
+| `check_fit` | write |
 | `delete_model` | write, destructive |
 | `get_backend` | read-only |
 | `get_info` | read-only |
 | `get_job` | read-only |
-| `get_model` | read-only |
+| `get_model` | write |
 | `list_backends` | read-only |
 | `list_jobs` | read-only |
 | `list_loaded_models` | write |
-| `list_models` | read-only |
-| `list_nodes` | read-only |
+| `list_models` | write |
+| `list_nodes` | write |
 | `list_presets` | read-only |
 | `load_model` | write |
 | `pull_model` | write |
@@ -120,7 +120,9 @@ One backend per name (default: the kind); kserve takes one per serving cluster, 
 ## `cancel_job`
 
 ```text
-Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).
+Cancel your pull or load task; a KServe download or serving resource continues independently.
+
+KServe cancellation stops this task's tracking and follow-up wiring. Stop shared Kubernetes work through its resource API with the required RBAC permissions; unload_model stops serving.
 ```
 
 ```json
@@ -147,7 +149,7 @@ Cancel a running pull or load job; cancelling a load leaves the model serving (u
 ```text
 Check whether a model or serving preset fits a kserve node before pulling or loading: the verdict load_model reaches.
 
-Sizes the weights from the hub (an oci:// preset from its image), adds the serving overhead and vLLM's KV cache at --max-model-len, and compares with the node's free budget less what served models reserve. fits stands only on the checks made: skippedChecks names those it could not make, reason any estimate. A GPU pool with no ready node is judged on its instance shapes (unverified without them). Says whether the model is cached there and needs a hub token.
+Sizes hub weights (OCI presets from the image), adds serving overhead and vLLM's KV cache at --max-model-len, and compares with the node's free budget less what served models reserve. fits covers the checks made: skippedChecks names those it could not make, reason any estimate. A GPU pool with no ready node is judged on its instance shapes (unverified without them). Says whether the model is cached there and needs a hub token. KServe inventory may write Jobs and indexes.
 ```
 
 ```json
@@ -271,7 +273,9 @@ Report this server's build, its tool names, the configured backends and, with ag
 ## `get_job`
 
 ```text
-Get one job: backend, phase, progress, error, and the ModelConfig created on success.
+Get one of your tasks: backend, phase, progress, error, and the ModelConfig created on success.
+
+Other callers' task IDs return not_found; Kubernetes resource access is checked on every request.
 ```
 
 ```json
@@ -293,6 +297,8 @@ Get one job: backend, phase, progress, error, and the ModelConfig created on suc
 
 ```text
 Get one downloaded model with its loaded state and kagent ModelConfig.
+
+KServe inventory may write Jobs and indexes.
 ```
 
 ```json
@@ -333,9 +339,9 @@ Call it first: most tools take an optional backend. An empty list comes with bac
 ## `list_jobs`
 
 ```text
-List pull and load jobs, newest first, with backend, phase and progress.
+List your pull and load tasks, newest first, with backend, phase and progress.
 
-On kserve a pull job carries the node whose cache receives the download and the preset it is for.
+Tasks are bound to the validated user, client and actor. Kubernetes tasks require current access to their backing resource.
 ```
 
 ```json
@@ -356,7 +362,7 @@ On kserve a pull job carries the node whose cache receives the download and the 
 ```text
 List the models loaded or serving now, with memory use and expiry; on kserve phase, steps, API interfaces and endpoint.
 
-Not read-only on kserve: a served model model-manager manages that has no ModelConfig is wired by this read, as you (wiring.reason "wired on read"). A Ready kserve model carries runtime and interfaces, the APIs its server registered ([] with interfacesReason when unreadable); on the platform's LLM endpoint publicName is the model name clients send there. gitops names the Flux object applying a serving object from git: change it there.
+On kserve, a managed served model without a ModelConfig is wired as you (wiring.reason "wired on read"). A Ready kserve model carries runtime and interfaces, the APIs its server registered ([] with interfacesReason when unreadable); on the platform's LLM endpoint publicName is the model name clients send there. gitops names the Flux object applying a serving object from git: change it there. KServe inventory may write Jobs and indexes.
 ```
 
 ```json
@@ -377,7 +383,7 @@ Not read-only on kserve: a served model model-manager manages that has no ModelC
 ```text
 List downloaded models with backend, size, family and parameters, whether each is loaded, and its kagent ModelConfig.
 
-Without backend every backend is listed; one that fails to answer is reported under errors while the others' models are returned.
+Without backend every backend is listed; one that fails to answer is reported under errors while the others' models are returned. KServe inventory may write Jobs and indexes.
 ```
 
 ```json
@@ -398,7 +404,7 @@ Without backend every backend is listed; one that fails to answer is reported un
 ```text
 List the nodes a backend serves on, with memory budget, what loaded models reserve and the download cache each holds.
 
-kserve: accelerator nodes only; eligible and eligibilityReason say whether a model can be served there, and load_model, pull_model and check_fit refuse an ineligible node with that reason. modelImageEligible says the same for a preset served from an OCI model image. ollama and lemonade: the proxied host, always eligible. lmstudio answers unsupported: LM Studio exposes no host hardware.
+kserve: accelerator nodes only; eligible and eligibilityReason say whether a model can be served there, and load_model, pull_model and check_fit refuse an ineligible node with that reason. modelImageEligible says the same for a preset served from an OCI model image. ollama and lemonade: the proxied host, always eligible. lmstudio answers unsupported: LM Studio exposes no host hardware. KServe inventory may write Jobs and indexes.
 ```
 
 ```json

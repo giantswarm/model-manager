@@ -8,6 +8,9 @@ set -euo pipefail
 # pipefail, grep -q exiting at the first match fails a writer still writing.
 cd "$(dirname "$0")/.."
 CHART=helm/model-manager
+CHART_KUBE_CONTEXT="${CHART_KUBE_CONTEXT:-render-only}"
+
+helm() { command helm --kube-context "$CHART_KUBE_CONTEXT" "$@"; }
 
 fail() { echo "verify-chart: FAIL: $*" >&2; exit 1; }
 
@@ -286,11 +289,11 @@ got=$(helm template mm "$CHART" --set serviceMonitor.enabled=true --set observab
 if echo "$got" | grep >/dev/null -- 'kind: ServiceMonitor'; then fail "ServiceMonitor rendered with metrics off"; fi
 got=$(helm template mm "$CHART" --show-only templates/servicemonitor.yaml --set serviceMonitor.enabled=true \
   --set-json 'serviceMonitor.labels={"observability.giantswarm.io/tenant":"giantswarm"}')
-echo "$got" | grep >/dev/null -- '^    observability.giantswarm.io/tenant: giantswarm$' \
+echo "$got" | grep >/dev/null -xF -- '    observability.giantswarm.io/tenant: "giantswarm"' \
   || fail "ServiceMonitor lacks serviceMonitor.labels"
 echo "$got" | grep >/dev/null -- '- port: metrics$' || fail "ServiceMonitor does not scrape the metrics port"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
-echo "$got" | grep -B8 -- 'port: 9464$' | grep >/dev/null -- 'kubernetes.io/metadata.name: kube-system' \
+echo "$got" | grep -B12 -- 'port: 9464$' | grep >/dev/null -- 'kubernetes.io/metadata.name: kube-system' \
   || fail "networkpolicy: metrics port not admitted from kube-system"
 got=$(helm template mm "$CHART" --show-only templates/networkpolicy.yaml --set networkPolicy.enabled=true)
 if echo "$got" | grep >/dev/null -- 'OTLP collector'; then
@@ -380,7 +383,8 @@ refused 'githubTokenExchange' --set githubTokenExchange.endpoint=https://muster.
 # version can land on ".", on "_" (from "+") or on a run like "--.". The
 # version is set by packaging, since `helm template --version` does not apply
 # to a chart directory.
-pkg=$(mktemp -d)
+mkdir -p "${HOME}/.cache/tmp"
+pkg=$(mktemp -d "${HOME}/.cache/tmp/model-manager-chart.XXXXXX")
 trap 'rm -rf "$pkg"' EXIT
 label_re='^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
 for v in 0.1.0 \

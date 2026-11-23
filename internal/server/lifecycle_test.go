@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 func TestAuthenticatedRequestsAndDrain(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 	configuration := idp.config()
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	server, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true, OAuth: &configuration}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	addresses := make(chan string, 1)
@@ -128,5 +129,86 @@ func TestAuthenticatedRequestsAndDrain(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown failed")
+	}
+}
+
+func TestSharedShutdownDeadlineClosesRequestsBeforeOAuthCleanup(t *testing.T) {
+	configuration := newPrivateIdP(t, "").config()
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
+	var once sync.Once
+	var shutdownContext context.Context
+	factory := func() context.Context {
+		once.Do(func() {
+			var cancel context.CancelFunc
+			shutdownContext, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
+			t.Cleanup(cancel)
+		})
+		return shutdownContext
+	}
+	instance, err := New(Config{Addr: "127.0.0.1:0", OAuth: &configuration, ShutdownContext: factory}, svc, nil, nil)
+	require.NoError(t, err)
+	addresses := make(chan string, 1)
+	instance.http.BaseContext = func(listener net.Listener) context.Context { addresses <- listener.Addr().String(); return t.Context() }
+	entered, disconnected := make(chan struct{}), make(chan struct{})
+	instance.http.Handler = http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(entered)
+		<-request.Context().Done()
+		close(disconnected)
+	})
+	cleanup := instance.oauth.cleanup
+	var cleanupDeadline time.Time
+	instance.oauth.cleanup = func(ctx context.Context) error {
+		cleanupDeadline, _ = ctx.Deadline()
+		return cleanup(ctx)
+	}
+	serving, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- instance.Run(serving) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = instance.http.Close()
+	})
+	var address string
+	select {
+	case address = <-addresses:
+	case <-time.After(time.Second):
+		t.Fatal("listener did not start")
+	}
+	responseDone := make(chan struct{})
+	go func() {
+		defer close(responseDone)
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+address+"/work", nil)
+		if err != nil {
+			return
+		}
+		response, _ := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("request did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("process deadline was extended")
+	}
+	require.False(t, instance.health.IsReady())
+	deadline, _ := shutdownContext.Deadline()
+	require.Equal(t, deadline, cleanupDeadline)
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("deadline left the request connected")
+	}
+	select {
+	case <-responseDone:
+	case <-time.After(time.Second):
+		t.Fatal("client remained connected")
 	}
 }

@@ -331,9 +331,19 @@ httpRoute:
 
 networkPolicy:
   # -- Create a Kubernetes NetworkPolicy for the pod.
-  enabled: false
-  # -- Namespaces allowed to reach the API (label kubernetes.io/metadata.name).
-  # Empty allows ingress from the release namespace only.
+  enabled: true
+  # -- NetworkPolicy peers allowed to reach the API. Pod selectors alone match
+  # the release namespace. Configure the actual gateway data-plane selector
+  # when using an HTTPRoute with another gateway implementation.
+  gatewayPeers:  # @schema item: object ; itemProperties: {podSelector: {type: object, additionalProperties: true}, namespaceSelector: {type: object, additionalProperties: true}, ipBlock: {type: object, additionalProperties: true}}
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: muster
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: agentgateway
+  # -- Legacy additional namespaces allowed to reach the API. Each explicitly
+  # configured namespace allows all its pods (label kubernetes.io/metadata.name).
   ingressNamespaces: []
   # -- Extra egress CIDRs (the host Ollama, Lemonade or LM Studio endpoint,
   # e.g. 172.21.0.1/32).
@@ -341,10 +351,18 @@ networkPolicy:
   # -- Allow egress to the Kubernetes API server (needed for wiring and by the
   # kserve backend).
   allowKubeAPI: true
-  # -- Namespaces allowed to scrape the metrics port (label
-  # kubernetes.io/metadata.name), when `observability.metrics.enabled`.
-  metricsNamespaces:
-    - kube-system
+  # -- NetworkPolicy peers allowed to scrape metrics when enabled.
+  metricsPeers:  # @schema item: object ; itemProperties: {podSelector: {type: object, additionalProperties: true}, namespaceSelector: {type: object, additionalProperties: true}, ipBlock: {type: object, additionalProperties: true}}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alloy
+          app.kubernetes.io/instance: alloy-metrics
+  # -- Legacy additional namespaces allowed to scrape metrics. Each explicitly
+  # configured namespace allows all its pods.
+  metricsNamespaces: []
 
 serviceAccount:
   # -- Create a ServiceAccount.
@@ -617,7 +635,8 @@ serviceMonitor:
   # observability platform routes a scrape to a Mimir tenant by
   # `observability.giantswarm.io/tenant`; a monitor without it writes to no
   # tenant.
-  labels: {}  # @schema additionalProperties: true
+  labels:  # @schema additionalProperties: true
+    observability.giantswarm.io/tenant: giantswarm
 
 # -- Extra container arguments.
 extraArgs: []

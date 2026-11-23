@@ -16,6 +16,7 @@ package lmstudio
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/http"
@@ -62,6 +63,7 @@ var loading = backend.Loading{OnDemand: true, IdleEviction: false}
 
 // Backend is the lmstudio driver.
 type Backend struct {
+	jobScope  string
 	client    *Client
 	endpoint  string
 	agentHost string
@@ -94,7 +96,7 @@ func New(opts backend.LMStudioOptions) (*Backend, error) {
 		timeout = 60 * time.Second
 	}
 	hc := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	return &Backend{client: NewClient(endpoint, hc, opts.LoadTimeout), endpoint: endpoint, agentHost: agentHost,
+	return &Backend{jobScope: rand.Text(), client: NewClient(endpoint, hc, opts.LoadTimeout), endpoint: endpoint, agentHost: agentHost,
 		pollInterval: defaultPollInterval}, nil
 }
 
@@ -103,8 +105,11 @@ func NewWithClient(c *Client, endpoint, agentHost string) *Backend {
 	if agentHost == "" {
 		agentHost = endpoint
 	}
-	return &Backend{client: c, endpoint: endpoint, agentHost: agentHost, pollInterval: defaultPollInterval}
+	return &Backend{jobScope: rand.Text(), client: c, endpoint: endpoint, agentHost: agentHost, pollInterval: defaultPollInterval}
 }
+
+// JobScope identifies this configured backend instance.
+func (b *Backend) JobScope(context.Context) string { return b.jobScope }
 
 // Name implements backend.Backend.
 func (b *Backend) Name() backend.Name { return backend.NameLMStudio }
@@ -535,10 +540,10 @@ func mapErr(err error, name string) error {
 	case apiErr.Status == http.StatusNotFound,
 		apiErr.Code == "model_not_found", apiErr.Code == "job_not_found",
 		strings.Contains(msg, "not found"):
-		return fmt.Errorf("%w: %s: %s", backend.ErrNotFound, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrNotFound, name)
 	case apiErr.Status == http.StatusBadRequest, apiErr.Status == http.StatusUnprocessableEntity,
 		apiErr.Code == "invalid_request", apiErr.Code == "invalid_arguments":
-		return fmt.Errorf("%w: %s: %s", backend.ErrInvalid, name, apiErr.Message)
+		return fmt.Errorf("%w: %s", backend.ErrInvalid, name)
 	}
 	return err
 }

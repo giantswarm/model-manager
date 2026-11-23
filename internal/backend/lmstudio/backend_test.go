@@ -643,6 +643,10 @@ func TestAgentEndpoint(t *testing.T) {
 }
 
 func TestMapErr(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadRequest, http.StatusUnprocessableEntity} {
+		err := mapErr(&APIError{Status: status, Message: "private upstream credential"}, modelGranite)
+		require.NotContains(t, err.Error(), "private upstream credential")
+	}
 	assert.NoError(t, mapErr(nil, modelGranite))
 
 	err := mapErr(&APIError{Status: http.StatusNotFound, Code: "model_not_found", Message: "Model x not found in downloaded models"}, modelGranite)

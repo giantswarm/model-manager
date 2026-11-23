@@ -1,63 +1,57 @@
 package api
 
 import (
-	"context"
-	"errors"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/giantswarm/model-manager/internal/backend"
+	"github.com/giantswarm/model-manager/internal/buildinfo"
+	"github.com/giantswarm/model-manager/internal/jobs"
+	"github.com/giantswarm/model-manager/internal/service"
 )
 
-func TestToolDuration(t *testing.T) {
+func TestRegisteredToolDuration(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	mw := toolDuration(provider.Meter(TracerName))
-
-	handlers := map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error){
-		ToolListModels: func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return mcp.NewToolResultText("[]"), nil
-		},
-		ToolLoadModel: func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return mcp.NewToolResultError("no such model"), nil
-		},
-		ToolPullModel: func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return nil, errors.New("backend down")
-		},
-	}
-	for name, h := range handlers {
-		var req mcp.CallToolRequest
-		req.Params.Name = name
-		_, _ = mw(h)(t.Context(), req)
-	}
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(t.Context(), &rm))
-	require.Len(t, rm.ScopeMetrics, 1)
-	require.Len(t, rm.ScopeMetrics[0].Metrics, 1)
-	m := rm.ScopeMetrics[0].Metrics[0]
-	require.Equal(t, "mcp.server.operation.duration", m.Name)
-	require.Equal(t, "s", m.Unit)
-	hist, ok := m.Data.(metricdata.Histogram[float64])
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(t.Context())) })
+	svc := service.New([]backend.Backend{newFakeBackend()}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
+	server := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithToolPolicy(toolpolicy.Options{Meter: provider.Meter(TracerName)}))
+	_, failed := callTool(t, server, ToolGetInfo, nil)
+	require.False(t, failed)
+	_, failed = callTool(t, server, ToolGetModel, map[string]any{"model": "missing"})
+	require.True(t, failed)
+	var resource metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &resource))
+	require.Len(t, resource.ScopeMetrics, 1)
+	require.Len(t, resource.ScopeMetrics[0].Metrics, 1)
+	metric := resource.ScopeMetrics[0].Metrics[0]
+	require.Equal(t, "mcp.server.operation.duration", metric.Name)
+	require.Equal(t, "s", metric.Unit)
+	histogram, ok := metric.Data.(metricdata.Histogram[float64])
 	require.True(t, ok)
-
-	got := map[string]string{}
-	for _, dp := range hist.DataPoints {
-		require.Equal(t, uint64(1), dp.Count)
-		method, _ := dp.Attributes.Value("mcp.method.name")
+	outcomes := map[string]string{}
+	for _, point := range histogram.DataPoints {
+		require.Equal(t, uint64(1), point.Count)
+		method, _ := point.Attributes.Value("mcp.method.name")
 		require.Equal(t, "tools/call", method.AsString())
-		op, _ := dp.Attributes.Value("gen_ai.operation.name")
-		require.Equal(t, "execute_tool", op.AsString())
-		tool, _ := dp.Attributes.Value("gen_ai.tool.name")
-		errType, _ := dp.Attributes.Value(attribute.Key("error.type"))
-		got[tool.AsString()] = errType.AsString()
+		operation, _ := point.Attributes.Value("gen_ai.operation.name")
+		require.Equal(t, "execute_tool", operation.AsString())
+		tool, _ := point.Attributes.Value("gen_ai.tool.name")
+		failure, _ := point.Attributes.Value("error.type")
+		outcomes[tool.AsString()] = failure.AsString()
 	}
-	require.Equal(t, map[string]string{
-		ToolListModels: "",
-		ToolLoadModel:  "tool_error",
-		ToolPullModel:  "_OTHER",
-	}, got)
+	require.Equal(t, map[string]string{ToolGetInfo: "", ToolGetModel: "tool_error"}, outcomes)
+}
+
+func TestRegisteredToolWholeResultLimit(t *testing.T) {
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
+	for _, limit := range []int{32, 0, -1} {
+		server := NewMCPServer(svc, buildinfo.Info{Version: "test"}, WithToolPolicy(toolpolicy.Options{MaxResultBytes: limit}))
+		_, failed := callTool(t, server, ToolGetInfo, nil)
+		require.Equal(t, limit > 0, failed)
+	}
 }

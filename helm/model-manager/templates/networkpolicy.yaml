@@ -14,8 +14,11 @@ spec:
     - Ingress
     - Egress
   ingress:
+    {{- if or .Values.networkPolicy.gatewayPeers .Values.networkPolicy.ingressNamespaces }}
     - from:
-        - podSelector: {}
+        {{- with .Values.networkPolicy.gatewayPeers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- range .Values.networkPolicy.ingressNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -24,8 +27,12 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    {{- if and .Values.observability.metrics.enabled .Values.networkPolicy.metricsNamespaces }}
+    {{- end }}
+    {{- if and .Values.observability.metrics.enabled (or .Values.networkPolicy.metricsPeers .Values.networkPolicy.metricsNamespaces) }}
     - from:
+        {{- with .Values.networkPolicy.metricsPeers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- range .Values.networkPolicy.metricsNamespaces }}
         - namespaceSelector:
             matchLabels:

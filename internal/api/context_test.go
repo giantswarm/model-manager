@@ -59,7 +59,7 @@ func TestReconcilerRefreshesStaleContextLengths(t *testing.T) {
 	for _, r := range []wiring.ModelConfigRef{stale, current, gone} {
 		fw.refs[refKey(r.Backend, r.Model)] = r
 	}
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, ReconcileInterval: 5 * time.Millisecond}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { svc.Run(ctx); close(done) }()

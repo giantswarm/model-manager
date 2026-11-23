@@ -223,7 +223,9 @@ type Model struct {
 
 // LoadedModel is a model currently loaded in memory / serving.
 type LoadedModel struct {
-	Name string `json:"name"`
+	// Object is the backing Kubernetes resource, when this driver has one.
+	Object *JobObject `json:"-"`
+	Name   string     `json:"name"`
 	// Backend is the driver serving this model; set by the service.
 	Backend       Name       `json:"backend,omitempty"`
 	Digest        string     `json:"digest,omitempty"`
@@ -418,15 +420,32 @@ type Step struct {
 
 // Progress is a pull-progress sample.
 type Progress struct {
-	Status         string `json:"status"`
-	BytesCompleted int64  `json:"bytesCompleted"`
-	BytesTotal     int64  `json:"bytesTotal"`
+	// Object pins the resource whose status this operation follows.
+	Object         *JobObject `json:"object,omitempty"`
+	Status         string     `json:"status"`
+	BytesCompleted int64      `json:"bytesCompleted"`
+	BytesTotal     int64      `json:"bytesTotal"`
 	// Node and Preset name where the pull lands once the backend has decided
 	// (kserve: the node the fit check picked when the request left it open,
 	// the preset resolved from the model). Empty leaves the job's values as
 	// they are; drivers without placement (ollama) never set them.
 	Node   string `json:"node,omitempty"`
 	Preset string `json:"preset,omitempty"`
+}
+
+// JobObject identifies a resource without carrying credentials or mutable profile data.
+type JobObject struct {
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Resource  string `json:"resource"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid,omitempty"`
+}
+
+// JobAccess checks the caller's current access to an operation's backing resource.
+type JobAccess interface {
+	CheckJobAccess(context.Context, *JobObject) error
 }
 
 // PullRequest asks the backend to import a model.
@@ -1067,6 +1086,8 @@ func (o WireOptions) Apply(ep AgentEndpoint) AgentEndpoint {
 // Job, Load/Unload create and delete LLMInferenceServices, LoadRequest.Preset
 // selects a serving preset.
 type Backend interface {
+	// JobScope separates configured backend instances for operation deduplication.
+	JobScope(context.Context) string
 	Name() Name
 	Capabilities() Capabilities
 	Info(ctx context.Context) Info

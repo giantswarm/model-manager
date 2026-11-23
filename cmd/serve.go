@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/mcp-toolkit/metrics"
+	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
@@ -68,8 +69,11 @@ type serveOptions struct {
 	defaultKeepAlive  string
 	reconcileInterval time.Duration
 
-	mcpEnabled bool
-	mcpPath    string
+	mcpEnabled       bool
+	mcpPath          string
+	toolTimeout      time.Duration
+	maxResponseBytes int
+	shutdownTimeout  time.Duration
 
 	oauthEnabled                  bool
 	oauthBaseURL                  string
@@ -148,6 +152,9 @@ environment variable named next to it; flags win over the environment.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("MODEL_MANAGER_LISTEN", ":8080"), "Listen address (MODEL_MANAGER_LISTEN)")
+	f.DurationVar(&o.toolTimeout, "tool-timeout", envDuration("MODEL_MANAGER_TOOL_TIMEOUT", 30*time.Second), "MCP tool deadline; nonpositive disables (MODEL_MANAGER_TOOL_TIMEOUT)")
+	f.IntVar(&o.maxResponseBytes, "max-response-bytes", envInt("MODEL_MANAGER_MAX_RESPONSE_BYTES", 128*1024), "Maximum complete JSON MCP tool result; nonpositive disables (MODEL_MANAGER_MAX_RESPONSE_BYTES)")
+	f.DurationVar(&o.shutdownTimeout, "shutdown-timeout", envDuration("MODEL_MANAGER_SHUTDOWN_TIMEOUT", defaultShutdownTimeout), "Total shutdown budget, including five seconds reserved for telemetry; must exceed 5s (MODEL_MANAGER_SHUTDOWN_TIMEOUT)")
 	f.StringVar(&o.backendName, "backend", envOr("MODEL_MANAGER_BACKEND", ""), "Static serving backend: ollama|kserve|lemonade|lmstudio — the one-backend form of --backends. Empty, like --backends, starts with no backend: backends are then registered at runtime with add_backend (MODEL_MANAGER_BACKEND)")
 	f.StringVar(&o.namespace, "namespace", envOr("MODEL_MANAGER_NAMESPACE", envOr("POD_NAMESPACE", "")), "model-manager's own namespace, where backend documents (ConfigMaps labelled agent-platform.giantswarm.io/model-backend=true) are watched and written; empty disables runtime registration (MODEL_MANAGER_NAMESPACE, POD_NAMESPACE)")
 	f.StringVar(&o.backends, "backends", envOr("MODEL_MANAGER_BACKENDS", ""), "Comma-separated serving backends to run at once (ollama,lemonade,lmstudio,kserve), each at most once, in the operator's order: the first is the default backend, the one GET /api/v1/backend describes and an unqualified pull goes to. Empty runs --backend alone; when both are set the single value must be listed (MODEL_MANAGER_BACKENDS)")
@@ -244,6 +251,15 @@ func warnDeprecatedOAuthOptions(o *serveOptions, log *slog.Logger) {
 }
 
 func runServe(ctx context.Context, o *serveOptions) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// The root command owns the budget so log flushing shares its deadline.
+	budget, ok := ctx.Value(shutdownBudgetKey{}).(*shutdownBudget)
+	if !ok {
+		return errors.New("serve requires the root command's shutdown budget")
+	}
+	stopBudget := context.AfterFunc(ctx, budget.Start)
+	defer stopBudget()
 	log := slog.Default()
 	warnDeprecatedOAuthOptions(o, log)
 	shutdownTracing, err := tracing.Init(ctx, tracing.WithServiceName("model-manager"), tracing.WithServiceVersion(build.Version))
@@ -251,7 +267,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return fmt.Errorf("tracing: %w", err)
 	}
 	defer func() {
-		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		flushCtx, cancel := context.WithTimeout(budget.Context(), 5*time.Second)
 		defer cancel()
 		if err := shutdownTracing(flushCtx); err != nil {
 			log.Warn("flushing traces", "error", err)
@@ -262,7 +278,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return fmt.Errorf("metrics: %w", err)
 	}
 	defer func() {
-		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		flushCtx, cancel := context.WithTimeout(budget.Context(), 5*time.Second)
 		defer cancel()
 		if err := shutdownMetrics(flushCtx); err != nil {
 			log.Warn("flushing metrics", "error", err)
@@ -379,7 +395,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		log.Info("agent wiring enabled", "namespace", k.Namespace(), "apiVersion", k.APIVersion(), "instance", k.Instance(), "autoWire", o.autoWire)
 	}
 
-	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention))
+	jm := jobs.NewManager(jobs.WithRetention(o.jobRetention), jobs.WithLifetime(ctx), jobs.WithAnonymousAccess(!o.oauthEnabled))
+	defer func() {
+		stop()
+		if err := jm.Shutdown(budget.WorkContext()); err != nil {
+			log.Warn("job shutdown deadline reached", "error", err)
+		}
+	}()
 	// Backend documents are watched in --namespace, given a cluster.
 	documentNamespace := o.namespace
 	if clients == nil {
@@ -420,6 +442,11 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		reg     *registry.Registry
 		mcpOpts []api.Option
 	)
+	toolTimeout := o.toolTimeout
+	if toolTimeout == 0 {
+		toolTimeout = -1
+	}
+	mcpOpts = append(mcpOpts, api.WithToolPolicy(toolpolicy.Options{Timeout: toolTimeout, MaxResultBytes: o.maxResponseBytes, Logger: log, User: validatedToolIdentity}))
 	switch {
 	case clients == nil:
 		// Already warned above.
@@ -440,7 +467,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		log.Info("no static backend: waiting for backend documents", "namespace", o.namespace, "registration", reg != nil)
 	}
 
-	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath}
+	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath, ShutdownContext: budget.WorkContext}
 	if o.oauthEnabled {
 		cfg.OAuth = &server.OAuthConfig{
 			BaseURL:                       o.oauthBaseURL,
@@ -463,21 +490,41 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	log.Info("model-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath, "mcpEnabled", o.mcpEnabled, "oauth", o.oauthEnabled, "downstreamOAuth", o.downstreamOAuth, "commit", o.githubExchangeEndpoint != "")
 
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go svc.Run(ctx)
+	serviceDone := make(chan struct{})
+	backgroundDone := []<-chan struct{}{serviceDone}
+	backgroundErrors := make(chan error, 1)
+	go func() { defer close(serviceDone); svc.Run(ctx) }()
 	if reg != nil {
+		registryDone := make(chan struct{})
+		backgroundDone = append(backgroundDone, registryDone)
 		go func() {
+			defer close(registryDone)
 			if err := reg.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error("backend document watch stopped", "error", err)
+				backgroundErrors <- err
+				stop()
 			}
 		}()
 	}
-	if err := srv.Run(ctx); err != nil {
-		return err
+	defer func() {
+		stop()
+		cleanupContext := budget.WorkContext()
+		for _, done := range backgroundDone {
+			select {
+			case <-done:
+			case <-cleanupContext.Done():
+				log.Warn("background shutdown deadline reached")
+				return
+			}
+		}
+	}()
+	serveError := srv.Run(ctx)
+	select {
+	case err := <-backgroundErrors:
+		return errors.Join(serveError, err)
+	default:
+		return serveError
 	}
-	jm.Wait()
-	return nil
 }
 
 // backendNames is the ordered list of drivers to run: --backends when set,

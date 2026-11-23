@@ -94,7 +94,7 @@ func TestPullCreatesAndFillsTheNodeClaim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testGPUNode, Claim: gpuNodeClaim}
 	f.completeJob(ctx, plan.jobName(), "INFO start\nPROGRESS 1000\n")
 	var last backend.Progress
 	require.NoError(t, f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo, Node: testGPUNode}, func(p backend.Progress) { last = p }))

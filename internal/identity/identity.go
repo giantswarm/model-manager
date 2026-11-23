@@ -1,9 +1,8 @@
 // Package identity carries the authenticated caller through a request: who
 // the OAuth layer validated (subject, email, groups) and, when the server is
 // configured to act on the caller's behalf towards the Kubernetes API, the
-// caller's own IdP token. Background work that runs without a caller (the
-// wiring reconciler, a job that outlives its request's token) sees no identity
-// and acts as the ServiceAccount.
+// caller's own IdP token. Request continuations retain that credential, including
+// after expiry. Application-owned work explicitly selects ServiceAccount clients.
 package identity
 
 import (
@@ -30,8 +29,17 @@ const (
 
 // Identity is the authenticated caller.
 type Identity struct {
+	// Issuer and Subject identify the validated caller independently of profile data.
+	Issuer string
 	// Subject is the IdP's stable user id (the `sub` claim).
 	Subject string
+	// ActorIssuer and ActorSubject identify a validated delegated actor together.
+	ActorIssuer  string
+	ActorSubject string
+	// ClientID identifies the validated OAuth client when available.
+	ClientID string
+	// Scopes are the validated token's current grant.
+	Scopes []string
 	// Email is the caller's email when the IdP provided one.
 	Email string
 	// Name is the display name when the IdP provided one.
@@ -42,8 +50,7 @@ type Identity struct {
 	Source Source
 }
 
-// String is the caller as logged and recorded on jobs: the email, else the
-// subject.
+// String is display attribution recorded on jobs: the email, else the subject.
 func (id *Identity) String() string {
 	if id == nil {
 		return ""
@@ -84,8 +91,15 @@ func Caller(ctx context.Context) string {
 // LogAttr is the structured-log attribute every mutation carries: the caller,
 // or the ServiceAccount marker when the operation runs without one.
 func LogAttr(ctx context.Context) slog.Attr {
-	if c := Caller(ctx); c != "" {
-		return slog.String("caller", c)
+	if caller, ok := FromContext(ctx); ok {
+		if caller.Issuer == "" || caller.Subject == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
+			return slog.String("caller", "unavailable")
+		}
+		attributes := []slog.Attr{slog.String("issuer", caller.Issuer), slog.String("subject", caller.Subject)}
+		if caller.ActorIssuer != "" {
+			attributes = append(attributes, slog.String("actor_issuer", caller.ActorIssuer), slog.String("actor_subject", caller.ActorSubject))
+		}
+		return slog.GroupAttrs("caller", attributes...)
 	}
 	return slog.String("caller", "service-account")
 }

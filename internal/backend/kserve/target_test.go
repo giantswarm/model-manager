@@ -142,7 +142,7 @@ func TestRemoteTargetActsAsTheCaller(t *testing.T) {
 	// The download Job and the cache index.
 	rf.b.scan = func(context.Context, string) ([]cacheEntry, string, error) { return nil, testCacheNode, nil }
 	rf.b.inv.invalidate()
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testCacheNode, Claim: DefaultCacheClaim}
 	rf.completeJob(ctx, plan.jobName(), "INFO start\nPROGRESS 1000\n")
 	require.NoError(t, rf.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, nil))
 	var pulled bool
@@ -168,14 +168,12 @@ func TestRemoteTargetActsAsTheCaller(t *testing.T) {
 	rf.assertNothingAnonymous(t)
 }
 
-// TestRemoteTargetCancelledPullCleansUpAsTheCaller: the Job of a cancelled
-// download is deleted with the caller's token, not anonymously.
-func TestRemoteTargetCancelledPullCleansUpAsTheCaller(t *testing.T) {
+func TestRemoteTargetCancellationPreservesSharedDownload(t *testing.T) {
 	rf := newRemoteFixture(t)
 	ctx, cancel := context.WithCancel(callerContext(t))
 	done := make(chan error, 1)
 	go func() { done <- rf.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, nil) }()
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testCacheNode, Claim: DefaultCacheClaim}
 	require.Eventually(t, func() bool {
 		_, err := rf.cs.BatchV1().Jobs(testServingNS).Get(context.Background(), plan.jobName(), metav1.GetOptions{})
 		return err == nil
@@ -188,7 +186,7 @@ func TestRemoteTargetCancelledPullCleansUpAsTheCaller(t *testing.T) {
 		t.Fatal("pull did not stop on cancel")
 	}
 	_, err := rf.cs.BatchV1().Jobs(testServingNS).Get(context.Background(), plan.jobName(), metav1.GetOptions{})
-	assert.True(t, apierrors.IsNotFound(err), "the cancelled Job is deleted on the target: %v", err)
+	require.NoError(t, err, "cancelling the observer preserves the shared Job on the target")
 	rf.assertNothingAnonymous(t)
 }
 

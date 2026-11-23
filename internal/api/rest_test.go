@@ -66,6 +66,8 @@ func newFakeBackend() *fakeBackend {
 // the API reports.
 const fakeDriverKeepAlive = "1m"
 
+func (f *fakeBackend) JobScope(context.Context) string { return fmt.Sprintf("%p", f) }
+
 func (f *fakeBackend) Name() backend.Name {
 	if f.name != "" {
 		return f.name
@@ -314,7 +316,7 @@ func newFixture(t *testing.T, withWirer bool) *fixture {
 		w = fw
 		info = &service.WiringInfo{Namespace: "kagent", APIVersion: wiring.DefaultAPIVersion}
 	}
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), w, info, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), w, info, service.Config{AutoWire: true, DefaultKeepAlive: "5m"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)
@@ -375,7 +377,7 @@ func TestListBackendsSaysWhyItIsEmpty(t *testing.T) {
 	require.Len(t, body["backends"], 1)
 	assert.NotContains(t, body, "backendsReason", "a configured backend needs no reason")
 
-	svc := service.New(nil, jobs.NewManager(), nil, nil, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: "agent-platform"}, nil)
+	svc := service.New(nil, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{Instance: "mm-test", Version: "1.2.3", DocumentNamespace: "agent-platform"}, nil)
 	mux := http.NewServeMux()
 	NewREST(svc, nil).Register(mux)
 	srv := httptest.NewServer(mux)

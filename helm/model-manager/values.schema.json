@@ -665,15 +665,56 @@
                     "type": "boolean",
                     "description": "Create a Kubernetes NetworkPolicy for the pod."
                 },
+                "gatewayPeers": {
+                    "type": "array",
+                    "description": "NetworkPolicy peers allowed to reach the API. Pod selectors alone match the release namespace. Configure the actual gateway data-plane selector when using an HTTPRoute with another gateway implementation.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "ipBlock": {
+                                "type": "object",
+                                "additionalProperties": true
+                            },
+                            "namespaceSelector": {
+                                "type": "object",
+                                "additionalProperties": true
+                            },
+                            "podSelector": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    }
+                },
                 "ingressNamespaces": {
                     "type": "array",
-                    "description": "Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only."
+                    "description": "Legacy additional namespaces allowed to reach the API. Each explicitly configured namespace allows all its pods (label kubernetes.io/metadata.name)."
                 },
                 "metricsNamespaces": {
                     "type": "array",
-                    "description": "Namespaces allowed to scrape the metrics port (label kubernetes.io/metadata.name), when `observability.metrics.enabled`.",
+                    "description": "Legacy additional namespaces allowed to scrape metrics. Each explicitly configured namespace allows all its pods."
+                },
+                "metricsPeers": {
+                    "type": "array",
+                    "description": "NetworkPolicy peers allowed to scrape metrics when enabled.",
                     "items": {
-                        "type": "string"
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "ipBlock": {
+                                "type": "object",
+                                "additionalProperties": true
+                            },
+                            "namespaceSelector": {
+                                "type": "object",
+                                "additionalProperties": true
+                            },
+                            "podSelector": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
                     }
                 }
             }
@@ -1069,7 +1110,12 @@
                 "labels": {
                     "type": "object",
                     "description": "Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant.",
-                    "additionalProperties": true
+                    "additionalProperties": true,
+                    "properties": {
+                        "observability.giantswarm.io/tenant": {
+                            "type": "string"
+                        }
+                    }
                 }
             }
         },

@@ -421,7 +421,7 @@ func TestPullRunsAJobWithProgress(t *testing.T) {
 	jobs, _ := f.cs.BatchV1().Jobs(testServingNS).List(ctx, metav1.ListOptions{})
 	assert.Empty(t, jobs.Items)
 
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testCacheNode, Claim: DefaultCacheClaim}
 	f.completeJob(ctx, plan.jobName(), "INFO start\nPROGRESS 1000\nPROGRESS 200000\n")
 	var samples []backend.Progress
 	err = f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, func(p backend.Progress) { samples = append(samples, p) })
@@ -488,7 +488,7 @@ func TestPullFailsAStalledDownloadWithTheReason(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testCacheNode, Claim: DefaultCacheClaim}
 	stall := "DOWNLOAD STALLED: no bytes written to /cache/tiny for 600s (1000 bytes on disk, HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=1); partial files stay for a retry"
 	f.failJob(ctx, plan.jobName(), "INFO start\nPROGRESS 1000\nPROGRESS 1000\n"+stall+"\n",
 		"PodFailurePolicy", "Container download for pod "+testServingNS+"/"+plan.jobName()+"-abcde failed with exit code 3 matching FailJob rule at index 0")
@@ -503,12 +503,12 @@ func TestPullFailsAStalledDownloadWithTheReason(t *testing.T) {
 	assert.EqualValues(t, 1000, samples[len(samples)-1].BytesCompleted, "the last bytes read before the stall")
 }
 
-func TestPullCancelDeletesJobAndAdoption(t *testing.T) {
+func TestPullCancellationPreservesDownloadForAdoption(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- f.b.Pull(ctx, backend.PullRequest{Ref: tinyRepo}, nil) }()
-	plan := downloadPlan{Dir: "tiny"}
+	plan := downloadPlan{Dir: "tiny", Node: testCacheNode, Claim: DefaultCacheClaim}
 	require.Eventually(t, func() bool {
 		_, err := f.cs.BatchV1().Jobs(testServingNS).Get(context.Background(), plan.jobName(), metav1.GetOptions{})
 		return err == nil
@@ -530,7 +530,7 @@ func TestPullCancelDeletesJobAndAdoption(t *testing.T) {
 		t.Fatal("pull did not stop on cancel")
 	}
 	_, err = f.cs.BatchV1().Jobs(testServingNS).Get(context.Background(), plan.jobName(), metav1.GetOptions{})
-	assert.Error(t, err, "cancel deletes the Job")
+	require.NoError(t, err, "detaching a task preserves the shared Kubernetes Job")
 }
 
 func TestDeleteRemovesCacheDirectory(t *testing.T) {
@@ -801,8 +801,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	}
 	require.NotNil(t, cache)
 	assert.Equal(t, InventoryModeDaemonSet, cache.Inventory)
-	assert.Contains(t, cache.Error, "no ready cache-agent pod on "+testCacheNode)
-	assert.Contains(t, cache.Error, "app.kubernetes.io/instance=mm")
+	assert.Equal(t, "backend request failed", cache.Error)
 	assert.Equal(t, 0, cache.Models)
 	pods, err := f.cs.CoreV1().Pods(testServingNS).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
@@ -823,7 +822,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	require.NoError(t, err)
 	for _, n := range nodes {
 		if n.Name == testCacheNode {
-			assert.Contains(t, n.Cache.Error, "no ready cache-agent pod")
+			assert.Equal(t, "backend request failed", n.Cache.Error)
 		}
 	}
 
@@ -878,7 +877,7 @@ func TestDaemonSetInventory(t *testing.T) {
 	require.NoError(t, err)
 	for _, n := range nodes {
 		if n.Name == testCacheNode {
-			assert.Contains(t, n.Cache.Error, "HTTP 500")
+			assert.Equal(t, "backend request failed", n.Cache.Error)
 		}
 	}
 }

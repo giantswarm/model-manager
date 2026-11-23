@@ -88,7 +88,7 @@ func spanByID(t *testing.T, spans []sdktrace.ReadOnlySpan, id trace.SpanID) sdkt
 
 func TestToolCallIsTracedUnderTheCallersTrace(t *testing.T) {
 	rec := recordSpans(t)
-	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(), nil, nil, service.Config{}, nil)
+	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())

@@ -253,7 +253,9 @@ func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool)
 }
 
 // PlanCancel is cancel_job's dry run: the job it would cancel.
-func (s *Service) PlanCancel(id string) (jobs.Job, error) { return s.jobs.Get(id) }
+func (s *Service) PlanCancel(ctx context.Context, id string) (jobs.Job, error) {
+	return s.jobs.GetFor(ctx, id)
+}
 
 // errCommitsOnKServe is mode commit on a load or unload a backend lands
 // operationally.

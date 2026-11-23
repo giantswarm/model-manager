@@ -24,6 +24,8 @@ type Config struct {
 	Addr       string
 	MCPEnabled bool
 	MCPPath    string
+	// ShutdownContext returns the application's shared dependency deadline.
+	ShutdownContext func() context.Context
 	// OAuth, when set, makes the server an OAuth 2.1 resource server: the MCP
 	// endpoint and the REST API require a bearer token the platform IdP
 	// issued (forwarded by muster / sent by the portal) or this server's own,
@@ -35,10 +37,11 @@ type Config struct {
 
 // Server is the assembled HTTP server.
 type Server struct {
-	http   *http.Server
-	oauth  *oauthRuntime
-	log    *slog.Logger
-	health *health.Health
+	http            *http.Server
+	oauth           *oauthRuntime
+	log             *slog.Logger
+	health          *health.Health
+	shutdownContext func() context.Context
 }
 
 // New builds the server.
@@ -56,13 +59,13 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		if err := svc.Ready(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	s := &Server{log: log, health: healthState}
+	s := &Server{log: log, health: healthState, shutdownContext: cfg.ShutdownContext}
 	if cfg.OAuth != nil {
 		o, err := newOAuth(*cfg.OAuth, cfg.MCPPath, log)
 		if err != nil {
@@ -81,8 +84,8 @@ func New(cfg Config, svc *service.Service, mcpSrv *mcpserver.MCPServer, log *slo
 	if cfg.MCPEnabled && mcpSrv != nil {
 		// mcp-go reads a POST body whole before validating it
 		// (CVE-2026-108859): the bound keeps that read to what the REST API accepts.
-		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath))
-		mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler), maxMCPBodyBytes))
+		mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath), mcpserver.WithStateLess(true))
+		mux.Handle(cfg.MCPPath, httpx.ProtectOrigin(http.MaxBytesHandler(s.guard(mcpHandler), maxMCPBodyBytes)))
 	}
 
 	s.http = &http.Server{
@@ -125,12 +128,16 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 	defer stop()
 	s.log.Info("listening", "addr", s.http.Addr)
-	err := httpx.Run(servingContext, s.http, 15*time.Second)
+	shutdownContext := s.shutdownContext
+	if shutdownContext == nil {
+		shutdownContext = func() context.Context { return context.WithoutCancel(ctx) }
+	}
+	err := httpx.RunWithShutdownContext(servingContext, s.http, 15*time.Second, shutdownContext)
 	s.health.SetReady(false)
-	if errors.Is(err, context.DeadlineExceeded) {
+	if err != nil {
 		err = errors.Join(err, s.http.Close())
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(shutdownContext(), 5*time.Second)
 	defer cancel()
 	if s.oauth != nil {
 		s.oauth.shutdown(shutdownCtx)

@@ -448,6 +448,10 @@ func TestCheckpointDerivations(t *testing.T) {
 }
 
 func TestMapErr(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadRequest, http.StatusUnprocessableEntity} {
+		err := mapErr(&APIError{Status: status, Message: "private upstream credential"}, "x")
+		require.NotContains(t, err.Error(), "private upstream credential")
+	}
 	nf := mapErr(&APIError{Status: http.StatusNotFound, Code: "model_not_found", Message: "Model 'x' was not found"}, "x")
 	require.ErrorIs(t, nf, backend.ErrNotFound)
 	require.ErrorIs(t, mapErr(&APIError{Status: http.StatusUnprocessableEntity, Message: "Model not found: x"}, "x"), backend.ErrNotFound)

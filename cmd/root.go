@@ -25,6 +25,7 @@ func SetBuild(b buildinfo.Info) { build = b }
 func newRootCmd() (*cobra.Command, func()) {
 	var verbose bool
 	var shutdown logging.Shutdown
+	var budget *shutdownBudget
 	root := &cobra.Command{
 		Use:   "model-manager",
 		Short: "Model management service for the Agent Platform",
@@ -33,10 +34,24 @@ func newRootCmd() (*cobra.Command, func()) {
 AMD Ryzen AI hosts running Lemonade Server): list downloaded
 and loaded models, pull/import with progress, load/unload, delete, and wire
 models into kagent ModelConfigs so agents can use them. The API is served as
-REST/JSON (portal) and as MCP tools (muster) from one process.`,
+REST/JSON and as MCP tools (muster) from one process.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(command *cobra.Command, _ []string) error {
+			timeout := defaultShutdownTimeout
+			if command.Flags().Lookup("shutdown-timeout") != nil {
+				var err error
+				timeout, err = command.Flags().GetDuration("shutdown-timeout")
+				if err != nil {
+					return err
+				}
+			}
+			var err error
+			budget, err = newShutdownBudget(command.Context(), timeout)
+			if err != nil {
+				return err
+			}
+			command.SetContext(context.WithValue(command.Context(), shutdownBudgetKey{}, budget))
 			level := slog.LevelInfo
 			if verbose {
 				level = slog.LevelDebug
@@ -62,8 +77,11 @@ REST/JSON (portal) and as MCP tools (muster) from one process.`,
 	root.SetVersionTemplate("model-manager version {{.Version}}\n")
 	root.AddCommand(newServeCmd(), newCacheAgentCmd(), newVersionCmd())
 	return root, func() {
+		if budget != nil {
+			defer budget.Close()
+		}
 		if shutdown != nil {
-			flushContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			flushContext, cancel := context.WithTimeout(budget.Context(), 5*time.Second)
 			defer cancel()
 			if err := shutdown(flushContext); err != nil {
 				slog.Warn("flushing logs", "error", err)

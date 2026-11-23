@@ -188,12 +188,17 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		info, ok := handler.UserInfoFromContext(ctx)
-		if !ok || info == nil {
+		if !ok || info == nil || info.Issuer == "" || info.ID == "" || (info.ActorIssuer == "") != (info.ActorSubject == "") {
 			// ValidateToken admits nothing without user info; defensive.
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		id := &identity.Identity{Subject: info.ID, Email: info.Email, Name: info.Name, Groups: info.Groups, Source: identity.SourceOAuth}
+		id := &identity.Identity{Issuer: info.Issuer, Subject: info.ID, ActorIssuer: info.ActorIssuer, ActorSubject: info.ActorSubject, Email: info.Email, Name: info.Name, Groups: info.Groups, Source: identity.SourceOAuth}
+		id.ClientID = info.ClientID
+		id.Scopes, _ = handler.ScopesFromContext(ctx)
+		if len(id.Scopes) == 0 {
+			id.Scopes = info.Scopes
+		}
 		if info.IsSSO() {
 			id.Source = identity.SourceSSO
 		}
@@ -206,7 +211,7 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 			}
 			ctx = identity.ContextWithToken(ctx, token)
 		}
-		o.log.Debug("authenticated request", "caller", id.String(), "source", id.Source, "path", r.URL.Path)
+		o.log.Debug("authenticated request", identity.LogAttr(ctx), "source", id.Source, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

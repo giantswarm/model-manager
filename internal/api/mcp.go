@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/giantswarm/mcp-toolkit/brand"
+	policy "github.com/giantswarm/mcp-toolkit/middleware/mcpgo"
 	"github.com/giantswarm/mcp-toolkit/tooldesc"
+	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -162,6 +166,21 @@ func readOnly() mcp.ToolOption {
 		mcp.WithReadOnlyHintAnnotation(true)(t)
 		mcp.WithDestructiveHintAnnotation(false)(t)
 		mcp.WithIdempotentHintAnnotation(true)(t)
+		mcp.WithOpenWorldHintAnnotation(true)(t)
+	}
+}
+
+const inventoryEffects = "KServe inventory may write Jobs and indexes."
+
+// inventoryOperation marks reads whose KServe inventory creates scan Jobs and
+// replaces model-manager's own index ConfigMaps: writes, but additive to the
+// caller's environment and safe to repeat.
+func inventoryOperation() mcp.ToolOption {
+	return func(tool *mcp.Tool) {
+		mcp.WithReadOnlyHintAnnotation(false)(tool)
+		mcp.WithDestructiveHintAnnotation(false)(tool)
+		mcp.WithIdempotentHintAnnotation(true)(tool)
+		mcp.WithOpenWorldHintAnnotation(true)(tool)
 	}
 }
 
@@ -191,20 +210,22 @@ type Info struct {
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
 // build is what get_info and the MCP server identity report as the version.
 func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *mcpserver.MCPServer {
+	t := &tools{svc: svc, build: build, policy: toolpolicy.Options{MaxResultBytes: 128 * 1024}}
+	for _, option := range opts {
+		option(t)
+	}
 	s := mcpserver.NewMCPServer("model-manager", build.Version, append(tracingOptions(),
+		policy.New(t.policy),
 		brand.WithGiantSwarmIcon(),
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions("Manage the models one or several serving backends (ollama, kserve, lemonade, lmstudio) hold: list downloaded and loaded models, pull with progress, load/unload, delete, and wire models into kagent ModelConfigs so agents can use them. Backends are registered at runtime with add_backend (remove_backend drops one); an installation may run none yet: list_backends and get_info then answer an empty list with backendsReason saying that no backend is registered and how to register one. Call list_backends first to learn which backends this installation runs and which capabilities each supports; every model carries its backend, and every tool takes an optional backend argument — required when the same model reference exists on several backends (the tool then answers conflict). On kserve also use list_presets, search_models, check_fit and list_nodes before pulling or loading."),
 	)...)
-	t := &tools{svc: svc, build: build}
-	for _, o := range opts {
-		o(t)
-	}
 	t.registerBackendTools(s)
 
 	s.AddTool(mcp.NewTool(ToolGetInfo,
 		tooldesc.Describe("Report this server's build, its tool names, the configured backends and, with agent wiring on, where ModelConfigs go.", ""),
 		readOnly(),
+		mcp.WithOpenWorldHintAnnotation(false),
 	), t.getInfo)
 
 	s.AddTool(mcp.NewTool(ToolGetBackend,
@@ -223,28 +244,26 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 
 	s.AddTool(mcp.NewTool(ToolListModels,
 		tooldesc.Describe("List downloaded models with backend, size, family and parameters, whether each is loaded, and its kagent ModelConfig.",
-			"Without backend every backend is listed; one that fails to answer is reported under errors while the others' models are returned."),
+			"Without backend every backend is listed; one that fails to answer is reported under errors while the others' models are returned. "+inventoryEffects),
 		backendArg("to list"),
-		readOnly(),
+		inventoryOperation(),
 	), t.listModels)
 
 	s.AddTool(mcp.NewTool(ToolGetModel,
-		tooldesc.Describe("Get one downloaded model with its loaded state and kagent ModelConfig.", ""),
+		tooldesc.Describe("Get one downloaded model with its loaded state and kagent ModelConfig.", inventoryEffects),
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference, e.g. smollm2:135m or hf.co/org/repo:Q4_K_M")),
 		backendArg("holding the model; else resolved across backends (conflict when several hold it)"),
-		readOnly(),
+		inventoryOperation(),
 	), t.getModel)
 
 	s.AddTool(mcp.NewTool(ToolListLoadedModels,
 		tooldesc.Describe("List the models loaded or serving now, with memory use and expiry; on kserve phase, steps, API interfaces and endpoint.",
-			"Not read-only on kserve: a served model model-manager manages that has no ModelConfig is wired by this read, as you (wiring.reason \"wired on read\"). "+
+			"On kserve, a managed served model without a ModelConfig is wired as you (wiring.reason \"wired on read\"). "+
 				"A Ready kserve model carries runtime and interfaces, the APIs its server registered ([] with interfacesReason when unreadable); "+
 				"on the platform's LLM endpoint publicName is the model name clients send there. "+
-				"gitops names the Flux object applying a serving object from git: change it there."),
+				"gitops names the Flux object applying a serving object from git: change it there. "+inventoryEffects),
 		backendArg("to list"),
-		mcp.WithReadOnlyHintAnnotation(false),
-		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithIdempotentHintAnnotation(true),
+		inventoryOperation(),
 	), t.listLoaded)
 
 	s.AddTool(mcp.NewTool(ToolPullModel,
@@ -261,6 +280,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("whether the model is there, on kserve the fit verdict and target node, and the ModelConfig it would wire"),
 		applyOnly(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(false),
 	), t.pull)
@@ -281,6 +301,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("the fit verdict, the serving object it would create or where it serves already, and the ModelConfig it would wire"),
 		commitArgs(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.load)
@@ -304,26 +325,26 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 
 	s.AddTool(mcp.NewTool(ToolCheckFit,
 		tooldesc.Describe("Check whether a model or serving preset fits a kserve node before pulling or loading: the verdict load_model reaches.",
-			"Sizes the weights from the hub (an oci:// preset from its image), adds the serving overhead and vLLM's KV cache at --max-model-len, "+
+			"Sizes hub weights (OCI presets from the image), adds serving overhead and vLLM's KV cache at --max-model-len, "+
 				"and compares with the node's free budget less what served models reserve. "+
-				"fits stands only on the checks made: skippedChecks names those it could not make, reason any estimate. "+
-				"A GPU pool with no ready node is judged on its instance shapes (unverified without them). Says whether the model is cached there and needs a hub token."),
+				"fits covers the checks made: skippedChecks names those it could not make, reason any estimate. "+
+				"A GPU pool with no ready node is judged on its instance shapes (unverified without them). Says whether the model is cached there and needs a hub token. "+inventoryEffects),
 		mcp.WithString(argModel, mcp.Description("Hugging Face repository owner/name (required unless preset is given)")),
 		backendArg("to check on; required when several backends offer fit checks"),
 		mcp.WithString(argPreset, mcp.Description("Serving preset (overhead, model id)")),
 		mcp.WithString(argNode, mcp.Description("Node to check against; default: the best eligible node")),
 		mcp.WithString(argPlacement, mcp.Enum(backend.PlacementCopies, backend.PlacementSplit), mcp.Description("kserve: copies (default; each holds the whole model) or split across one fast link's nodes (each its share); the answer recommends one")),
 		mcp.WithArray(argNodes, mcp.WithStringItems(), mcp.Description("kserve: split, the nodes to split across (default: the first fast link hosting the model); copies, one copy on each, fitting when every copy does")),
-		readOnly(),
+		inventoryOperation(),
 	), t.checkFit)
 
 	s.AddTool(mcp.NewTool(ToolListNodes,
 		tooldesc.Describe("List the nodes a backend serves on, with memory budget, what loaded models reserve and the download cache each holds.",
 			"kserve: accelerator nodes only; eligible and eligibilityReason say whether a model can be served there, and load_model, pull_model and check_fit refuse an ineligible node with that reason. "+
 				"modelImageEligible says the same for a preset served from an OCI model image. "+
-				"ollama and lemonade: the proxied host, always eligible. lmstudio answers unsupported: LM Studio exposes no host hardware."),
+				"ollama and lemonade: the proxied host, always eligible. lmstudio answers unsupported: LM Studio exposes no host hardware. "+inventoryEffects),
 		backendArg("to list nodes of"),
-		readOnly(),
+		inventoryOperation(),
 	), t.listNodes)
 
 	s.AddTool(mcp.NewTool(ToolUnloadModel,
@@ -335,6 +356,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("on kserve the serving objects it would delete and the ModelConfig to unwire, elsewhere whether it is loaded"),
 		commitArgs(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unload)
@@ -348,6 +370,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("whether the model is loaded and the ModelConfig the delete would unwire"),
 		applyOnly(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.deleteModel)
@@ -365,6 +388,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("the manifests, the Flux object applying the ModelConfig from git, another owner's ModelConfig wiring it"),
 		commitArgs(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.wire)
@@ -378,28 +402,30 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		dryRunArg("the ModelConfig and Secret it would delete and the Flux object applying the ModelConfig from git"),
 		commitArgs(),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.unwire)
 
 	s.AddTool(mcp.NewTool(ToolListJobs,
-		tooldesc.Describe("List pull and load jobs, newest first, with backend, phase and progress.",
-			"On kserve a pull job carries the node whose cache receives the download and the preset it is for."),
+		tooldesc.Describe("List your pull and load tasks, newest first, with backend, phase and progress.",
+			"Tasks are bound to the validated user, client and actor. Kubernetes tasks require current access to their backing resource."),
 		backendArg("to list jobs of"),
 		readOnly(),
 	), t.listJobs)
 
 	s.AddTool(mcp.NewTool(ToolGetJob,
-		tooldesc.Describe("Get one job: backend, phase, progress, error, and the ModelConfig created on success.", ""),
+		tooldesc.Describe("Get one of your tasks: backend, phase, progress, error, and the ModelConfig created on success.", "Other callers' task IDs return not_found; Kubernetes resource access is checked on every request."),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id from pull_model")),
 		readOnly(),
 	), t.getJob)
 
 	s.AddTool(mcp.NewTool(ToolCancelJob,
-		tooldesc.Describe("Cancel a running pull or load job; cancelling a load leaves the model serving (unload_model stops it).", ""),
+		tooldesc.Describe("Cancel your pull or load task; a KServe download or serving resource continues independently.", "KServe cancellation stops this task's tracking and follow-up wiring. Stop shared Kubernetes work through its resource API with the required RBAC permissions; unload_model stops serving."),
 		mcp.WithString(argJobID, mcp.Required(), mcp.Description("Job id")),
 		dryRunArg("the job it would cancel"),
 		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.cancelJob)
@@ -408,9 +434,15 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 }
 
 type tools struct {
-	svc   *service.Service
-	build buildinfo.Info
-	store *registry.Store // nil: no Kubernetes access, registration tools refuse
+	policy toolpolicy.Options
+	svc    *service.Service
+	build  buildinfo.Info
+	store  *registry.Store // nil: no Kubernetes access, registration tools refuse
+}
+
+// WithToolPolicy supplies resolved tool limits, audit identity and telemetry.
+func WithToolPolicy(options toolpolicy.Options) Option {
+	return func(target *tools) { target.policy = options }
 }
 
 func (t *tools) getInfo(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -439,6 +471,9 @@ func (t *tools) listBackends(ctx context.Context, _ mcp.CallToolRequest) (*mcp.C
 	backends, invalid := t.svc.Backends(ctx)
 	out := backendsBody(t.svc, backends)
 	if len(invalid) > 0 {
+		for i := range invalid {
+			invalid[i].Error = "backend document is invalid"
+		}
 		out["invalid"] = invalid
 	}
 	return jsonResult(out)
@@ -453,7 +488,7 @@ func (t *tools) listModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) getModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -473,7 +508,7 @@ func (t *tools) listLoaded(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) pull(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -532,7 +567,7 @@ func (t *tools) listPresets(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (t *tools) search(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query, err := req.RequireString(argQuery)
+	query, err := requiredString(req, argQuery)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -560,7 +595,7 @@ func (t *tools) listNodes(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 }
 
 func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -599,7 +634,7 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -619,7 +654,7 @@ func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -654,7 +689,7 @@ func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 }
 
 func (t *tools) unwire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -694,39 +729,39 @@ func unwiredView(model string, u *service.Unwired) map[string]any {
 	return out
 }
 
-func (t *tools) listJobs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	list, err := t.svc.Jobs(req.GetString(argBackend, ""))
+func (t *tools) listJobs(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	list, err := t.svc.Jobs(ctx, req.GetString(argBackend, ""))
 	if err != nil {
 		return errResult(err), nil
 	}
 	return jsonResult(map[string]any{"jobs": list})
 }
 
-func (t *tools) getJob(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString(argJobID)
+func (t *tools) getJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := requiredString(req, argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
-	job, err := t.svc.Job(id)
+	job, err := t.svc.Job(ctx, id)
 	if err != nil {
 		return errResult(err), nil
 	}
 	return jsonResult(job)
 }
 
-func (t *tools) cancelJob(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString(argJobID)
+func (t *tools) cancelJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := requiredString(req, argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
 	if req.GetBool(argDryRun, false) {
-		job, err := t.svc.PlanCancel(id)
+		job, err := t.svc.PlanCancel(ctx, id)
 		if err != nil {
 			return errResult(err), nil
 		}
 		return jsonResult(map[string]any{argDryRun: true, keyJob: job})
 	}
-	job, err := t.svc.CancelJob(id)
+	job, err := t.svc.CancelJob(ctx, id)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -812,10 +847,20 @@ func dryRunView(plan *service.WirePlan) map[string]any {
 	return out
 }
 
+// requiredString reads a required argument; a missing or mistyped one is the
+// caller's invalid request, not a backend failure.
+func requiredString(req mcp.CallToolRequest, name string) (string, error) {
+	value, err := req.RequireString(name)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", backend.ErrInvalid, err)
+	}
+	return value, nil
+}
+
 func jsonResult(v any) (*mcp.CallToolResult, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("encode result: %v", err)), nil
+		return mcp.NewToolResultError("encode result failed"), nil
 	}
 	return mcp.NewToolResultText(string(data)), nil
 }
@@ -838,6 +883,9 @@ func errResult(err error) *mcp.CallToolResult {
 		res.StructuredContent = structured
 		return res
 	}
-	_, code := statusFor(err)
-	return mcp.NewToolResultError(code + ": " + strings.TrimPrefix(err.Error(), code+": "))
+	status, code := statusFor(err)
+	if status >= http.StatusInternalServerError {
+		slog.Error("tool call failed", "code", code, "error", err)
+	}
+	return mcp.NewToolResultError(code + ": " + strings.TrimPrefix(publicErrorMessage(err), code+": "))
 }

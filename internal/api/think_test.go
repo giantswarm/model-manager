@@ -116,7 +116,7 @@ func TestReconcilerDoesNotLoopWhereKagentLacksThink(t *testing.T) {
 // the returned stop is called (or the test ends).
 func runService(t *testing.T, fb *fakeBackend, fw *fakeWirer) (stop func()) {
 	t.Helper()
-	svc := service.New([]backend.Backend{fb}, jobs.NewManager(), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, ReconcileInterval: 5 * time.Millisecond}, nil)
+	svc := service.New([]backend.Backend{fb}, jobs.NewManager(jobs.WithAnonymousAccess(true)), fw, &service.WiringInfo{Namespace: "kagent"}, service.Config{AutoWire: true, ReconcileInterval: 5 * time.Millisecond}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { svc.Run(ctx); close(done) }()

@@ -1,0 +1,32 @@
+suite: servicemonitor
+templates:
+  - templates/servicemonitor.yaml
+tests:
+  - it: defaults to an explicit tenant when enabled
+    set:
+      serviceMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.labels["observability.giantswarm.io/tenant"]
+          value: giantswarm
+
+  - it: routes metrics to the configured tenant
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.labels:
+        observability.giantswarm.io/tenant: custom-tenant
+    asserts:
+      - equal:
+          path: metadata.labels["observability.giantswarm.io/tenant"]
+          value: custom-tenant
+
+  - it: refuses an empty tenant
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.labels:
+        observability.giantswarm.io/tenant: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: serviceMonitor.labels[observability.giantswarm.io/tenant] must be set
