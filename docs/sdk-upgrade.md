@@ -94,20 +94,7 @@ in-cluster or host Ollama, Lemonade or LM Studio endpoint, needs its address in
 installation with `--set networkPolicy.enabled=false`. Keep OAuth enabled
 where the server is reachable by other users.
 
-## Operator notice and recovery
-
-Before rollout, notify API users of the default tool limits, 413 response,
-stateless transport, Origin checks and gateway/scraper selectors. Confirm the
-actual REST clients and gateway peers for the installation. Send the notice
-through the installation's approved channel before changing network access.
-
-Notice draft:
-
-```text
-The model-manager update adds private user/client/actor-bound task handles, default tool limits of 30 seconds and 128 KiB, and REST 413 above 1 MiB.
-Cancelling a KServe task stops tracking; shared downloads continue. Resource operations retain caller RBAC, and chart ingress is limited to configured gateways and scrapers.
-Refresh rejected credentials through sign-in. Confirm client identity claims and report access failures before rollout; authentication remains enforced during recovery.
-```
+## Recovery
 
 If a supported client loses access, check its negotiated version, Origin,
 resource metadata, caller credential and selected network peer. Correct the
