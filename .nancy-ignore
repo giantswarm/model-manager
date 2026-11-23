@@ -1,3 +1,2 @@
-CVE-2026-84445 until=2026-11-30 # google.golang.org/grpc@v1.84.0: GHSA-2v4p-qf9q-27wj patched 1.84.0 before release, the index range still matches it; no newer grpc; https://github.com/giantswarm/model-manager/issues/214
 CVE-2026-107325 until=2027-01-04 # go.mongodb.org/mongo-driver@v1.17.10
-CVE-2026-128100 until=2026-12-18 # github.com/hashicorp/vault/api@v1.23.0 since=2026-11-18
+CVE-2026-128100 until=2027-01-04 # github.com/hashicorp/vault/api@v1.23.0 since=2026-11-18
