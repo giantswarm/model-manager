@@ -58,3 +58,11 @@ func TestBackgroundPublicErrorMessages(t *testing.T) {
 		require.Equal(t, test.message, backend.PublicErrorMessage(test.err))
 	}
 }
+
+func TestMissingRequiredArgumentIsAnInvalidRequest(t *testing.T) {
+	_, err := requiredString(mcp.CallToolRequest{}, argJobID)
+	require.ErrorIs(t, err, backend.ErrInvalid)
+	text := errResult(err).Content[0].(mcp.TextContent).Text
+	require.Contains(t, text, "invalid_request: ")
+	require.Contains(t, text, `required argument "id"`)
+}

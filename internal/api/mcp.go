@@ -488,7 +488,7 @@ func (t *tools) listModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) getModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -508,7 +508,7 @@ func (t *tools) listLoaded(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 }
 
 func (t *tools) pull(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -567,7 +567,7 @@ func (t *tools) listPresets(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (t *tools) search(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query, err := req.RequireString(argQuery)
+	query, err := requiredString(req, argQuery)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -595,7 +595,7 @@ func (t *tools) listNodes(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 }
 
 func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -634,7 +634,7 @@ func (t *tools) unload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -654,7 +654,7 @@ func (t *tools) deleteModel(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -689,7 +689,7 @@ func (t *tools) wire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 }
 
 func (t *tools) unwire(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name, err := req.RequireString(argModel)
+	name, err := requiredString(req, argModel)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -738,7 +738,7 @@ func (t *tools) listJobs(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 }
 
 func (t *tools) getJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString(argJobID)
+	id, err := requiredString(req, argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -750,7 +750,7 @@ func (t *tools) getJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (t *tools) cancelJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString(argJobID)
+	id, err := requiredString(req, argJobID)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -845,6 +845,16 @@ func dryRunView(plan *service.WirePlan) map[string]any {
 		out["alreadyWired"] = plan.AlreadyWired
 	}
 	return out
+}
+
+// requiredString reads a required argument; a missing or mistyped one is the
+// caller's invalid request, not a backend failure.
+func requiredString(req mcp.CallToolRequest, name string) (string, error) {
+	value, err := req.RequireString(name)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", backend.ErrInvalid, err)
+	}
+	return value, nil
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {
