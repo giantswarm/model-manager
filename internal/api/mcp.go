@@ -172,11 +172,14 @@ func readOnly() mcp.ToolOption {
 
 const inventoryEffects = "KServe inventory may write Jobs and indexes."
 
+// inventoryOperation marks reads whose KServe inventory creates scan Jobs and
+// replaces model-manager's own index ConfigMaps: writes, but additive to the
+// caller's environment and safe to repeat.
 func inventoryOperation() mcp.ToolOption {
 	return func(tool *mcp.Tool) {
 		mcp.WithReadOnlyHintAnnotation(false)(tool)
-		mcp.WithDestructiveHintAnnotation(true)(tool)
-		mcp.WithIdempotentHintAnnotation(false)(tool)
+		mcp.WithDestructiveHintAnnotation(false)(tool)
+		mcp.WithIdempotentHintAnnotation(true)(tool)
 		mcp.WithOpenWorldHintAnnotation(true)(tool)
 	}
 }

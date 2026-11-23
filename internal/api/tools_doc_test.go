@@ -60,7 +60,8 @@ func TestToolEffectsIncludeInventoryWrites(t *testing.T) {
 		require.Equal(t, mcp.ToBoolPtr(!local[tool.Name]), tool.Annotations.OpenWorldHint, tool.Name)
 		if inventory[tool.Name] {
 			require.Equal(t, mcp.ToBoolPtr(false), tool.Annotations.ReadOnlyHint, tool.Name)
-			require.Equal(t, mcp.ToBoolPtr(false), tool.Annotations.IdempotentHint, tool.Name)
+			require.Equal(t, mcp.ToBoolPtr(false), tool.Annotations.DestructiveHint, tool.Name)
+			require.Equal(t, mcp.ToBoolPtr(true), tool.Annotations.IdempotentHint, tool.Name)
 			require.Contains(t, tool.Description, inventoryEffects)
 		}
 	}

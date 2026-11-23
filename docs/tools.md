@@ -6,17 +6,17 @@ Generated from the registered tools (`make tools-doc`); through muster every too
 |---|---|
 | `add_backend` | write, destructive |
 | `cancel_job` | write, destructive |
-| `check_fit` | write, destructive |
+| `check_fit` | write |
 | `delete_model` | write, destructive |
 | `get_backend` | read-only |
 | `get_info` | read-only |
 | `get_job` | read-only |
-| `get_model` | write, destructive |
+| `get_model` | write |
 | `list_backends` | read-only |
 | `list_jobs` | read-only |
-| `list_loaded_models` | write, destructive |
-| `list_models` | write, destructive |
-| `list_nodes` | write, destructive |
+| `list_loaded_models` | write |
+| `list_models` | write |
+| `list_nodes` | write |
 | `list_presets` | read-only |
 | `load_model` | write |
 | `pull_model` | write |
