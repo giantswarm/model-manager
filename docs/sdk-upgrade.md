@@ -56,12 +56,53 @@ before reporting the object as missing. A refreshed credential can read an
 owned task, but does not reuse a worker holding an older credential.
 
 Cancelling a KServe task stops its observer and follow-up wiring; it does not
-delete a shared download or serving object. Stop the underlying work through the
-Kubernetes resource API with the appropriate RBAC permissions, or use
-`unload_model` to stop serving. These operations use the acting caller's
+delete a shared download or serving object. Stop a download with
+`stop_download` (below), or use `unload_model` to stop serving. These operations use the acting caller's
 authority. The Kubernetes Job controller owns execution of submitted downloads.
 Downloads on different node caches have distinct Job identities; a matching
 existing Job can be joined after the caller's Kubernetes access is checked.
+
+### Stopping a shared download
+
+A task is bound to the caller's authorization context, as the MCP tasks
+specification requires, so cancelling it never ends another caller's task. The
+download Job is shared work. `stop_download` (`POST
+/api/v1/models/stop-download`) deletes it with the caller's own Kubernetes
+credentials:
+
+- The caller needs `delete` on `batch/jobs` in the serving namespace. The
+  cluster refuses everyone else with 403.
+- The delete carries the Job's UID as a precondition, so a Job recreated under
+  the same name is never stopped by mistake. `uid` narrows it to the object a
+  task reported.
+- `dryRun` asks the cluster to admit the delete without performing it.
+- Every task observing the Job fails with `download stopped`. Partial files
+  stay in the cache for the next `pull_model`.
+- Without downstream OAuth the delete would run with the ServiceAccount's
+  permissions, so the call answers `unsupported` and the Job is deleted through
+  the Kubernetes API instead.
+
+This is how KServe, KAITO, Fluid and OME treat a shared download: one object,
+deleting it stops the work for everyone, and RBAC decides who may delete it.
+
+KServe's `LocalModelCache` was evaluated as the download object
+(giantswarm/model-manager#446) and is not used yet:
+
+- Deleting a cache also stops the download for every caller and removes the
+  files. Its in-use check covers serving workloads, not other callers.
+- The node-group mode writes to a hostPath on every node of the group. That
+  does not fit a download pinned to one node's claim, or a model split across
+  nodes. The shared-claim mode (`pvcRef`) needs a ReadWriteMany claim and is
+  not in a KServe release (v0.21.0).
+- Its status has no byte progress, and a failed download is not retried until
+  someone deletes it.
+- The KServe app does not ship its controller, node agent, CRDs or webhook.
+- `LocalModelCache` is cluster-scoped, so callers would need cluster-wide
+  delete permission.
+
+Revisit it once a KServe release ships `pvcRef`, the KServe app ships the
+local model components, and the platform offers a ReadWriteMany cache class.
+`stop_download` would then delete the namespaced cache as the caller.
 
 Task state is in memory, so restart requires a new private handle. A fresh pull
 can join an existing matching download through the caller's Kubernetes access.

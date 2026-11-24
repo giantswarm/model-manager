@@ -22,6 +22,7 @@ Generated from the registered tools (`make tools-doc`); through muster every too
 | `pull_model` | write |
 | `remove_backend` | write, destructive |
 | `search_models` | read-only |
+| `stop_download` | write, destructive |
 | `unload_model` | write, destructive |
 | `unwire_model` | write, destructive |
 | `wire_model` | write, destructive |
@@ -631,6 +632,49 @@ Run check_fit before pulling.
   },
   "required": [
     "query"
+  ],
+  "type": "object"
+}
+```
+
+## `stop_download`
+
+```text
+Stop a running kserve download for everyone: delete its download Job as you.
+
+Every task observing the download fails with download stopped; cancel_job only detaches your own task. Your Kubernetes RBAC decides (delete on batch/jobs in the serving namespace); without downstream OAuth it answers unsupported. Partial files stay in the cache for the next pull_model.
+```
+
+```json
+{
+  "properties": {
+    "backend": {
+      "description": "Backend running the download, as list_backends names it; optional with one backend",
+      "type": "string"
+    },
+    "dryRun": {
+      "description": "Write nothing; return the plan: the download Job it would delete, with the cluster checking your delete permission",
+      "type": "boolean"
+    },
+    "model": {
+      "description": "Repository (owner/name[:revision]) or preset name, as pull_model took it",
+      "type": "string"
+    },
+    "node": {
+      "description": "Only the download to this node's cache; required when the model downloads to several",
+      "type": "string"
+    },
+    "preset": {
+      "description": "Only the download for this preset",
+      "type": "string"
+    },
+    "uid": {
+      "description": "Stop only the download Job with this uid (a job's object.uid)",
+      "type": "string"
+    }
+  },
+  "required": [
+    "model"
   ],
   "type": "object"
 }

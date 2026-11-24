@@ -41,6 +41,7 @@ const (
 	ToolListJobs         = "list_jobs"
 	ToolGetJob           = "get_job"
 	ToolCancelJob        = "cancel_job"
+	ToolStopDownload     = "stop_download"
 	// kserve capabilities; unsupported on other backends.
 	ToolListPresets  = "list_presets"
 	ToolSearchModels = "search_models"
@@ -53,7 +54,7 @@ func ToolNames() []string {
 	return []string{
 		ToolGetInfo, ToolGetBackend, ToolListBackends, ToolListModels, ToolGetModel, ToolListLoadedModels,
 		ToolPullModel, ToolLoadModel, ToolUnloadModel, ToolDeleteModel,
-		ToolWireModel, ToolUnwireModel, ToolListJobs, ToolGetJob, ToolCancelJob,
+		ToolWireModel, ToolUnwireModel, ToolListJobs, ToolGetJob, ToolCancelJob, ToolStopDownload,
 		ToolListPresets, ToolSearchModels, ToolCheckFit, ToolListNodes,
 		ToolAddBackend, ToolRemoveBackend,
 	}
@@ -77,6 +78,7 @@ const (
 	argTracing           = "tracing"
 	argQuery             = "query"
 	argLimit             = "limit"
+	argUID               = "uid"
 )
 
 // The commit target of a write in mode commit where Flux provenance names none.
@@ -430,6 +432,23 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithIdempotentHintAnnotation(true),
 	), t.cancelJob)
 
+	s.AddTool(mcp.NewTool(ToolStopDownload,
+		tooldesc.Describe("Stop a running kserve download for everyone: delete its download Job as you.",
+			"Every task observing the download fails with download stopped; cancel_job only detaches your own task. "+
+				"Your Kubernetes RBAC decides (delete on batch/jobs in the serving namespace); without downstream OAuth it answers unsupported. "+
+				"Partial files stay in the cache for the next pull_model."),
+		mcp.WithString(argModel, mcp.Required(), mcp.Description("Repository (owner/name[:revision]) or preset name, as pull_model took it")),
+		backendArg("running the download"),
+		mcp.WithString(argPreset, mcp.Description("Only the download for this preset")),
+		mcp.WithString(argNode, mcp.Description("Only the download to this node's cache; required when the model downloads to several")),
+		mcp.WithString(argUID, mcp.Description("Stop only the download Job with this uid (a job's object.uid)")),
+		dryRunArg("the download Job it would delete, with the cluster checking your delete permission"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(false),
+	), t.stopDownload)
+
 	return s
 }
 
@@ -766,6 +785,36 @@ func (t *tools) cancelJob(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		return errResult(err), nil
 	}
 	return jsonResult(job)
+}
+
+func (t *tools) stopDownload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	model, err := requiredString(req, argModel)
+	if err != nil {
+		return errResult(err), nil
+	}
+	b, stopped, err := t.svc.StopDownload(ctx, req.GetString(argBackend, ""), backend.StopDownloadRequest{
+		Ref:    model,
+		Preset: req.GetString(argPreset, ""),
+		Node:   req.GetString(argNode, ""),
+		UID:    req.GetString(argUID, ""),
+		DryRun: req.GetBool(argDryRun, false),
+	})
+	if err != nil {
+		return errResult(err), nil
+	}
+	return jsonResult(stopDownloadView(b, stopped))
+}
+
+// stopDownloadView is stop_download's answer in MCP and REST.
+func stopDownloadView(b backend.Name, stopped *backend.StoppedDownload) map[string]any {
+	out := map[string]any{argBackend: b, "download": stopped, "stopped": !stopped.DryRun}
+	if stopped.DryRun {
+		out[argDryRun] = true
+		out["next"] = "the cluster admits your delete; re-run without dryRun to stop the download for every task observing it"
+	} else {
+		out["next"] = "the download Job is being deleted; tasks observing it fail with download stopped, and pull_model starts it again"
+	}
+	return out
 }
 
 // commitView is a write's answer in mode commit: the plan and the pull

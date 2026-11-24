@@ -979,6 +979,37 @@ type PullAdopter interface {
 	RunningPulls(ctx context.Context) ([]PullRequest, error)
 }
 
+// StopDownloadRequest names a running download by what pull_model took. Node
+// and Preset narrow the match when the model downloads to several caches.
+// UID, when set, must be the download object's: a download recreated under
+// the same name is never stopped by a reference to its predecessor.
+type StopDownloadRequest struct {
+	Ref    string `json:"ref"`
+	Preset string `json:"preset,omitempty"`
+	Node   string `json:"node,omitempty"`
+	UID    string `json:"uid,omitempty"`
+	DryRun bool   `json:"dryRun,omitempty"`
+}
+
+// StoppedDownload is the download a StopDownload deleted, or, on a dry run,
+// the one it would delete once the cluster admitted the caller's delete.
+type StoppedDownload struct {
+	Object JobObject `json:"object"`
+	Model  string    `json:"model"`
+	Node   string    `json:"node,omitempty"`
+	Preset string    `json:"preset,omitempty"`
+	DryRun bool      `json:"dryRun,omitempty"`
+}
+
+// DownloadStopper is implemented by backends whose downloads are shared
+// cluster objects (kserve: download Jobs). StopDownload deletes the object
+// with the caller's own credentials, so the cluster's RBAC decides; it stops
+// the download for every task observing it. Cancelling a task only detaches
+// that task.
+type DownloadStopper interface {
+	StopDownload(ctx context.Context, req StopDownloadRequest) (*StoppedDownload, error)
+}
+
 // AgentEndpoint describes how kagent agents reach a model on this backend; the
 // wiring layer turns it into a ModelConfig. The API key the ModelConfig
 // presents to the endpoint takes one of three shapes, in this order of

@@ -450,7 +450,7 @@ func (b *Backend) watchJob(ctx context.Context, plan downloadPlan, backing *batc
 	for {
 		job, err := client.BatchV1().Jobs(backing.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("download Job %s/%s disappeared", backing.Namespace, name)
+			return fmt.Errorf("download stopped: Job %s/%s was deleted", backing.Namespace, name)
 		}
 		if err != nil {
 			if errors.IsUnauthorized(err) || errors.IsForbidden(err) {

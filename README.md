@@ -49,7 +49,7 @@ The same operations are exposed twice from one process:
   `list_backends`, `list_models`, `get_model`, `list_loaded_models`, `pull_model`,
   `load_model`, `unload_model`, `delete_model`, `wire_model`, `unwire_model`,
   `list_jobs`, `get_job`, `cancel_job`, plus the kserve capabilities
-  `list_presets`, `search_models`, `check_fit`, `list_nodes` (through muster:
+  `list_presets`, `search_models`, `check_fit`, `list_nodes`, `stop_download` (through muster:
   `x_<server>_<tool>`); every tool takes an optional `backend`. Every tool's
   description and input schema as a model reads them: [docs/tools.md](docs/tools.md).
 
@@ -71,7 +71,8 @@ Lemonade-backend ADR in the team's decision log.
 | Job progress | `GET /api/v1/jobs[?backend=]`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}` | `list_jobs`, `get_job`, `cancel_job` |
 | Load / unload (kserve: the load answers `fit`, `running` and `wiring` — the ModelConfig created in the same call, `apiKeyPassthrough` for a model routed on the models Gateway — before the model is ready; the unload deletes the serving object and unwires within the call — only a ModelConfig this model-manager created, any other is reported as `modelConfigLeft` — never waiting for a cache scan, and answers `inventory: {refreshing, reason?}` — the cache rescanned in the background, or why it cannot be) | `POST /api/v1/models/load {"model","backend?","keepAlive?","tracing?"}`, `POST /api/v1/models/unload {"model","backend?"}` | `load_model`, `unload_model` |
 | Delete (unwires by default) | `DELETE /api/v1/models/{name}[?unwire=false][&backend=]` | `delete_model` |
-| Every write tool takes `dryRun` (MCP): it answers the plan and changes nothing — `pull_model` whether the model is there, the kserve fit verdict and the ModelConfig it would wire; `load_model` the loaded state, the keep-alive, the kserve fit verdict and serving object (`manifests`) or `alreadyServing`, the ModelConfig the auto-wire would ensure (`wiring`); `unload_model` the kserve serving objects it would delete and the ModelConfig it would unwire; `delete_model` the loaded state and the ModelConfig it would unwire, or the refusal the delete would answer (kserve: a model still served); `cancel_job` the job | — | `pull_model`, `load_model`, `unload_model`, `delete_model`, `cancel_job` |
+| Stop a running kserve download for every task observing it: deletes the download Job with the caller's own credentials, so their RBAC decides; `cancel_job` only detaches the caller's task ([why](docs/sdk-upgrade.md#stopping-a-shared-download)) | `POST /api/v1/models/stop-download {"model","backend?","preset?","node?","uid?","dryRun?"}` | `stop_download` |
+| Every write tool takes `dryRun` (MCP): it answers the plan and changes nothing — `pull_model` whether the model is there, the kserve fit verdict and the ModelConfig it would wire; `load_model` the loaded state, the keep-alive, the kserve fit verdict and serving object (`manifests`) or `alreadyServing`, the ModelConfig the auto-wire would ensure (`wiring`); `unload_model` the kserve serving objects it would delete and the ModelConfig it would unwire; `delete_model` the loaded state and the ModelConfig it would unwire, or the refusal the delete would answer (kserve: a model still served); `cancel_job` the job; `stop_download` the download Job, the cluster checking the caller's delete | — | `pull_model`, `load_model`, `unload_model`, `delete_model`, `cancel_job`, `stop_download` |
 | Wire / unwire to kagent (`apiKeyPassthrough` or `apiKeySecret`+`apiKeySecretKey` override the backend's API-key shape; both together are refused; MCP `dryRun: true` returns the `manifests` it would write or delete, writing nothing) | `POST /api/v1/models/wire {"model","backend?","apiKeyPassthrough?","apiKeySecret?","apiKeySecretKey?"}`, `POST /api/v1/models/unwire {"model","backend?"}` | `wire_model`, `unwire_model` |
 | Serving presets (kserve) | `GET /api/v1/presets[?backend=]` | `list_presets` |
 | Hub search (kserve) | `GET /api/v1/search?q=…&limit=…[&backend=]` | `search_models` |
@@ -859,7 +860,8 @@ Jobs (`GET /api/v1/jobs`) live in process memory: the chart runs one replica
 and clients poll one server. Authenticated task access requires the same
 validated issuer, subject, OAuth client and current actor, plus current access
 to the backing Kubernetes resource. Cancelling a KServe task detaches its
-observer; shared Kubernetes work continues.
+observer; shared Kubernetes work continues. `stop_download` stops a shared
+download for every task observing it, as the caller.
 
 A restart loses private handles. The next pull creates a fresh private handle
 and can join a matching Kubernetes download through caller RBAC. Application

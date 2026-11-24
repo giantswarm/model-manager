@@ -55,6 +55,7 @@ func (h *REST) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+Prefix+"/models/wire", h.wire)
 	mux.HandleFunc("POST "+Prefix+"/models/unwire", h.unwire)
 	mux.HandleFunc("POST "+Prefix+"/models/fit-check", h.fitCheck)
+	mux.HandleFunc("POST "+Prefix+"/models/stop-download", h.stopDownload)
 	mux.HandleFunc("GET "+Prefix+"/models/{name...}", h.getModel)
 	mux.HandleFunc("DELETE "+Prefix+"/models/{name...}", h.deleteModel)
 	mux.HandleFunc("GET "+Prefix+"/jobs", h.listJobs)
@@ -91,6 +92,10 @@ type modelRequest struct {
 	APIKeyPassthrough bool   `json:"apiKeyPassthrough,omitempty"`
 	APIKeySecret      string `json:"apiKeySecret,omitempty"`
 	APIKeySecretKey   string `json:"apiKeySecretKey,omitempty"`
+	// UID and DryRun are stop-download's: the download Job's uid it must
+	// match, and a delete the cluster checks without performing it.
+	UID    string `json:"uid,omitempty"`
+	DryRun bool   `json:"dryRun,omitempty"`
 }
 
 // wireOptions is the request's say on the wired ModelConfig's API key.
@@ -284,6 +289,19 @@ func (h *REST) unload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+func (h *REST) stopDownload(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	b, stopped, err := h.svc.StopDownload(r.Context(), req.Backend, backend.StopDownloadRequest{Ref: req.Model, Preset: req.Preset, Node: req.Node, UID: req.UID, DryRun: req.DryRun})
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stopDownloadView(b, stopped))
 }
 
 func (h *REST) wire(w http.ResponseWriter, r *http.Request) {
