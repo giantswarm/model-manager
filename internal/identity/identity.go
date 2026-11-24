@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/giantswarm/mcp-oauth/handler"
 )
 
 // Source says how the caller was authenticated.
@@ -82,8 +84,14 @@ func FromContext(ctx context.Context) (*Identity, bool) {
 	return id, ok && id != nil
 }
 
-// Caller is the caller's String(), or "" without one.
+// Caller is display attribution for the caller: the name a trusted issuer's
+// subjectClaim mapped (mcp-oauth UserInfo.Username) when it differs from the
+// subject, else String(), else "". Stored state keys on issuer and subject,
+// never on this value.
 func Caller(ctx context.Context) string {
+	if user, ok := handler.UserInfoFromContext(ctx); ok && user != nil && user.Username != "" && user.Username != user.ID {
+		return user.Username
+	}
 	id, _ := FromContext(ctx)
 	return id.String()
 }

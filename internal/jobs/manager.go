@@ -82,9 +82,9 @@ type Job struct {
 	Resource string `json:"resource,omitempty"`
 	// Object identifies the Kubernetes resource followed by this task.
 	Object *backend.JobObject `json:"object,omitempty"`
-	// RequestedBy is the caller who started the job (email, else the IdP
-	// subject) when the request was authenticated; empty for jobs the service
-	// starts on its own (adopted downloads).
+	// RequestedBy is the caller who started the job (the mapped username, else
+	// the email, else the IdP subject) when the request was authenticated;
+	// empty for jobs the service starts on its own (adopted downloads).
 	RequestedBy string `json:"requestedBy,omitempty"`
 	// Result is operation-specific output (pull: the ModelConfig reference).
 	Result any `json:"result,omitempty"`
