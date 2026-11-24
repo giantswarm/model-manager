@@ -1063,6 +1063,9 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 	if !b.Capabilities().Delete {
 		return b.Name(), fmt.Errorf("%w: delete on %s", backend.ErrUnsupported, b.Name())
 	}
+	if err := checkDelete(ctx, b, m.Name); err != nil {
+		return b.Name(), err
+	}
 	if unwire && s.wirer != nil {
 		var left *wiring.NotOwnedError
 		if err := s.wirer.Remove(ctx, b.Name(), m.Name, wiring.CreatedHere); errors.Is(err, backend.ErrGitOpsOwned) {
@@ -1078,6 +1081,16 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 	}
 	s.log.Info("model deleted", "backend", b.Name(), "model", m.Name, "unwired", unwire && s.wirer != nil, identity.LogAttr(ctx))
 	return b.Name(), nil
+}
+
+// checkDelete is the refusal b's Delete would answer for model, asked before
+// anything changes; a backend that cannot tell up front answers nil.
+func checkDelete(ctx context.Context, b backend.Backend, model string) error {
+	dc, ok := b.(backend.DeleteChecker)
+	if !ok {
+		return nil
+	}
+	return dc.CheckDelete(ctx, model)
 }
 
 // Wire creates the ModelConfig for an existing model.

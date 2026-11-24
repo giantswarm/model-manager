@@ -230,7 +230,8 @@ func (s *Service) stopPlan(ctx context.Context, name, ref string) (backend.Backe
 }
 
 // PlanDelete is delete_model's dry run: whether the model is loaded and the
-// ModelConfig the delete would unwire. Nothing is deleted.
+// ModelConfig the delete would unwire, or the refusal the backend's delete
+// would answer. Nothing is deleted.
 func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool) (*OpPlan, error) {
 	b, m, err := s.resolve(ctx, name, ref)
 	if err != nil {
@@ -238,6 +239,9 @@ func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool)
 	}
 	if !b.Capabilities().Delete {
 		return nil, fmt.Errorf("%w: delete on %s", backend.ErrUnsupported, b.Name())
+	}
+	if err := checkDelete(ctx, b, m.Name); err != nil {
+		return nil, err
 	}
 	plan := &OpPlan{Backend: b.Name(), Model: m.Name, Present: true, Manifests: []map[string]any{}}
 	_, plan.Loaded = s.loadedIndex(ctx, b)[m.Name]
