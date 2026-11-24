@@ -1394,6 +1394,25 @@ func (s *Service) CancelJob(ctx context.Context, id string) (jobs.Job, error) {
 	return s.jobs.CancelFor(ctx, id)
 }
 
+// StopDownload stops a running shared download on the named backend, else
+// the default backend, for every task observing it.
+func (s *Service) StopDownload(ctx context.Context, name string, req backend.StopDownloadRequest) (backend.Name, *backend.StoppedDownload, error) {
+	b, err := s.named(name)
+	if err != nil {
+		return "", nil, err
+	}
+	stopper, ok := b.(backend.DownloadStopper)
+	if !ok {
+		return b.Name(), nil, fmt.Errorf("%w: stop_download on %s: its downloads are no shared cluster objects", backend.ErrUnsupported, b.Name())
+	}
+	req.Ref, req.Preset, req.Node, req.UID = strings.TrimSpace(req.Ref), strings.TrimSpace(req.Preset), strings.TrimSpace(req.Node), strings.TrimSpace(req.UID)
+	stopped, err := stopper.StopDownload(ctx, req)
+	if err != nil {
+		return b.Name(), nil, err
+	}
+	return b.Name(), stopped, nil
+}
+
 // Run performs the background duties until ctx ends: adopting pulls that
 // survived a restart (PullAdopter backends); on ServeLifecycle backends,
 // wiring served models that became ready without a load job watching them

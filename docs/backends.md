@@ -121,9 +121,9 @@ target uses model-manager's in-cluster address and CA. For a remote target:
   the installation's Dex as an OIDC issuer, naming the issuer and audience of the caller's token — or
   that the token expired; a 403 names the caller's RBAC on the target, or a call that carried no
   caller's token. The code and reason stay the apiserver's.
-- **Detached work runs as the caller.** A background cache rescan and the cleanup of a cancelled
-  download present the token of the call that caused them; with no caller they are skipped (logged
-  once, and the answer's `inventory.reason` says why), never made anonymously. A caller the target
+- **Detached work runs as the caller.** A background cache rescan presents the token of the call
+  that caused it; with no caller it is skipped (logged once, and the answer's `inventory.reason`
+  says why), never made anonymously. A caller the target
   refuses is not retried without the token.
 - **The model server is read through the target apiserver.** The workload Service's cluster-local
   name resolves only on the target, so `GET /version`, `GET /openapi.json` and the first request of

@@ -386,6 +386,69 @@ paths:
         "501": { $ref: "#/components/responses/Unsupported" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "502": { $ref: "#/components/responses/BackendError" }
+  /api/v1/models/stop-download:
+    post:
+      tags: [models]
+      summary: Stop a running shared download for every task observing it (kserve)
+      description: |
+        Deletes the download Job the request names with the caller's own Kubernetes credentials,
+        so the cluster's RBAC decides (`delete` on `batch/jobs` in the serving namespace). The Job
+        is shared: every task observing it fails with `download stopped`, while `DELETE
+        /api/v1/jobs/{id}` only detaches the caller's own task. `model` is a repository
+        (`owner/name[:revision]`) or a preset name; `node` and `preset` narrow the match, and a
+        reference matching several running downloads answers `400` naming them. `uid` stops the
+        Job only when it is still the one with that uid; the delete carries it as a precondition.
+        `dryRun` asks the cluster to admit the delete without performing it. Without downstream
+        OAuth the call would run with the ServiceAccount's permissions and answers `501`. Partial
+        files stay in the cache for the next pull.
+      operationId: stopDownload
+      x-mcp-tool: stop_download
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelRequest" }
+      responses:
+        "200":
+          description: the download Job is being deleted, or on a dry run would be
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backend: { type: string }
+                  stopped: { type: boolean, description: false on a dry run }
+                  dryRun: { type: boolean }
+                  next: { type: string }
+                  download:
+                    type: object
+                    properties:
+                      model: { type: string }
+                      node: { type: string }
+                      preset: { type: string }
+                      dryRun: { type: boolean }
+                      object:
+                        type: object
+                        description: the download Job's identity
+                        properties:
+                          group: { type: string }
+                          version: { type: string }
+                          resource: { type: string }
+                          namespace: { type: string }
+                          name: { type: string }
+                          uid: { type: string }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: the running download Job has another uid, or was replaced while stopping it
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/BackendError" }
   /api/v1/models/fit-check:
     post:
       tags: [serving]
@@ -833,6 +896,10 @@ components:
         apiKeyPassthrough: { type: boolean, description: "wire only: the ModelConfig forwards the Bearer token of the agent's incoming request to the endpoint as the API key; no Secret is referenced or created. Mutually exclusive with apiKeySecret." }
         apiKeySecret: { type: string, description: "wire only: an existing Secret in the kagent namespace holding a static API key the endpoint checks; model-manager never creates or deletes it" }
         apiKeySecretKey: { type: string, description: "wire only: the key within apiKeySecret (default OPENAI_API_KEY)" }
+        preset: { type: string, description: "kserve: the serving preset (pull, load, fit-check); stop-download: only the download for this preset" }
+        node: { type: string, description: "kserve: the node (pull, load, fit-check); stop-download: only the download to this node's cache" }
+        uid: { type: string, description: "stop-download only: stop the download Job only while it has this uid" }
+        dryRun: { type: boolean, description: "stop-download only: the cluster admits the delete without performing it" }
     Capabilities:
       type: object
       description: Explicit data — render per flag, never per backend name.
