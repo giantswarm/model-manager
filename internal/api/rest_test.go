@@ -48,6 +48,8 @@ type fakeBackend struct {
 	// think is the think its AgentEndpoint carries (ollama's configured
 	// think).
 	think *bool
+	// deleteErr, when set, is every Delete's answer.
+	deleteErr error
 }
 
 func newFakeBackend() *fakeBackend {
@@ -133,6 +135,9 @@ func (f *fakeBackend) Pull(ctx context.Context, req backend.PullRequest, progres
 func (f *fakeBackend) Delete(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	if _, ok := f.models[name]; !ok {
 		return fmt.Errorf("%w: %s", backend.ErrNotFound, name)
 	}
@@ -571,6 +576,29 @@ func TestLoadUnloadDelete(t *testing.T) {
 	assert.Zero(t, f.wirer.count(), "delete unwires by default")
 	status, _ = f.do(t, http.MethodGet, Prefix+"/models/qwen3:0.6b", nil)
 	assert.Equal(t, http.StatusNotFound, status)
+}
+
+// A delete the backend fails leaves the model wired: the weights go before
+// the ModelConfig.
+func TestDeleteTheBackendFailsKeepsTheModelConfig(t *testing.T) {
+	f := newFixture(t, true)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b"})
+	require.Equal(t, http.StatusOK, status, body)
+
+	f.backend.mu.Lock()
+	f.backend.deleteErr = fmt.Errorf("%w: ollama is restarting", backend.ErrUnavailable)
+	f.backend.mu.Unlock()
+	status, body = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
+	require.Equal(t, http.StatusServiceUnavailable, status, body)
+	_, ok := f.wirer.get(backend.NameOllama, "qwen3:0.6b")
+	assert.True(t, ok, "the failed delete left the ModelConfig")
+
+	f.backend.mu.Lock()
+	f.backend.deleteErr = nil
+	f.backend.mu.Unlock()
+	status, body = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Zero(t, f.wirer.count(), "the delete unwired once the weights were gone")
 }
 
 func TestWireUnwireAndDisabled(t *testing.T) {
