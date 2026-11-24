@@ -1083,14 +1083,15 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 	return b.Name(), nil
 }
 
-// checkDelete is the refusal b's Delete would answer for model, asked before
-// anything changes; a backend that cannot tell up front answers nil.
+// checkDelete is the refusal b's Delete would answer for model. Delete and
+// PlanDelete ask it before unwiring, so a refused delete leaves the
+// ModelConfig in place; a backend that cannot tell up front answers nil.
 func checkDelete(ctx context.Context, b backend.Backend, model string) error {
 	dc, ok := b.(backend.DeleteChecker)
 	if !ok {
 		return nil
 	}
-	return dc.CheckDelete(ctx, model)
+	return dc.DeleteCheck(ctx, model)
 }
 
 // Wire creates the ModelConfig for an existing model.

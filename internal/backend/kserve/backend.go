@@ -618,9 +618,9 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// CheckDelete implements backend.DeleteChecker: the refusal Delete would
+// DeleteCheck implements backend.DeleteChecker: the refusal Delete would
 // answer — not in the cache, or still served — with nothing removed.
-func (b *Backend) CheckDelete(ctx context.Context, name string) error {
+func (b *Backend) DeleteCheck(ctx context.Context, name string) error {
 	_, err := b.deletable(ctx, name)
 	return err
 }

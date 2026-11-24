@@ -124,9 +124,9 @@ func (f *fakeServing) Stop(ctx context.Context, name string) (*backend.UnloadRes
 	return &backend.UnloadResult{Model: repo, Inventory: backend.InventoryRefresh{Refreshing: true}}, nil
 }
 
-// CheckDelete is the kserve driver's: a served model must be unloaded before
+// DeleteCheck is the kserve driver's: a served model must be unloaded before
 // its weights are deleted.
-func (f *fakeServing) CheckDelete(_ context.Context, name string) error {
+func (f *fakeServing) DeleteCheck(_ context.Context, name string) error {
 	repo := f.repoOf(name)
 	f.fakeBackend.mu.Lock()
 	served := f.loaded[repo]
@@ -138,7 +138,7 @@ func (f *fakeServing) CheckDelete(_ context.Context, name string) error {
 }
 
 func (f *fakeServing) Delete(ctx context.Context, name string) error {
-	if err := f.CheckDelete(ctx, name); err != nil {
+	if err := f.DeleteCheck(ctx, name); err != nil {
 		return err
 	}
 	return f.fakeBackend.Delete(ctx, f.repoOf(name))
