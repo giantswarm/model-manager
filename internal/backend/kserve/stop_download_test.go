@@ -196,7 +196,9 @@ func TestStopDownloadFailsEveryObserver(t *testing.T) {
 	for range onces {
 		select {
 		case err := <-done:
+			require.ErrorIs(t, err, backend.ErrStopped)
 			require.ErrorContains(t, err, "download stopped: Job "+testServingNS+"/")
+			require.Equal(t, "download stopped", backend.PublicErrorMessage(err), "the task's public error says why")
 		case <-time.After(3 * time.Second):
 			t.Fatal("an observer did not see the download stop")
 		}

@@ -76,6 +76,9 @@ var (
 	// applied by Flux from git: a live change would be reverted on the next
 	// reconciliation, so it is changed in git (mode commit) or not at all.
 	ErrGitOpsOwned = errors.New("owned by GitOps")
+	// ErrStopped means the shared download a task observed was deleted
+	// (stop_download, or a delete through the Kubernetes API).
+	ErrStopped = errors.New("download stopped")
 )
 
 // Capabilities are explicit data, not conditionals in clients. A flag is true
