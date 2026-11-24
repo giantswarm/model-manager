@@ -136,6 +136,7 @@ func (f *fakeServing) CheckDelete(_ context.Context, name string) error {
 	}
 	return nil
 }
+
 func (f *fakeServing) Delete(ctx context.Context, name string) error {
 	if err := f.CheckDelete(ctx, name); err != nil {
 		return err

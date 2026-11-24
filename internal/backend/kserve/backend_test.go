@@ -565,7 +565,7 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 
 func TestCheckDeleteAnswersDeletesRefusalAndRemovesNothing(t *testing.T) {
 	f := newFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true})
 	f.completePods(ctx)

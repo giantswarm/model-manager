@@ -208,7 +208,7 @@ lmstudio answers unsupported (LM Studio removes models only with `lms rm` on the
       "type": "string"
     },
     "dryRun": {
-      "description": "Write nothing; return the plan: whether the model is loaded and the ModelConfig the delete would unwire",
+      "description": "Write nothing; return the plan: whether the model is loaded and the ModelConfig the delete would unwire, or the backend's refusal",
       "type": "boolean"
     },
     "mode": {
