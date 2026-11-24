@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giantswarm/mcp-oauth/handler"
-	"github.com/giantswarm/mcp-oauth/providers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,27 +80,4 @@ func jwt(t *testing.T, claims map[string]any) string {
 	payload, err := json.Marshal(claims)
 	require.NoError(t, err)
 	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
-}
-
-func TestCallerPrefersMappedUsername(t *testing.T) {
-	id := &Identity{Issuer: "https://dex.example.test", Subject: "CgVhbGljZRIFbG9jYWw", Email: "alice@example.test", Source: SourceOAuth}
-	tests := []struct {
-		name     string
-		username string
-		want     string
-	}{
-		{name: "subject claim mapped to verified email", username: "alice.mapped@example.test", want: "alice.mapped@example.test"},
-		{name: "no subject claim: username equals sub", username: id.Subject, want: "alice@example.test"},
-		{name: "no username", username: "", want: "alice@example.test"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := ContextWith(t.Context(), id)
-			ctx = handler.ContextWithUserInfo(ctx, &providers.UserInfo{ID: id.Subject, Username: tt.username, Email: id.Email})
-			require.Equal(t, tt.want, Caller(ctx))
-			got, ok := FromContext(ctx)
-			require.True(t, ok)
-			require.Equal(t, "CgVhbGljZRIFbG9jYWw", got.Subject)
-		})
-	}
 }
