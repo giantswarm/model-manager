@@ -598,21 +598,9 @@ func (b *Backend) Pull(ctx context.Context, req backend.PullRequest, progress fu
 // Delete implements backend.Backend: removes the cache directory. A model
 // that is being served must be unloaded first.
 func (b *Backend) Delete(ctx context.Context, name string) error {
-	m, err := b.GetModel(ctx, name)
+	m, err := b.deletable(ctx, name)
 	if err != nil {
 		return err
-	}
-	if m.Downloaded == nil || !*m.Downloaded {
-		return fmt.Errorf("%w: %s is not in the cache", backend.ErrNotFound, name)
-	}
-	servedList, err := b.listServed(ctx)
-	if err != nil {
-		return err
-	}
-	for _, sv := range servedList {
-		if sv.Name == m.Path || strings.EqualFold(sv.Model, m.Name) {
-			return fmt.Errorf("%w: %s is served by %s %s; unload it first", backend.ErrConflict, m.Name, kindLLMInferenceService, sv.Name)
-		}
 	}
 	loc, err := b.cacheNodes(ctx)
 	if err != nil {
@@ -628,6 +616,35 @@ func (b *Backend) Delete(ctx context.Context, name string) error {
 	b.forgetDir(ctx, m.Path)
 	b.inv.invalidate()
 	return nil
+}
+
+// DeleteCheck implements backend.DeleteChecker: the refusal Delete would
+// answer — not in the cache, or still served — with nothing removed.
+func (b *Backend) DeleteCheck(ctx context.Context, name string) error {
+	_, err := b.deletable(ctx, name)
+	return err
+}
+
+// deletable is the cached model Delete removes, or the refusal: a model an
+// LLMInferenceService serves must be unloaded first.
+func (b *Backend) deletable(ctx context.Context, name string) (*backend.Model, error) {
+	m, err := b.GetModel(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if m.Downloaded == nil || !*m.Downloaded {
+		return nil, fmt.Errorf("%w: %s is not in the cache", backend.ErrNotFound, name)
+	}
+	servedList, err := b.listServed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sv := range servedList {
+		if sv.Name == m.Path || strings.EqualFold(sv.Model, m.Name) {
+			return nil, fmt.Errorf("%w: %s is served by %s %s; unload it first", backend.ErrConflict, m.Name, kindLLMInferenceService, sv.Name)
+		}
+	}
+	return m, nil
 }
 
 // Load implements backend.Backend: fit-check, then create the

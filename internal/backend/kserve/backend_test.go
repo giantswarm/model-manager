@@ -563,6 +563,26 @@ func TestDeleteRemovesCacheDirectory(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "the removed directory is forgotten, and the ConfigMap goes with its last entry")
 }
 
+func TestDeleteCheckAnswersDeletesRefusalAndRemovesNothing(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	f.setEntries(testCacheNode, cacheEntry{Dir: "tiny", Bytes: 453864, Files: 2, HasModel: true})
+	f.completePods(ctx)
+
+	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Name: tinyRepo}))
+	err := f.b.DeleteCheck(ctx, tinyRepo)
+	require.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "unload it first")
+	assert.ErrorIs(t, f.b.DeleteCheck(ctx, bigRepo), backend.ErrNotFound)
+
+	require.NoError(t, f.b.Unload(ctx, tinyRepo))
+	require.NoError(t, f.b.DeleteCheck(ctx, tinyRepo))
+	cm, err := f.cs.CoreV1().ConfigMaps(testServingNS).Get(ctx, DefaultCacheIndexConfigMap, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data, "tiny", "the check removed nothing")
+}
+
 func TestListNodes(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

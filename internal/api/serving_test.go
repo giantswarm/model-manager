@@ -123,6 +123,26 @@ func (f *fakeServing) Stop(ctx context.Context, name string) (*backend.UnloadRes
 	}
 	return &backend.UnloadResult{Model: repo, Inventory: backend.InventoryRefresh{Refreshing: true}}, nil
 }
+
+// DeleteCheck is the kserve driver's: a served model must be unloaded before
+// its weights are deleted.
+func (f *fakeServing) DeleteCheck(_ context.Context, name string) error {
+	repo := f.repoOf(name)
+	f.fakeBackend.mu.Lock()
+	served := f.loaded[repo]
+	f.fakeBackend.mu.Unlock()
+	if served {
+		return fmt.Errorf("%w: %s is served by LLMInferenceService %s; unload it first", backend.ErrConflict, repo, strings.ReplaceAll(repo, "/", "-"))
+	}
+	return nil
+}
+
+func (f *fakeServing) Delete(ctx context.Context, name string) error {
+	if err := f.DeleteCheck(ctx, name); err != nil {
+		return err
+	}
+	return f.fakeBackend.Delete(ctx, f.repoOf(name))
+}
 func (f *fakeServing) Info(context.Context) backend.Info {
 	return backend.Info{Backend: f.Name(), Version: "serving.kserve.io/v1beta1", Healthy: true}
 }
@@ -507,6 +527,34 @@ func TestServingLoadWiresInTheCallAndUnloadUnwires(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	assert.Equal(t, false, body["loaded"])
 	assert.Nil(t, body["modelConfig"])
+}
+
+// A delete the backend refuses, a served model's, changes nothing: the
+// ModelConfig stays and the Agents keep the model. The dry run answers the
+// same refusal.
+func TestServingDeleteOfAServedModelKeepsItsModelConfig(t *testing.T) {
+	f := newServingFixture(t)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/load", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status, body)
+	_, ok := f.wirer.get(backend.NameKServe, "org/tiny")
+	require.True(t, ok, "the load wired the model")
+
+	status, body = f.do(t, http.MethodDelete, Prefix+"/models/org/tiny", nil)
+	require.Equal(t, http.StatusConflict, status, body)
+	assert.Contains(t, body["error"].(map[string]any)["message"], "unload it first")
+	_, ok = f.wirer.get(backend.NameKServe, "org/tiny")
+	assert.True(t, ok, "the refused delete left the ModelConfig")
+
+	_, err := f.svc.PlanDelete(t.Context(), "", "org/tiny", true)
+	require.ErrorIs(t, err, backend.ErrConflict)
+	assert.ErrorContains(t, err, "unload it first")
+	assert.Equal(t, 1, f.wirer.count(), "the dry run changed nothing")
+
+	status, _ = f.do(t, http.MethodPost, Prefix+"/models/unload", map[string]any{"model": "org/tiny"})
+	require.Equal(t, http.StatusOK, status)
+	status, body = f.do(t, http.MethodDelete, Prefix+"/models/org/tiny", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, true, body["deleted"])
 }
 
 // An unload that lands while the load job's last readiness read still

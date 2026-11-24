@@ -841,6 +841,13 @@ type StopPlanner interface {
 	StopPlan(ctx context.Context, name string) (*StopPlan, error)
 }
 
+// DeleteChecker is a backend whose Delete has preconditions it can check
+// without changing anything: DeleteCheck answers the refusal Delete would
+// answer now, or nil. Delete still enforces them itself.
+type DeleteChecker interface {
+	DeleteCheck(ctx context.Context, name string) error
+}
+
 // StopPlan is what a Stop would do: the model the serving objects serve (the
 // reference its ModelConfig is unwired by), the objects it deletes and, for
 // an object Flux applies from git, the refusal Stop answers instead

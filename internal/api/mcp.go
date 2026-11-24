@@ -367,7 +367,7 @@ func NewMCPServer(svc *service.Service, build buildinfo.Info, opts ...Option) *m
 		mcp.WithString(argModel, mcp.Required(), mcp.Description("Model reference")),
 		backendArg("holding the model; without it the model is resolved across backends"),
 		mcp.WithBoolean(argUnwire, mcp.Description("Also remove the ModelConfig (default true)")),
-		dryRunArg("whether the model is loaded and the ModelConfig the delete would unwire"),
+		dryRunArg("whether the model is loaded and the ModelConfig the delete would unwire, or the backend's refusal"),
 		applyOnly(),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
