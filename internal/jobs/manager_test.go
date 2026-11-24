@@ -12,8 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
+
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 func waitDone(t *testing.T, m *Manager, id string) Job {
@@ -151,14 +154,14 @@ func TestListOrderAndPrune(t *testing.T) {
 
 func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 	m := NewManager(WithAnonymousAccess(true))
-	reqCtx, cancelReq := context.WithCancel(identity.ContextWithToken(
-		identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
+	reqCtx, cancelReq := context.WithCancel(requester.ContextWithToken(
+		handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
 	release := make(chan struct{})
 	var seenCaller, seenToken string
 	var seenErr error
 	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
-		seenCaller = identity.Caller(ctx)
-		seenToken, _ = identity.TokenFromContext(ctx)
+		seenCaller = requester.Caller(ctx)
+		seenToken, _ = requester.TokenFromContext(ctx)
 		<-release
 		seenErr = ctx.Err()
 		return nil, nil

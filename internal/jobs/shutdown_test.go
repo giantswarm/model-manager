@@ -8,8 +8,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
+
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 func TestJobsHaveApplicationLifetime(t *testing.T) {
@@ -17,11 +20,11 @@ func TestJobsHaveApplicationLifetime(t *testing.T) {
 		lifetime, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		manager := NewManager(WithLifetime(lifetime))
-		caller := identity.ContextWithToken(identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "user", ClientID: "cli"}), "expired-caller-token")
+		caller := requester.ContextWithToken(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "user", ClientID: "cli"}), "expired-caller-token")
 		entered := make(chan struct{})
 		job, created, err := manager.Start(StartRequest{Type: TypePull, Model: "model", Context: caller}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
-			require.Equal(t, "user", identity.Caller(ctx))
-			token, ok := identity.TokenFromContext(ctx)
+			require.Equal(t, "user", requester.Caller(ctx))
+			token, ok := requester.TokenFromContext(ctx)
 			require.True(t, ok)
 			require.Equal(t, "expired-caller-token", token)
 			close(entered)

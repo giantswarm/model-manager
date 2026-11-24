@@ -11,7 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 type principal struct{ Issuer, Subject, ActorIssuer, ActorSubject, ClientID string }
@@ -25,28 +25,27 @@ type operationKey struct {
 }
 
 func callerPrincipal(ctx context.Context) (principal, error) {
-	caller, ok := identity.FromContext(ctx)
+	caller, ok := requester.FromContext(ctx)
 	if !ok {
-		if _, hasToken := identity.TokenFromContext(ctx); hasToken {
+		if _, hasToken := requester.TokenFromContext(ctx); hasToken {
 			return principal{}, ErrIdentityRequired
 		}
 		return principal{}, nil
 	}
-	if caller.Issuer == "" || caller.Subject == "" || caller.ClientID == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
+	if caller.Issuer == "" || caller.ID == "" || caller.ClientID == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
 		return principal{}, ErrIdentityRequired
 	}
-	return principal{Issuer: caller.Issuer, Subject: caller.Subject, ActorIssuer: caller.ActorIssuer, ActorSubject: caller.ActorSubject, ClientID: caller.ClientID}, nil
+	return principal{Issuer: caller.Issuer, Subject: caller.ID, ActorIssuer: caller.ActorIssuer, ActorSubject: caller.ActorSubject, ClientID: caller.ClientID}, nil
 }
 
 func grantKey(ctx context.Context) string {
-	caller, ok := identity.FromContext(ctx)
-	if !ok {
+	if _, ok := requester.FromContext(ctx); !ok {
 		return ""
 	}
-	scopes := slices.Clone(caller.Scopes)
+	scopes := slices.Clone(requester.Scopes(ctx))
 	slices.Sort(scopes)
 	scopes = slices.Compact(scopes)
-	credential, _ := identity.TokenFromContext(ctx)
+	credential, _ := requester.TokenFromContext(ctx)
 	credentialDigest := sha256.Sum256([]byte(credential))
 	encoded, _ := json.Marshal(struct {
 		Scopes     []string

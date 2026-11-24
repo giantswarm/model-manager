@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // StopDownload deletes the running download Job req names, as the caller.
@@ -24,7 +24,7 @@ func (b *Backend) StopDownload(ctx context.Context, req backend.StopDownloadRequ
 	if ref == "" {
 		return nil, fmt.Errorf("%w: model reference is required", backend.ErrInvalid)
 	}
-	if _, ok := identity.TokenFromContext(ctx); !ok {
+	if _, ok := requester.TokenFromContext(ctx); !ok {
 		return nil, fmt.Errorf("%w: stopping a shared download runs only with the caller's own Kubernetes credentials (--downstream-oauth); delete the download Job through the Kubernetes API instead", backend.ErrUnsupported)
 	}
 	s := b.cfg.settings(ctx)
@@ -72,7 +72,7 @@ func (b *Backend) StopDownload(ctx context.Context, req backend.StopDownloadRequ
 	}
 	if !req.DryRun {
 		b.inv.invalidate()
-		b.log.Info("download stopped", "job", job.Name, "namespace", job.Namespace, "model", job.Annotations[ModelAnnotation], "node", job.Annotations[NodeAnnotation], identity.LogAttr(ctx))
+		b.log.Info("download stopped", "job", job.Name, "namespace", job.Namespace, "model", job.Annotations[ModelAnnotation], "node", job.Annotations[NodeAnnotation], requester.LogAttr(ctx))
 	}
 	return &backend.StoppedDownload{
 		Object: backend.JobObject{Group: downloadJobGVR.Group, Version: downloadJobGVR.Version, Resource: downloadJobGVR.Resource, Namespace: job.Namespace, Name: job.Name, UID: string(job.UID)},

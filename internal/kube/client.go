@@ -19,7 +19,7 @@ import (
 
 	toolkitk8s "github.com/giantswarm/mcp-toolkit/k8s"
 
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // Factory selects explicitly configured application clients or caller clients.
@@ -80,7 +80,7 @@ func fromRESTConfig(restCfg *rest.Config) (*Factory, error) {
 // For selects caller clients when a token is present, including after expiry.
 // Calls without a token use the explicitly configured base clients.
 func (c *Factory) For(ctx context.Context) (*toolkitk8s.Clients, error) {
-	token, ok := identity.TokenFromContext(ctx)
+	token, ok := requester.TokenFromContext(ctx)
 	if !ok {
 		return c.Clients, nil
 	}

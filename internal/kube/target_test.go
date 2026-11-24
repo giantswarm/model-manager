@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
 	"k8s.io/client-go/kubernetes/scheme"
 
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // fakeTargetAPIServer answers like an apiserver that trusts no caller token:
@@ -80,7 +80,7 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 
 	t.Run("an untrusted token names the issuer and audience", func(t *testing.T) {
 		tok := testJWT(t, map[string]any{"iss": "https://dex.installation.example", "aud": "muster", "exp": time.Now().Add(time.Hour).Unix()})
-		err := get(identity.ContextWithToken(context.Background(), tok))
+		err := get(requester.ContextWithToken(context.Background(), tok))
 		require.Error(t, err)
 		assert.True(t, apierrors.IsUnauthorized(err), "the code and reason stay: %v", err)
 		assert.Contains(t, err.Error(), "must trust the installation's Dex as an OIDC issuer")
@@ -88,7 +88,7 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 		assert.Contains(t, err.Error(), srv.URL)
 		assert.True(t, strings.HasPrefix(err.Error(), "Unauthorized — "), "the apiserver's own message, decoded: %q", err.Error())
 
-		caller, err := tc.For(identity.ContextWithToken(t.Context(), tok))
+		caller, err := tc.For(requester.ContextWithToken(t.Context(), tok))
 		require.NoError(t, err)
 		_, err = caller.Dynamic.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("ns").Get(t.Context(), "x", metav1.GetOptions{})
 		assert.True(t, apierrors.IsUnauthorized(err), "the dynamic client (JSON) too: %v", err)
@@ -96,7 +96,7 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 	})
 	t.Run("an expired token says so instead", func(t *testing.T) {
 		tok := testJWT(t, map[string]any{"iss": "https://dex.installation.example", "aud": "muster", "exp": time.Now().Add(-time.Minute).Unix()})
-		err := get(identity.ContextWithToken(context.Background(), tok))
+		err := get(requester.ContextWithToken(context.Background(), tok))
 		assert.True(t, apierrors.IsUnauthorized(err))
 		assert.Contains(t, err.Error(), "the caller's token expired at")
 		assert.NotContains(t, err.Error(), "must trust")
@@ -108,7 +108,7 @@ func TestTargetRefusalNamesThePrecondition(t *testing.T) {
 		assert.Contains(t, err.Error(), "--downstream-oauth")
 	})
 	t.Run("the caller's RBAC on the target", func(t *testing.T) {
-		err := get(identity.ContextWithToken(context.Background(), "rbac-denied"))
+		err := get(requester.ContextWithToken(context.Background(), "rbac-denied"))
 		assert.True(t, apierrors.IsForbidden(err), "%v", err)
 		assert.Contains(t, err.Error(), `User "jane@example.com" cannot get resource`)
 		assert.Contains(t, err.Error(), "whose RBAC there does not allow this")

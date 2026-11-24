@@ -10,7 +10,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers"
 	"github.com/stretchr/testify/require"
 
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 func TestAttachIdentityRequiresCompleteValidatedClaims(t *testing.T) {
@@ -33,10 +33,10 @@ func TestAttachIdentityRequiresCompleteValidatedClaims(t *testing.T) {
 			called := false
 			protected := afterValidation(&test.user, runtime.attachIdentity(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				called = true
-				caller, ok := identity.FromContext(request.Context())
+				caller, ok := requester.FromContext(request.Context())
 				require.True(t, ok)
 				require.Equal(t, test.user.Issuer, caller.Issuer)
-				require.Equal(t, test.user.ID, caller.Subject)
+				require.Equal(t, test.user.ID, caller.ID)
 				require.Equal(t, test.user.ActorIssuer, caller.ActorIssuer)
 				require.Equal(t, test.user.ActorSubject, caller.ActorSubject)
 				writer.WriteHeader(http.StatusNoContent)

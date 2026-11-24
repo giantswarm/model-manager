@@ -16,7 +16,7 @@ import (
 	oauthserver "github.com/giantswarm/mcp-oauth/server"
 
 	"github.com/giantswarm/model-manager/internal/api"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // OAuthConfig makes model-manager an OAuth 2.1 resource server (mcp-oauth) in
@@ -26,9 +26,9 @@ import (
 // portal sends the signed-in user's id_token through the gateway; both are
 // validated here against the IdP's JWKS when their audience is one of the
 // trusted audiences (OAUTH_TRUSTED_AUDIENCES, the platform's OAuth client).
-// The caller's identity then travels with the request (identity package) and,
-// with DownstreamOAuth, so does the token: the Kubernetes API is called as
-// the caller.
+// The caller mcp-oauth validated (providers.UserInfo) then travels with the
+// request and, with DownstreamOAuth, so does the token: the Kubernetes API is
+// called as the caller.
 type OAuthConfig struct {
 	// Settings is mcp-oauth's configuration, read from the OAUTH_* variables
 	// by oauthconfig.SettingsFromEnv.
@@ -135,40 +135,35 @@ func (o *oauthRuntime) protect(next http.Handler) http.Handler {
 	return o.handler.ValidateToken(protected)
 }
 
-// attachIdentity translates the validated mcp-oauth user into the request's
-// identity and, with DownstreamOAuth, resolves the IdP token to present to
-// the Kubernetes API: a forwarded id_token is the bearer itself; for a token
-// this server issued, the provider's id_token is looked up in the store. A
-// request that yields neither is refused: the ServiceAccount holds no
-// permissions, so there is nothing else to run as.
+// attachIdentity admits a request only with a complete validated caller
+// (issuer, subject, and both or neither actor claims) and, with
+// DownstreamOAuth, resolves the IdP token to present to the Kubernetes API: a
+// forwarded id_token is the bearer itself; for a token this server issued,
+// the provider's id_token is looked up in the store. A request that yields
+// neither is refused: the ServiceAccount holds no permissions, so there is
+// nothing else to run as.
 func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		info, ok := handler.UserInfoFromContext(ctx)
-		if !ok || info == nil || info.Issuer == "" || info.ID == "" || (info.ActorIssuer == "") != (info.ActorSubject == "") {
+		info, ok := requester.FromContext(ctx)
+		if !ok || info.Issuer == "" || info.ID == "" || (info.ActorIssuer == "") != (info.ActorSubject == "") {
 			// ValidateToken admits nothing without user info; defensive.
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		id := &identity.Identity{Issuer: info.Issuer, Subject: info.ID, ActorIssuer: info.ActorIssuer, ActorSubject: info.ActorSubject, Email: info.Email, Name: info.Name, Groups: info.Groups, Source: identity.SourceOAuth}
-		id.ClientID = info.ClientID
-		id.Scopes, _ = handler.ScopesFromContext(ctx)
-		if len(id.Scopes) == 0 {
-			id.Scopes = info.Scopes
-		}
+		source := "oauth"
 		if info.IsSSO() {
-			id.Source = identity.SourceSSO
+			source = "sso"
 		}
-		ctx = identity.ContextWith(ctx, id)
 		if o.downstreamOAuth {
 			token, err := handler.ProviderIDTokenFromContext(ctx)
 			if err != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			ctx = identity.ContextWithToken(ctx, token)
+			ctx = requester.ContextWithToken(ctx, token)
 		}
-		o.log.Debug("authenticated request", identity.LogAttr(ctx), "source", id.Source, "path", r.URL.Path)
+		o.log.Debug("authenticated request", requester.LogAttr(ctx), "source", source, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

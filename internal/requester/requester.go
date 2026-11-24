@@ -1,9 +1,10 @@
-// Package identity carries the authenticated caller through a request: who
-// the OAuth layer validated (subject, email, groups) and, when the server is
-// configured to act on the caller's behalf towards the Kubernetes API, the
-// caller's own IdP token. Request continuations retain that credential, including
-// after expiry. Application-owned work explicitly selects ServiceAccount clients.
-package identity
+// Package requester carries what a request knows about its caller beyond the
+// identity mcp-oauth validated (handler.UserInfoFromContext): the caller's own
+// IdP token when the server acts on the caller's behalf towards the
+// Kubernetes API, that token's claims, and the person's GitHub grant for a
+// commit. Request continuations retain that credential, including after
+// expiry. Application-owned work explicitly selects ServiceAccount clients.
+package requester
 
 import (
 	"context"
@@ -12,90 +13,56 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
 )
-
-// Source says how the caller was authenticated.
-type Source string
-
-const (
-	// SourceSSO is an IdP id_token forwarded by a trusted aggregator (muster)
-	// or sent by the portal through the gateway, validated against the IdP's
-	// JWKS.
-	SourceSSO Source = "sso"
-	// SourceOAuth is an access token issued by this server's own OAuth 2.1
-	// flow (a client that authenticated directly, e.g. mcp-debug).
-	SourceOAuth Source = "oauth"
-)
-
-// Identity is the authenticated caller.
-type Identity struct {
-	// Issuer and Subject identify the validated caller independently of profile data.
-	Issuer string
-	// Subject is the IdP's stable user id (the `sub` claim).
-	Subject string
-	// ActorIssuer and ActorSubject identify a validated delegated actor together.
-	ActorIssuer  string
-	ActorSubject string
-	// ClientID identifies the validated OAuth client when available.
-	ClientID string
-	// Scopes are the validated token's current grant.
-	Scopes []string
-	// Email is the caller's email when the IdP provided one.
-	Email string
-	// Name is the display name when the IdP provided one.
-	Name string
-	// Groups are the IdP group claims (Dex `groups`; empty for Google).
-	Groups []string
-	// Source is how the token was validated.
-	Source Source
-}
-
-// String is display attribution recorded on jobs: the email, else the subject.
-func (id *Identity) String() string {
-	if id == nil {
-		return ""
-	}
-	if id.Email != "" {
-		return id.Email
-	}
-	return id.Subject
-}
 
 type ctxKey int
 
-const (
-	identityKey ctxKey = iota
-	tokenKey
-)
+const tokenKey ctxKey = 0
 
-// ContextWith returns ctx carrying id.
-func ContextWith(ctx context.Context, id *Identity) context.Context {
-	if id == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, identityKey, id)
+// FromContext returns the caller mcp-oauth validated, if any.
+func FromContext(ctx context.Context) (*providers.UserInfo, bool) {
+	info, ok := handler.UserInfoFromContext(ctx)
+	return info, ok && info != nil
 }
 
-// FromContext returns the caller, if any.
-func FromContext(ctx context.Context) (*Identity, bool) {
-	id, ok := ctx.Value(identityKey).(*Identity)
-	return id, ok && id != nil
-}
-
-// Caller is the caller's String(), or "" without one.
+// Caller is the attribution recorded on jobs: the caller's email, else the
+// subject, or "" without a caller.
 func Caller(ctx context.Context) string {
-	id, _ := FromContext(ctx)
-	return id.String()
+	info, ok := FromContext(ctx)
+	switch {
+	case !ok:
+		return ""
+	case info.Email != "":
+		return info.Email
+	default:
+		return info.ID
+	}
+}
+
+// Scopes is the validated token's current grant: the scopes mcp-oauth
+// validated for this request, else those recorded for the caller.
+func Scopes(ctx context.Context) []string {
+	if scopes, ok := handler.ScopesFromContext(ctx); ok && len(scopes) > 0 {
+		return scopes
+	}
+	if info, ok := FromContext(ctx); ok {
+		return info.Scopes
+	}
+	return nil
 }
 
 // LogAttr is the structured-log attribute every mutation carries: the caller,
-// or the ServiceAccount marker when the operation runs without one.
+// or the ServiceAccount marker when the operation runs without one. It names
+// issuer, subject and actor only, never profile data.
 func LogAttr(ctx context.Context) slog.Attr {
 	if caller, ok := FromContext(ctx); ok {
-		if caller.Issuer == "" || caller.Subject == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
+		if caller.Issuer == "" || caller.ID == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
 			return slog.String("caller", "unavailable")
 		}
-		attributes := []slog.Attr{slog.String("issuer", caller.Issuer), slog.String("subject", caller.Subject)}
+		attributes := []slog.Attr{slog.String("issuer", caller.Issuer), slog.String("subject", caller.ID)}
 		if caller.ActorIssuer != "" {
 			attributes = append(attributes, slog.String("actor_issuer", caller.ActorIssuer), slog.String("actor_subject", caller.ActorSubject))
 		}

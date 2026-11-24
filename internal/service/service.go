@@ -22,8 +22,8 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
-	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
+	"github.com/giantswarm/model-manager/internal/requester"
 	"github.com/giantswarm/model-manager/internal/wiring"
 )
 
@@ -753,7 +753,7 @@ func (s *Service) Pull(ctx context.Context, opts PullOptions) (jobs.Job, bool, e
 		return jobs.Job{}, false, err
 	}
 	if created {
-		s.log.Info("pull started", "backend", b.Name(), "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+		s.log.Info("pull started", "backend", b.Name(), "model", ref, "job", job.ID, "wire", doWire, "preset", req.Preset, "node", req.Node, requester.LogAttr(ctx))
 	}
 	return job, created, nil
 }
@@ -814,7 +814,7 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if res.AlreadyServing {
 		// Nothing was created: the answer says where the model already
 		// serves, and no load job follows an object this call did not start.
-		s.log.Info("model already serving", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "nodes", strings.Join(res.ServingNodes, ","), identity.LogAttr(ctx))
+		s.log.Info("model already serving", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "nodes", strings.Join(res.ServingNodes, ","), requester.LogAttr(ctx))
 		view := s.loadedView(ctx, b, m)
 		view.Fit, view.AlreadyServing, view.ServingNodes = res.Fit, true, res.ServingNodes
 		return view, nil
@@ -823,9 +823,9 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	if isServer {
 		// A Server serves until stopped: keep-alive is an in-memory
 		// backend's notion.
-		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "preset", req.Preset, "node", req.Node, requester.LogAttr(ctx))
 	} else {
-		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, identity.LogAttr(ctx))
+		s.log.Info("model loaded", "backend", b.Name(), "model", m.Name, "keepAlive", keepAlive, "preset", req.Preset, "node", req.Node, requester.LogAttr(ctx))
 	}
 	if s.cfg.AutoWire && s.wirer != nil {
 		if sl, ok := serveLifecycle(b); ok {
@@ -907,7 +907,7 @@ func (s *Service) loadTarget(ctx context.Context, opts LoadOptions) (backend.Bac
 func (s *Service) wire(ctx context.Context, b backend.Backend, model, reason string) *WiringResult {
 	ref, err := s.wireModel(ctx, b, model, backend.WireOptions{})
 	if err != nil {
-		s.log.Warn("wiring failed", "backend", b.Name(), "model", model, "occasion", reason, "error", err, identity.LogAttr(ctx))
+		s.log.Warn("wiring failed", "backend", b.Name(), "model", model, "occasion", reason, "error", err, requester.LogAttr(ctx))
 		return &WiringResult{Reason: WiringFailed, Error: backend.PublicErrorMessage(err)}
 	}
 	if !ref.Managed {
@@ -924,7 +924,7 @@ func (s *Service) wire(ctx context.Context, b backend.Backend, model, reason str
 func (s *Service) loadedView(ctx context.Context, b backend.Backend, m *backend.Model) *ModelView {
 	view, err := s.GetModel(ctx, string(b.Name()), m.Name)
 	if err != nil {
-		s.log.Warn("reading the model's state after the load failed; answering with the resolved model", "backend", b.Name(), "model", m.Name, "error", err, identity.LogAttr(ctx))
+		s.log.Warn("reading the model's state after the load failed; answering with the resolved model", "backend", b.Name(), "model", m.Name, "error", err, requester.LogAttr(ctx))
 		return &ModelView{Model: *m}
 	}
 	return view
@@ -969,7 +969,7 @@ func (s *Service) startLoadJob(ctx context.Context, b backend.Backend, sl backen
 		return err
 	}
 	if created {
-		s.log.Info("load job started", "backend", b.Name(), "model", model, "job", job.ID, identity.LogAttr(ctx))
+		s.log.Info("load job started", "backend", b.Name(), "model", model, "job", job.ID, requester.LogAttr(ctx))
 	}
 	return nil
 }
@@ -998,7 +998,7 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 	if err != nil {
 		return nil, err
 	}
-	s.log.Info("model unloaded", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
+	s.log.Info("model unloaded", "backend", b.Name(), "model", model, requester.LogAttr(ctx))
 	view := &UnloadView{Backend: b.Name(), Model: strings.TrimSpace(ref)}
 	if _, ok := serveLifecycle(b); ok && s.wirer != nil {
 		s.endLoadJob(ctx, b, model)
@@ -1006,11 +1006,11 @@ func (s *Service) Unload(ctx context.Context, name, ref string) (*UnloadView, er
 		switch err := s.wirer.Remove(ctx, b.Name(), model, wiring.CreatedHere); {
 		case errors.As(err, &left):
 			view.ModelConfigLeft = left
-			s.log.Info("ModelConfig left in place", "backend", b.Name(), "model", model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
+			s.log.Info("ModelConfig left in place", "backend", b.Name(), "model", model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, requester.LogAttr(ctx))
 		case err != nil:
 			s.log.Warn("unwire after unload failed", "backend", b.Name(), "model", model, "error", err)
 		default:
-			s.log.Info("model unwired", "backend", b.Name(), "model", model, identity.LogAttr(ctx))
+			s.log.Info("model unwired", "backend", b.Name(), "model", model, requester.LogAttr(ctx))
 		}
 	}
 	if res != nil {
@@ -1101,7 +1101,7 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 			return b.Name(), fmt.Errorf("%s was deleted but its ModelConfig was not: unwire %s: %w; repeat the delete to remove it", m.Name, m.Name, err)
 		}
 	}
-	s.log.Info("model deleted", "backend", b.Name(), "model", m.Name, "unwired", unwire, identity.LogAttr(ctx))
+	s.log.Info("model deleted", "backend", b.Name(), "model", m.Name, "unwired", unwire, requester.LogAttr(ctx))
 	return b.Name(), nil
 }
 
@@ -1117,7 +1117,7 @@ func (s *Service) unwireDeleted(ctx context.Context, name, ref string, notFound 
 	if err := s.wirer.Remove(ctx, plan.Backend, plan.Model, wiring.CreatedHere); err != nil {
 		return plan.Backend, fmt.Errorf("unwire %s: %w", plan.Model, err)
 	}
-	s.log.Info("model deleted", "backend", plan.Backend, "model", plan.Model, "unwired", true, "weightsAlreadyGone", true, identity.LogAttr(ctx))
+	s.log.Info("model deleted", "backend", plan.Backend, "model", plan.Model, "unwired", true, "weightsAlreadyGone", true, requester.LogAttr(ctx))
 	return plan.Backend, nil
 }
 
@@ -1194,7 +1194,7 @@ func (s *Service) Unwire(ctx context.Context, name, ref string) (*Unwired, error
 	}
 	if mc != nil {
 		out.ModelConfig = &ObjectRef{Name: mc.Name, Namespace: mc.Namespace}
-		s.log.Info("model unwired", "backend", b, "model", ref, "modelConfig", mc.Namespace+"/"+mc.Name, identity.LogAttr(ctx))
+		s.log.Info("model unwired", "backend", b, "model", ref, "modelConfig", mc.Namespace+"/"+mc.Name, requester.LogAttr(ctx))
 	}
 	return out, nil
 }
@@ -1881,13 +1881,13 @@ func (s *Service) UnwireBackend(ctx context.Context, name backend.Name) ([]strin
 		}
 		var left *wiring.NotOwnedError
 		if err := s.wirer.Remove(ctx, name, r.Model, wiring.CreatedHere); errors.As(err, &left) {
-			s.log.Info("ModelConfig left in place with its backend", "backend", name, "model", r.Model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, identity.LogAttr(ctx))
+			s.log.Info("ModelConfig left in place with its backend", "backend", name, "model", r.Model, "modelConfig", left.Namespace+"/"+left.Name, "createdBy", left.CreatedBy, requester.LogAttr(ctx))
 			continue
 		} else if err != nil {
 			return removed, fmt.Errorf("unwire %s on %s: %w", r.Model, name, err)
 		}
 		removed = append(removed, r.Model)
-		s.log.Info("model unwired with its backend", "backend", name, "model", r.Model, identity.LogAttr(ctx))
+		s.log.Info("model unwired with its backend", "backend", name, "model", r.Model, requester.LogAttr(ctx))
 	}
 	return removed, nil
 }

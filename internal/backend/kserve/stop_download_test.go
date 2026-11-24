@@ -18,7 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // callerFixture is a fixture whose calls run with the caller's clients, as
@@ -29,7 +29,7 @@ func callerFixture(t *testing.T) (*fixture, context.Context) {
 	f.b.opts.ClientsFor = func(context.Context) (kubernetes.Interface, dynamic.Interface, error) {
 		return f.cs, f.dyn, nil
 	}
-	return f, identity.ContextWithToken(t.Context(), "caller-token")
+	return f, requester.ContextWithToken(t.Context(), "caller-token")
 }
 
 // runningDownload creates the download Job for plan with a uid, as the

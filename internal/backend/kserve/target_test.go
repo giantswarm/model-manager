@@ -28,7 +28,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 const testModelsHost = "https://models.gpu01.example"
@@ -57,7 +57,7 @@ func newRemoteFixture(t *testing.T) *remoteFixture {
 	anonCS.PrependReactor("*", "*", deny)
 	anonDyn.PrependReactor("*", "*", deny)
 	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		if _, ok := identity.TokenFromContext(ctx); ok {
+		if _, ok := requester.TokenFromContext(ctx); ok {
 			return f.cs, f.dyn, nil
 		}
 		return anonCS, anonDyn, nil
@@ -90,7 +90,7 @@ func (rf *remoteFixture) created(resource string) []runtime.Object {
 
 func callerContext(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(identity.ContextWithToken(context.Background(), "caller-token"), 10*time.Second)
+	ctx, cancel := context.WithTimeout(requester.ContextWithToken(context.Background(), "caller-token"), 10*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -206,7 +206,7 @@ func TestRemoteTargetDetachedWork(t *testing.T) {
 	}
 	scans := make(chan scanCall, 4)
 	rf.b.scan = func(ctx context.Context, node string) ([]cacheEntry, string, error) {
-		_, caller := identity.TokenFromContext(ctx)
+		_, caller := requester.TokenFromContext(ctx)
 		scans <- scanCall{caller: caller, cancelled: ctx.Err() != nil}
 		return nil, node, nil
 	}
@@ -231,7 +231,7 @@ func TestRemoteTargetRefusalIsNotRetriedAnonymously(t *testing.T) {
 	rf := newRemoteFixture(t)
 	cs, dyn := unauthorizedClients()
 	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		if _, ok := identity.TokenFromContext(ctx); ok {
+		if _, ok := requester.TokenFromContext(ctx); ok {
 			return cs, dyn, nil
 		}
 		return rf.anonCS, rf.anonDyn, nil
@@ -326,7 +326,7 @@ func statusAnswer(code int32, message string) *http.Response {
 // fixture's transport underneath.
 func (f *fixture) callerTargetREST(ctx context.Context) (*rest.RESTClient, error) {
 	cfg := &rest.Config{Host: testTarget.APIServer, Transport: f}
-	if token, ok := identity.TokenFromContext(ctx); ok {
+	if token, ok := requester.TokenFromContext(ctx); ok {
 		cfg.BearerToken = token
 	}
 	cs, err := kubernetes.NewForConfig(cfg)

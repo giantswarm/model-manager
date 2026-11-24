@@ -33,8 +33,8 @@ import (
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
-	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
+	"github.com/giantswarm/model-manager/internal/requester"
 	"github.com/giantswarm/model-manager/internal/service"
 )
 
@@ -186,13 +186,13 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
 	var seen struct {
-		id    *identity.Identity
+		id    *providers.UserInfo
 		token string
 		ok    bool
 	}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen.id, seen.ok = identity.FromContext(r.Context())
-		seen.token, _ = identity.TokenFromContext(r.Context())
+		seen.id, seen.ok = requester.FromContext(r.Context())
+		seen.token, _ = requester.TokenFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -204,10 +204,10 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	require.True(t, seen.ok, "the caller reaches the handler")
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
-	assert.Equal(t, "sub-admin", seen.id.Subject)
+	assert.Equal(t, "sub-admin", seen.id.ID)
 	assert.Equal(t, "agent-platform", seen.id.ClientID)
 	assert.Equal(t, []string{"platform-admins"}, seen.id.Groups)
-	assert.Equal(t, identity.SourceSSO, seen.id.Source)
+	assert.True(t, seen.id.IsSSO(), "a forwarded id_token")
 	assert.Equal(t, forwarded, seen.token, "downstream OAuth: the forwarded id_token is what the Kubernetes API will see")
 
 	// A bearer this server issued carries the IdP id_token stored next to it;
@@ -233,8 +233,8 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	var caller string
 	var hasToken bool
 	h := afterValidation(verifiedUser(), o.attachIdentity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = identity.Caller(r.Context())
-		_, hasToken = identity.TokenFromContext(r.Context())
+		caller = requester.Caller(r.Context())
+		_, hasToken = requester.TokenFromContext(r.Context())
 	})))
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))

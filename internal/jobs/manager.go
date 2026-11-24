@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // Phase is the job lifecycle state.
@@ -242,7 +242,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, er
 			Preset:      req.Preset,
 			Resource:    req.Resource,
 			Object:      cloneObject(req.Object),
-			RequestedBy: identity.Caller(parent),
+			RequestedBy: requester.Caller(parent),
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),

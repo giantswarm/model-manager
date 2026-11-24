@@ -28,7 +28,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/giantswarm/model-manager/internal/api"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // privateIdP is an OIDC issuer the production chain reaches as it reaches
@@ -247,7 +247,7 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 	})
 	var caller string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = identity.Caller(r.Context())
+		caller = requester.Caller(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)

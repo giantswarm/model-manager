@@ -1,4 +1,4 @@
-package identity
+package requester
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,15 +18,15 @@ import (
 func TestCallerLogIdentityExcludesProfileData(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
-	caller := &Identity{Issuer: "https://dex.example.test", Subject: "subject", ActorIssuer: "https://actor.example.test", ActorSubject: "agent", Email: "private@example.test", Groups: []string{"private-group"}}
-	logger.Info("operation", LogAttr(ContextWith(t.Context(), caller)))
+	caller := &providers.UserInfo{Issuer: "https://dex.example.test", ID: "subject", ActorIssuer: "https://actor.example.test", ActorSubject: "agent", Email: "private@example.test", Groups: []string{"private-group"}}
+	logger.Info("operation", LogAttr(handler.ContextWithUserInfo(t.Context(), caller)))
 	require.Contains(t, output.String(), `"issuer":"https://dex.example.test"`)
 	require.Contains(t, output.String(), `"subject":"subject"`)
 	require.Contains(t, output.String(), `"actor_subject":"agent"`)
 	require.NotContains(t, output.String(), caller.Email)
 	require.NotContains(t, output.String(), caller.Groups[0])
-	for _, invalid := range []*Identity{{Subject: "subject"}, {Issuer: caller.Issuer}, {Issuer: caller.Issuer, Subject: "subject", ActorSubject: "agent"}} {
-		require.Equal(t, "unavailable", LogAttr(ContextWith(t.Context(), invalid)).Value.String())
+	for _, invalid := range []*providers.UserInfo{{ID: "subject"}, {Issuer: caller.Issuer}, {Issuer: caller.Issuer, ID: "subject", ActorSubject: "agent"}} {
+		require.Equal(t, "unavailable", LogAttr(handler.ContextWithUserInfo(t.Context(), invalid)).Value.String())
 	}
 }
 
@@ -34,19 +36,21 @@ func TestContextRoundTrip(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, "service-account", LogAttr(ctx).Value.String())
 	assert.Equal(t, "", Caller(ctx))
+	assert.Nil(t, Scopes(ctx))
 
-	id := &Identity{Issuer: "https://idp.example.test", Subject: "sub-1", Email: "admin@lab.local", Groups: []string{"platform-admins"}, Source: SourceSSO}
-	ctx = ContextWith(ctx, id)
+	info := &providers.UserInfo{Issuer: "https://idp.example.test", ID: "sub-1", Email: "admin@lab.local", Groups: []string{"platform-admins"}, Scopes: []string{"stored"}}
+	ctx = handler.ContextWithUserInfo(ctx, info)
 	got, ok := FromContext(ctx)
 	require.True(t, ok)
-	assert.Equal(t, id, got)
+	assert.Same(t, info, got)
 	assert.Equal(t, "admin@lab.local", Caller(ctx))
 	assert.Equal(t, "caller", LogAttr(ctx).Key)
 	assert.Equal(t, "issuer", LogAttr(ctx).Value.Group()[0].Key)
-	assert.Equal(t, id.Issuer, LogAttr(ctx).Value.Group()[0].Value.String())
+	assert.Equal(t, info.Issuer, LogAttr(ctx).Value.Group()[0].Value.String())
+	assert.Equal(t, []string{"stored"}, Scopes(ctx), "without validated scopes, the caller's recorded ones")
+	assert.Equal(t, []string{"mcp:access"}, Scopes(handler.ContextWithScopes(ctx, []string{"mcp:access"})), "the validated scopes win")
 
-	assert.Equal(t, "sub-1", (&Identity{Subject: "sub-1"}).String(), "email wins, subject is the fallback")
-	assert.Equal(t, "", (*Identity)(nil).String())
+	assert.Equal(t, "sub-1", Caller(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "sub-1"})), "email wins, subject is the fallback")
 
 	_, ok = TokenFromContext(ctx)
 	assert.False(t, ok)
@@ -55,7 +59,6 @@ func TestContextRoundTrip(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tok", tok)
 	assert.Same(t, ctx, ContextWithToken(ctx, ""), "an empty token adds nothing")
-	assert.Same(t, ctx, ContextWith(ctx, nil), "a nil identity adds nothing")
 }
 
 func TestTokenExpiry(t *testing.T) {

@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 func TestForSelectsExplicitClientsOrCaller(t *testing.T) {
@@ -27,14 +27,14 @@ func TestForSelectsExplicitClientsOrCaller(t *testing.T) {
 	application, err := clients.For(t.Context())
 	require.NoError(t, err)
 	require.Same(t, clients.Clients, application)
-	callerContext := identity.ContextWithToken(t.Context(), jwt(t, time.Now().Add(time.Hour)))
+	callerContext := requester.ContextWithToken(t.Context(), jwt(t, time.Now().Add(time.Hour)))
 	caller, err := clients.For(callerContext)
 	require.NoError(t, err)
 	require.NotSame(t, application, caller)
 	cached, err := clients.For(callerContext)
 	require.NoError(t, err)
 	require.Same(t, caller, cached)
-	expiredContext := identity.ContextWithToken(t.Context(), jwt(t, time.Now().Add(-time.Minute)))
+	expiredContext := requester.ContextWithToken(t.Context(), jwt(t, time.Now().Add(-time.Minute)))
 	expired, err := clients.For(expiredContext)
 	require.NoError(t, err)
 	require.NotSame(t, application, expired)
@@ -56,7 +56,7 @@ func TestForConstructionFailureSendsNoServiceAccountRequest(t *testing.T) {
 	clients, err := fromRESTConfig(&rest.Config{Host: api.URL, BearerToken: "application-token", TLSClientConfig: rest.TLSClientConfig{CAFile: caFile}})
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(caFile))
-	caller, err := clients.For(identity.ContextWithToken(t.Context(), "caller-token"))
+	caller, err := clients.For(requester.ContextWithToken(t.Context(), "caller-token"))
 	require.ErrorContains(t, err, "caller-token Kubernetes clients")
 	require.Nil(t, caller)
 	require.Zero(t, requests.Load())
@@ -74,7 +74,7 @@ func TestForExpiredTokenReachesAPIAsCaller(t *testing.T) {
 	t.Cleanup(api.Close)
 	clients, err := fromRESTConfig(&rest.Config{Host: api.URL, BearerToken: "application-token"})
 	require.NoError(t, err)
-	caller, err := clients.For(identity.ContextWithToken(t.Context(), token))
+	caller, err := clients.For(requester.ContextWithToken(t.Context(), token))
 	require.NoError(t, err)
 	_, err = caller.Clientset.CoreV1().ConfigMaps("default").List(t.Context(), metav1.ListOptions{})
 	require.True(t, apierrors.IsUnauthorized(err), "%v", err)
@@ -106,7 +106,7 @@ func TestClientRateLimitsPreserveOverrides(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.qps, configuration.QPS)
 			require.Equal(t, test.burst, configuration.Burst)
-			caller, err := factory.For(identity.ContextWithToken(t.Context(), "caller-token"))
+			caller, err := factory.For(requester.ContextWithToken(t.Context(), "caller-token"))
 			require.NoError(t, err)
 			for _, client := range []rest.Interface{factory.Clientset.CoreV1().RESTClient(), caller.Clientset.CoreV1().RESTClient()} {
 				limiter := client.GetRateLimiter()
@@ -125,7 +125,7 @@ func TestClientRateLimitsPreserveOverrides(t *testing.T) {
 	limiter := flowcontrol.NewFakeAlwaysRateLimiter()
 	factory, err := fromRESTConfig(&rest.Config{Host: "https://api.example.test", RateLimiter: limiter})
 	require.NoError(t, err)
-	caller, err := factory.For(identity.ContextWithToken(t.Context(), "caller-token"))
+	caller, err := factory.For(requester.ContextWithToken(t.Context(), "caller-token"))
 	require.NoError(t, err)
 	require.Same(t, limiter, factory.Clientset.CoreV1().RESTClient().GetRateLimiter())
 	require.Same(t, limiter, caller.Clientset.CoreV1().RESTClient().GetRateLimiter())

@@ -20,7 +20,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // DefaultGitHubAPIURL is GitHub's REST API.
@@ -94,9 +94,9 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 	grantRequired := func(reason string) error {
 		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
-	return func(ctx context.Context) (*identity.GitHub, error) {
+	return func(ctx context.Context) (*requester.GitHub, error) {
 		validatedUser, ok := handler.UserInfoFromContext(ctx)
-		subjectToken, hasToken := identity.TokenFromContext(ctx)
+		subjectToken, hasToken := requester.TokenFromContext(ctx)
 		if !ok || validatedUser == nil || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken || subjectToken == "" {
 			return nil, fmt.Errorf("%w: commit mode needs your verified platform identity to fetch your GitHub authorization", gitops.ErrAuthRequired)
 		}
@@ -162,6 +162,6 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&user) != nil || user.Login == "" {
 			return nil, fmt.Errorf("%w: GitHub user verification answered status %d", backend.ErrUnavailable, response.StatusCode)
 		}
-		return &identity.GitHub{Login: user.Login, Token: result.AccessToken}, nil
+		return &requester.GitHub{Login: user.Login, Token: result.AccessToken}, nil
 	}
 }

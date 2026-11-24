@@ -39,8 +39,11 @@ make helm-docs      # regenerate helm/model-manager/README.md
   which maps the deprecated flags onto them); provider, storage and cleanup
   construction belongs to `mcp-oauth/oauthconfig`. REST and
   MCP challenges advertise their own protected-resource metadata URLs.
-- `internal/identity` — the authenticated caller on the request context and,
-  with `--downstream-oauth`, the caller's IdP token the Kubernetes clients use.
+- `internal/requester` — what a request carries beyond the caller mcp-oauth
+  validated (`providers.UserInfo`, read with `requester.FromContext`): with
+  `--downstream-oauth`, the caller's IdP token the Kubernetes clients use, its
+  claims, the GitHub grant for a commit, and the log attribute naming the
+  caller by issuer, subject and actor.
 - `internal/kube` — Kubernetes clients: the ServiceAccount's, and per-caller
   ones selected through the independent `mcp-toolkit/k8s` module. Local cluster
   configuration and remote diagnostics belong here. Caller-client construction failures stop

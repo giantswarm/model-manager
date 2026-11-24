@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // A remote target — a kserve backend whose document names another cluster's
@@ -29,7 +29,7 @@ func (b *Backend) callerless(ctx context.Context, work string) string {
 	if b.opts.Target.Local() {
 		return ""
 	}
-	if _, ok := identity.TokenFromContext(ctx); ok {
+	if _, ok := requester.TokenFromContext(ctx); ok {
 		return ""
 	}
 	reason := fmt.Sprintf("no %s on the remote target %s without a caller: model-manager holds no credential there, and only a request carrying the caller's token may act on it", work, b.opts.Target.Cluster)
