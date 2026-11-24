@@ -1,4 +1,4 @@
-suite: OAuth settings as mcp-oauth OAUTH_* variables
+suite: OAuth settings from the deprecated keys
 templates:
   - templates/deployment.yaml
 set:
@@ -20,6 +20,9 @@ tests:
           content: {name: OAUTH_PROVIDER, value: dex}
       - contains:
           path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_STORAGE_BACKEND, value: memory}
+      - contains:
+          path: spec.template.spec.containers[0].env
           content: {name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS, value: "true"}
       - contains:
           path: spec.template.spec.containers[0].env
@@ -29,13 +32,15 @@ tests:
           content: {name: OAUTH_DEX_CLIENT_ID, value: manager}
       - contains:
           path: spec.template.spec.containers[0].env
-          content:
-            name: OAUTH_DEX_CLIENT_SECRET
-            valueFrom:
-              secretKeyRef: {name: manager-oauth, key: dex-client-secret}
+          content: {name: OAUTH_DEX_CLIENT_SECRET_FILE, value: /etc/model-manager/oauth-client/client-secret}
       - contains:
-          path: spec.template.spec.containers[0].env
-          content: {name: OAUTH_TRUSTED_AUDIENCES, value: agent-platform}
+          path: spec.template.spec.volumes
+          content:
+            name: oauth-client
+            secret:
+              secretName: manager-oauth
+              defaultMode: 0400
+              items: [{key: dex-client-secret, path: client-secret}]
       - contains:
           path: spec.template.spec.containers[0].args
           content: --enable-oauth=true
@@ -46,24 +51,46 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].env
           any: true
+          content: {name: OAUTH_TRUSTED_AUDIENCES}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
           content: {name: OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION}
       - notMatchRegex:
           path: spec.template.spec.containers[0].args[*]
           pattern: ^--(oauth-|dex-|sso-|google-|allow-private-oauth-urls|allow-public-client-registration)
 
-  - it: points OAUTH_DEX_CA_FILE at the mounted CA
+  - it: trusts Dex as the OpenID Provider for the trusted audiences
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test"],"audiences":["agent-platform"],"issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+
+  - it: adds the deprecated JWKS hosts and the CA to the Dex entry
     set:
       oauth.dex.caSecret.name: dex-ca
+      oauth.sso.allowPrivateIPJWKSHosts: [keys.internal.example]
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content: {name: OAUTH_DEX_CA_FILE, value: /etc/model-manager/idp-ca/ca.crt}
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test","keys.internal.example"],"audiences":["agent-platform"],"caFile":"/etc/model-manager/idp-ca/ca.crt","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: idp-ca
+            secret:
+              secretName: dex-ca
+              items: [{key: ca.crt, path: ca.crt}]
 
   - it: renders the Google settings with the callback as redirect URL
     set:
       oauth.provider: google
       oauth.baseURL: https://manager.example.test/
       oauth.google.clientID: google-client
+      oauth.trustedAudiences: [google-client]
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -73,17 +100,36 @@ tests:
           content: {name: OAUTH_GOOGLE_CLIENT_ID, value: google-client}
       - contains:
           path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_GOOGLE_CLIENT_SECRET_FILE, value: /etc/model-manager/oauth-client/client-secret}
+      - contains:
+          path: spec.template.spec.volumes
           content:
-            name: OAUTH_GOOGLE_CLIENT_SECRET
-            valueFrom:
-              secretKeyRef: {name: manager-oauth, key: google-client-secret}
+            name: oauth-client
+            secret:
+              secretName: manager-oauth
+              defaultMode: 0400
+              items: [{key: google-client-secret, path: client-secret}]
       - contains:
           path: spec.template.spec.containers[0].env
           content: {name: OAUTH_GOOGLE_REDIRECT_URL, value: https://manager.example.test/oauth/callback}
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["JWT"],"audiences":["google-client"],"issuer":"https://accounts.google.com","jwksURI":"https://www.googleapis.com/oauth2/v3/certs","openIDProvider":true}]'
       - notContains:
           path: spec.template.spec.containers[0].env
           any: true
           content: {name: OAUTH_DEX_ISSUER_URL}
+
+  - it: reads the Google client ID from the Secret without a value
+    set:
+      oauth.provider: google
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OAUTH_GOOGLE_CLIENT_ID
+            valueFrom:
+              secretKeyRef: {name: manager-oauth, key: google-client-id}
 
   - it: passes public client registration when allowed
     set:
@@ -113,3 +159,7 @@ tests:
           path: spec.template.spec.containers[0].env
           any: true
           content: {name: OAUTH_ISSUER}
+      - notContains:
+          path: spec.template.spec.volumes
+          any: true
+          content: {name: oauth-client}

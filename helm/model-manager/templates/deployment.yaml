@@ -201,55 +201,79 @@ spec:
                   fieldPath: metadata.namespace
             {{- if .Values.oauth.enabled }}
             {{- /* mcp-oauth's settings (oauthconfig.SettingsFromEnv). */}}
+            {{- $oauth := include "model-manager.oauth" . | fromJson }}
+            {{- $rs := .Values.oauth.resourceServer }}
+            {{- $as := .Values.oauth.authorizationServer }}
             - name: OAUTH_ISSUER
-              value: {{ include "model-manager.oauthBaseURL" . | quote }}
-            - name: OAUTH_PROVIDER
-              value: {{ .Values.oauth.provider | quote }}
-            - name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS
-              value: "true"
-            {{- with include "model-manager.oauthTrustedAudiences" . }}
-            - name: OAUTH_TRUSTED_AUDIENCES
+              value: {{ $oauth.issuer | quote }}
+            {{- with $rs.resource }}
+            - name: OAUTH_RESOURCE
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.oauth.sso.allowPrivateIPJWKSHosts }}
-            - name: OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS
+            {{- with $rs.additionalResources }}
+            - name: OAUTH_ADDITIONAL_RESOURCES
+              value: {{ $resources := list }}{{ range . }}{{ $resources = append $resources (dict "resource" .) }}{{ end }}{{ toJson $resources | quote }}
+            {{- end }}
+            {{- with $rs.authorizationServers }}
+            - name: OAUTH_AUTHORIZATION_SERVERS
               value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with $oauth.trustedIssuers }}
+            - name: OAUTH_TRUSTED_ISSUERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- if $rs.requireResourceAccessTokens }}
+            - name: OAUTH_REQUIRE_RESOURCE_ACCESS_TOKENS
+              value: "true"
+            {{- end }}
+            {{- if not $oauth.authorizationServer }}
+            - name: OAUTH_ENABLE_AUTHORIZATION_SERVER
+              value: "false"
+            {{- else }}
+            - name: OAUTH_PROVIDER
+              value: {{ $oauth.provider | quote }}
+            - name: OAUTH_STORAGE_BACKEND
+              value: {{ $as.storage.type | quote }}
+            - name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS
+              value: {{ $as.clientIDMetadataDocuments.enabled | quote }}
+            {{- if not $as.dynamicClientRegistration.enabled }}
+            - name: OAUTH_ENABLE_DYNAMIC_CLIENT_REGISTRATION
+              value: "false"
+            {{- end }}
+            {{- if $as.dynamicClientRegistration.initialAccessToken.secretKeyRef.name }}
+            - name: OAUTH_REGISTRATION_ACCESS_TOKEN_FILE
+              value: /etc/model-manager/oauth-registration/token
             {{- end }}
             {{- if .Values.oauth.allowPublicClientRegistration }}
             - name: OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION
               value: "true"
             {{- end }}
-            {{- if eq .Values.oauth.provider "google" }}
-            {{- if .Values.oauth.google.clientID }}
+            {{- if eq $oauth.provider "google" }}
+            {{- with $oauth.clientIDSecret }}
             - name: OAUTH_GOOGLE_CLIENT_ID
-              value: {{ .Values.oauth.google.clientID | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ .key }}
             {{- else }}
             - name: OAUTH_GOOGLE_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "model-manager.oauthSecretName" . }}
-                  key: google-client-id
+              value: {{ $oauth.clientID | quote }}
             {{- end }}
-            - name: OAUTH_GOOGLE_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "model-manager.oauthSecretName" . }}
-                  key: google-client-secret
+            - name: OAUTH_GOOGLE_CLIENT_SECRET_FILE
+              value: /etc/model-manager/oauth-client/client-secret
             - name: OAUTH_GOOGLE_REDIRECT_URL
-              value: {{ printf "%s/oauth/callback" (include "model-manager.oauthBaseURL" . | trimSuffix "/") | quote }}
+              value: {{ printf "%s/oauth/callback" ($oauth.issuer | trimSuffix "/") | quote }}
             {{- else }}
             - name: OAUTH_DEX_ISSUER_URL
-              value: {{ include "model-manager.oauthDexIssuerURL" . | quote }}
+              value: {{ required "oauth.authorizationServer.upstream.issuer (or global.identity.issuerUrl) is required for the dex provider" $oauth.upstreamIssuer | quote }}
             - name: OAUTH_DEX_CLIENT_ID
-              value: {{ include "model-manager.oauthDexClientID" . | quote }}
-            - name: OAUTH_DEX_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "model-manager.oauthSecretName" . }}
-                  key: dex-client-secret
-            {{- if include "model-manager.oauthDexCASecretName" . }}
+              value: {{ required "oauth.authorizationServer.upstream.client.id (or global.identity.clientId) is required for the dex provider" $oauth.clientID | quote }}
+            - name: OAUTH_DEX_CLIENT_SECRET_FILE
+              value: /etc/model-manager/oauth-client/client-secret
+            {{- with $oauth.upstreamCA }}
             - name: OAUTH_DEX_CA_FILE
-              value: /etc/model-manager/idp-ca/{{ include "model-manager.oauthDexCASecretKey" . }}
+              value: {{ printf "%s/%s" .dir .key | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- end }}
@@ -324,15 +348,25 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- $idpCA := "" }}
-          {{- if and .Values.oauth.enabled (eq .Values.oauth.provider "dex") }}{{ $idpCA = include "model-manager.oauthDexCASecretName" . }}{{ end }}
+          {{- $oauth := dict "mounts" list }}
+          {{- if .Values.oauth.enabled }}{{ $oauth = include "model-manager.oauth" . | fromJson }}{{ end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if $idpCA }}
-            - name: idp-ca
-              mountPath: /etc/model-manager/idp-ca
+            {{- range $oauth.mounts }}
+            - name: {{ .volume }}
+              mountPath: {{ .dir }}
               readOnly: true
+            {{- end }}
+            {{- if $oauth.authorizationServer }}
+            - name: oauth-client
+              mountPath: /etc/model-manager/oauth-client
+              readOnly: true
+            {{- if .Values.oauth.authorizationServer.dynamicClientRegistration.initialAccessToken.secretKeyRef.name }}
+            - name: oauth-registration
+              mountPath: /etc/model-manager/oauth-registration
+              readOnly: true
+            {{- end }}
             {{- end }}
             {{- if $githubExchange }}
             - name: github-token-exchange
@@ -352,13 +386,38 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if $idpCA }}
-        - name: idp-ca
+        {{- range $oauth.mounts }}
+        - name: {{ .volume }}
+          {{- if .secret }}
           secret:
-            secretName: {{ $idpCA }}
+            secretName: {{ .secret }}
+          {{- else }}
+          configMap:
+            name: {{ .configMap }}
+          {{- end }}
             items:
-              - key: {{ include "model-manager.oauthDexCASecretKey" . }}
-                path: {{ include "model-manager.oauthDexCASecretKey" . }}
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
+        {{- if $oauth.authorizationServer }}
+        - name: oauth-client
+          secret:
+            secretName: {{ $oauth.clientSecret.name }}
+            defaultMode: 0400
+            items:
+              - key: {{ $oauth.clientSecret.key }}
+                path: client-secret
+        {{- with .Values.oauth.authorizationServer.dynamicClientRegistration.initialAccessToken.secretKeyRef }}
+        {{- if .name }}
+        - name: oauth-registration
+          secret:
+            secretName: {{ .name }}
+            defaultMode: 0400
+            items:
+              - key: {{ required "oauth.authorizationServer.dynamicClientRegistration.initialAccessToken.secretKeyRef.key is required with its name" .key }}
+                path: token
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- if $githubExchange }}
         - name: github-token-exchange

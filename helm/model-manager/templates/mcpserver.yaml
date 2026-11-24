@@ -6,8 +6,9 @@
 {{- /*
 Registers this server with muster. Tools appear as x_<name>_<tool>. With
 oauth.enabled the CR carries the auth block: muster forwards the session's IdP
-id_token (forwardToken), which this server validates against its trusted
-audiences (oauth.trustedAudiences plus the requiredAudiences below), and
+id_token (forwardToken), which this server accepts from the IdP for its
+audiences (model-manager.oauthTrustedAudiences: the platform client plus the
+requiredAudiences below), and
 requests the requiredAudiences at login. Without OAuth muster connects
 anonymously. With github.tokenExchange the registration forwards the ID token
 and lists the token exchange audience under providerApps: a commit
@@ -49,7 +50,7 @@ spec:
     providerApps:
       - {{ .Values.github.tokenExchange.audience | quote }}
     {{- end }}
-    {{- with .Values.muster.mcpServer.auth.requiredAudiences }}
+    {{- with include "model-manager.requiredAudiences" . | fromJsonArray }}
     requiredAudiences:
       {{- toYaml . | nindent 6 }}
     {{- end }}

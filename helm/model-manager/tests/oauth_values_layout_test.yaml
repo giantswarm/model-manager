@@ -1,0 +1,220 @@
+suite: OAuth settings from the shared values layout
+templates:
+  - templates/deployment.yaml
+set:
+  oauth:
+    enabled: true
+    authorizationServer:
+      issuer: https://manager.example.test
+      upstream:
+        type: dex
+        issuer: https://dex.example.test
+        client:
+          id: manager
+          secretKeyRef: {name: manager-dex, key: secret}
+        certificateAuthority:
+          secretKeyRef: {name: dex-ca, key: bundle.pem}
+tests:
+  - it: renders the upstream from the layout
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ISSUER, value: https://manager.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_ISSUER_URL, value: https://dex.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CLIENT_ID, value: manager}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CA_FILE, value: /etc/model-manager/idp-ca/bundle.pem}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: oauth-client
+            secret:
+              secretName: manager-dex
+              defaultMode: 0400
+              items: [{key: secret, path: client-secret}]
+
+  - it: takes the layout's keys over the deprecated ones
+    set:
+      oauth.baseURL: https://old.example.test
+      oauth.provider: google
+      oauth.dex.issuerURL: https://old-dex.example.test
+      oauth.dex.clientID: old
+      oauth.existingSecret: old-secret
+      oauth.dex.caSecret.name: old-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ISSUER, value: https://manager.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_PROVIDER, value: dex}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_ISSUER_URL, value: https://dex.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CLIENT_ID, value: manager}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: idp-ca
+            secret:
+              secretName: dex-ca
+              items: [{key: bundle.pem, path: bundle.pem}]
+
+  - it: takes the deprecated keys over global.identity
+    set:
+      global.identity: {issuerUrl: https://global-dex.example.test, clientId: platform-client, existingSecret: idp}
+      oauth.authorizationServer.upstream: {type: "", issuer: "", client: {id: "", secretKeyRef: {name: "", key: client-secret}}, certificateAuthority: {secretKeyRef: {name: "", key: ca.crt}}}
+      oauth.dex.issuerURL: https://old-dex.example.test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_ISSUER_URL, value: https://old-dex.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CLIENT_ID, value: platform-client}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: oauth-client
+            secret:
+              secretName: idp
+              defaultMode: 0400
+              items: [{key: dex-client-secret, path: client-secret}]
+
+  - it: renders the listed trusted issuers instead of the derived one, with their CAs mounted
+    set:
+      oauth.resourceServer:
+        trustedIssuers:
+          - issuer: https://dex.example.test
+            jwksURI: https://dex.example.test/keys
+            audiences: [agent-platform]
+            acceptedTypHeaders: [""]
+            openIDProvider: true
+            certificateAuthority:
+              configMapKeyRef: {name: idp-trust, key: ca.crt}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":[""],"audiences":["agent-platform"],"caFile":"/etc/model-manager/trusted-issuer-ca/0/ca.crt","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: trusted-issuer-ca-0
+            configMap:
+              name: idp-trust
+              items: [{key: ca.crt, path: ca.crt}]
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: trusted-issuer-ca-0, mountPath: /etc/model-manager/trusted-issuer-ca/0, readOnly: true}
+
+  - it: renders the resource server settings
+    set:
+      oauth.resourceServer:
+        resource: https://manager.example.test/mcp
+        additionalResources: [https://manager.example.test/api/v1]
+        authorizationServers: [https://manager.example.test]
+        requireResourceAccessTokens: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_RESOURCE, value: https://manager.example.test/mcp}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ADDITIONAL_RESOURCES, value: '[{"resource":"https://manager.example.test/api/v1"}]'}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_AUTHORIZATION_SERVERS, value: https://manager.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_REQUIRE_RESOURCE_ACCESS_TOKENS, value: "true"}
+
+  - it: renders the registration settings
+    set:
+      oauth.authorizationServer.clientIDMetadataDocuments.enabled: false
+      oauth.authorizationServer.dynamicClientRegistration:
+        initialAccessToken:
+          secretKeyRef: {name: registration, key: token}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS, value: "false"}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_REGISTRATION_ACCESS_TOKEN_FILE, value: /etc/model-manager/oauth-registration/token}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: oauth-registration
+            secret:
+              secretName: registration
+              defaultMode: 0400
+              items: [{key: token, path: token}]
+
+  - it: turns dynamic client registration off
+    set:
+      oauth.authorizationServer.dynamicClientRegistration.enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ENABLE_DYNAMIC_CLIENT_REGISTRATION, value: "false"}
+
+  - it: runs as a resource server only with the authorization server off
+    set:
+      oauth.authorizationServer.enabled: false
+      oauth.trustedAudiences: [agent-platform]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ENABLE_AUTHORIZATION_SERVER, value: "false"}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_PROVIDER}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_DEX_CLIENT_ID}
+      - notContains:
+          path: spec.template.spec.volumes
+          any: true
+          content: {name: oauth-client}
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test"],"audiences":["agent-platform"],"caFile":"/etc/model-manager/idp-ca/bundle.pem","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+
+  - it: refuses a trusted issuer entry with an unknown key
+    set:
+      oauth.resourceServer:
+        trustedIssuers:
+          - issuer: https://dex.example.test
+            jwksURI: https://dex.example.test/keys
+            audiences: [agent-platform]
+            jwksUrl: https://typo.example.test
+    asserts:
+      - failedTemplate: {}
+
+  - it: takes the provider type and the Kubernetes audiences from global.identity
+    set:
+      oauth.authorizationServer.upstream.type: ""
+      oauth.authorizationServer.upstream.client.id: ""
+      global.identity: {type: dex, clientId: platform-client, kubernetes: {audiences: [dex-k8s-authenticator]}}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_PROVIDER, value: dex}
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test"],"audiences":["platform-client","dex-k8s-authenticator"],"caFile":"/etc/model-manager/idp-ca/bundle.pem","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+
+  - it: trusts the upstream client it signs in with by default
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
+          value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test"],"audiences":["manager"],"caFile":"/etc/model-manager/idp-ca/bundle.pem","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'

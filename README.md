@@ -920,8 +920,8 @@ MCP endpoint and the REST API: every call needs a bearer token the platform
 identity provider issued — Dex (`OAUTH_PROVIDER=dex`, the default) or Google
 (`OAUTH_PROVIDER=google`). mcp-oauth's `OAUTH_*` variables configure it
 (`oauthconfig.SettingsFromEnv`: `OAUTH_ISSUER`, `OAUTH_DEX_ISSUER_URL`,
-`OAUTH_DEX_CLIENT_ID`, `OAUTH_DEX_CLIENT_SECRET`, `OAUTH_DEX_CA_FILE`,
-`OAUTH_TRUSTED_AUDIENCES`, …); model-manager turns on client ID metadata
+`OAUTH_DEX_CLIENT_ID`, `OAUTH_DEX_CLIENT_SECRET_FILE`, `OAUTH_DEX_CA_FILE`,
+`OAUTH_TRUSTED_ISSUERS`, …); model-manager turns on client ID metadata
 documents unless `OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS` says otherwise.
 The earlier flags and variables (`--oauth-base-url`, `--oauth-provider`,
 `--dex-*`, `--google-*`, `--oauth-trusted-audiences`,
@@ -931,16 +931,19 @@ still work for one more release and log a deprecation warning naming the
 replacement; an `OAUTH_*` variable wins over them. On the platform nobody logs in
 to model-manager itself: muster forwards the session's IdP id_token
 byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
-and the portal sends the signed-in user's id_token through the gateway;
-model-manager validates them against the IdP's JWKS when their audience is one
-of `OAUTH_TRUSTED_AUDIENCES`. The chart passes the platform's OAuth client
-(`oauth.trustedAudiences`, else `global.identity.clientId`) plus the
-MCPServer's `requiredAudiences`: every forwarded token carries those by
+and the portal sends the signed-in user's id_token through the gateway.
+The chart lists the IdP in `OAUTH_TRUSTED_ISSUERS` as the OpenID Provider
+people sign in with (`openIDProvider`), so model-manager validates those
+id_tokens against the IdP's JWKS and presents them to the Kubernetes API. Its
+audiences are the platform's OAuth client (`global.identity.clientId`) plus
+the MCPServer's `requiredAudiences`: every forwarded token carries those by
 construction and they are what the kube-apiserver trusts, so a portal session
 — whose id_token carries them but not the platform client — is accepted too.
-An id_token whose audience matches none of them is refused with 401; the
-`Unknown JWT bearer refused` log line names the token's `token_audience` next
-to the `trusted_audiences`. The caller — the `email`,
+An id_token whose audience matches none of them, or that carries an `act`
+claim, is refused with 401. The chart's values follow mcp-oauth's layout for
+MCP servers (`oauth.resourceServer`, `oauth.authorizationServer`); the
+earlier `oauth.*` keys still work for one more release and the release notes
+name each one that is set. The caller — the `email`,
 else the `sub` — is on every mutation's log line and recorded as
 `requestedBy` on jobs.
 

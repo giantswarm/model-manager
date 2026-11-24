@@ -6,6 +6,12 @@
 # `global.identity.clientId`, `global.identity.existingSecret`,
 # `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth
 # base URL. Empty here; a chart installed on its own sets `oauth.*` directly.
+# -- Platform-wide settings. `global.identity` is the platform's sign-in, the
+# fallback for `oauth.authorizationServer.upstream` and the derived trusted
+# issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`),
+# `ca` (`secretName`, `key`), `type` (`dex` or `google`) and
+# `kubernetes.audiences`, the audiences the Kubernetes API server requires
+# (its `AuthenticationConfiguration` `jwt.issuer.audiences`).
 global: {}  # @schema type: object; additionalProperties: true
 
 # -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless
@@ -166,72 +172,154 @@ mcp:
 
 oauth:
   # -- Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP
-  # endpoint and the REST API require a bearer token the platform identity
-  # provider issued, and every call carries the caller's identity (logged,
-  # recorded as `requestedBy` on jobs). On the Agent Platform muster forwards
-  # the session's IdP id_token to this server (MCPServer `auth.forwardToken`,
-  # rendered below) and the portal sends the signed-in user's id_token through
-  # the gateway; both are validated against the IdP's JWKS when their audience
-  # is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount —
-  # only for a server nothing but a trusted proxy can reach.
+  # endpoint and the REST API require a bearer token, and every call carries
+  # the caller's identity (logged, recorded as `requestedBy` on jobs). On the
+  # Agent Platform muster forwards the session's IdP ID token to this server
+  # (MCPServer `auth.forwardToken`, rendered below) and the portal sends the
+  # signed-in user's ID token through the gateway; both are accepted from the
+  # provider people sign in with (`resourceServer.trustedIssuers`). Off:
+  # anonymous, acting as the ServiceAccount, only for a server nothing but a
+  # trusted proxy can reach.
   enabled: false
-  # -- Public base URL of this server: the issuer of its own OAuth metadata
-  # (https, or http on loopback). Empty derives
-  # `https://<fullname>.<global.domain>` when `global.domain` is set.
+  # The protected resource: which tokens are accepted (mcp-oauth's values
+  # layout for MCP servers).
+  resourceServer:
+    # -- The main protected resource, by its full URL (`OAUTH_RESOURCE`).
+    # Empty uses the issuer.
+    resource: ""
+    # -- Further protected resources on the same origin, each by its full URL
+    # (`OAUTH_ADDITIONAL_RESOURCES`). The REST API and the MCP endpoint are
+    # always protected resources.
+    additionalResources: []  # @schema item: string
+    # -- Issuer identifiers the resource metadata advertises
+    # (`OAUTH_AUTHORIZATION_SERVERS`): this server's issuer or a trusted
+    # issuer. Empty advertises this server's issuer.
+    authorizationServers: []  # @schema item: string
+    # -- The issuers whose JWTs are accepted (`OAUTH_TRUSTED_ISSUERS`). A
+    # trust anchor: set it only from the release's own values or a
+    # GitOps-managed ConfigMap that only installation administrators write.
+    # Each entry: `issuer`, `jwksURI` and `audiences` (required),
+    # `subjectClaim` (`sub` or `email`), `acceptedTypHeaders`,
+    # `allowedClaims`, `allowPrivateIPJWKSHosts`, `openIDProvider` (true for
+    # the provider people sign in with, whose bearers are their ID tokens),
+    # and `certificateAuthority` with a `secretKeyRef` or `configMapKeyRef`
+    # (`name`, `key`). Empty trusts the provider people sign in with
+    # (`authorizationServer.upstream`) as `openIDProvider`: its ID tokens are
+    # accepted as bearer tokens, a deviation from MCP's audience rule until
+    # per-backend tokens (ID-JAG, giantswarm/giantswarm#39102). They are
+    # accepted for the client people sign in with
+    # (`authorizationServer.upstream.client.id`, or the deprecated
+    # `oauth.trustedAudiences`) and `muster.mcpServer.auth.requiredAudiences`,
+    # in that order and without duplicates.
+    trustedIssuers: []  # @schema item: object ; itemRequired: [issuer, jwksURI, audiences] ; itemProperties: {issuer: {type: string}, jwksURI: {type: string}, audiences: {type: array, minItems: 1, items: {type: string}}, subjectClaim: {type: string, enum: ['', sub, email]}, acceptedTypHeaders: {type: array, items: {type: string}}, allowedClaims: {type: object, additionalProperties: {type: string}}, allowPrivateIPJWKSHosts: {type: array, items: {type: string}}, openIDProvider: {type: boolean}, certificateAuthority: {type: object, additionalProperties: false, properties: {secretKeyRef: {type: object, additionalProperties: false, required: [name, key], properties: {name: {type: string}, key: {type: string}}}, configMapKeyRef: {type: object, additionalProperties: false, required: [name, key], properties: {name: {type: string}, key: {type: string}}}}}}
+    # -- Accept only tokens whose audience names this server's resource
+    # (`OAUTH_REQUIRE_RESOURCE_ACCESS_TOKENS`), as MCP requires. Off while the
+    # platform forwards ID tokens (giantswarm/giantswarm#39102).
+    requireResourceAccessTokens: false
+  # This server's own authorization server: people sign in through the
+  # upstream provider and MCP clients get tokens from this server.
+  authorizationServer:
+    # -- Run the authorization server. Off makes model-manager a resource
+    # server only (`OAUTH_ENABLE_AUTHORIZATION_SERVER=false`).
+    enabled: true
+    # -- Public base URL of this server, the issuer of its tokens and metadata
+    # (`OAUTH_ISSUER`; https, or http on loopback). Empty uses the deprecated
+    # `oauth.baseURL`, else `https://<fullname>.<global.domain>`.
+    issuer: ""
+    upstream:
+      # -- The OpenID Provider people sign in with: `dex` or `google`
+      # (`OAUTH_PROVIDER`). Empty uses the deprecated `oauth.provider`, else
+      # `dex`.
+      type: ""  # @schema enum: ["", dex, google]
+      # -- Dex issuer URL. Empty uses the deprecated `oauth.dex.issuerURL`,
+      # else `global.identity.issuerUrl`.
+      issuer: ""
+      client:
+        # -- OAuth client ID at the provider. Empty uses the deprecated
+        # `oauth.dex.clientID` or `oauth.google.clientID`, else
+        # `global.identity.clientId` (dex).
+        id: ""
+        # -- Secret key with the client secret, mounted as a file. Empty name
+        # uses the deprecated `oauth.existingSecret`, else
+        # `global.identity.existingSecret`, else a Secret from the deprecated
+        # inline client secret.
+        secretKeyRef:
+          name: ""
+          key: client-secret
+      certificateAuthority:
+        # -- Secret key with the CA of a Dex that serves a private
+        # certificate (`OAUTH_DEX_CA_FILE`). Empty name uses the deprecated
+        # `oauth.dex.caSecret`, else `global.identity.ca`.
+        secretKeyRef:
+          name: ""
+          key: ca.crt
+    dynamicClientRegistration:
+      # -- Serve RFC 7591 dynamic client registration
+      # (`OAUTH_ENABLE_DYNAMIC_CLIENT_REGISTRATION`). MCP 2026-07-28
+      # deprecates it in favour of client ID metadata documents; it stays on
+      # for clients that still register this way.
+      enabled: true
+      initialAccessToken:
+        # -- Secret key with the bearer a registration must present
+        # (`OAUTH_REGISTRATION_ACCESS_TOKEN_FILE`).
+        secretKeyRef:
+          name: ""
+          key: token
+    clientIDMetadataDocuments:
+      # -- Accept URL client IDs (client ID metadata documents)
+      # (`OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS`).
+      enabled: true
+    storage:
+      # -- Token storage (`OAUTH_STORAGE_BACKEND`). Memory loses every
+      # session on restart and needs one replica.
+      type: memory  # @schema enum: [memory]
+  # -- Deprecated: use `authorizationServer.issuer`.
   baseURL: ""
-  # -- Identity provider: `dex` or `google`.
-  provider: dex
+  # -- Deprecated: use `authorizationServer.upstream.type`.
+  provider: ""  # @schema enum: ["", dex, google]
   dex:
-    # -- Dex issuer URL. Empty falls back to `global.identity.issuerUrl`.
+    # -- Deprecated: use `authorizationServer.upstream.issuer`.
     issuerURL: ""
-    # -- Dex OAuth client ID. Empty falls back to `global.identity.clientId`.
+    # -- Deprecated: use `authorizationServer.upstream.client.id`.
     clientID: ""
-    # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
+    # -- Deprecated: use `authorizationServer.upstream.client.secretKeyRef`.
     clientSecret: ""
     # -- Deprecated, no effect, not passed to the server: the Dex client
     # reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and
     # NO_PROXY without it. Remove it from your values; the key goes away in a
     # later release.
     allowPrivateURLs: false
-    # -- Secret with the CA of a Dex that serves a private certificate;
-    # mounted and passed as `OAUTH_DEX_CA_FILE`. Empty name falls back to
-    # `global.identity.ca.secretName` / `global.identity.ca.key`.
+    # -- Deprecated: use `authorizationServer.upstream.certificateAuthority`.
     caSecret:
       name: ""
       key: ca.crt
   google:
-    # -- Google OAuth client ID (not secret; may also come from the Secret key
-    # `google-client-id` when empty).
+    # -- Deprecated: use `authorizationServer.upstream.client.id`. Empty
+    # reads the Secret key `google-client-id`.
     clientID: ""
-    # -- Google OAuth client secret (prefer `oauth.existingSecret`).
+    # -- Deprecated: use `authorizationServer.upstream.client.secretKeyRef`.
     clientSecret: ""
-  # -- Existing Secret with the provider credentials: `dex-client-secret`
-  # (dex) or `google-client-secret` (+ optional `google-client-id`) (google).
-  # Empty falls back to `global.identity.existingSecret`, whose
-  # `dex-client-secret` is the platform client's; without that, the chart
-  # renders a Secret from the values above.
+  # -- Deprecated: use `authorizationServer.upstream.client.secretKeyRef`.
+  # Existing Secret with `dex-client-secret` (dex) or `google-client-secret`
+  # (+ optional `google-client-id`) (google).
   existingSecret: ""
-  # -- OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO
-  # token forwarding). Empty falls back to `[global.identity.clientId]`, the
-  # platform client MCP clients and the muster CLI log in with. The server
-  # trusts the union of this list and `muster.mcpServer.auth.requiredAudiences`
-  # (in that order, without duplicates): every token muster forwards carries
-  # the required audiences by construction and they are what the
-  # kube-apiserver trusts, so a portal session — whose id_token carries them
-  # but not the platform client — is accepted without listing its client here.
-  trustedAudiences: []
+  # -- Deprecated: list the provider in `resourceServer.trustedIssuers` with
+  # these `audiences`. The OAuth client IDs whose ID tokens of the provider
+  # people sign in with are accepted.
+  trustedAudiences: []  # @schema item: string
   sso:
     # -- Deprecated, no effect, not passed to the server: the issuer host of
     # the configured provider may resolve to a private address for its JWKS
     # without it; list any other JWKS host in allowPrivateIPJWKSHosts. Remove
     # it from your values; the key goes away in a later release.
     allowPrivateIPs: false
-    # -- Hosts, other than the issuer's own, whose JWKS may resolve to an
-    # RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts
-    # on another host. Exact hostnames, no port. Loopback and link-local stay
-    # refused.
+    # -- Deprecated: list the provider in `resourceServer.trustedIssuers`
+    # with these `allowPrivateIPJWKSHosts`. Hosts, other than the issuer's
+    # own, whose JWKS may resolve to an RFC 1918 or RFC 4193 address.
     allowPrivateIPJWKSHosts: []  # @schema item: string
-  # -- Accept unauthenticated dynamic client registration (labs only).
+  # -- Deprecated, removed in a later release: accept dynamic client
+  # registration without an initial access token, public clients included
+  # (labs only). MCP clients register with client ID metadata documents.
   allowPublicClientRegistration: false
   downstream:
     # -- Call the Kubernetes API as the caller: everything a request does
@@ -244,7 +332,9 @@ oauth:
     # ClusterRoles (`rbac.create` is moot), work without a caller (download
     # adoption after a restart, the wiring reconciler) is off, and a job that
     # outlives its caller's token fails on the apiserver's 401 instead of
-    # continuing with other credentials.
+    # continuing with other credentials. Presenting the forwarded token is
+    # token passthrough, which MCP forbids: a deviation until per-backend
+    # tokens (ID-JAG, giantswarm/giantswarm#39102).
     enabled: false
 
 github:
@@ -314,8 +404,9 @@ muster:
     # `kubernetes`) so `oauth.downstream` works; muster requests them at
     # login, so users re-login after a change. They are trusted as bearer
     # audiences by construction, since the server's trusted audiences are
-    # `oauth.trustedAudiences` plus this list. A Google IdP has no
-    # cross-client audiences: leave the list empty.
+    # the platform client plus this list. Empty uses
+    # `global.identity.kubernetes.audiences`. A Google IdP has no
+    # cross-client audiences: leave both empty.
     auth:
       forwardToken: true
       requiredAudiences: []
