@@ -917,13 +917,23 @@ operations answer 501.
 With `--enable-oauth` model-manager is an OAuth 2.1 resource server
 ([mcp-oauth](https://github.com/giantswarm/mcp-oauth)) in front of both the
 MCP endpoint and the REST API: every call needs a bearer token the platform
-identity provider issued — Dex (`--oauth-provider dex`, the Agent Platform
-default) or Google (`--oauth-provider google`). On the platform nobody logs in
+identity provider issued — Dex (`OAUTH_PROVIDER=dex`, the default) or Google
+(`OAUTH_PROVIDER=google`). mcp-oauth's `OAUTH_*` variables configure it
+(`oauthconfig.SettingsFromEnv`: `OAUTH_ISSUER`, `OAUTH_DEX_ISSUER_URL`,
+`OAUTH_DEX_CLIENT_ID`, `OAUTH_DEX_CLIENT_SECRET`, `OAUTH_DEX_CA_FILE`,
+`OAUTH_TRUSTED_AUDIENCES`, …); model-manager turns on client ID metadata
+documents unless `OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS` says otherwise.
+The earlier flags and variables (`--oauth-base-url`, `--oauth-provider`,
+`--dex-*`, `--google-*`, `--oauth-trusted-audiences`,
+`--sso-allow-private-ip-jwks-hosts`, `--allow-public-client-registration` and
+their `MODEL_MANAGER_OAUTH_*`, `DEX_*`, `GOOGLE_*` and `SSO_*` variables)
+still work for one more release and log a deprecation warning naming the
+replacement; an `OAUTH_*` variable wins over them. On the platform nobody logs in
 to model-manager itself: muster forwards the session's IdP id_token
 byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
 and the portal sends the signed-in user's id_token through the gateway;
 model-manager validates them against the IdP's JWKS when their audience is one
-of `--oauth-trusted-audiences`. The chart passes the platform's OAuth client
+of `OAUTH_TRUSTED_AUDIENCES`. The chart passes the platform's OAuth client
 (`oauth.trustedAudiences`, else `global.identity.clientId`) plus the
 MCPServer's `requiredAudiences`: every forwarded token carries those by
 construction and they are what the kube-apiserver trusts, so a portal session

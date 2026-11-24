@@ -165,20 +165,6 @@ spec:
             - --mcp-path={{ .Values.mcp.path }}
             {{- if .Values.oauth.enabled }}
             - --enable-oauth=true
-            - --oauth-base-url={{ include "model-manager.oauthBaseURL" . }}
-            - --oauth-provider={{ .Values.oauth.provider }}
-            {{- with include "model-manager.oauthTrustedAudiences" . }}
-            - --oauth-trusted-audiences={{ . }}
-            {{- end }}
-            {{- if .Values.oauth.sso.allowPrivateIPs }}
-            - --sso-allow-private-ips=true
-            {{- end }}
-            {{- with .Values.oauth.sso.allowPrivateIPJWKSHosts }}
-            - --sso-allow-private-ip-jwks-hosts={{ join "," . }}
-            {{- end }}
-            {{- if .Values.oauth.allowPublicClientRegistration }}
-            - --allow-public-client-registration=true
-            {{- end }}
             {{- if .Values.oauth.downstream.enabled }}
             - --downstream-oauth=true
             {{- end }}
@@ -197,16 +183,6 @@ spec:
             {{- end }}
             - --github-api-url={{ .Values.github.apiURL }}
             {{- end }}
-            {{- if eq .Values.oauth.provider "dex" }}
-            - --dex-issuer-url={{ include "model-manager.oauthDexIssuerURL" . }}
-            - --dex-client-id={{ include "model-manager.oauthDexClientID" . }}
-            {{- if .Values.oauth.dex.allowPrivateURLs }}
-            - --allow-private-oauth-urls=true
-            {{- end }}
-            {{- if include "model-manager.oauthDexCASecretName" . }}
-            - --dex-ca-file=/etc/model-manager/idp-ca/{{ include "model-manager.oauthDexCASecretKey" . }}
-            {{- end }}
-            {{- end }}
             {{- end }}
             {{- if .Values.logging.verbose }}
             - --verbose
@@ -224,28 +200,57 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- if .Values.oauth.enabled }}
+            {{- /* mcp-oauth's settings (oauthconfig.SettingsFromEnv). */}}
+            - name: OAUTH_ISSUER
+              value: {{ include "model-manager.oauthBaseURL" . | quote }}
+            - name: OAUTH_PROVIDER
+              value: {{ .Values.oauth.provider | quote }}
+            - name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS
+              value: "true"
+            {{- with include "model-manager.oauthTrustedAudiences" . }}
+            - name: OAUTH_TRUSTED_AUDIENCES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.oauth.sso.allowPrivateIPJWKSHosts }}
+            - name: OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.oauth.allowPublicClientRegistration }}
+            - name: OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION
+              value: "true"
+            {{- end }}
             {{- if eq .Values.oauth.provider "google" }}
             {{- if .Values.oauth.google.clientID }}
-            - name: GOOGLE_CLIENT_ID
+            - name: OAUTH_GOOGLE_CLIENT_ID
               value: {{ .Values.oauth.google.clientID | quote }}
             {{- else }}
-            - name: GOOGLE_CLIENT_ID
+            - name: OAUTH_GOOGLE_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ include "model-manager.oauthSecretName" . }}
                   key: google-client-id
             {{- end }}
-            - name: GOOGLE_CLIENT_SECRET
+            - name: OAUTH_GOOGLE_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "model-manager.oauthSecretName" . }}
                   key: google-client-secret
+            - name: OAUTH_GOOGLE_REDIRECT_URL
+              value: {{ printf "%s/oauth/callback" (include "model-manager.oauthBaseURL" . | trimSuffix "/") | quote }}
             {{- else }}
-            - name: DEX_CLIENT_SECRET
+            - name: OAUTH_DEX_ISSUER_URL
+              value: {{ include "model-manager.oauthDexIssuerURL" . | quote }}
+            - name: OAUTH_DEX_CLIENT_ID
+              value: {{ include "model-manager.oauthDexClientID" . | quote }}
+            - name: OAUTH_DEX_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "model-manager.oauthSecretName" . }}
                   key: dex-client-secret
+            {{- if include "model-manager.oauthDexCASecretName" . }}
+            - name: OAUTH_DEX_CA_FILE
+              value: /etc/model-manager/idp-ca/{{ include "model-manager.oauthDexCASecretKey" . }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- with .Values.observability.otel }}

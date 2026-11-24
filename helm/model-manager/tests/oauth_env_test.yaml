@@ -1,0 +1,115 @@
+suite: OAuth settings as mcp-oauth OAUTH_* variables
+templates:
+  - templates/deployment.yaml
+set:
+  oauth.enabled: true
+  oauth.baseURL: https://manager.example.test
+  oauth.dex.issuerURL: https://dex.example.test
+  oauth.dex.clientID: manager
+  oauth.existingSecret: manager-oauth
+  oauth.trustedAudiences:
+    - agent-platform
+tests:
+  - it: renders the Dex settings as OAUTH_* variables and no OAuth arguments besides the switches
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ISSUER, value: https://manager.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_PROVIDER, value: dex}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS, value: "true"}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_ISSUER_URL, value: https://dex.example.test}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CLIENT_ID, value: manager}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OAUTH_DEX_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef: {name: manager-oauth, key: dex-client-secret}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_TRUSTED_AUDIENCES, value: agent-platform}
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-oauth=true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_DEX_CA_FILE}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION}
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--(oauth-|dex-|sso-|google-|allow-private-oauth-urls|allow-public-client-registration)
+
+  - it: points OAUTH_DEX_CA_FILE at the mounted CA
+    set:
+      oauth.dex.caSecret.name: dex-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_DEX_CA_FILE, value: /etc/model-manager/idp-ca/ca.crt}
+
+  - it: renders the Google settings with the callback as redirect URL
+    set:
+      oauth.provider: google
+      oauth.baseURL: https://manager.example.test/
+      oauth.google.clientID: google-client
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_PROVIDER, value: google}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_GOOGLE_CLIENT_ID, value: google-client}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OAUTH_GOOGLE_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef: {name: manager-oauth, key: google-client-secret}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_GOOGLE_REDIRECT_URL, value: https://manager.example.test/oauth/callback}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_DEX_ISSUER_URL}
+
+  - it: passes public client registration when allowed
+    set:
+      oauth.allowPublicClientRegistration: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION, value: "true"}
+
+  - it: still accepts the deprecated no-op values and passes nothing for them
+    set:
+      oauth.dex.allowPrivateURLs: true
+      oauth.sso.allowPrivateIPs: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --allow-private-oauth-urls=true
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --sso-allow-private-ips=true
+
+  - it: renders no OAuth settings with OAuth off
+    set:
+      oauth.enabled: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: {name: OAUTH_ISSUER}

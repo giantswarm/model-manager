@@ -17,7 +17,6 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/backend/kserve"
-	"github.com/giantswarm/model-manager/internal/server"
 )
 
 // remoteKServeDocument is a kserve document whose target is a workload
@@ -77,30 +76,31 @@ func TestBackendBuilderRemoteTarget(t *testing.T) {
 
 func TestValidateGitHubExchange(t *testing.T) {
 	exchange := func() *serveOptions {
-		return &serveOptions{oauthEnabled: true, downstreamOAuth: true, oauthProvider: server.ProviderDex,
+		return &serveOptions{oauthEnabled: true, downstreamOAuth: true,
 			githubExchangeEndpoint: "https://broker.example.com/token", githubExchangeAudience: "model-manager-app",
 			githubExchangeClientFile: "/mounted/client-id", githubExchangeSecretFile: "/mounted/client-secret"}
 	}
-	require.NoError(t, validateGitHubExchange(&serveOptions{}))
-	require.NoError(t, validateGitHubExchange(exchange()), "the client ID file stands in for the client ID flag")
+	require.NoError(t, validateGitHubExchange(&serveOptions{}, true))
+	require.NoError(t, validateGitHubExchange(exchange(), true), "the client ID file stands in for the client ID flag")
 
 	o := exchange()
 	o.githubExchangeClient, o.githubExchangeClientFile = "model-manager", ""
-	require.NoError(t, validateGitHubExchange(o))
+	require.NoError(t, validateGitHubExchange(o, true))
 
 	o = exchange()
 	o.githubExchangeClientFile = ""
-	require.Error(t, validateGitHubExchange(o), "neither client ID flag nor file")
+	require.Error(t, validateGitHubExchange(o, true), "neither client ID flag nor file")
 
 	o = exchange()
 	o.githubExchangeAudience = ""
-	require.Error(t, validateGitHubExchange(o))
+	require.Error(t, validateGitHubExchange(o, true))
 
 	o = exchange()
 	o.downstreamOAuth = false
-	require.Error(t, validateGitHubExchange(o))
+	require.Error(t, validateGitHubExchange(o, true))
+	require.Error(t, validateGitHubExchange(exchange(), false), "the subject token must be a Dex token")
 
-	require.Error(t, validateGitHubExchange(&serveOptions{githubExchangeAudience: "model-manager-app"}), "exchange options without an endpoint")
+	require.Error(t, validateGitHubExchange(&serveOptions{githubExchangeAudience: "model-manager-app"}, true), "exchange options without an endpoint")
 }
 
 func TestWarnDeprecatedOAuthOptions(t *testing.T) {

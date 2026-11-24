@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-toolkit/metrics"
 	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 	"github.com/giantswarm/mcp-toolkit/tracing"
@@ -215,20 +216,20 @@ environment variable named next to it; flags win over the environment.`,
 	f.DurationVar(&o.reconcileInterval, "reconcile-interval", envDuration("MODEL_MANAGER_RECONCILE_INTERVAL", 30*time.Second), "How often served models are checked for a missing ModelConfig on backends that wire on readiness; 0 disables (MODEL_MANAGER_RECONCILE_INTERVAL)")
 	f.BoolVar(&o.mcpEnabled, "mcp-enabled", envBool("MODEL_MANAGER_MCP_ENABLED", true), "Serve the MCP streamable-HTTP endpoint (MODEL_MANAGER_MCP_ENABLED)")
 	f.StringVar(&o.mcpPath, "mcp-path", envOr("MODEL_MANAGER_MCP_PATH", "/mcp"), "MCP endpoint path (MODEL_MANAGER_MCP_PATH)")
-	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("MODEL_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API, validated against the platform IdP (mcp-oauth); the caller's identity travels with every request (MODEL_MANAGER_OAUTH_ENABLED)")
-	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("MODEL_MANAGER_OAUTH_BASE_URL", ""), "Public base URL of this server: the issuer of its OAuth metadata, https or loopback http (MODEL_MANAGER_OAUTH_BASE_URL)")
-	f.StringVar(&o.oauthProvider, "oauth-provider", envOr("MODEL_MANAGER_OAUTH_PROVIDER", server.ProviderDex), "Identity provider: dex or google (MODEL_MANAGER_OAUTH_PROVIDER)")
-	f.StringVar(&o.dexIssuerURL, "dex-issuer-url", envOr("DEX_ISSUER_URL", ""), "Dex issuer URL (DEX_ISSUER_URL)")
-	f.StringVar(&o.dexClientID, "dex-client-id", envOr("DEX_CLIENT_ID", ""), "Dex client ID (DEX_CLIENT_ID)")
-	f.StringVar(&o.dexClientSecret, "dex-client-secret", envOr("DEX_CLIENT_SECRET", ""), "Dex client secret (DEX_CLIENT_SECRET)")
-	f.StringVar(&o.dexCAFile, "dex-ca-file", envOr("DEX_CA_FILE", ""), "PEM CA bundle of a Dex with a private certificate; verifies discovery, token and JWKS calls (DEX_CA_FILE)")
+	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("MODEL_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API (mcp-oauth, configured by the OAUTH_* variables); the caller's identity travels with every request (MODEL_MANAGER_OAUTH_ENABLED)")
+	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("MODEL_MANAGER_OAUTH_BASE_URL", ""), "Deprecated: set OAUTH_ISSUER, the public base URL of this server (MODEL_MANAGER_OAUTH_BASE_URL)")
+	f.StringVar(&o.oauthProvider, "oauth-provider", envOr("MODEL_MANAGER_OAUTH_PROVIDER", ""), "Deprecated: set OAUTH_PROVIDER (dex, the default, or google) (MODEL_MANAGER_OAUTH_PROVIDER)")
+	f.StringVar(&o.dexIssuerURL, "dex-issuer-url", envOr("DEX_ISSUER_URL", ""), "Deprecated: set OAUTH_DEX_ISSUER_URL (DEX_ISSUER_URL)")
+	f.StringVar(&o.dexClientID, "dex-client-id", envOr("DEX_CLIENT_ID", ""), "Deprecated: set OAUTH_DEX_CLIENT_ID (DEX_CLIENT_ID)")
+	f.StringVar(&o.dexClientSecret, "dex-client-secret", envOr("DEX_CLIENT_SECRET", ""), "Deprecated: set OAUTH_DEX_CLIENT_SECRET or OAUTH_DEX_CLIENT_SECRET_FILE (DEX_CLIENT_SECRET)")
+	f.StringVar(&o.dexCAFile, "dex-ca-file", envOr("DEX_CA_FILE", ""), "Deprecated: set OAUTH_DEX_CA_FILE, the PEM CA bundle of a Dex with a private certificate (DEX_CA_FILE)")
 	f.BoolVar(&o.dexAllowPrivateIP, "allow-private-oauth-urls", envBool("MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", false), "Deprecated, no effect: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS)")
-	f.StringVar(&o.googleClientID, "google-client-id", envOr("GOOGLE_CLIENT_ID", ""), "Google OAuth client ID (GOOGLE_CLIENT_ID)")
-	f.StringVar(&o.googleClientSecret, "google-client-secret", envOr("GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret (GOOGLE_CLIENT_SECRET)")
-	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens — the platform client muster forwards tokens for and the portal logs in with (OAUTH_TRUSTED_AUDIENCES)")
+	f.StringVar(&o.googleClientID, "google-client-id", envOr("GOOGLE_CLIENT_ID", ""), "Deprecated: set OAUTH_GOOGLE_CLIENT_ID (GOOGLE_CLIENT_ID)")
+	f.StringVar(&o.googleClientSecret, "google-client-secret", envOr("GOOGLE_CLIENT_SECRET", ""), "Deprecated: set OAUTH_GOOGLE_CLIENT_SECRET or OAUTH_GOOGLE_CLIENT_SECRET_FILE (GOOGLE_CLIENT_SECRET)")
+	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Deprecated flag: set OAUTH_TRUSTED_AUDIENCES, the comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens")
 	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Deprecated, no effect: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in --sso-allow-private-ip-jwks-hosts (SSO_ALLOW_PRIVATE_IPS)")
-	f.StringVar(&o.ssoAllowPrivateIPJWKSHosts, "sso-allow-private-ip-jwks-hosts", envOr("SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS", ""), "Comma-separated hosts, other than the issuer's own, whose JWKS may resolve to an RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts on another host. Loopback and link-local stay refused (SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS)")
-	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
+	f.StringVar(&o.ssoAllowPrivateIPJWKSHosts, "sso-allow-private-ip-jwks-hosts", envOr("SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS", ""), "Deprecated: set OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS (SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS)")
+	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Deprecated: set OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
 	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
 	f.StringVar(&o.githubExchangeEndpoint, "github-token-exchange-endpoint", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT", ""), "RFC 8693 endpoint (muster's broker) that releases the person's GitHub App user grant for commit mode, in place of the App-pinned registration (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT)")
 	f.StringVar(&o.githubExchangeClient, "github-token-exchange-client-id", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID", ""), "Confidential token exchange client ID; wins over --github-token-exchange-client-id-file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID)")
@@ -292,7 +293,13 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return fmt.Errorf("--instance is empty: agent wiring records the instance that creates a ModelConfig, so it deletes only its own; name this model-manager or set --disable-wiring")
 	}
 
-	if err := validateGitHubExchange(o); err != nil {
+	var oauthSettings oauthconfig.Settings
+	if o.oauthEnabled {
+		if oauthSettings, err = loadOAuthSettings(o, log); err != nil {
+			return fmt.Errorf("oauth: %w", err)
+		}
+	}
+	if err := validateGitHubExchange(o, oauthSettings.Dex != nil); err != nil {
 		return err
 	}
 
@@ -469,20 +476,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 
 	cfg := server.Config{Addr: o.listen, MCPEnabled: o.mcpEnabled, MCPPath: o.mcpPath, ShutdownContext: budget.WorkContext}
 	if o.oauthEnabled {
-		cfg.OAuth = &server.OAuthConfig{
-			BaseURL:                       o.oauthBaseURL,
-			Provider:                      o.oauthProvider,
-			DexIssuerURL:                  o.dexIssuerURL,
-			DexClientID:                   o.dexClientID,
-			DexClientSecret:               o.dexClientSecret,
-			DexCAFile:                     o.dexCAFile,
-			GoogleClientID:                o.googleClientID,
-			GoogleClientSecret:            o.googleClientSecret,
-			TrustedAudiences:              splitList(o.oauthTrustedAudiences),
-			AllowPrivateIPJWKSHosts:       splitList(o.ssoAllowPrivateIPJWKSHosts),
-			AllowPublicClientRegistration: o.allowPublicClientRegistration,
-			DownstreamOAuth:               o.downstreamOAuth,
-		}
+		cfg.OAuth = &server.OAuthConfig{Settings: oauthSettings, DownstreamOAuth: o.downstreamOAuth}
 	}
 	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, build, mcpOpts...), log)
 	if err != nil {
@@ -711,14 +705,14 @@ func (o *serveOptions) gitHubExchangeConfig() server.GitHubExchangeConfig {
 
 // validateGitHubExchange checks the token exchange options: the subject
 // token is the caller's IdP token, so they need Dex and downstream OAuth.
-func validateGitHubExchange(o *serveOptions) error {
+func validateGitHubExchange(o *serveOptions, dex bool) error {
 	if o.githubExchangeEndpoint == "" {
 		if o.githubExchangeClient != "" || o.githubExchangeClientFile != "" || o.githubExchangeSecretFile != "" || o.githubExchangeAudience != "" || o.githubExchangeCAFile != "" {
 			return errors.New("GitHub token exchange options require --github-token-exchange-endpoint")
 		}
 		return nil
 	}
-	if !o.oauthEnabled || !o.downstreamOAuth || o.oauthProvider != server.ProviderDex {
+	if !o.oauthEnabled || !o.downstreamOAuth || !dex {
 		return errors.New("GitHub token exchange requires Dex OAuth and downstream OAuth")
 	}
 	return o.gitHubExchangeConfig().Validate()
