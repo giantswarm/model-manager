@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -234,6 +235,9 @@ func (s *Service) stopPlan(ctx context.Context, name, ref string) (backend.Backe
 // would answer. Nothing is deleted.
 func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool) (*OpPlan, error) {
 	b, m, err := s.resolve(ctx, name, ref)
+	if errors.Is(err, backend.ErrNotFound) && unwire && s.wirer != nil {
+		return s.planUnwireDeleted(ctx, name, ref, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +258,29 @@ func (s *Service) PlanDelete(ctx context.Context, name, ref string, unwire bool)
 		}
 	}
 	return plan, nil
+}
+
+// planUnwireDeleted is unwireDeleted's dry run: the ModelConfig a delete
+// whose weights are already gone would remove.
+func (s *Service) planUnwireDeleted(ctx context.Context, name, ref string, notFound error) (*OpPlan, error) {
+	b, ref, err := s.unwireTarget(ctx, name, ref)
+	if err != nil {
+		return nil, err
+	}
+	if b == "" {
+		return nil, notFound
+	}
+	w, err := s.unwiring(ctx, b, ref)
+	if err != nil {
+		return nil, err
+	}
+	if w == nil || (w.ModelConfig == "" && w.Left == nil) {
+		return nil, notFound
+	}
+	if err := deleteRefusal(ref, w); err != nil {
+		return nil, err
+	}
+	return &OpPlan{Backend: b, Model: ref, Manifests: []map[string]any{}, Wiring: w}, nil
 }
 
 // PlanCancel is cancel_job's dry run: the job it would cancel.

@@ -191,6 +191,9 @@ type Service struct {
 	wiring  *WiringInfo
 	cfg     Config
 	log     *slog.Logger
+	// models serialises a load's serving-object creation and a delete's
+	// weight removal on the same model.
+	models modelLocks
 }
 
 // WithCatalog gives the service the preset catalog FitCheck answers from
@@ -789,18 +792,25 @@ func (s *Service) Load(ctx context.Context, opts LoadOptions) (*ModelView, error
 	}
 	keepAlive := req.KeepAlive
 	res := &backend.LoadResult{}
+	unlock, err := s.models.lock(ctx, b.Name(), m.Name)
+	if err != nil {
+		return nil, err
+	}
 	srv, isServer := b.(backend.Server)
 	if isServer {
 		served, err := srv.Serve(ctx, req)
 		if err != nil {
+			unlock()
 			return nil, err
 		}
 		if served != nil {
 			res = served
 		}
 	} else if err := b.Load(ctx, req); err != nil {
+		unlock()
 		return nil, err
 	}
+	unlock()
 	if res.AlreadyServing {
 		// Nothing was created: the answer says where the model already
 		// serves, and no load job follows an object this call did not start.
@@ -1058,14 +1068,22 @@ func unloadable(b backend.Backend) error {
 // before anything changes; the weights go before the ModelConfig, so a
 // delete the backend refuses or fails leaves the model wired.
 func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (backend.Name, error) {
+	unwire = unwire && s.wirer != nil
 	b, m, err := s.resolve(ctx, name, ref)
+	if errors.Is(err, backend.ErrNotFound) && unwire {
+		return s.unwireDeleted(ctx, name, ref, err)
+	}
 	if err != nil {
 		return "", err
 	}
 	if !b.Capabilities().Delete {
 		return b.Name(), fmt.Errorf("%w: delete on %s", backend.ErrUnsupported, b.Name())
 	}
-	unwire = unwire && s.wirer != nil
+	unlock, err := s.models.lock(ctx, b.Name(), m.Name)
+	if err != nil {
+		return b.Name(), err
+	}
+	defer unlock()
 	if unwire {
 		w, err := s.unwiring(ctx, b.Name(), m.Name)
 		if err != nil {
@@ -1080,11 +1098,27 @@ func (s *Service) Delete(ctx context.Context, name, ref string, unwire bool) (ba
 	}
 	if unwire {
 		if err := s.wirer.Remove(ctx, b.Name(), m.Name, wiring.CreatedHere); err != nil {
-			return b.Name(), fmt.Errorf("%s was deleted but its ModelConfig was not: unwire %s: %w; remove it with unwire_model", m.Name, m.Name, err)
+			return b.Name(), fmt.Errorf("%s was deleted but its ModelConfig was not: unwire %s: %w; repeat the delete to remove it", m.Name, m.Name, err)
 		}
 	}
 	s.log.Info("model deleted", "backend", b.Name(), "model", m.Name, "unwired", unwire, identity.LogAttr(ctx))
 	return b.Name(), nil
+}
+
+// unwireDeleted completes a delete whose weights are already gone: it
+// removes the ModelConfig this instance created for ref, so repeating a
+// delete that failed after removing the weights finishes it. With nothing
+// wired either, the answer is notFound.
+func (s *Service) unwireDeleted(ctx context.Context, name, ref string, notFound error) (backend.Name, error) {
+	plan, err := s.planUnwireDeleted(ctx, name, ref, notFound)
+	if err != nil {
+		return "", err
+	}
+	if err := s.wirer.Remove(ctx, plan.Backend, plan.Model, wiring.CreatedHere); err != nil {
+		return plan.Backend, fmt.Errorf("unwire %s: %w", plan.Model, err)
+	}
+	s.log.Info("model deleted", "backend", plan.Backend, "model", plan.Model, "unwired", true, "weightsAlreadyGone", true, identity.LogAttr(ctx))
+	return plan.Backend, nil
 }
 
 // deleteRefusal is the refusal delete_model answers, with nothing deleted,

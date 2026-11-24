@@ -50,6 +50,9 @@ type fakeBackend struct {
 	think *bool
 	// deleteErr, when set, is every Delete's answer.
 	deleteErr error
+	// deleteHold, when set, is signalled when a Delete starts, and the
+	// Delete waits until it is closed.
+	deleteHold chan struct{}
 }
 
 func newFakeBackend() *fakeBackend {
@@ -133,6 +136,13 @@ func (f *fakeBackend) Pull(ctx context.Context, req backend.PullRequest, progres
 	return nil
 }
 func (f *fakeBackend) Delete(_ context.Context, name string) error {
+	f.mu.Lock()
+	hold := f.deleteHold
+	f.mu.Unlock()
+	if hold != nil {
+		hold <- struct{}{}
+		<-hold
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
@@ -599,6 +609,59 @@ func TestDeleteTheBackendFailsKeepsTheModelConfig(t *testing.T) {
 	status, body = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
 	require.Equal(t, http.StatusOK, status, body)
 	assert.Zero(t, f.wirer.count(), "the delete unwired once the weights were gone")
+}
+
+// A delete repeated after the weights went, its ModelConfig left, removes
+// the ModelConfig: the delete is idempotent. With nothing left, it is a 404.
+func TestDeleteRepeatedAfterTheWeightsWentUnwires(t *testing.T) {
+	f := newFixture(t, true)
+	status, body := f.do(t, http.MethodPost, Prefix+"/models/wire", map[string]any{"model": "qwen3:0.6b"})
+	require.Equal(t, http.StatusOK, status, body)
+	f.backend.mu.Lock()
+	delete(f.backend.models, "qwen3:0.6b")
+	f.backend.mu.Unlock()
+
+	plan, err := f.svc.PlanDelete(t.Context(), "", "qwen3:0.6b", true)
+	require.NoError(t, err)
+	assert.False(t, plan.Present)
+	require.NotNil(t, plan.Wiring)
+	assert.Equal(t, "qwen3-0-6b", plan.Wiring.ModelConfig, "the dry run names the ModelConfig the repeat removes")
+	assert.Equal(t, 1, f.wirer.count(), "the dry run changed nothing")
+
+	status, body = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "ollama", body["backend"])
+	assert.Zero(t, f.wirer.count())
+
+	status, _ = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b", nil)
+	assert.Equal(t, http.StatusNotFound, status)
+	status, _ = f.do(t, http.MethodDelete, Prefix+"/models/qwen3:0.6b?unwire=false", nil)
+	assert.Equal(t, http.StatusNotFound, status)
+}
+
+// A load of a model whose delete is running waits for the delete.
+func TestLoadWaitsForADeleteOfTheSameModel(t *testing.T) {
+	f := newFixture(t, true)
+	hold := make(chan struct{})
+	f.backend.mu.Lock()
+	f.backend.deleteHold = hold
+	f.backend.mu.Unlock()
+	deleted := make(chan error, 1)
+	go func() {
+		_, err := f.svc.Delete(t.Context(), "", "qwen3:0.6b", false)
+		deleted <- err
+	}()
+	<-hold
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := f.svc.Load(ctx, service.LoadOptions{Model: "qwen3:0.6b"})
+	require.ErrorIs(t, err, context.Canceled, "the load waited for the delete's lock")
+
+	close(hold)
+	require.NoError(t, <-deleted)
+	_, err = f.svc.Load(t.Context(), service.LoadOptions{Model: "qwen3:0.6b"})
+	require.ErrorIs(t, err, backend.ErrNotFound, "the load after the delete finds no weights")
 }
 
 func TestWireUnwireAndDisabled(t *testing.T) {
