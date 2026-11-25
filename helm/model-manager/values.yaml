@@ -325,7 +325,7 @@ muster:
     # installation tightens a tool here (Ask or Block)), so the connector arrives
     # reviewed. `rule` is what a tool without its own entry gets, new tools
     # included. Values: Allow | Ask | Block (Block hides the tool), `rule` Allow |
-    # Ask. An installation overrides per tool in its values; `{}` renders none
+    # Ask. An installation overrides per tool in its values; `null` renders none (`{}` does not: Helm merges it into this default)
     # (the connector then runs every tool, shown as not reviewed). Needs a muster
     # whose MCPServer CRD carries spec.approval (an older CRD drops the field).
     # See https://docs.giantswarm.io/overview/agent-platform/governing-tool-calls/
