@@ -41,6 +41,10 @@ spec:
   {{- with .Values.muster.mcpServer.description }}
   description: {{ . | quote }}
   {{- end }}
+  {{- with .Values.muster.mcpServer.approval }}
+  approval:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- if .Values.oauth.enabled }}
   auth:
     type: oauth

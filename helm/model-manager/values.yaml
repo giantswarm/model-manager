@@ -316,6 +316,44 @@ muster:
     auth:
       forwardToken: true
       requiredAudiences: []
+    # -- The connector's tool approval, rendered as the MCPServer's `spec.approval`.
+    # The chart writes out every tool of this release explicitly (the "Allow all"
+    # preset: it is one of the platform's own management servers, whose tools the
+    # Dev Portal's pages call as the signed-in person and agents use freely on a
+    # trusted platform; agent callers are asked by muster's floors and the
+    # governance mode (`governance` in agent-platform), not by these settings; an
+    # installation tightens a tool here (Ask or Block)), so the connector arrives
+    # reviewed. `rule` is what a tool without its own entry gets, new tools
+    # included. Values: Allow | Ask | Block (Block hides the tool), `rule` Allow |
+    # Ask. An installation overrides per tool in its values; `{}` renders none
+    # (the connector then runs every tool, shown as not reviewed). Needs a muster
+    # whose MCPServer CRD carries spec.approval (an older CRD drops the field).
+    # See https://docs.giantswarm.io/overview/agent-platform/governing-tool-calls/
+    approval:
+      rule: Allow  # @schema enum: [Allow, Ask]
+      tools:  # @schema skipProperties: true; maxProperties: 512; additionalProperties: {type: string, enum: [Allow, Ask, Block]}
+        get_info: Allow
+        get_backend: Allow
+        list_backends: Allow
+        list_models: Allow
+        get_model: Allow
+        list_loaded_models: Allow
+        pull_model: Allow
+        load_model: Allow
+        list_presets: Allow
+        search_models: Allow
+        check_fit: Allow
+        list_nodes: Allow
+        unload_model: Allow
+        delete_model: Allow
+        wire_model: Allow
+        unwire_model: Allow
+        list_jobs: Allow
+        get_job: Allow
+        cancel_job: Allow
+        stop_download: Allow
+        add_backend: Allow
+        remove_backend: Allow
 
 httpRoute:
   # -- Expose the service through a Gateway API HTTPRoute.

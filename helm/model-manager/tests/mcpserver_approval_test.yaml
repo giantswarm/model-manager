@@ -1,0 +1,59 @@
+# The tool approval the chart sets on the muster MCPServer (spec.approval).
+suite: mcpserver tool approval
+templates:
+  - templates/mcpserver.yaml
+set:
+  muster:
+    mcpServer:
+      enabled: true
+tests:
+  - it: renders the connector's tool approval with the Allow rule and every tool named
+    asserts:
+      - equal:
+          path: spec.approval.rule
+          value: Allow
+      - equal:
+          path: spec.approval.tools.get_info
+          value: Allow
+      - equal:
+          path: spec.approval.tools.list_models
+          value: Allow
+      - equal:
+          path: spec.approval.tools.delete_model
+          value: Allow
+
+  - it: renders an installation's per-tool override next to the defaults
+    set:
+      muster:
+        mcpServer:
+          approval:
+            tools:
+              delete_model: Ask
+    asserts:
+      - equal:
+          path: spec.approval.tools.delete_model
+          value: Ask
+      - equal:
+          path: spec.approval.tools.list_models
+          value: Allow
+      - equal:
+          path: spec.approval.rule
+          value: Allow
+
+  - it: renders no approval when the installation clears it (null: Helm merges an empty map into the default)
+    set:
+      muster:
+        mcpServer:
+          approval: null
+    asserts:
+      - notExists:
+          path: spec.approval
+
+  - it: refuses a rule the CRD does not allow (Block hides a tool, it is no rule)
+    set:
+      muster:
+        mcpServer:
+          approval:
+            rule: Block
+    asserts:
+      - failedTemplate: {}
