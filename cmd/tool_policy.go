@@ -2,15 +2,17 @@ package cmd
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/giantswarm/mcp-oauth/handler"
-	"github.com/giantswarm/mcp-toolkit/toolpolicy"
 )
 
-func validatedToolIdentity(ctx context.Context) (toolpolicy.Identity, bool) {
+// validatedUser is the user mcp-oauth validated for the tool audit record, or
+// nil. providers.UserInfo logs issuer, subject and actor, never profile data.
+func validatedUser(ctx context.Context) slog.LogValuer {
 	user, ok := handler.UserInfoFromContext(ctx)
 	if !ok || user == nil {
-		return toolpolicy.Identity{}, false
+		return nil
 	}
-	return toolpolicy.Identity{Issuer: user.Issuer, Subject: user.ID, ActorIssuer: user.ActorIssuer, ActorSubject: user.ActorSubject}, true
+	return user
 }

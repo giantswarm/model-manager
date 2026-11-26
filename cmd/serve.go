@@ -453,7 +453,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	if toolTimeout == 0 {
 		toolTimeout = -1
 	}
-	mcpOpts = append(mcpOpts, api.WithToolPolicy(toolpolicy.Options{Timeout: toolTimeout, MaxResultBytes: o.maxResponseBytes, Logger: log, User: validatedToolIdentity}))
+	mcpOpts = append(mcpOpts, api.WithToolPolicy(toolpolicy.Options{Timeout: toolTimeout, MaxResultBytes: o.maxResponseBytes, Logger: log, User: validatedUser}))
 	switch {
 	case clients == nil:
 		// Already warned above.
