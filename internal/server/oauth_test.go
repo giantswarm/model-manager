@@ -25,8 +25,6 @@ import (
 	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers"
 	oauthserver "github.com/giantswarm/mcp-oauth/server"
-	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,23 +37,16 @@ import (
 )
 
 // fakeIdP is a minimal OIDC issuer on https://localhost: a discovery
-// document, enough for mcp-oauth's Dex provider to boot, and a key to mint
-// id_tokens the way the platform's Dex does.
+// document, enough for mcp-oauth's Dex provider to boot.
 type fakeIdP struct {
 	issuer string
-	key    *rsa.PrivateKey
 	caFile string
 	srv    *httptest.Server
 }
 
-const testKID = "test-key"
-
 func newFakeIdP(t *testing.T) *fakeIdP {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	idp := &fakeIdP{key: key}
+	idp := &fakeIdP{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dex/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -110,20 +101,6 @@ func selfSignedLocalhost(t *testing.T) tls.Certificate {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	require.NoError(t, err)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
-}
-
-// idToken mints an id_token the fake IdP signed.
-func (f *fakeIdP) idToken(t *testing.T, aud []string, exp time.Time) string {
-	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: f.key},
-		(&jose.SignerOptions{}).WithHeader("kid", testKID).WithType("JWT"))
-	require.NoError(t, err)
-	claims := jwt.Claims{Issuer: f.issuer, Subject: "sub-admin", Audience: jwt.Audience(aud),
-		Expiry: jwt.NewNumericDate(exp), IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Minute))}
-	extra := map[string]any{"email": "admin@lab.local", "email_verified": true, "name": "Lab Admin", "groups": []string{"platform-admins"}}
-	tok, err := jwt.Signed(signer).Claims(claims).Claims(extra).Serialize()
-	require.NoError(t, err)
-	return tok
 }
 
 func (f *fakeIdP) config(t *testing.T, downstream bool) OAuthConfig {
