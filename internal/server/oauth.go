@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/giantswarm/mcp-oauth/handler"
@@ -65,7 +64,6 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 		dexConfig.Logger = log
 		settings.Dex = &dexConfig
 	}
-	settings.TrustedIssuers = refuseOpenIDProviderActors(settings.TrustedIssuers)
 	runtime, cleanup, err := oauthconfig.Setup(settings, oauthserver.WithAuditor(security.NewAuditor(log, true)))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: %w", err)
@@ -109,22 +107,6 @@ func protectedResources(configuration *oauthserver.Config, mcpPath string) map[s
 		}
 	}
 	return resources
-}
-
-// refuseOpenIDProviderActors gives each trusted issuer marked OpenIDProvider
-// an empty actor policy when it has none, so a bearer of that issuer carrying
-// an act claim (RFC 8693 §4.1) is refused. Its bearers are ID tokens, which
-// identify the person signed in (OpenID Connect Core §2), not an acting party;
-// mcp-oauth leaves act unchecked under a nil policy, and OAUTH_TRUSTED_ISSUERS
-// cannot set one.
-func refuseOpenIDProviderActors(issuers []oauthserver.TrustedIssuer) []oauthserver.TrustedIssuer {
-	issuers = slices.Clone(issuers)
-	for i := range issuers {
-		if issuers[i].OpenIDProvider && issuers[i].Actors == nil {
-			issuers[i].Actors = &oauthserver.ActorPolicy{}
-		}
-	}
-	return issuers
 }
 
 func providerName(settings oauthconfig.Settings) string {

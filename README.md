@@ -939,8 +939,7 @@ audiences are the platform's OAuth client (`global.identity.clientId`) plus
 the MCPServer's `requiredAudiences`: every forwarded token carries those by
 construction and they are what the kube-apiserver trusts, so a portal session
 — whose id_token carries them but not the platform client — is accepted too.
-An id_token whose audience matches none of them, or that carries an `act`
-claim, is refused with 401. The chart's values follow mcp-oauth's layout for
+An id_token whose audience matches none of them is refused with 401. The chart's values follow mcp-oauth's layout for
 MCP servers (`oauth.resourceServer`, `oauth.authorizationServer`); the
 earlier `oauth.*` keys still work for one more release and the release notes
 name each one that is set. The caller — the `email`,

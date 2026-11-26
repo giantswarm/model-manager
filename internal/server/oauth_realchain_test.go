@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"io"
 	"log/slog"
-	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -217,19 +216,12 @@ func resolveTestHosts(t *testing.T, ip net.IP, hosts ...string) {
 
 func (p *privateIdP) idToken(t *testing.T, aud []string) string {
 	t.Helper()
-	return p.idTokenWith(t, aud, nil)
-}
-
-// idTokenWith signs an ID token with additional claims.
-func (p *privateIdP) idTokenWith(t *testing.T, aud []string, additional map[string]any) string {
-	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: p.key},
 		(&jose.SignerOptions{}).WithHeader("kid", privateTestKID).WithType("JWT"))
 	require.NoError(t, err)
 	claims := jwt.Claims{Issuer: p.issuer, Subject: "sub-admin", Audience: jwt.Audience(aud),
 		Expiry: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)), IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Minute))}
 	extra := map[string]any{"email": "admin@lab.local", "email_verified": true, "name": "Lab Admin", "groups": []string{"platform-admins"}}
-	maps.Copy(extra, additional)
 	tok, err := jwt.Signed(signer).Claims(claims).Claims(extra).Serialize()
 	require.NoError(t, err)
 	return tok
@@ -337,12 +329,6 @@ func TestOpenIDProviderTrustedIssuer(t *testing.T) {
 
 	code, _ = callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), idp.idToken(t, []string{"someone-else"}))
 	require.Equal(t, http.StatusUnauthorized, code, "an untrusted audience is refused")
-
-	delegated := idp.idTokenWith(t, []string{"kubernetes"}, map[string]any{"act": map[string]any{"iss": idp.issuer, "sub": "agent"}})
-	code, _ = callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), delegated)
-	require.Equal(t, http.StatusUnauthorized, code, "the provider's token carrying act is refused")
-	code, _ = callThroughChain(t, idp.config(t), delegated)
-	require.Equal(t, http.StatusUnauthorized, code, "as it is under trusted audiences")
 
 	o, err := newOAuth(idp.trustedIssuerConfig(t, true, privateIssuerHost), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
