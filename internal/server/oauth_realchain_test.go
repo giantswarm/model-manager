@@ -290,3 +290,62 @@ func TestJWKSOnAnotherPrivateHost(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, code)
 	require.Equal(t, "admin@lab.local", caller)
 }
+
+// trustedIssuerConfig declares the IdP as the OpenID Provider people sign in
+// with (an OAUTH_TRUSTED_ISSUERS entry with openIDProvider) instead of
+// trusting audiences of forwarded ID tokens, as the chart renders it.
+func (p *privateIdP) trustedIssuerConfig(t *testing.T, downstream bool, jwksHosts ...string) OAuthConfig {
+	t.Helper()
+	environment := dexEnvironment(p.issuer, p.caFile)
+	delete(environment, "OAUTH_TRUSTED_AUDIENCES")
+	entry, err := json.Marshal([]map[string]any{{
+		"issuer":                  p.issuer,
+		"jwksURI":                 p.issuer + "/keys",
+		"audiences":               []string{"agent-platform", "kubernetes"},
+		"acceptedTypHeaders":      []string{"", "JWT"},
+		"caFile":                  p.caFile,
+		"allowPrivateIPJWKSHosts": jwksHosts,
+		"openIDProvider":          true,
+	}})
+	require.NoError(t, err)
+	environment["OAUTH_TRUSTED_ISSUERS"] = string(entry)
+	return OAuthConfig{Settings: oauthSettings(t, environment), DownstreamOAuth: downstream}
+}
+
+// TestOpenIDProviderTrustedIssuer pins that the IdP as a trusted issuer
+// marked openIDProvider admits what audience trust admits: the same caller,
+// and with downstream OAuth the bearer itself as the token presented to the
+// Kubernetes API.
+func TestOpenIDProviderTrustedIssuer(t *testing.T) {
+	idp := newPrivateIdP(t, "")
+	token := idp.idToken(t, []string{"kubernetes"})
+
+	code, _ := callThroughChain(t, idp.trustedIssuerConfig(t, false), token)
+	require.Equal(t, http.StatusUnauthorized, code, "a private JWKS host must be listed")
+
+	code, caller := callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), token)
+	require.Equal(t, http.StatusNoContent, code)
+	require.Equal(t, "admin@lab.local", caller)
+
+	code, _ = callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), idp.idToken(t, []string{"someone-else"}))
+	require.Equal(t, http.StatusUnauthorized, code, "an untrusted audience is refused")
+
+	o, err := newOAuth(idp.trustedIssuerConfig(t, true, privateIssuerHost), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		o.shutdown(ctx)
+	})
+	var presented string
+	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented, _ = identity.TokenFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, token, presented, "the forwarded ID token is what the Kubernetes API sees")
+}

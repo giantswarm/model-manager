@@ -14,12 +14,14 @@ helm() { command helm --kube-context "$CHART_KUBE_CONTEXT" "$@"; }
 
 fail() { echo "verify-chart: FAIL: $*" >&2; exit 1; }
 
-# trusted prints the value of OAUTH_TRUSTED_AUDIENCES the Deployment sets for
-# the given values, or nothing when the variable is not rendered.
+# trusted prints the audiences of the OAUTH_TRUSTED_ISSUERS entry the
+# Deployment renders for the provider people sign in with, comma-separated, or
+# nothing when no entry is rendered.
 trusted() {
   helm template mm "$CHART" --show-only templates/deployment.yaml "$@" \
-    | { grep -A1 -- '- name: OAUTH_TRUSTED_AUDIENCES$' || true; } \
-    | sed -n 's/^ *value: "\(.*\)"$/\1/p'
+    | { grep -A1 -- '- name: OAUTH_TRUSTED_ISSUERS$' || true; } \
+    | { grep -o 'audiences\\":\[[^]]*' || true; } \
+    | sed 's/^[^[]*\[//; s/\\"//g'
 }
 
 # A Dex install that sets only the platform identity contract.
@@ -94,7 +96,7 @@ got=$(trusted --set oauth.enabled=true --set oauth.provider=google \
 
 # OAuth off renders no flag.
 got=$(trusted)
-[ -z "$got" ] || fail "oauth disabled: want no OAUTH_TRUSTED_AUDIENCES, got '$got'"
+[ -z "$got" ] || fail "oauth disabled: want no OAUTH_TRUSTED_ISSUERS, got '$got'"
 
 # The lemonade backend renders its own flags and none of ollama's or kserve's.
 args() {
