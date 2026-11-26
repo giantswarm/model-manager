@@ -16,28 +16,27 @@ import (
 	oauthserver "github.com/giantswarm/mcp-oauth/server"
 
 	"github.com/giantswarm/model-manager/internal/api"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // OAuthConfig makes model-manager an OAuth 2.1 resource server (mcp-oauth) in
-// front of the MCP endpoint and the REST API. The platform's identity
-// provider is the authority: on the Agent Platform, muster forwards the
-// session's IdP id_token byte-identical (MCPServer auth.forwardToken) and the
-// portal sends the signed-in user's id_token through the gateway; both are
-// validated here against the IdP's JWKS when their audience is one of the
-// trusted audiences (OAUTH_TRUSTED_AUDIENCES, the platform's OAuth client).
-// The caller's identity then travels with the request (identity package) and,
-// with DownstreamOAuth, so does the token: the Kubernetes API is called as
-// the caller.
+// front of the MCP endpoint and the REST API. The OpenID Provider people sign
+// in with is the authority: on the Agent Platform, muster forwards the
+// session's ID token byte-identical (MCPServer auth.forwardToken) and the
+// portal sends the signed-in user's ID token through the gateway; both are
+// validated against the provider's JWKS as a trusted issuer
+// (OAUTH_TRUSTED_ISSUERS). The user mcp-oauth validated (providers.UserInfo)
+// then travels with the request and, with DownstreamOAuth, so does their ID
+// token: the Kubernetes API is called as the user.
 type OAuthConfig struct {
 	// Settings is mcp-oauth's configuration, read from the OAUTH_* variables
 	// by oauthconfig.SettingsFromEnv.
 	Settings oauthconfig.Settings
-	// DownstreamOAuth puts the caller's IdP token on the request so
-	// Kubernetes API calls are made as the caller instead of the
-	// ServiceAccount (the apiserver must trust the IdP and the token's
-	// audience). The ServiceAccount holds no permissions then, so a request
-	// that yields no IdP token to present is refused (401).
+	// DownstreamOAuth puts the user's ID token on the request so Kubernetes
+	// API calls are made as the user instead of the ServiceAccount (the
+	// apiserver must trust the provider and the token's audience). The
+	// ServiceAccount holds no permissions then, so a request that yields no
+	// ID token to present is refused (401).
 	DownstreamOAuth bool
 }
 
@@ -125,51 +124,43 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 }
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
-// server's own access tokens, or a forwarded IdP id_token whose audience is
-// trusted) and then attaches the caller to the request.
+// server's own access tokens, or a forwarded ID token whose audience is
+// trusted), which puts the validated user on the request. With
+// DownstreamOAuth the request also needs the user's ID token
+// (RequireProviderIDToken), which attachIDToken hands to the Kubernetes
+// clients; the ServiceAccount then holds no permissions, so there is nothing
+// else to run as.
 func (o *oauthRuntime) protect(next http.Handler) http.Handler {
-	protected := o.attachIdentity(next)
+	protected := o.logUser(next)
 	if o.downstreamOAuth {
-		protected = o.handler.RequireProviderIDToken(protected)
+		protected = o.handler.RequireProviderIDToken(attachIDToken(protected))
 	}
 	return o.handler.ValidateToken(protected)
 }
 
-// attachIdentity translates the validated mcp-oauth user into the request's
-// identity and, with DownstreamOAuth, resolves the IdP token to present to
-// the Kubernetes API: a forwarded id_token is the bearer itself; for a token
-// this server issued, the provider's id_token is looked up in the store. A
-// request that yields neither is refused: the ServiceAccount holds no
-// permissions, so there is nothing else to run as.
-func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
+// logUser logs at debug level who a request authenticated as and how
+// mcp-oauth validated the bearer.
+func (o *oauthRuntime) logUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		info, ok := handler.UserInfoFromContext(ctx)
-		if !ok || info == nil || info.Issuer == "" || info.ID == "" || (info.ActorIssuer == "") != (info.ActorSubject == "") {
-			// ValidateToken admits nothing without user info; defensive.
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok && user != nil {
+			o.log.DebugContext(r.Context(), "authenticated request", slog.Any("user", user), "token_source", user.TokenSource, "path", r.URL.Path)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// attachIDToken puts the user's ID token on the request for the Kubernetes
+// clients: a forwarded ID token is the bearer itself; for a token this server
+// issued, the provider's ID token stored with it. A request without one is
+// refused.
+func attachIDToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := handler.ProviderIDTokenFromContext(r.Context())
+		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		id := &identity.Identity{Issuer: info.Issuer, Subject: info.ID, ActorIssuer: info.ActorIssuer, ActorSubject: info.ActorSubject, Email: info.Email, Name: info.Name, Groups: info.Groups, Source: identity.SourceOAuth}
-		id.ClientID = info.ClientID
-		id.Scopes, _ = handler.ScopesFromContext(ctx)
-		if len(id.Scopes) == 0 {
-			id.Scopes = info.Scopes
-		}
-		if info.IsSSO() {
-			id.Source = identity.SourceSSO
-		}
-		ctx = identity.ContextWith(ctx, id)
-		if o.downstreamOAuth {
-			token, err := handler.ProviderIDTokenFromContext(ctx)
-			if err != nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			ctx = identity.ContextWithToken(ctx, token)
-		}
-		o.log.Debug("authenticated request", identity.LogAttr(ctx), "source", id.Source, "path", r.URL.Path)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r.WithContext(idtoken.ContextWith(r.Context(), token)))
 	})
 }
 

@@ -18,7 +18,7 @@ import (
 	toolkitk8s "github.com/giantswarm/mcp-toolkit/k8s"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
@@ -55,7 +55,7 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 	users, err := toolkitk8s.NewUserClients(&rest.Config{Host: api.URL, BearerToken: "application-credential"}, nil)
 	require.NoError(t, err)
 	driver := &Backend{opts: backend.KServeOptions{ClientsFor: func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		token, _ := identity.TokenFromContext(ctx)
+		token, _ := idtoken.FromContext(ctx)
 		clients, err := users.ForToken(token)
 		if err != nil {
 			return nil, nil, err
@@ -63,12 +63,12 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 		return clients.Clientset, clients.Dynamic, nil
 	}}}
 	object := &backend.JobObject{Group: "batch", Version: "v1", Resource: "jobs", Namespace: "tenant", Name: "download", UID: "original"}
-	caller := identity.ContextWithToken(t.Context(), "fresh-caller")
+	caller := idtoken.ContextWith(t.Context(), "fresh-caller")
 	require.NoError(t, driver.CheckJobAccess(caller, object))
 	mode.Store("forbidden")
 	require.Error(t, driver.CheckJobAccess(caller, object))
 	mode.Store("allowed")
-	require.Error(t, driver.CheckJobAccess(identity.ContextWithToken(t.Context(), "expired-caller"), object))
+	require.Error(t, driver.CheckJobAccess(idtoken.ContextWith(t.Context(), "expired-caller"), object))
 	require.Error(t, driver.CheckJobAccess(t.Context(), object))
 	mode.Store("replacement")
 	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrNotFound)
@@ -97,7 +97,7 @@ func TestServingTaskAccessUsesTheOriginalNamespaceNameAndUID(t *testing.T) {
 	users, err := toolkitk8s.NewUserClients(&rest.Config{Host: api.URL, BearerToken: "application-credential"}, nil)
 	require.NoError(t, err)
 	driver := &Backend{opts: backend.KServeOptions{ClientsFor: func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		credential, _ := identity.TokenFromContext(ctx)
+		credential, _ := idtoken.FromContext(ctx)
 		clients, err := users.ForToken(credential)
 		if err != nil {
 			return nil, nil, err
@@ -105,7 +105,7 @@ func TestServingTaskAccessUsesTheOriginalNamespaceNameAndUID(t *testing.T) {
 		return clients.Clientset, clients.Dynamic, nil
 	}}}
 	object := &backend.JobObject{Group: llmisvcGVR.Group, Version: llmisvcGVR.Version, Resource: llmisvcGVR.Resource, Namespace: "tenant", Name: "served-model", UID: "original"}
-	caller := identity.ContextWithToken(t.Context(), "current-caller")
+	caller := idtoken.ContextWith(t.Context(), "current-caller")
 	require.NoError(t, driver.CheckJobAccess(caller, object))
 	replacement.Store(true)
 	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrNotFound)

@@ -13,9 +13,11 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/require"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/providers"
+
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
-	"github.com/giantswarm/model-manager/internal/identity"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
@@ -38,8 +40,8 @@ func TestRESTAndMCPJobAuthorization(t *testing.T) {
 			NewREST(svc, nil).Register(mux)
 			mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(NewMCPServer(svc, buildinfo.Info{Version: "test"}), mcpserver.WithStateLess(true)))
 			host := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				caller := &identity.Identity{Issuer: "https://issuer.example.test", Subject: request.Header.Get("X-Test-Subject"), ClientID: "client", Email: request.Header.Get("X-Test-Email")}
-				mux.ServeHTTP(writer, request.WithContext(identity.ContextWith(request.Context(), caller)))
+				user := &providers.UserInfo{Issuer: "https://issuer.example.test", ID: request.Header.Get("X-Test-Subject"), ClientID: "client", Email: request.Header.Get("X-Test-Email")}
+				mux.ServeHTTP(writer, request.WithContext(handler.ContextWithUserInfo(request.Context(), user)))
 			}))
 			t.Cleanup(host.Close)
 			invoke := func(subject, operation, identifier string, dryRun ...bool) (map[string]any, bool) {
@@ -134,7 +136,7 @@ func TestLoadRequiresTaskIdentityBeforeServingOrWiring(t *testing.T) {
 	manager := jobs.NewManager()
 	wirer := newFakeWirer()
 	svc := service.New([]backend.Backend{driver}, manager, wirer, nil, service.Config{AutoWire: true}, nil)
-	ctx := identity.ContextWith(t.Context(), &identity.Identity{Issuer: "https://issuer.example.test", Subject: "alice"})
+	ctx := handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "alice"})
 	_, err := svc.Load(ctx, service.LoadOptions{Model: "org/tiny"})
 	require.ErrorIs(t, err, jobs.ErrIdentityRequired)
 	driver.fakeBackend.mu.Lock()

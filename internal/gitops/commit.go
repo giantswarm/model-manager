@@ -20,7 +20,6 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
 )
 
 // Directory is the directory model-manager writes its files to, under the
@@ -56,8 +55,17 @@ func (e *ErrGrantRequired) Error() string { return e.Reason }
 
 func (e *ErrGrantRequired) Unwrap() error { return ErrAuthRequired }
 
-// GitHubUser fetches the person's GitHub grant for one commit.
-type GitHubUser func(context.Context) (*identity.GitHub, error)
+// GitHubUserAccessToken is a GitHub App user access token for one commit,
+// obtained through muster's broker, with the login GET /user answered for
+// it. Commit mode opens the pull request with that token.
+type GitHubUserAccessToken struct {
+	Login string
+	Token string
+}
+
+// GitHubUser fetches the person's GitHub App user access token for one
+// commit.
+type GitHubUser func(context.Context) (*GitHubUserAccessToken, error)
 
 // signIn is the one-time consent a commit needs.
 const signIn = "connect model-manager in muster (core_auth_login server=model-manager), then call again"
@@ -81,9 +89,9 @@ type RemoteFor func(token string) (Remote, error)
 // namespace, as one pull request opened as the person.
 type Committer struct {
 	remote RemoteFor
-	// user fetches the person's grant per commit (nil: every commit is
-	// refused); grantApp is muster's name for the provider App that grant is
-	// of.
+	// user fetches the person's user access token per commit (nil: every
+	// commit is refused); grantApp is muster's name for the provider App the
+	// person granted.
 	user     GitHubUser
 	grantApp string
 	dyn      func(ctx context.Context) (dynamic.Interface, error)
@@ -91,13 +99,15 @@ type Committer struct {
 
 // NewCommitter builds a Committer; dyn is the Kubernetes client of the call
 // (the caller's own under downstream OAuth), which reads the Flux objects.
-// It commits once WithGitHubUser names the person's grant.
+// It commits once WithGitHubUser says how to fetch the person's user access
+// token.
 func NewCommitter(remote RemoteFor, dyn func(ctx context.Context) (dynamic.Interface, error)) *Committer {
 	return &Committer{remote: remote, dyn: dyn}
 }
 
-// WithGitHubUser fetches the person's grant on demand for every commit; app
-// is muster's name for the provider App the grant is of, named in refusals.
+// WithGitHubUser fetches the person's user access token on demand for
+// every commit; app is muster's name for the provider App the grant is of,
+// named in refusals.
 func (c *Committer) WithGitHubUser(app string, user GitHubUser) *Committer {
 	c.grantApp, c.user = app, user
 	return c
@@ -220,7 +230,7 @@ type planned struct {
 // written; a repository the App's token does not reach is one, reported per
 // part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
-	var gh *identity.GitHub
+	var gh *GitHubUserAccessToken
 	if c.user != nil {
 		var err error
 		if gh, err = c.user(ctx); err != nil {
@@ -683,7 +693,8 @@ func body(req Request, login string, plans []planned) string {
 }
 
 // commitError answers a token GitHub refused with the consent to renew. A
-// grant fetched per commit that GitHub answers 401 is a grant to give again.
+// user access token GitHub answers 401 for means the grant must be given
+// again.
 func (c *Committer) commitError(err error) error {
 	var auth *commit.AuthError
 	if !errors.As(err, &auth) {

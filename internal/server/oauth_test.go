@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -25,37 +26,28 @@ import (
 	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers"
 	oauthserver "github.com/giantswarm/mcp-oauth/server"
-	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 	"github.com/giantswarm/model-manager/internal/jobs"
 	"github.com/giantswarm/model-manager/internal/service"
 )
 
 // fakeIdP is a minimal OIDC issuer on https://localhost: a discovery
-// document, enough for mcp-oauth's Dex provider to boot, and a key to mint
-// id_tokens the way the platform's Dex does.
+// document, enough for mcp-oauth's Dex provider to boot.
 type fakeIdP struct {
 	issuer string
-	key    *rsa.PrivateKey
 	caFile string
 	srv    *httptest.Server
 }
 
-const testKID = "test-key"
-
 func newFakeIdP(t *testing.T) *fakeIdP {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	idp := &fakeIdP{key: key}
+	idp := &fakeIdP{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dex/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -112,20 +104,6 @@ func selfSignedLocalhost(t *testing.T) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// idToken mints an id_token the fake IdP signed.
-func (f *fakeIdP) idToken(t *testing.T, aud []string, exp time.Time) string {
-	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: f.key},
-		(&jose.SignerOptions{}).WithHeader("kid", testKID).WithType("JWT"))
-	require.NoError(t, err)
-	claims := jwt.Claims{Issuer: f.issuer, Subject: "sub-admin", Audience: jwt.Audience(aud),
-		Expiry: jwt.NewNumericDate(exp), IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Minute))}
-	extra := map[string]any{"email": "admin@lab.local", "email_verified": true, "name": "Lab Admin", "groups": []string{"platform-admins"}}
-	tok, err := jwt.Signed(signer).Claims(claims).Claims(extra).Serialize()
-	require.NoError(t, err)
-	return tok
-}
-
 func (f *fakeIdP) config(t *testing.T, downstream bool) OAuthConfig {
 	t.Helper()
 	return OAuthConfig{Settings: oauthSettings(t, dexEnvironment(f.issuer, f.caFile)), DownstreamOAuth: downstream}
@@ -158,25 +136,11 @@ func oauthSettings(t *testing.T, environment map[string]string) oauthconfig.Sett
 	return settings
 }
 
-// verifiedUser is the user mcp-oauth hands on once it has validated a
-// forwarded IdP id_token.
-func verifiedUser() *providers.UserInfo {
-	return &providers.UserInfo{Issuer: "https://idp.example.test", ID: "sub-admin", Email: "admin@lab.local", EmailVerified: true, Name: "Lab Admin", Groups: []string{"platform-admins"}, TokenSource: providers.TokenSourceSSO}
-}
-
-// afterValidation runs next as if mcp-oauth had validated the bearer and
-// admitted info.
-func afterValidation(info *providers.UserInfo, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(handler.ContextWithUserInfo(r.Context(), info)))
-	})
-}
-
-// TestForwardedIDTokenBecomesTheCaller is the platform path: muster (or the
-// portal through the gateway) forwards the IdP id_token for the platform
-// client; once mcp-oauth has validated it, the request carries the caller and,
-// with downstream OAuth, the caller's token.
-func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
+// TestForwardedIDTokenBecomesTheUser is the platform path: muster (or the
+// portal through the gateway) forwards the ID token for the platform client;
+// once mcp-oauth has validated it, the request carries the user and, with
+// downstream OAuth, their ID token.
+func TestForwardedIDTokenBecomesTheUser(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 	configuration := idp.config(t)
 	configuration.DownstreamOAuth = true
@@ -186,13 +150,13 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
 	var seen struct {
-		id    *identity.Identity
+		id    *providers.UserInfo
 		token string
 		ok    bool
 	}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen.id, seen.ok = identity.FromContext(r.Context())
-		seen.token, _ = identity.TokenFromContext(r.Context())
+		seen.id, seen.ok = handler.UserInfoFromContext(r.Context())
+		seen.token, _ = idtoken.FromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -202,12 +166,12 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	rec := httptest.NewRecorder()
 	o.protect(next).ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	require.True(t, seen.ok, "the caller reaches the handler")
+	require.True(t, seen.ok, "the user reaches the handler")
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
-	assert.Equal(t, "sub-admin", seen.id.Subject)
+	assert.Equal(t, "sub-admin", seen.id.ID)
 	assert.Equal(t, "agent-platform", seen.id.ClientID)
 	assert.Equal(t, []string{"platform-admins"}, seen.id.Groups)
-	assert.Equal(t, identity.SourceSSO, seen.id.Source)
+	assert.True(t, seen.id.IsSSO(), "a forwarded id_token")
 	assert.Equal(t, forwarded, seen.token, "downstream OAuth: the forwarded id_token is what the Kubernetes API will see")
 
 	// A bearer this server issued carries the IdP id_token stored next to it;
@@ -218,30 +182,32 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	o.protect(next).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	// Nothing admitted, nothing attached.
+	// No validated user, no ID token to attach.
 	rec = httptest.NewRecorder()
-	o.attachIdentity(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
+	attachIDToken(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
-	idp := newFakeIdP(t)
-	o, err := newOAuth(idp.config(t, false), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	idp := newPrivateIdP(t, "")
+	o, err := newOAuth(idp.config(t), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
-	var caller string
+	var attributed string
 	var hasToken bool
-	h := afterValidation(verifiedUser(), o.attachIdentity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = identity.Caller(r.Context())
-		_, hasToken = identity.TokenFromContext(r.Context())
-	})))
+	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok {
+			attributed = user.Email
+		}
+		_, hasToken = idtoken.FromContext(r.Context())
+	}))
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
-	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))
+	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "admin@lab.local", caller, "the caller is known and attributed")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "admin@lab.local", attributed, "the user is known and attributed")
 	assert.False(t, hasToken, "but nothing is presented to the Kubernetes API")
 }
 
@@ -317,4 +283,20 @@ func newLocalhostTLSServer(t *testing.T, handler http.Handler) *httptest.Server 
 // localhostURL is the server's base URL with the hostname localhost.
 func localhostURL(srv *httptest.Server) string {
 	return strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
+}
+
+func TestLogUserNamesTheUserWithoutProfileData(t *testing.T) {
+	var logs bytes.Buffer
+	o := &oauthRuntime{log: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	user := &providers.UserInfo{Issuer: "https://dex.example.test", ID: "sub-admin", Email: "admin@lab.local", TokenSource: providers.TokenSourceSSO}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	request = request.WithContext(handler.ContextWithUserInfo(request.Context(), user))
+
+	o.logUser(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })).ServeHTTP(httptest.NewRecorder(), request)
+
+	var line map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &line))
+	require.Equal(t, map[string]any{"issuer": "https://dex.example.test", "subject": "sub-admin"}, line["user"])
+	require.Equal(t, string(providers.TokenSourceSSO), line["token_source"])
+	require.NotContains(t, logs.String(), "admin@lab.local")
 }

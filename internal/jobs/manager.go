@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
 )
 
 // Phase is the job lifecycle state.
@@ -42,7 +41,7 @@ const (
 var (
 	ErrNotFound         = errors.New("job not found")
 	ErrShuttingDown     = errors.New("job manager is shutting down")
-	ErrIdentityRequired = errors.New("complete caller identity required")
+	ErrIdentityRequired = errors.New("complete user identity required")
 )
 
 // Job is a snapshot of one operation. Values returned by the manager are
@@ -100,7 +99,7 @@ type RunFunc func(ctx context.Context, report func(backend.Progress)) (any, erro
 
 type entry struct {
 	job       Job
-	owner     principal
+	owner     taskOwner
 	key       operationKey
 	authorize func(context.Context, Job) error
 	cancel    context.CancelFunc
@@ -180,7 +179,7 @@ type StartRequest struct {
 	Authorize func(context.Context, Job) error
 }
 
-// Start deduplicates active tasks only within one principal, grant, backend
+// Start deduplicates active tasks only within one owner, authorization, backend
 // instance and complete operation parameters.
 func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, err error) {
 	parent := req.Context
@@ -190,14 +189,14 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, er
 	if err := parent.Err(); err != nil {
 		return Job{}, false, err
 	}
-	owner, err := callerPrincipal(parent)
+	owner, err := ownerFrom(parent)
 	if err != nil {
 		return Job{}, false, err
 	}
-	if owner == (principal{}) && !m.allowAnonymous && !req.ApplicationOwned {
+	if owner == (taskOwner{}) && !m.allowAnonymous && !req.ApplicationOwned {
 		return Job{}, false, ErrIdentityRequired
 	}
-	key := operationKey{Owner: owner, Type: req.Type, Backend: req.Backend, Model: req.Model, Node: req.Node, Preset: req.Preset, Resource: req.Resource, Wire: req.Wire, Parameters: req.Parameters, Grant: grantKey(parent), Scope: req.Scope}
+	key := operationKey{Owner: owner, Type: req.Type, Backend: req.Backend, Model: req.Model, Node: req.Node, Preset: req.Preset, Resource: req.Resource, Wire: req.Wire, Parameters: req.Parameters, Authorization: authorizationKey(parent), Scope: req.Scope}
 	if req.Object != nil {
 		key.Object = *req.Object
 	}
@@ -242,7 +241,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, er
 			Preset:      req.Preset,
 			Resource:    req.Resource,
 			Object:      cloneObject(req.Object),
-			RequestedBy: identity.Caller(parent),
+			RequestedBy: requestedBy(parent),
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),

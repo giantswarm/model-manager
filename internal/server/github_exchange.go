@@ -20,7 +20,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // DefaultGitHubAPIURL is GitHub's REST API.
@@ -59,9 +59,10 @@ func (c GitHubExchangeConfig) Validate() error {
 	return nil
 }
 
-// NewGitHubExchange obtains the person's user grant on demand. Tokens are
-// neither cached nor attached to a session; only the returned request-local
-// identity holds one. log receives the broker's refusals.
+// NewGitHubExchange obtains the person's GitHub App user access token on
+// demand. Tokens are neither cached nor attached to a session; only the
+// returned request-local GitHubUserAccessToken holds one. log receives the
+// broker's refusals.
 func NewGitHubExchange(configuration GitHubExchangeConfig, log *slog.Logger) (gitops.GitHubUser, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, err
@@ -94,15 +95,15 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 	grantRequired := func(reason string) error {
 		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
-	return func(ctx context.Context) (*identity.GitHub, error) {
-		validatedUser, ok := handler.UserInfoFromContext(ctx)
-		subjectToken, hasToken := identity.TokenFromContext(ctx)
-		if !ok || validatedUser == nil || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken || subjectToken == "" {
+	return func(ctx context.Context) (*gitops.GitHubUserAccessToken, error) {
+		user, ok := handler.UserInfoFromContext(ctx)
+		subjectToken, hasToken := idtoken.FromContext(ctx)
+		if !ok || user == nil || !hasToken {
 			return nil, fmt.Errorf("%w: commit mode needs your verified platform identity to fetch your GitHub authorization", gitops.ErrAuthRequired)
 		}
-		// A delegated caller (an agent acting for the person) never receives
-		// the person's GitHub grant.
-		if validatedUser.IsOBO() {
+		// A delegated call (an actor acting for the user, RFC 8693 4.1) never
+		// receives the user's GitHub user access token.
+		if user.IsOBO() {
 			return nil, fmt.Errorf("%w: commit mode opens the pull request as you, and only you, not an agent acting for you, can authorize it", backend.ErrForbidden)
 		}
 		secret, err := os.ReadFile(configuration.ClientSecretFile)
@@ -156,12 +157,12 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 		if response.StatusCode == http.StatusUnauthorized {
 			return nil, grantRequired("GitHub refused your grant of the GitHub App muster keeps as %s: grant it again in muster (core_auth_login app=%s), then call again")
 		}
-		var user struct {
+		var gitHubUser struct {
 			Login string `json:"login"`
 		}
-		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&user) != nil || user.Login == "" {
+		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&gitHubUser) != nil || gitHubUser.Login == "" {
 			return nil, fmt.Errorf("%w: GitHub user verification answered status %d", backend.ErrUnavailable, response.StatusCode)
 		}
-		return &identity.GitHub{Login: user.Login, Token: result.AccessToken}, nil
+		return &gitops.GitHubUserAccessToken{Login: gitHubUser.Login, Token: result.AccessToken}, nil
 	}
 }

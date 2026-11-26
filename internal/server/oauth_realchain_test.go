@@ -27,8 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+
 	"github.com/giantswarm/model-manager/internal/api"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // privateIdP is an OIDC issuer the production chain reaches as it reaches
@@ -247,7 +249,9 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 	})
 	var caller string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = identity.Caller(r.Context())
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok {
+			caller = user.Email
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)
@@ -339,7 +343,7 @@ func TestOpenIDProviderTrustedIssuer(t *testing.T) {
 	})
 	var presented string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		presented, _ = identity.TokenFromContext(r.Context())
+		presented, _ = idtoken.FromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)

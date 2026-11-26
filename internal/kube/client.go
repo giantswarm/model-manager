@@ -1,7 +1,7 @@
 // Package kube builds the Kubernetes clients model-manager uses for agent
 // wiring and the kserve driver: in-cluster when running as a pod, kubeconfig
 // (+ context) otherwise. With downstream OAuth on, a request that carries the
-// caller's IdP token gets clients that present that token instead — the
+// caller's ID token gets clients that present that token instead — the
 // caller's RBAC governs what the request may do, and the ServiceAccount holds
 // no permissions of its own (the chart renders no RBAC for it).
 package kube
@@ -19,7 +19,7 @@ import (
 
 	toolkitk8s "github.com/giantswarm/mcp-toolkit/k8s"
 
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // Factory selects explicitly configured application clients or caller clients.
@@ -80,7 +80,7 @@ func fromRESTConfig(restCfg *rest.Config) (*Factory, error) {
 // For selects caller clients when a token is present, including after expiry.
 // Calls without a token use the explicitly configured base clients.
 func (c *Factory) For(ctx context.Context) (*toolkitk8s.Clients, error) {
-	token, ok := identity.TokenFromContext(ctx)
+	token, ok := idtoken.FromContext(ctx)
 	if !ok {
 		return c.Clients, nil
 	}

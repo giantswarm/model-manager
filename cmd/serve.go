@@ -230,14 +230,14 @@ environment variable named next to it; flags win over the environment.`,
 	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Deprecated, no effect: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in --sso-allow-private-ip-jwks-hosts (SSO_ALLOW_PRIVATE_IPS)")
 	f.StringVar(&o.ssoAllowPrivateIPJWKSHosts, "sso-allow-private-ip-jwks-hosts", envOr("SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS", ""), "Deprecated: set OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS (SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS)")
 	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Deprecated: set OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION (MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
-	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's IdP token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
-	f.StringVar(&o.githubExchangeEndpoint, "github-token-exchange-endpoint", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT", ""), "RFC 8693 endpoint (muster's broker) that releases the person's GitHub App user grant for commit mode, in place of the App-pinned registration (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT)")
+	f.BoolVar(&o.downstreamOAuth, "downstream-oauth", envBool("MODEL_MANAGER_DOWNSTREAM_OAUTH", false), "Call the Kubernetes API as the caller, with the caller's ID token, for everything a request does — the ServiceAccount holds no permissions (the chart renders none) and work without a caller (download adoption, the wiring reconciler) is off. Needs --enable-oauth and an apiserver that trusts the IdP (MODEL_MANAGER_DOWNSTREAM_OAUTH)")
+	f.StringVar(&o.githubExchangeEndpoint, "github-token-exchange-endpoint", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT", ""), "RFC 8693 endpoint (muster's broker) that releases the person's GitHub App user access token for commit mode, in place of the App-pinned registration (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_ENDPOINT)")
 	f.StringVar(&o.githubExchangeClient, "github-token-exchange-client-id", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID", ""), "Confidential token exchange client ID; wins over --github-token-exchange-client-id-file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID)")
 	f.StringVar(&o.githubExchangeClientFile, "github-token-exchange-client-id-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE", ""), "Mounted confidential client ID file, read at startup when --github-token-exchange-client-id is empty (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_ID_FILE)")
 	f.StringVar(&o.githubExchangeSecretFile, "github-token-exchange-client-secret-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE", ""), "Mounted confidential client secret file (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CLIENT_SECRET_FILE)")
 	f.StringVar(&o.githubExchangeAudience, "github-token-exchange-audience", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE", ""), "RFC 8693 audience: the provider App (muster's aggregator.providerApps name) whose grant the broker releases, named in grant_required answers (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_AUDIENCE)")
 	f.StringVar(&o.githubExchangeCAFile, "github-token-exchange-ca-file", envOr("MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE", ""), "Additional CA bundle for token exchange (MODEL_MANAGER_GITHUB_TOKEN_EXCHANGE_CA_FILE)")
-	f.StringVar(&o.githubAPIURL, "github-api-url", envOr("MODEL_MANAGER_GITHUB_API_URL", server.DefaultGitHubAPIURL), "GitHub REST API base URL for GET /user on the fetched grant and commit mode's pull request (MODEL_MANAGER_GITHUB_API_URL)")
+	f.StringVar(&o.githubAPIURL, "github-api-url", envOr("MODEL_MANAGER_GITHUB_API_URL", server.DefaultGitHubAPIURL), "GitHub REST API base URL for GET /user on the fetched user access token and commit mode's pull request (MODEL_MANAGER_GITHUB_API_URL)")
 	f.DurationVar(&o.jobRetention, "job-retention", envDuration("MODEL_MANAGER_JOB_RETENTION", 24*time.Hour), "How long finished jobs stay listed (MODEL_MANAGER_JOB_RETENTION)")
 	return cmd
 }
@@ -427,7 +427,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 
 	if o.githubExchangeEndpoint != "" && clients != nil && wirer != nil {
 		// Commit mode: the pull request is opened as the person, with the
-		// grant fetched from muster's broker for the commit; the Flux objects
+		// user access token fetched from muster's broker for the commit; the Flux objects
 		// that name the repository are read as the caller.
 		apiURL := o.githubAPIURL
 		user, err := server.NewGitHubExchange(o.gitHubExchangeConfig(), log)
@@ -704,7 +704,7 @@ func (o *serveOptions) gitHubExchangeConfig() server.GitHubExchangeConfig {
 }
 
 // validateGitHubExchange checks the token exchange options: the subject
-// token is the caller's IdP token, so they need Dex and downstream OAuth.
+// token is the caller's ID token, so they need Dex and downstream OAuth.
 func validateGitHubExchange(o *serveOptions, dex bool) error {
 	if o.githubExchangeEndpoint == "" {
 		if o.githubExchangeClient != "" || o.githubExchangeClientFile != "" || o.githubExchangeSecretFile != "" || o.githubExchangeAudience != "" || o.githubExchangeCAFile != "" {
