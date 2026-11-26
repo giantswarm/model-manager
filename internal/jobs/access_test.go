@@ -12,7 +12,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/requester"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 func authenticatedCaller(t *testing.T, subject string) context.Context {
@@ -52,7 +52,7 @@ func TestTaskIdentityIsPrivateAndStableAcrossProfileChanges(t *testing.T) {
 		{"delegated actor", func(c *providers.UserInfo) { c.ActorIssuer = "https://agents.example.test"; c.ActorSubject = "agent" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			original, _ := requester.FromContext(alice)
+			original, _ := handler.UserInfoFromContext(alice)
 			caller := *original
 			test.change(&caller)
 			ctx := handler.ContextWithUserInfo(t.Context(), &caller)
@@ -69,7 +69,7 @@ func TestTaskIdentityIsPrivateAndStableAcrossProfileChanges(t *testing.T) {
 			require.NotEqual(t, job.ID, other.ID)
 		})
 	}
-	original, _ := requester.FromContext(alice)
+	original, _ := handler.UserInfoFromContext(alice)
 	changed := *original
 	changed.Email = "changed@example.test"
 	changed.Groups = []string{"changed-profile"}
@@ -99,11 +99,11 @@ func TestTaskDeduplicationIncludesEffectiveAuthorityAndParameters(t *testing.T) 
 		{"resource", func(r *StartRequest) { r.Resource = "other-resource" }},
 		{"backend instance", func(r *StartRequest) { r.Scope = "other-target" }},
 		{"parameters", func(r *StartRequest) { r.Parameters = `{"placement":"split"}` }},
-		{"new credential", func(r *StartRequest) { r.Context = requester.ContextWithIDToken(r.Context, "fresh-credential") }},
-		{"different grant", func(r *StartRequest) {
-			caller, _ := requester.FromContext(r.Context)
+		{"new credential", func(r *StartRequest) { r.Context = idtoken.ContextWith(r.Context, "fresh-credential") }},
+		{"different scopes", func(r *StartRequest) {
+			caller, _ := handler.UserInfoFromContext(r.Context)
 			changed := *caller
-			changed.Scopes = []string{"other-grant"}
+			changed.Scopes = []string{"other-scope"}
 			r.Context = handler.ContextWithUserInfo(r.Context, &changed)
 		}},
 		{"resource UID", func(r *StartRequest) {
@@ -163,18 +163,14 @@ func TestTaskAccessRechecksCurrentAuthorizationOnEveryPath(t *testing.T) {
 
 func TestTaskIdentityFailsClosedAndApplicationRecoveryIsNotUserOwnership(t *testing.T) {
 	manager := managedJobs(t)
-	for _, caller := range []*providers.UserInfo{
-		{}, {Issuer: "https://issuer.example.test", ID: "alice"},
-		{Issuer: "https://issuer.example.test", ClientID: "client"},
-		{ID: "alice", ClientID: "client"},
-		{Issuer: "https://issuer.example.test", ID: "alice", ClientID: "client", ActorSubject: "agent"},
-	} {
-		_, _, err := manager.Start(StartRequest{Context: handler.ContextWithUserInfo(t.Context(), caller)}, blockingOperation)
-		require.ErrorIs(t, err, ErrIdentityRequired)
-	}
-	_, _, err := manager.Start(StartRequest{Context: t.Context()}, blockingOperation)
+	// mcp-oauth guarantees a validated user's issuer, subject and actor; a
+	// task also needs the client.
+	withoutClient := &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "alice"}
+	_, _, err := manager.Start(StartRequest{Context: handler.ContextWithUserInfo(t.Context(), withoutClient)}, blockingOperation)
 	require.ErrorIs(t, err, ErrIdentityRequired)
-	_, _, err = manager.Start(StartRequest{Context: requester.ContextWithIDToken(t.Context(), "credential")}, blockingOperation)
+	_, _, err = manager.Start(StartRequest{Context: t.Context()}, blockingOperation)
+	require.ErrorIs(t, err, ErrIdentityRequired)
+	_, _, err = manager.Start(StartRequest{Context: idtoken.ContextWith(t.Context(), "credential")}, blockingOperation)
 	require.ErrorIs(t, err, ErrIdentityRequired)
 	recovered, _, err := manager.Start(StartRequest{ApplicationOwned: true, Type: TypePull, Model: "model"}, blockingOperation)
 	require.NoError(t, err)

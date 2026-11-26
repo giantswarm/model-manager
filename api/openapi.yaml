@@ -743,7 +743,7 @@ paths:
   /api/v1/jobs:
     get:
       tags: [jobs]
-      summary: List caller-owned jobs with current backend access, newest first
+      summary: List user-owned jobs with current backend access, newest first
       operationId: listJobs
       x-mcp-tool: list_jobs
       parameters:
@@ -771,7 +771,7 @@ paths:
         schema: { type: string }
     get:
       tags: [jobs]
-      summary: One caller-owned job with progress and current backend access
+      summary: One user-owned job with progress and current backend access
       operationId: getJob
       x-mcp-tool: get_job
       responses:
@@ -786,7 +786,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [jobs]
-      summary: Cancel a caller-owned task without deleting shared Kubernetes work
+      summary: Cancel a user-owned task without deleting shared Kubernetes work
       operationId: cancelJob
       x-mcp-tool: cancel_job
       responses:

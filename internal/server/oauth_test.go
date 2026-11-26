@@ -33,8 +33,8 @@ import (
 	"github.com/giantswarm/model-manager/internal/api"
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/buildinfo"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 	"github.com/giantswarm/model-manager/internal/jobs"
-	"github.com/giantswarm/model-manager/internal/requester"
 	"github.com/giantswarm/model-manager/internal/service"
 )
 
@@ -158,25 +158,11 @@ func oauthSettings(t *testing.T, environment map[string]string) oauthconfig.Sett
 	return settings
 }
 
-// verifiedUser is the user mcp-oauth hands on once it has validated a
-// forwarded IdP id_token.
-func verifiedUser() *providers.UserInfo {
-	return &providers.UserInfo{Issuer: "https://idp.example.test", ID: "sub-admin", Email: "admin@lab.local", EmailVerified: true, Name: "Lab Admin", Groups: []string{"platform-admins"}, TokenSource: providers.TokenSourceSSO}
-}
-
-// afterValidation runs next as if mcp-oauth had validated the bearer and
-// admitted info.
-func afterValidation(info *providers.UserInfo, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(handler.ContextWithUserInfo(r.Context(), info)))
-	})
-}
-
-// TestForwardedIDTokenBecomesTheCaller is the platform path: muster (or the
-// portal through the gateway) forwards the IdP id_token for the platform
-// client; once mcp-oauth has validated it, the request carries the caller and,
-// with downstream OAuth, the caller's token.
-func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
+// TestForwardedIDTokenBecomesTheUser is the platform path: muster (or the
+// portal through the gateway) forwards the ID token for the platform client;
+// once mcp-oauth has validated it, the request carries the user and, with
+// downstream OAuth, their ID token.
+func TestForwardedIDTokenBecomesTheUser(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 	configuration := idp.config(t)
 	configuration.DownstreamOAuth = true
@@ -191,8 +177,8 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 		ok    bool
 	}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen.id, seen.ok = requester.FromContext(r.Context())
-		seen.token, _ = requester.IDTokenFromContext(r.Context())
+		seen.id, seen.ok = handler.UserInfoFromContext(r.Context())
+		seen.token, _ = idtoken.FromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -202,7 +188,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	rec := httptest.NewRecorder()
 	o.protect(next).ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	require.True(t, seen.ok, "the caller reaches the handler")
+	require.True(t, seen.ok, "the user reaches the handler")
 	assert.Equal(t, "admin@lab.local", seen.id.Email)
 	assert.Equal(t, "sub-admin", seen.id.ID)
 	assert.Equal(t, "agent-platform", seen.id.ClientID)
@@ -218,30 +204,32 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	o.protect(next).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	// Nothing admitted, nothing attached.
+	// No validated user, no ID token to attach.
 	rec = httptest.NewRecorder()
-	o.requireCaller(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
+	attachIDToken(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
-	idp := newFakeIdP(t)
-	o, err := newOAuth(idp.config(t, false), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	idp := newPrivateIdP(t, "")
+	o, err := newOAuth(idp.config(t), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
-	var caller string
+	var attributed string
 	var hasToken bool
-	h := afterValidation(verifiedUser(), o.requireCaller(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = requester.RequestedBy(r.Context())
-		_, hasToken = requester.IDTokenFromContext(r.Context())
-	})))
+	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok {
+			attributed = user.Email
+		}
+		_, hasToken = idtoken.FromContext(r.Context())
+	}))
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
-	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))
+	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "admin@lab.local", caller, "the caller is known and attributed")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "admin@lab.local", attributed, "the user is known and attributed")
 	assert.False(t, hasToken, "but nothing is presented to the Kubernetes API")
 }
 

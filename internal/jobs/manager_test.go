@@ -16,7 +16,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/requester"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 func waitDone(t *testing.T, m *Manager, id string) Job {
@@ -154,14 +154,14 @@ func TestListOrderAndPrune(t *testing.T) {
 
 func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 	m := NewManager(WithAnonymousAccess(true))
-	reqCtx, cancelReq := context.WithCancel(requester.ContextWithIDToken(
+	reqCtx, cancelReq := context.WithCancel(idtoken.ContextWith(
 		handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
 	release := make(chan struct{})
 	var seenCaller, seenToken string
 	var seenErr error
 	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
-		seenCaller = requester.RequestedBy(ctx)
-		seenToken, _ = requester.IDTokenFromContext(ctx)
+		seenCaller = requestedBy(ctx)
+		seenToken, _ = idtoken.FromContext(ctx)
 		<-release
 		seenErr = ctx.Err()
 		return nil, nil

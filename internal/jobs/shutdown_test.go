@@ -12,7 +12,7 @@ import (
 	"github.com/giantswarm/mcp-oauth/providers"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/requester"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 func TestJobsHaveApplicationLifetime(t *testing.T) {
@@ -20,11 +20,11 @@ func TestJobsHaveApplicationLifetime(t *testing.T) {
 		lifetime, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		manager := NewManager(WithLifetime(lifetime))
-		caller := requester.ContextWithIDToken(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "user", ClientID: "cli"}), "expired-caller-token")
+		caller := idtoken.ContextWith(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "user", ClientID: "cli"}), "expired-caller-token")
 		entered := make(chan struct{})
 		job, created, err := manager.Start(StartRequest{Type: TypePull, Model: "model", Context: caller}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
-			require.Equal(t, "user", requester.RequestedBy(ctx))
-			token, ok := requester.IDTokenFromContext(ctx)
+			require.Equal(t, "user", requestedBy(ctx))
+			token, ok := idtoken.FromContext(ctx)
 			require.True(t, ok)
 			require.Equal(t, "expired-caller-token", token)
 			close(entered)

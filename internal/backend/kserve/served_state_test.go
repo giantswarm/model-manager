@@ -19,7 +19,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/requester"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // pendingLLMISVC creates the LLMInferenceService of a preset as KServe leaves
@@ -141,7 +141,7 @@ func unauthorizedClients() (kubernetes.Interface, dynamic.Interface) {
 // using the ServiceAccount's.
 func (f *fixture) callerClients(cs kubernetes.Interface, dyn dynamic.Interface) {
 	clientsFor := func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		if _, ok := requester.IDTokenFromContext(ctx); ok {
+		if _, ok := idtoken.FromContext(ctx); ok {
 			return cs, dyn, nil
 		}
 		return f.cs, f.dyn, nil
@@ -160,7 +160,7 @@ func TestSettingsSurviveACallerWhoseTokenExpired(t *testing.T) {
 	f.serveLLMAPI()
 	require.NoError(t, f.b.Load(ctx, backend.LoadRequest{Preset: "tiny"}))
 	f.callerClients(unauthorizedClients())
-	expired := requester.ContextWithIDToken(ctx, "expired-token")
+	expired := idtoken.ContextWith(ctx, "expired-token")
 
 	// The caller's own calls fail as they must, and the readiness wait ends
 	// at once rather than at its timeout.

@@ -13,8 +13,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
-
-	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // NewForTarget builds clients toward another cluster's apiserver with no
@@ -107,7 +105,7 @@ func authFailure(apiServer string, code int, message, token string, now time.Tim
 	case code == http.StatusForbidden:
 		return fmt.Sprintf("%s — %s authenticated the caller, whose RBAC there does not allow this: model-manager acts on the target as the caller, with no permissions of its own", message, apiServer)
 	}
-	c := requester.TokenClaims(token)
+	c := tokenClaims(token)
 	if !c.Expiry.IsZero() && now.After(c.Expiry) {
 		return fmt.Sprintf("%s — the caller's token expired at %s; the operation outlived it, a new request carries a fresh one", message, c.Expiry.UTC().Format(time.RFC3339))
 	}
