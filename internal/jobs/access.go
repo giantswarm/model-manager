@@ -30,9 +30,10 @@ type operationKey struct {
 }
 
 // ownerFrom is the owner of a task the request starts or reads. mcp-oauth
-// guarantees the issuer, subject and a complete actor of a validated user; a
-// task also needs the client. A request without a user owns nothing, unless
-// it carries an ID token, which only a validated user can.
+// guarantees the issuer and subject of a validated user. A delegated actor
+// has a subject and an optional issuer; a task also needs the client.
+// A request without a user owns nothing, unless it carries an ID token,
+// which only a validated user can.
 func ownerFrom(ctx context.Context) (taskOwner, error) {
 	user, ok := handler.UserInfoFromContext(ctx)
 	if !ok || user == nil {

@@ -50,6 +50,7 @@ func TestTaskIdentityIsPrivateAndStableAcrossProfileChanges(t *testing.T) {
 		{"different issuer", func(c *providers.UserInfo) { c.Issuer = "https://other-connector.example.test" }},
 		{"different client", func(c *providers.UserInfo) { c.ClientID = "other-client" }},
 		{"delegated actor", func(c *providers.UserInfo) { c.ActorIssuer = "https://agents.example.test"; c.ActorSubject = "agent" }},
+		{"actor without issuer", func(c *providers.UserInfo) { c.ActorSubject = "agent" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			original, _ := handler.UserInfoFromContext(alice)
