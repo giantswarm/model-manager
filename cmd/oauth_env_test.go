@@ -2,9 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +125,76 @@ func TestLoadOAuthSettingsRefusesGitHub(t *testing.T) {
 	t.Setenv("OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS", "")
 	_, err := loadOAuthSettings(&serveOptions{}, slog.New(slog.DiscardHandler))
 	require.ErrorContains(t, err, "OAUTH_PROVIDER=github is not supported")
+}
+
+func TestLoadOAuthInitialAccessToken(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		current string
+		legacy  string
+		file    bool
+		want    string
+	}{
+		{name: "initial access token", current: "current-secret", want: "current-secret"},
+		{name: "deprecated token", legacy: "legacy-secret", want: "legacy-secret"},
+		{name: "new name wins", current: "current-secret", legacy: "legacy-secret", want: "current-secret"},
+		{name: "mounted initial access token", current: "current-secret", file: true, want: "current-secret"},
+		{name: "deprecated mounted token", legacy: "legacy-secret", file: true, want: "legacy-secret"},
+		{name: "new file wins", current: "current-secret", legacy: "legacy-secret", file: true, want: "current-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for name, value := range map[string]string{
+				"OAUTH_ISSUER": "https://mm.example.com", "OAUTH_PROVIDER": "google",
+				"OAUTH_GOOGLE_CLIENT_ID": "model-manager", "OAUTH_GOOGLE_CLIENT_SECRET": "provider-secret",
+				"OAUTH_INITIAL_ACCESS_TOKEN":      "",
+				"OAUTH_INITIAL_ACCESS_TOKEN_FILE": "", "OAUTH_REGISTRATION_ACCESS_TOKEN": "",
+				"OAUTH_REGISTRATION_ACCESS_TOKEN_FILE": "",
+			} {
+				t.Setenv(name, value)
+			}
+			for name, value := range map[string]string{"OAUTH_INITIAL_ACCESS_TOKEN": test.current, "OAUTH_REGISTRATION_ACCESS_TOKEN": test.legacy} {
+				if test.file && value != "" {
+					path := filepath.Join(t.TempDir(), "token")
+					require.NoError(t, os.WriteFile(path, []byte(value+"\n"), 0600))
+					t.Setenv(name+"_FILE", path)
+				} else {
+					t.Setenv(name, value)
+				}
+			}
+			var output bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&output, nil))
+			previous := slog.Default()
+			slog.SetDefault(logger)
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			settings, err := loadOAuthSettings(&serveOptions{}, logger)
+			require.NoError(t, err)
+			require.Equal(t, test.want, settings.Server.InitialAccessToken)
+			settings.Logger = logger
+			runtime, cleanup, err := oauthconfig.Setup(settings)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cleanup(context.WithoutCancel(t.Context()))) })
+			for _, token := range []string{"", "wrong-secret", test.want} {
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/oauth/register", strings.NewReader(`{"client_name":"fixture","redirect_uris":["http://127.0.0.1:50123/callback"],"token_endpoint_auth_method":"client_secret_basic"}`))
+				request.Header.Set("Content-Type", "application/json")
+				if token != "" {
+					request.Header.Set("Authorization", "Bearer "+token)
+				}
+				response := httptest.NewRecorder()
+				runtime.Handler.ServeClientRegistration(response, request)
+				status := http.StatusUnauthorized
+				if token == test.want {
+					status = http.StatusCreated
+				}
+				require.Equal(t, status, response.Code, response.Body.String())
+			}
+			if test.legacy != "" {
+				require.Contains(t, output.String(), "DEPRECATED:")
+				require.Contains(t, output.String(), "OAUTH_INITIAL_ACCESS_TOKEN")
+			} else {
+				require.NotContains(t, output.String(), "DEPRECATED:")
+			}
+			require.NotContains(t, output.String(), "current-secret")
+			require.NotContains(t, output.String(), "legacy-secret")
+		})
+	}
 }

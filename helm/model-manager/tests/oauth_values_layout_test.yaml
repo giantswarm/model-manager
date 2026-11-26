@@ -147,7 +147,7 @@ tests:
           content: {name: OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS, value: "false"}
       - contains:
           path: spec.template.spec.containers[0].env
-          content: {name: OAUTH_REGISTRATION_ACCESS_TOKEN_FILE, value: /etc/model-manager/oauth-registration/token}
+          content: {name: OAUTH_INITIAL_ACCESS_TOKEN_FILE, value: /etc/model-manager/oauth-registration/token}
       - contains:
           path: spec.template.spec.volumes
           content:
@@ -156,6 +156,21 @@ tests:
               secretName: registration
               defaultMode: 0440
               items: [{key: token, path: token}]
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 1000
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault
 
   - it: turns dynamic client registration off
     set:

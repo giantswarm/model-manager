@@ -262,7 +262,7 @@ oauth:
       initialAccessToken:
         # -- Secret key with the RFC 7591 initial access token a
         # registration must present (mcp-oauth reads it from
-        # `OAUTH_REGISTRATION_ACCESS_TOKEN_FILE`).
+        # `OAUTH_INITIAL_ACCESS_TOKEN_FILE`).
         secretKeyRef:
           name: ""
           key: token
