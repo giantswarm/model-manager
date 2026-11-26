@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/giantswarm/mcp-oauth/handler"
 	"github.com/giantswarm/mcp-oauth/oauthconfig"
@@ -83,19 +84,25 @@ func protectedResources(configuration *oauthserver.Config, mcpPath string) map[s
 	if resources == nil {
 		resources = map[string]oauthserver.ProtectedResourceConfig{}
 	}
+	// Metadata lookup ignores a trailing slash, so "/mcp/" describes "/mcp".
+	described := func(path string) (oauthserver.ProtectedResourceConfig, bool) {
+		for key, resource := range resources {
+			if strings.TrimRight(key, "/") == strings.TrimRight(path, "/") {
+				return resource, true
+			}
+		}
+		return oauthserver.ProtectedResourceConfig{}, false
+	}
 	var advertised []string
 	if main, err := url.Parse(configuration.GetResourceIdentifier()); err == nil {
-		path := main.EscapedPath()
-		if path == "" {
-			path = "/"
-		}
-		advertised = resources[path].AuthorizationServers
+		resource, _ := described(main.EscapedPath())
+		advertised = resource.AuthorizationServers
 	}
 	for _, path := range []string{api.Prefix, mcpPath} {
 		if path == "" || path == "/" {
 			continue
 		}
-		if _, ok := resources[path]; !ok {
+		if _, ok := described(path); !ok {
 			resources[path] = oauthserver.ProtectedResourceConfig{AuthorizationServers: advertised}
 		}
 	}
@@ -108,8 +115,6 @@ func providerName(settings oauthconfig.Settings) string {
 		return "dex"
 	case settings.Google != nil:
 		return "google"
-	case settings.GitHub != nil:
-		return "github"
 	default:
 		return "none"
 	}

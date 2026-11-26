@@ -260,6 +260,12 @@ func TestProtectedResources(t *testing.T) {
 
 	assert.Equal(t, map[string]oauthserver.ProtectedResourceConfig{api.Prefix: {}, "/mcp": {}},
 		protectedResources(&oauthserver.Config{Issuer: "https://mm.example.com"}, "/mcp"), "nothing advertised: the server's own issuer")
+
+	trailing := &oauthserver.Config{Issuer: "https://mm.example.com", ResourceMetadataByPath: map[string]oauthserver.ProtectedResourceConfig{
+		"/mcp/": {ResourceIdentifier: "https://mm.example.com/mcp/"},
+	}}
+	assert.Equal(t, map[string]oauthserver.ProtectedResourceConfig{"/mcp/": {ResourceIdentifier: "https://mm.example.com/mcp/"}, api.Prefix: {}},
+		protectedResources(trailing, "/mcp"), "a configured path with a trailing slash describes the MCP endpoint")
 }
 
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled

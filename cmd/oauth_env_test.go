@@ -65,6 +65,13 @@ func TestOAuthEnvironment(t *testing.T) {
 			environment: map[string]string{"OAUTH_ENABLE_AUTHORIZATION_SERVER": "false"},
 			wantSet:     map[string]string{"OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS": "true"},
 		},
+		{
+			name:           "a deprecated provider is reported but not set with the authorization server off",
+			options:        serveOptions{oauthProvider: "dex"},
+			environment:    map[string]string{"OAUTH_ENABLE_AUTHORIZATION_SERVER": "false"},
+			wantSet:        map[string]string{"OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS": "true"},
+			wantDeprecated: []string{"oauth-provider"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +97,7 @@ func TestLoadOAuthSettingsFromDeprecatedOptions(t *testing.T) {
 	}
 	var output bytes.Buffer
 	settings, err := loadOAuthSettings(&serveOptions{oauthBaseURL: "https://mm.example.com", dexIssuerURL: "https://dex.example.com",
-		dexClientID: "model-manager", dexClientSecret: "secret", oauthTrustedAudiences: "agent-platform"},
+		dexClientID: "model-manager", dexClientSecret: "dex-secret-value", oauthTrustedAudiences: "agent-platform"},
 		slog.New(slog.NewTextHandler(&output, nil)))
 	require.NoError(t, err)
 	require.NotNil(t, settings.Dex)
@@ -100,5 +107,15 @@ func TestLoadOAuthSettingsFromDeprecatedOptions(t *testing.T) {
 	assert.Equal(t, []string{"agent-platform"}, settings.Server.TrustedAudiences)
 	assert.True(t, settings.Server.EnableClientIDMetadataDocuments)
 	assert.Contains(t, output.String(), "--dex-issuer-url (DEX_ISSUER_URL) is deprecated and will be removed in the next minor release: set OAUTH_DEX_ISSUER_URL")
-	assert.NotContains(t, output.String(), "secret\"", "no secret value is logged")
+	assert.NotContains(t, output.String(), "dex-secret-value", "no secret value is logged")
+}
+
+func TestLoadOAuthSettingsRefusesGitHub(t *testing.T) {
+	for name, value := range map[string]string{"OAUTH_ISSUER": "https://mm.example.com", "OAUTH_PROVIDER": "github",
+		"OAUTH_GITHUB_CLIENT_ID": "id", "OAUTH_GITHUB_CLIENT_SECRET": "secret", "OAUTH_GITHUB_REDIRECT_URL": "https://mm.example.com/oauth/callback"} {
+		t.Setenv(name, value)
+	}
+	t.Setenv("OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS", "")
+	_, err := loadOAuthSettings(&serveOptions{}, slog.New(slog.DiscardHandler))
+	require.ErrorContains(t, err, "OAUTH_PROVIDER=github is not supported")
 }

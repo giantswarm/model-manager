@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"strconv"
@@ -9,8 +10,8 @@ import (
 	"github.com/giantswarm/mcp-oauth/oauthconfig"
 )
 
-// deprecatedOAuthOption is an option that mcp-oauth's OAUTH_* variable
-// Replacement now configures. Env is the variable that also set it, if any.
+// deprecatedOAuthOption is a flag whose setting mcp-oauth's OAUTH_* variable
+// Replacement holds. Env is the variable that also sets the flag, if any.
 type deprecatedOAuthOption struct {
 	Flag        string
 	Env         string
@@ -43,6 +44,12 @@ func oauthEnvironment(o *serveOptions, lookup func(string) (string, bool)) (map[
 		return v
 	}
 
+	authorizationServer := true
+	if raw, ok := lookup("OAUTH_ENABLE_AUTHORIZATION_SERVER"); ok {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			authorizationServer = parsed
+		}
+	}
 	publicRegistration := ""
 	if o.allowPublicClientRegistration {
 		publicRegistration = "true"
@@ -68,17 +75,15 @@ func oauthEnvironment(o *serveOptions, lookup func(string) (string, bool)) (map[
 			continue
 		}
 		deprecated = append(deprecated, option.deprecatedOAuthOption)
+		// mcp-oauth refuses OAUTH_PROVIDER with the authorization server off.
+		if option.Replacement == "OAUTH_PROVIDER" && !authorizationServer {
+			continue
+		}
 		if !present(option.Replacement) {
 			set[option.Replacement] = option.value
 		}
 	}
 
-	authorizationServer := true
-	if raw, ok := lookup("OAUTH_ENABLE_AUTHORIZATION_SERVER"); ok {
-		if parsed, err := strconv.ParseBool(raw); err == nil {
-			authorizationServer = parsed
-		}
-	}
 	if authorizationServer && !present("OAUTH_PROVIDER") {
 		set["OAUTH_PROVIDER"] = "dex"
 	}
@@ -109,5 +114,14 @@ func loadOAuthSettings(o *serveOptions, log *slog.Logger) (oauthconfig.Settings,
 			return oauthconfig.Settings{}, err
 		}
 	}
-	return oauthconfig.SettingsFromEnv()
+	settings, err := oauthconfig.SettingsFromEnv()
+	if err != nil {
+		return oauthconfig.Settings{}, err
+	}
+	// GitHub issues no ID token: the caller's identity and, with
+	// --downstream-oauth, the token presented to Kubernetes come from one.
+	if settings.GitHub != nil {
+		return oauthconfig.Settings{}, errors.New("OAUTH_PROVIDER=github is not supported: use dex or google, which issue OpenID Connect ID tokens")
+	}
+	return settings, nil
 }
