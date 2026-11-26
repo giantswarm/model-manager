@@ -760,7 +760,7 @@
                                     "properties": {
                                         "secretKeyRef": {
                                             "type": "object",
-                                            "description": "Secret key with the RFC 7591 initial access token a registration must present (mcp-oauth reads it from `OAUTH_REGISTRATION_ACCESS_TOKEN_FILE`).",
+                                            "description": "Secret key with the RFC 7591 initial access token a registration must present (mcp-oauth reads it from `OAUTH_INITIAL_ACCESS_TOKEN_FILE`).",
                                             "additionalProperties": false,
                                             "properties": {
                                                 "key": {

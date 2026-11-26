@@ -241,7 +241,7 @@ spec:
               value: "false"
             {{- end }}
             {{- if $as.dynamicClientRegistration.initialAccessToken.secretKeyRef.name }}
-            - name: OAUTH_REGISTRATION_ACCESS_TOKEN_FILE
+            - name: OAUTH_INITIAL_ACCESS_TOKEN_FILE
               value: /etc/model-manager/oauth-registration/token
             {{- end }}
             {{- if .Values.oauth.allowPublicClientRegistration }}
