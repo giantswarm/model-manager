@@ -1,17 +1,14 @@
 # Default values for model-manager.
 
 # -- Platform-wide values a parent chart (the `agent-platform` meta chart) shares
-# with every component; Helm forwards them to this chart. `oauth.*` reads the
-# identity contract as its defaults: `global.identity.issuerUrl`,
-# `global.identity.clientId`, `global.identity.existingSecret`,
-# `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth
-# base URL. Empty here; a chart installed on its own sets `oauth.*` directly.
-# -- Platform-wide settings. `global.identity` is the platform's sign-in, the
+# with every component. `global.domain` derives the OAuth issuer.
+# `global.identity` is the platform's sign-in, the
 # fallback for `oauth.authorizationServer.upstream` and the derived trusted
 # issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`),
 # `ca` (`secretName`, `key`), `type` (`dex` or `google`) and
 # `kubernetes.audiences`, the audiences the Kubernetes API server requires
-# (its `AuthenticationConfiguration` `jwt.issuer.audiences`).
+# (its `AuthenticationConfiguration` `jwt.issuer.audiences`). Empty here; a
+# chart installed on its own sets `oauth.*` directly.
 global: {}  # @schema type: object; additionalProperties: true
 
 # -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless
@@ -192,8 +189,10 @@ oauth:
     # always protected resources.
     additionalResources: []  # @schema item: string
     # -- Issuer identifiers the resource metadata advertises
-    # (`OAUTH_AUTHORIZATION_SERVERS`): this server's issuer or a trusted
-    # issuer. Empty advertises this server's issuer.
+    # (`OAUTH_AUTHORIZATION_SERVERS`, RFC 9728 `authorization_servers`): this
+    # server's issuer or a trusted issuer. Empty advertises this server's
+    # issuer; required with `authorizationServer.enabled` false, since MCP
+    # clients find the authorization server here.
     authorizationServers: []  # @schema item: string
     # -- The issuers whose JWTs are accepted (`OAUTH_TRUSTED_ISSUERS`). A
     # trust anchor: set it only from the release's own values or a
@@ -260,8 +259,9 @@ oauth:
       # for clients that still register this way.
       enabled: true
       initialAccessToken:
-        # -- Secret key with the bearer a registration must present
-        # (`OAUTH_REGISTRATION_ACCESS_TOKEN_FILE`).
+        # -- Secret key with the RFC 7591 initial access token a
+        # registration must present (mcp-oauth reads it from
+        # `OAUTH_REGISTRATION_ACCESS_TOKEN_FILE`).
         secretKeyRef:
           name: ""
           key: token
@@ -397,14 +397,14 @@ muster:
     labels: {}  # @schema additionalProperties: true
     # -- How muster authenticates to this server; rendered only with
     # `oauth.enabled`. `forwardToken` makes muster forward the session's IdP
-    # id_token byte-identical (the SSO path this chart trusts through its
-    # trusted audiences). `requiredAudiences` are extra audiences that token
+    # ID token byte-identical, accepted through the OpenID Provider's
+    # trusted issuer entry. `requiredAudiences` are extra audiences that token
     # must carry — the Dex cross-client audience the kube-apiserver trusts
     # (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is
     # `kubernetes`) so `oauth.downstream` works; muster requests them at
-    # login, so users re-login after a change. They are trusted as bearer
-    # audiences by construction, since the server's trusted audiences are
-    # the platform client plus this list. Empty uses
+    # login, so users re-login after a change. The derived trusted issuer
+    # entry accepts them, since its audiences are the platform client plus
+    # this list. Empty uses
     # `global.identity.kubernetes.audiences`. A Google IdP has no
     # cross-client audiences: leave both empty.
     auth:

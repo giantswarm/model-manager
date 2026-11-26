@@ -35,7 +35,7 @@ tests:
             name: oauth-client
             secret:
               secretName: manager-dex
-              defaultMode: 0400
+              defaultMode: 0440
               items: [{key: secret, path: client-secret}]
 
   - it: takes the layout's keys over the deprecated ones
@@ -85,7 +85,7 @@ tests:
             name: oauth-client
             secret:
               secretName: idp
-              defaultMode: 0400
+              defaultMode: 0440
               items: [{key: dex-client-secret, path: client-secret}]
 
   - it: renders the listed trusted issuers instead of the derived one, with their CAs mounted
@@ -154,7 +154,7 @@ tests:
             name: oauth-registration
             secret:
               secretName: registration
-              defaultMode: 0400
+              defaultMode: 0440
               items: [{key: token, path: token}]
 
   - it: turns dynamic client registration off
@@ -169,7 +169,11 @@ tests:
     set:
       oauth.authorizationServer.enabled: false
       oauth.trustedAudiences: [agent-platform]
+      oauth.resourceServer.authorizationServers: [https://dex.example.test]
     asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: OAUTH_AUTHORIZATION_SERVERS, value: https://dex.example.test}
       - contains:
           path: spec.template.spec.containers[0].env
           content: {name: OAUTH_ENABLE_AUTHORIZATION_SERVER, value: "false"}
@@ -188,6 +192,22 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].env[?(@.name=="OAUTH_TRUSTED_ISSUERS")].value
           value: '[{"acceptedTypHeaders":["","JWT"],"allowPrivateIPJWKSHosts":["dex.example.test"],"audiences":["agent-platform"],"caFile":"/etc/model-manager/idp-ca/bundle.pem","issuer":"https://dex.example.test","jwksURI":"https://dex.example.test/keys","openIDProvider":true}]'
+
+  - it: refuses a resource server only without an advertised authorization server
+    set:
+      oauth.authorizationServer.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: needs oauth.resourceServer.authorizationServers
+
+  - it: refuses a resource server only without a trusted issuer
+    set:
+      oauth.authorizationServer.enabled: false
+      oauth.authorizationServer.upstream.issuer: ""
+      oauth.resourceServer.authorizationServers: [https://dex.example.test]
+    asserts:
+      - failedTemplate:
+          errorPattern: accepts only trusted issuer tokens
 
   - it: refuses a trusted issuer entry with an unknown key
     set:

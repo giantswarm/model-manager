@@ -403,7 +403,7 @@ spec:
         - name: oauth-client
           secret:
             secretName: {{ $oauth.clientSecret.name }}
-            defaultMode: 0400
+            defaultMode: 0440
             items:
               - key: {{ $oauth.clientSecret.key }}
                 path: client-secret
@@ -412,7 +412,7 @@ spec:
         - name: oauth-registration
           secret:
             secretName: {{ .name }}
-            defaultMode: 0400
+            defaultMode: 0440
             items:
               - key: {{ required "oauth.authorizationServer.dynamicClientRegistration.initialAccessToken.secretKeyRef.key is required with its name" .key }}
                 path: token

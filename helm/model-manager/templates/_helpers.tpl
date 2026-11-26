@@ -178,8 +178,14 @@ the deprecated key it replaces, else from global.identity:
   upstreamCA      authorizationServer.upstream.certificateAuthority.secretKeyRef,
                   dex.caSecret, global.identity.ca
   trustedIssuers  resourceServer.trustedIssuers, else one entry for the
-                  provider people sign in with (openIDProvider), accepting
-                  its ID tokens for model-manager.oauthTrustedAudiences
+                  provider people sign in with (openIDProvider), accepting its
+                  ID tokens for the union, in this order and without
+                  duplicates, of the deprecated trustedAudiences (else
+                  clientID, else global.identity.clientId) and
+                  model-manager.requiredAudiences: every token muster
+                  forwards carries those by construction and the
+                  kube-apiserver trusts them, so a portal session's ID token
+                  is accepted too
 A CA is a mount: {volume, secret or configMap, key, dir}; caFile is dir/key.
 */}}
 {{- define "model-manager.oauth" -}}
@@ -248,11 +254,14 @@ A CA is a mount: {volume, secret or configMap, key, dir}; caFile is dir/key.
 {{- $issuers = append $issuers $out -}}
 {{- end -}}
 {{- if not $issuers -}}
-{{- $audiences := include "model-manager.oauthTrustedAudiences" . | splitList "," | compact -}}
+{{- $audiences := list -}}
+{{- range concat ($o.trustedAudiences | default (list ($clientID | default (dig "clientId" "" $g)))) (include "model-manager.requiredAudiences" . | fromJsonArray) -}}
+{{- if and . (not (has . $audiences)) }}{{ $audiences = append $audiences . }}{{ end -}}
+{{- end -}}
 {{- if and $audiences $upstreamIssuer -}}
 {{- $entry := dict "issuer" $upstreamIssuer "audiences" $audiences "openIDProvider" true -}}
 {{- if eq $provider "dex" -}}
-{{- /* Dex's jwks_uri; its ID tokens carry no typ header. The issuer host may resolve privately, as under audience trust. */ -}}
+{{- /* Dex serves its JWKS at <issuer>/keys and signs ID tokens without a typ header. mcp-oauth does not imply the issuer host for private JWKS addresses, so it is listed. */ -}}
 {{- $_ := set $entry "jwksURI" (printf "%s/keys" (trimSuffix "/" $upstreamIssuer)) -}}
 {{- $_ = set $entry "acceptedTypHeaders" (list "" "JWT") -}}
 {{- $_ = set $entry "allowPrivateIPJWKSHosts" (concat (list (urlParse $upstreamIssuer).hostname) $o.sso.allowPrivateIPJWKSHosts | uniq) -}}
@@ -264,38 +273,16 @@ A CA is a mount: {volume, secret or configMap, key, dir}; caFile is dir/key.
 {{- $issuers = list $entry -}}
 {{- end -}}
 {{- end -}}
+{{- if not $as.enabled -}}
+{{- if not $issuers -}}
+{{- fail "oauth.authorizationServer.enabled false accepts only trusted issuer tokens: set oauth.resourceServer.trustedIssuers, or the upstream issuer and client ID it is derived from" -}}
+{{- end -}}
+{{- if not $rs.authorizationServers -}}
+{{- fail "oauth.authorizationServer.enabled false needs oauth.resourceServer.authorizationServers: MCP clients discover the authorization server from the protected resource metadata (RFC 9728), and this server then runs none" -}}
+{{- end -}}
+{{- end -}}
 {{- $_ = set $r "trustedIssuers" $issuers -}}
 {{- toJson $r -}}
-{{- end }}
-
-{{/*
-The audiences, comma-separated, of the trusted issuer entry the chart derives
-for the provider people sign in with: the OAuth client ids whose IdP id_tokens
-this server accepts as bearer tokens. The union, in this order and without
-duplicates, of
-  - the deprecated oauth.trustedAudiences, else the client people sign in
-    with (authorizationServer.upstream.client.id, the deprecated dex.clientID
-    or google.clientID, else global.identity.clientId)
-    — the client MCP clients and the muster CLI log in with;
-  - model-manager.requiredAudiences — every token muster forwards to
-    this server carries them by construction (muster requests them at login)
-    and they are the audiences the kube-apiserver trusts, so a portal
-    session's token, which carries them but not the platform client, is
-    accepted too. The pair is what the management clusters' mcp-kubernetes
-    trusts as well.
-A Google install has no cross-client audiences (requiredAudiences empty) and
-trusts the client id alone.
-*/}}
-{{- define "model-manager.oauthTrustedAudiences" -}}
-{{- $g := include "model-manager.globalIdentity" . | fromJson -}}
-{{- $up := .Values.oauth.authorizationServer.upstream -}}
-{{- $client := $up.client.id | default (eq (include "model-manager.oauthProvider" .) "google" | ternary .Values.oauth.google.clientID .Values.oauth.dex.clientID) | default (dig "clientId" "" $g) -}}
-{{- $base := .Values.oauth.trustedAudiences | default (list $client) -}}
-{{- $auds := list -}}
-{{- range concat $base (include "model-manager.requiredAudiences" . | fromJsonArray) -}}
-{{- if and . (not (has . $auds)) }}{{ $auds = append $auds . }}{{ end -}}
-{{- end -}}
-{{- join "," $auds -}}
 {{- end }}
 
 {{/*

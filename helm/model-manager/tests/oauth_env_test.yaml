@@ -39,7 +39,7 @@ tests:
             name: oauth-client
             secret:
               secretName: manager-oauth
-              defaultMode: 0400
+              defaultMode: 0440
               items: [{key: dex-client-secret, path: client-secret}]
       - contains:
           path: spec.template.spec.containers[0].args
@@ -107,7 +107,7 @@ tests:
             name: oauth-client
             secret:
               secretName: manager-oauth
-              defaultMode: 0400
+              defaultMode: 0440
               items: [{key: google-client-secret, path: client-secret}]
       - contains:
           path: spec.template.spec.containers[0].env

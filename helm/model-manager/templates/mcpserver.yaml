@@ -6,9 +6,8 @@
 {{- /*
 Registers this server with muster. Tools appear as x_<name>_<tool>. With
 oauth.enabled the CR carries the auth block: muster forwards the session's IdP
-id_token (forwardToken), which this server accepts from the IdP for its
-audiences (model-manager.oauthTrustedAudiences: the platform client plus the
-requiredAudiences below), and
+ID token (forwardToken), which this server accepts from the OpenID Provider for
+the platform client and the requiredAudiences below (model-manager.oauth), and
 requests the requiredAudiences at login. Without OAuth muster connects
 anonymously. With github.tokenExchange the registration forwards the ID token
 and lists the token exchange audience under providerApps: a commit
