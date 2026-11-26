@@ -339,7 +339,7 @@ func TestOpenIDProviderTrustedIssuer(t *testing.T) {
 	})
 	var presented string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		presented, _ = identity.TokenFromContext(r.Context())
+		presented, _ = requester.IDTokenFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)
