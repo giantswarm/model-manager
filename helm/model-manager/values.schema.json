@@ -138,7 +138,7 @@
         },
         "global": {
             "type": "object",
-            "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component. `global.domain` derives the OAuth issuer. `global.identity` is the platform's sign-in, the fallback for `oauth.authorizationServer.upstream` and the derived trusted issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`), `ca` (`secretName`, `key`), `type` (`dex` or `google`) and `kubernetes.audiences`, the audiences the Kubernetes API server requires (its `AuthenticationConfiguration` `jwt.issuer.audiences`). Empty here; a chart installed on its own sets `oauth.*` directly.",
+            "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component. `global.domain` derives the OAuth issuer. `global.identity` is the platform's sign-in, the fallback for `oauth.authorizationServer.upstream` and the derived trusted issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`), `ca` (`secretName`, `key`), `type` (`dex` or `google`) and `kubernetes.audiences`, the audiences the Kubernetes API server accepts (its `AuthenticationConfiguration` `jwt.issuer.audiences`: a token passes when its `aud` holds at least one). Empty here; a chart installed on its own sets `oauth.*` directly.",
             "additionalProperties": true,
             "properties": {
                 "podSecurityStandards": {
@@ -609,7 +609,7 @@
                         },
                         "auth": {
                             "type": "object",
-                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP ID token byte-identical, accepted through the OpenID Provider's trusted issuer entry. `requiredAudiences` are extra audiences that token must carry — the Dex cross-client audience the kube-apiserver trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is `kubernetes`) so `oauth.downstream` works; muster requests them at login, so users re-login after a change. The derived trusted issuer entry accepts them, since its audiences are the platform client plus this list. Empty uses `global.identity.kubernetes.audiences`. A Google IdP has no cross-client audiences: leave both empty.",
+                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP ID token byte-identical, accepted through the OpenID Provider's trusted issuer entry. `requiredAudiences` are extra audiences that token must carry — the Dex cross-client audience the kube-apiserver trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is `kubernetes`) so `oauth.downstream` works; muster requests them at login, so users re-login after a change. The derived trusted issuer entry accepts them, since its audiences are the platform client plus this list. Empty uses `global.identity.kubernetes.audiences`. Google adds no audiences, so muster requests none there: the API server accepts the login client id, which the trusted issuer entry already holds.",
                             "additionalProperties": false,
                             "properties": {
                                 "forwardToken": {

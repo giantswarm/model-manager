@@ -6,9 +6,10 @@
 # fallback for `oauth.authorizationServer.upstream` and the derived trusted
 # issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`),
 # `ca` (`secretName`, `key`), `type` (`dex` or `google`) and
-# `kubernetes.audiences`, the audiences the Kubernetes API server requires
-# (its `AuthenticationConfiguration` `jwt.issuer.audiences`). Empty here; a
-# chart installed on its own sets `oauth.*` directly.
+# `kubernetes.audiences`, the audiences the Kubernetes API server accepts
+# (its `AuthenticationConfiguration` `jwt.issuer.audiences`: a token passes
+# when its `aud` holds at least one). Empty here; a chart installed on its own
+# sets `oauth.*` directly.
 global: {}  # @schema type: object; additionalProperties: true
 
 # -- Number of replicas. Jobs are tracked in memory, so keep this at 1 unless
@@ -405,8 +406,9 @@ muster:
     # login, so users re-login after a change. The derived trusted issuer
     # entry accepts them, since its audiences are the platform client plus
     # this list. Empty uses
-    # `global.identity.kubernetes.audiences`. A Google IdP has no
-    # cross-client audiences: leave both empty.
+    # `global.identity.kubernetes.audiences`. Google adds no audiences, so
+    # muster requests none there: the API server accepts the login client id,
+    # which the trusted issuer entry already holds.
     auth:
       forwardToken: true
       requiredAudiences: []
