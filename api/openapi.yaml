@@ -252,7 +252,7 @@ paths:
       summary: Start importing a model; returns a job immediately
       description: |
         Starts a background import and returns `202` with a private job. A pending
-        import with the same principal, client, actor, grant, backend instance
+        import with the same user, client, actor, scopes, ID token, backend instance
         and operation settings is returned with `created: false` after checking
         current resource access. Poll `GET /api/v1/jobs/{id}` for progress. On
         success the model is wired into kagent (job `result` carries the

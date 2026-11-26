@@ -1,7 +1,7 @@
 {{- /*
 No RBAC at all with oauth.downstream: every Kubernetes call then carries the
 caller's ID token and the caller's RBAC governs; the ServiceAccount keeps only
-what every authenticated principal has (API discovery). The token stays
+what every authenticated user has (API discovery). The token stays
 mounted for the in-cluster API address and CA.
 */}}
 {{- $rbac := and .Values.rbac.create (not (and .Values.oauth.enabled .Values.oauth.downstream.enabled)) }}

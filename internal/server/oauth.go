@@ -131,11 +131,22 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 // clients; the ServiceAccount then holds no permissions, so there is nothing
 // else to run as.
 func (o *oauthRuntime) protect(next http.Handler) http.Handler {
-	protected := next
+	protected := o.logUser(next)
 	if o.downstreamOAuth {
-		protected = o.handler.RequireProviderIDToken(attachIDToken(next))
+		protected = o.handler.RequireProviderIDToken(attachIDToken(protected))
 	}
 	return o.handler.ValidateToken(protected)
+}
+
+// logUser logs at debug level who a request authenticated as and how
+// mcp-oauth validated the bearer.
+func (o *oauthRuntime) logUser(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok && user != nil {
+			o.log.DebugContext(r.Context(), "authenticated request", slog.Any("user", user), "token_source", user.TokenSource, "path", r.URL.Path)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // attachIDToken puts the user's ID token on the request for the Kubernetes

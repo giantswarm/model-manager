@@ -942,9 +942,10 @@ construction and they are what the kube-apiserver trusts, so a portal session
 An id_token whose audience matches none of them is refused with 401. The chart's values follow mcp-oauth's layout for
 MCP servers (`oauth.resourceServer`, `oauth.authorizationServer`); the
 earlier `oauth.*` keys still work for one more release and the release notes
-name each one that is set. The caller — the `email`,
-else the `sub` — is on every mutation's log line and recorded as
-`requestedBy` on jobs.
+name each one that is set. Every mutation's log line names the user as
+`user.issuer` and `user.subject`, plus `user.actor.issuer` and
+`user.actor.subject` for a call an agent makes for them, never profile data;
+jobs record the `email`, else the `sub`, as `requestedBy`.
 
 `--downstream-oauth` goes one step further: everything a request does against
 the Kubernetes API (LLMInferenceServices, download Jobs, cache scans, kagent

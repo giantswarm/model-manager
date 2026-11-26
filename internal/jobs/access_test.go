@@ -54,9 +54,9 @@ func TestTaskIdentityIsPrivateAndStableAcrossProfileChanges(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			original, _ := handler.UserInfoFromContext(alice)
-			caller := *original
-			test.change(&caller)
-			ctx := handler.ContextWithUserInfo(t.Context(), &caller)
+			user := *original
+			test.change(&user)
+			ctx := handler.ContextWithUserInfo(t.Context(), &user)
 			_, err := manager.GetFor(ctx, job.ID)
 			require.ErrorIs(t, err, ErrNotFound)
 			_, err = manager.CancelFor(ctx, job.ID)
@@ -102,8 +102,8 @@ func TestTaskDeduplicationIncludesEffectiveAuthorityAndParameters(t *testing.T) 
 		{"parameters", func(r *StartRequest) { r.Parameters = `{"placement":"split"}` }},
 		{"new credential", func(r *StartRequest) { r.Context = idtoken.ContextWith(r.Context, "fresh-credential") }},
 		{"different scopes", func(r *StartRequest) {
-			caller, _ := handler.UserInfoFromContext(r.Context)
-			changed := *caller
+			user, _ := handler.UserInfoFromContext(r.Context)
+			changed := *user
 			changed.Scopes = []string{"other-scope"}
 			r.Context = handler.ContextWithUserInfo(r.Context, &changed)
 		}},

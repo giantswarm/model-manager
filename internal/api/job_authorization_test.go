@@ -40,8 +40,8 @@ func TestRESTAndMCPJobAuthorization(t *testing.T) {
 			NewREST(svc, nil).Register(mux)
 			mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(NewMCPServer(svc, buildinfo.Info{Version: "test"}), mcpserver.WithStateLess(true)))
 			host := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				caller := &providers.UserInfo{Issuer: "https://issuer.example.test", ID: request.Header.Get("X-Test-Subject"), ClientID: "client", Email: request.Header.Get("X-Test-Email")}
-				mux.ServeHTTP(writer, request.WithContext(handler.ContextWithUserInfo(request.Context(), caller)))
+				user := &providers.UserInfo{Issuer: "https://issuer.example.test", ID: request.Header.Get("X-Test-Subject"), ClientID: "client", Email: request.Header.Get("X-Test-Email")}
+				mux.ServeHTTP(writer, request.WithContext(handler.ContextWithUserInfo(request.Context(), user)))
 			}))
 			t.Cleanup(host.Close)
 			invoke := func(subject, operation, identifier string, dryRun ...bool) (map[string]any, bool) {

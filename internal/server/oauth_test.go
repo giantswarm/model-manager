@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -282,4 +283,20 @@ func newLocalhostTLSServer(t *testing.T, handler http.Handler) *httptest.Server 
 // localhostURL is the server's base URL with the hostname localhost.
 func localhostURL(srv *httptest.Server) string {
 	return strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
+}
+
+func TestLogUserNamesTheUserWithoutProfileData(t *testing.T) {
+	var logs bytes.Buffer
+	o := &oauthRuntime{log: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	user := &providers.UserInfo{Issuer: "https://dex.example.test", ID: "sub-admin", Email: "admin@lab.local", TokenSource: providers.TokenSourceSSO}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	request = request.WithContext(handler.ContextWithUserInfo(request.Context(), user))
+
+	o.logUser(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })).ServeHTTP(httptest.NewRecorder(), request)
+
+	var line map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &line))
+	require.Equal(t, map[string]any{"issuer": "https://dex.example.test", "subject": "sub-admin"}, line["user"])
+	require.Equal(t, string(providers.TokenSourceSSO), line["token_source"])
+	require.NotContains(t, logs.String(), "admin@lab.local")
 }

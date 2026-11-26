@@ -90,8 +90,8 @@ type RemoteFor func(token string) (Remote, error)
 type Committer struct {
 	remote RemoteFor
 	// user fetches the person's user access token per commit (nil: every
-	// commit is refused); grantApp is muster's name for the provider App that
-	// grant is of.
+	// commit is refused); grantApp is muster's name for the provider App the
+	// person granted.
 	user     GitHubUser
 	grantApp string
 	dyn      func(ctx context.Context) (dynamic.Interface, error)
