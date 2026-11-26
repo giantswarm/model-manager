@@ -346,7 +346,7 @@ true
 {{- else if or $x.audience $x.clientID $x.clientSecret $x.existingSecret $x.caSecretName -}}
 {{- fail "github.tokenExchange.tokenEndpoint is required when any other github.tokenExchange value is set" -}}
 {{- else if .Values.github.enabled -}}
-{{- fail "github.enabled needs github.tokenExchange.tokenEndpoint: commit mode fetches the person's GitHub grant per commit from muster's broker (github.tokenExchange)" -}}
+{{- fail "github.enabled needs github.tokenExchange.tokenEndpoint: commit mode fetches the person's GitHub App user access token per commit from muster's broker (github.tokenExchange)" -}}
 {{- end -}}
 {{- end }}
 

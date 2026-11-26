@@ -59,7 +59,7 @@ var (
 	ErrUnsupported = errors.New("operation not supported")
 	// ErrForbidden means the caller may not do this, whatever the cluster's
 	// RBAC says (an agent acting for a person asking for the person's
-	// GitHub grant).
+	// GitHub user access token).
 	ErrForbidden = errors.New("forbidden")
 	// ErrConflict means the operation would clobber state owned by someone else.
 	ErrConflict = errors.New("conflict")

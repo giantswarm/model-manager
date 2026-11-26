@@ -183,10 +183,10 @@ func TestGitHubExchange(t *testing.T) {
 			result, err := resolve(ctx)
 			if scenario == "success" {
 				require.NoError(t, err)
-				require.Equal(t, &gitops.GitHubUserToken{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
+				require.Equal(t, &gitops.GitHubUserAccessToken{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
 				_, err = resolve(ctx)
 				require.NoError(t, err)
-				require.Len(t, seen.on("/user"), 2, "user grants are not cached")
+				require.Len(t, seen.on("/user"), 2, "user access tokens are not cached")
 			} else {
 				require.Error(t, err)
 				require.Nil(t, result)

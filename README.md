@@ -948,14 +948,14 @@ else the `sub` — is on every mutation's log line and recorded as
 
 `--downstream-oauth` goes one step further: everything a request does against
 the Kubernetes API (LLMInferenceServices, download Jobs, cache scans, kagent
-ModelConfigs, the discovery ConfigMap) presents the caller's IdP token, and
+ModelConfigs, the discovery ConfigMap) presents the caller's ID token, and
 the ServiceAccount holds no permissions at all — the chart renders none of its
 Roles and ClusterRoles; the caller's RBAC is the only RBAC. That needs an
 apiserver that trusts the IdP and the token's audience — a Dex install lists
 the cross-client audience the apiserver trusts in the MCPServer's
 `requiredAudiences` (muster requests it at login), a Google install's client
 id is the apiserver's `--oidc-client-id`. A request whose bearer yields no
-IdP token to present (one this server neither issued nor trusts as a forwarded
+ID token to present (one this server neither issued nor trusts as a forwarded
 id_token) is refused with 401 instead of running as the permissionless
 ServiceAccount. Nothing runs without a caller: the
 wiring reconciler and the re-adoption of running downloads after a restart
@@ -1013,13 +1013,13 @@ Commit mode needs the person's GitHub authority, offered with the chart's
 `github.enabled`. With `github.tokenExchange`, the MCPServer forwards the
 person's ID token as without commit mode, and only a commit asks for GitHub:
 model-manager exchanges the ID token at muster's RFC 8693 broker
-(`--github-token-exchange-endpoint`) for the person's user grant of the GitHub
+(`--github-token-exchange-endpoint`) for the person's user access token of the GitHub
 App `github.tokenExchange.audience` names, for that commit only, verifies it
 with `GET /user` and opens the pull request with it. Without the grant the MCP
 tool answers `grant_required` with `apps: [<audience>]`, and the MCPServer
 lists the audience under `auth.providerApps`, so muster turns the answer into
 that App's sign-in link. REST answers `403` with code `grant_required` and
-the same `apps`. GitHub refusing the grant with `401` answers
+the same `apps`. GitHub refusing the token with `401` answers
 `grant_required` too. The client ID comes from
 `--github-token-exchange-client-id`, else from the mounted Secret's
 `client-id` key. A call made by an agent acting for the person (an ID token
@@ -1028,7 +1028,7 @@ muster also attaches the person's App token to every call it forwards, which
 model-manager ignores, until giantswarm/giantswarm#39227 lets a server name an
 App without receiving it.
 
-Fetching the person's GitHub grant from muster is a temporary deviation from
+Fetching the person's GitHub user access token from muster is a temporary deviation from
 the MCP 2025-11-25 authorization rules (no token passthrough, no third-party
 credentials), decided in giantswarm/giantswarm#39213; the exit is
 model-manager holding its own grant through URL elicitation and ID-JAG

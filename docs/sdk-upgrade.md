@@ -28,8 +28,9 @@ The product adapter in `internal/server/oauth.go` retains resolved CLI settings,
 resource-path selection, attachment of caller credentials for Kubernetes and
 application cleanup logging. `oauthconfig` owns provider/store construction and
 token-server lifecycle. `cmd/tool_policy.go` translates validated user info to
-plain toolkit identity fields. GitHub grant orchestration remains product code;
-it is not an OAuth configuration or generic MCP transport responsibility.
+plain toolkit identity fields. Fetching the GitHub user access token remains
+product code; it is not an OAuth configuration or generic MCP transport
+responsibility.
 
 | State | Key and authority | Upgrade action |
 | --- | --- | --- |

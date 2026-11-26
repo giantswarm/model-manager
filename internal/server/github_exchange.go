@@ -58,9 +58,10 @@ func (c GitHubExchangeConfig) Validate() error {
 	return nil
 }
 
-// NewGitHubExchange obtains the person's user grant on demand. Tokens are
-// neither cached nor attached to a session; only the returned request-local
-// identity holds one. log receives the broker's refusals.
+// NewGitHubExchange obtains the person's GitHub App user access token on
+// demand. Tokens are neither cached nor attached to a session; only the
+// returned request-local GitHubUserAccessToken holds one. log receives the
+// broker's refusals.
 func NewGitHubExchange(configuration GitHubExchangeConfig, log *slog.Logger) (gitops.GitHubUser, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, err
@@ -93,14 +94,14 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 	grantRequired := func(reason string) error {
 		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
-	return func(ctx context.Context) (*gitops.GitHubUserToken, error) {
+	return func(ctx context.Context) (*gitops.GitHubUserAccessToken, error) {
 		validatedUser, ok := requester.FromContext(ctx)
 		subjectToken, hasToken := requester.IDTokenFromContext(ctx)
 		if !ok || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken {
 			return nil, fmt.Errorf("%w: commit mode needs your verified platform identity to fetch your GitHub authorization", gitops.ErrAuthRequired)
 		}
 		// A delegated caller (an agent acting for the person) never receives
-		// the person's GitHub grant.
+		// the person's GitHub user access token.
 		if validatedUser.IsOBO() {
 			return nil, fmt.Errorf("%w: commit mode opens the pull request as you, and only you, not an agent acting for you, can authorize it", backend.ErrForbidden)
 		}
@@ -161,6 +162,6 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&user) != nil || user.Login == "" {
 			return nil, fmt.Errorf("%w: GitHub user verification answered status %d", backend.ErrUnavailable, response.StatusCode)
 		}
-		return &gitops.GitHubUserToken{Login: user.Login, Token: result.AccessToken}, nil
+		return &gitops.GitHubUserAccessToken{Login: user.Login, Token: result.AccessToken}, nil
 	}
 }

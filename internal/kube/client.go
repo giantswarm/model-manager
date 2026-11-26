@@ -1,7 +1,7 @@
 // Package kube builds the Kubernetes clients model-manager uses for agent
 // wiring and the kserve driver: in-cluster when running as a pod, kubeconfig
 // (+ context) otherwise. With downstream OAuth on, a request that carries the
-// caller's IdP token gets clients that present that token instead — the
+// caller's ID token gets clients that present that token instead — the
 // caller's RBAC governs what the request may do, and the ServiceAccount holds
 // no permissions of its own (the chart renders no RBAC for it).
 package kube

@@ -59,8 +59,8 @@ func cluster(extra ...runtime.Object) dynamic.Interface {
 // name.
 const testApp = "model-manager"
 
-// personKey carries the person's grant in a test's context, where the
-// production grant fetch asks muster's broker.
+// personKey carries the person's user access token in a test's context,
+// where production fetches it from muster's broker.
 type personKey struct{}
 
 // committer commits through fake, whose unreachable repositories the
@@ -68,14 +68,14 @@ type personKey struct{}
 // context (none: the person has not granted the App).
 func committer(dyn dynamic.Interface, fake *commit.Fake, unreachable ...commit.Repository) *Committer {
 	return NewCommitter(func(string) (Remote, error) { return FakeRemote{Fake: fake, Unreachable: unreachable}, nil }, func(context.Context) (dynamic.Interface, error) { return dyn, nil }).
-		WithGitHubUser(testApp, func(ctx context.Context) (*GitHubUserToken, error) {
-			gh, _ := ctx.Value(personKey{}).(*GitHubUserToken)
+		WithGitHubUser(testApp, func(ctx context.Context) (*GitHubUserAccessToken, error) {
+			gh, _ := ctx.Value(personKey{}).(*GitHubUserAccessToken)
 			return gh, nil
 		})
 }
 
 func asPerson() context.Context {
-	return context.WithValue(context.Background(), personKey{}, &GitHubUserToken{Login: "jane", Token: "ghu_x"})
+	return context.WithValue(context.Background(), personKey{}, &GitHubUserAccessToken{Login: "jane", Token: "ghu_x"})
 }
 
 func modelConfig(name string) *unstructured.Unstructured {
@@ -126,18 +126,18 @@ func TestCommitWithoutGitHubAuthorizationNamesTheConsent(t *testing.T) {
 	assert.Contains(t, err.Error(), "core_auth_login server=model-manager")
 }
 
-// TestCommitAsksForTheGrant: with the grant fetched per commit, a commit
-// without it answers the grant the person must give and opens nothing; with
-// it the pull request is opened as the person.
+// TestCommitAsksForTheGrant: with the user access token fetched per commit,
+// a commit without a grant answers the grant the person must give and opens
+// nothing; with it the pull request is opened as the person.
 func TestCommitAsksForTheGrant(t *testing.T) {
 	fake := commit.NewFake()
 	fake.AddBranch(repo, "main", map[string][]byte{"platform/kustomization.yaml": []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- kagent.yaml\n")})
 	granted := false
-	c := committer(cluster(), fake).WithGitHubUser("github", func(context.Context) (*GitHubUserToken, error) {
+	c := committer(cluster(), fake).WithGitHubUser("github", func(context.Context) (*GitHubUserAccessToken, error) {
 		if !granted {
 			return nil, &ErrGrantRequired{App: "github", Reason: "grant it"}
 		}
-		return &GitHubUserToken{Login: "jane", Token: "ghu_grant"}, nil
+		return &GitHubUserAccessToken{Login: "jane", Token: "ghu_grant"}, nil
 	})
 	req := Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"}
 
@@ -165,12 +165,12 @@ func (r refusingRemote) Reachable(context.Context, commit.Repository) (bool, err
 	return false, &commit.AuthError{Op: "get repository", Status: r.status}
 }
 
-// TestCommitWithAFetchedGrantGitHubRefuses: with the grant fetched per
-// commit, GitHub's 401 asks for the grant again as grant_required, and its
+// TestCommitWithAFetchedTokenGitHubRefuses: with the user access token
+// fetched per commit, GitHub's 401 asks for the grant again as grant_required, and its
 // 403 names the App by muster's name, never the server's login.
-func TestCommitWithAFetchedGrantGitHubRefuses(t *testing.T) {
-	user := func(context.Context) (*GitHubUserToken, error) {
-		return &GitHubUserToken{Login: "jane", Token: "ghu_grant"}, nil
+func TestCommitWithAFetchedTokenGitHubRefuses(t *testing.T) {
+	user := func(context.Context) (*GitHubUserAccessToken, error) {
+		return &GitHubUserAccessToken{Login: "jane", Token: "ghu_grant"}, nil
 	}
 	request := Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"}
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
@@ -202,8 +202,8 @@ func TestCommitWithAFetchedGrantNamesTheGrantedApp(t *testing.T) {
 		return FakeRemote{Fake: fake, Unreachable: []commit.Repository{repo}}, nil
 	},
 		func(context.Context) (dynamic.Interface, error) { return cluster(), nil }).
-		WithGitHubUser("model-manager", func(context.Context) (*GitHubUserToken, error) {
-			return &GitHubUserToken{Login: "jane", Token: "ghu_grant"}, nil
+		WithGitHubUser("model-manager", func(context.Context) (*GitHubUserAccessToken, error) {
+			return &GitHubUserAccessToken{Login: "jane", Token: "ghu_grant"}, nil
 		})
 
 	_, err := c.Commit(t.Context(), Request{Namespace: "kagent", Write: []*unstructured.Unstructured{modelConfig("qwen3-0-6b")}, Verb: "wire", Subject: "qwen3-0-6b", Tool: "wire_model", Summary: "Wires qwen3:0.6b"})

@@ -220,7 +220,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 
 	// Nothing admitted, nothing attached.
 	rec = httptest.NewRecorder()
-	o.admitCaller(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
+	o.requireCaller(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
@@ -232,7 +232,7 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 
 	var caller string
 	var hasToken bool
-	h := afterValidation(verifiedUser(), o.admitCaller(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := afterValidation(verifiedUser(), o.requireCaller(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller = requester.RequestedBy(r.Context())
 		_, hasToken = requester.IDTokenFromContext(r.Context())
 	})))

@@ -323,8 +323,8 @@ echo "$got" | grep -A6 -- 'OTLP collector' | grep >/dev/null -- 'cidr: 0.0.0.0/0
 echo "$got" | grep -A9 -- 'OTLP collector' | grep >/dev/null -- 'port: 443$' \
   || fail "networkpolicy: the OTLP egress to an https collector without a port is not 443"
 
-# github.tokenExchange: commit mode with the person's grant fetched per
-# commit. The MCPServer forwards the ID token and lists the audience under
+# github.tokenExchange: commit mode with the person's user access token fetched
+# per commit. The MCPServer forwards the ID token and lists the audience under
 # providerApps (no App pin); the Deployment mounts the whole Secret and passes
 # the client ID file; inline clientSecret renders the chart's Secret.
 GHX=("${DEX[@]}" --set oauth.downstream.enabled=true --set github.enabled=true

@@ -33,11 +33,11 @@ type OAuthConfig struct {
 	// Settings is mcp-oauth's configuration, read from the OAUTH_* variables
 	// by oauthconfig.SettingsFromEnv.
 	Settings oauthconfig.Settings
-	// DownstreamOAuth puts the caller's IdP token on the request so
+	// DownstreamOAuth puts the caller's ID token on the request so
 	// Kubernetes API calls are made as the caller instead of the
 	// ServiceAccount (the apiserver must trust the IdP and the token's
 	// audience). The ServiceAccount holds no permissions then, so a request
-	// that yields no IdP token to present is refused (401).
+	// that yields no ID token to present is refused (401).
 	DownstreamOAuth bool
 }
 
@@ -126,24 +126,24 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
 // server's own access tokens, or a forwarded IdP id_token whose audience is
-// trusted), which puts the validated caller on the request, then admits only a
+// trusted), which puts the validated caller on the request, then requires a
 // complete caller.
 func (o *oauthRuntime) protect(next http.Handler) http.Handler {
-	protected := o.admitCaller(next)
+	protected := o.requireCaller(next)
 	if o.downstreamOAuth {
 		protected = o.handler.RequireProviderIDToken(protected)
 	}
 	return o.handler.ValidateToken(protected)
 }
 
-// admitCaller admits a request only with a complete validated caller
+// requireCaller lets a request through only with a complete validated caller
 // (issuer, subject, and both or neither actor claims) and, with
-// DownstreamOAuth, resolves the IdP token to present to the Kubernetes API: a
-// forwarded id_token is the bearer itself; for a token this server issued,
-// the provider's id_token is looked up in the store. A request that yields
-// neither is refused: the ServiceAccount holds no permissions, so there is
-// nothing else to run as.
-func (o *oauthRuntime) admitCaller(next http.Handler) http.Handler {
+// DownstreamOAuth, resolves the caller's OIDC ID token to present to the
+// Kubernetes API: a forwarded id_token is the bearer itself; for a token this
+// server issued, the provider's id_token is looked up in the store. A request
+// that yields neither is refused: the ServiceAccount holds no permissions, so
+// there is nothing else to run as.
+func (o *oauthRuntime) requireCaller(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		info, ok := requester.FromContext(ctx)
