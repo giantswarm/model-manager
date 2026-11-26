@@ -154,14 +154,14 @@ func TestListOrderAndPrune(t *testing.T) {
 
 func TestStartInheritsTheCallerButNotTheRequestCancellation(t *testing.T) {
 	m := NewManager(WithAnonymousAccess(true))
-	reqCtx, cancelReq := context.WithCancel(requester.ContextWithToken(
+	reqCtx, cancelReq := context.WithCancel(requester.ContextWithIDToken(
 		handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{Issuer: "https://issuer.example.test", ID: "sub-1", ClientID: "cli", Email: "admin@lab.local"}), "caller-token"))
 	release := make(chan struct{})
 	var seenCaller, seenToken string
 	var seenErr error
 	job, created := startJob(t, m, StartRequest{Type: TypePull, Model: "m", Context: reqCtx}, func(ctx context.Context, _ func(backend.Progress)) (any, error) {
-		seenCaller = requester.Caller(ctx)
-		seenToken, _ = requester.TokenFromContext(ctx)
+		seenCaller = requester.RequestedBy(ctx)
+		seenToken, _ = requester.IDTokenFromContext(ctx)
 		<-release
 		seenErr = ctx.Err()
 		return nil, nil

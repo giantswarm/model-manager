@@ -27,7 +27,7 @@ type operationKey struct {
 func callerPrincipal(ctx context.Context) (principal, error) {
 	caller, ok := requester.FromContext(ctx)
 	if !ok {
-		if _, hasToken := requester.TokenFromContext(ctx); hasToken {
+		if _, hasToken := requester.IDTokenFromContext(ctx); hasToken {
 			return principal{}, ErrIdentityRequired
 		}
 		return principal{}, nil
@@ -45,7 +45,7 @@ func grantKey(ctx context.Context) string {
 	scopes := slices.Clone(requester.Scopes(ctx))
 	slices.Sort(scopes)
 	scopes = slices.Compact(scopes)
-	credential, _ := requester.TokenFromContext(ctx)
+	credential, _ := requester.IDTokenFromContext(ctx)
 	credentialDigest := sha256.Sum256([]byte(credential))
 	encoded, _ := json.Marshal(struct {
 		Scopes     []string

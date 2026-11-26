@@ -29,7 +29,7 @@ func (b *Backend) callerless(ctx context.Context, work string) string {
 	if b.opts.Target.Local() {
 		return ""
 	}
-	if _, ok := requester.TokenFromContext(ctx); ok {
+	if _, ok := requester.IDTokenFromContext(ctx); ok {
 		return ""
 	}
 	reason := fmt.Sprintf("no %s on the remote target %s without a caller: model-manager holds no credential there, and only a request carrying the caller's token may act on it", work, b.opts.Target.Cluster)

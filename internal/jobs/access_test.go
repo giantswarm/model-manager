@@ -99,7 +99,7 @@ func TestTaskDeduplicationIncludesEffectiveAuthorityAndParameters(t *testing.T) 
 		{"resource", func(r *StartRequest) { r.Resource = "other-resource" }},
 		{"backend instance", func(r *StartRequest) { r.Scope = "other-target" }},
 		{"parameters", func(r *StartRequest) { r.Parameters = `{"placement":"split"}` }},
-		{"new credential", func(r *StartRequest) { r.Context = requester.ContextWithToken(r.Context, "fresh-credential") }},
+		{"new credential", func(r *StartRequest) { r.Context = requester.ContextWithIDToken(r.Context, "fresh-credential") }},
 		{"different grant", func(r *StartRequest) {
 			caller, _ := requester.FromContext(r.Context)
 			changed := *caller
@@ -174,7 +174,7 @@ func TestTaskIdentityFailsClosedAndApplicationRecoveryIsNotUserOwnership(t *test
 	}
 	_, _, err := manager.Start(StartRequest{Context: t.Context()}, blockingOperation)
 	require.ErrorIs(t, err, ErrIdentityRequired)
-	_, _, err = manager.Start(StartRequest{Context: requester.ContextWithToken(t.Context(), "credential")}, blockingOperation)
+	_, _, err = manager.Start(StartRequest{Context: requester.ContextWithIDToken(t.Context(), "credential")}, blockingOperation)
 	require.ErrorIs(t, err, ErrIdentityRequired)
 	recovered, _, err := manager.Start(StartRequest{ApplicationOwned: true, Type: TypePull, Model: "model"}, blockingOperation)
 	require.NoError(t, err)

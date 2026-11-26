@@ -55,7 +55,7 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 	users, err := toolkitk8s.NewUserClients(&rest.Config{Host: api.URL, BearerToken: "application-credential"}, nil)
 	require.NoError(t, err)
 	driver := &Backend{opts: backend.KServeOptions{ClientsFor: func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		token, _ := requester.TokenFromContext(ctx)
+		token, _ := requester.IDTokenFromContext(ctx)
 		clients, err := users.ForToken(token)
 		if err != nil {
 			return nil, nil, err
@@ -63,12 +63,12 @@ func TestJobAccessUsesCurrentCallerAndResourceIdentity(t *testing.T) {
 		return clients.Clientset, clients.Dynamic, nil
 	}}}
 	object := &backend.JobObject{Group: "batch", Version: "v1", Resource: "jobs", Namespace: "tenant", Name: "download", UID: "original"}
-	caller := requester.ContextWithToken(t.Context(), "fresh-caller")
+	caller := requester.ContextWithIDToken(t.Context(), "fresh-caller")
 	require.NoError(t, driver.CheckJobAccess(caller, object))
 	mode.Store("forbidden")
 	require.Error(t, driver.CheckJobAccess(caller, object))
 	mode.Store("allowed")
-	require.Error(t, driver.CheckJobAccess(requester.ContextWithToken(t.Context(), "expired-caller"), object))
+	require.Error(t, driver.CheckJobAccess(requester.ContextWithIDToken(t.Context(), "expired-caller"), object))
 	require.Error(t, driver.CheckJobAccess(t.Context(), object))
 	mode.Store("replacement")
 	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrNotFound)
@@ -97,7 +97,7 @@ func TestServingTaskAccessUsesTheOriginalNamespaceNameAndUID(t *testing.T) {
 	users, err := toolkitk8s.NewUserClients(&rest.Config{Host: api.URL, BearerToken: "application-credential"}, nil)
 	require.NoError(t, err)
 	driver := &Backend{opts: backend.KServeOptions{ClientsFor: func(ctx context.Context) (kubernetes.Interface, dynamic.Interface, error) {
-		credential, _ := requester.TokenFromContext(ctx)
+		credential, _ := requester.IDTokenFromContext(ctx)
 		clients, err := users.ForToken(credential)
 		if err != nil {
 			return nil, nil, err
@@ -105,7 +105,7 @@ func TestServingTaskAccessUsesTheOriginalNamespaceNameAndUID(t *testing.T) {
 		return clients.Clientset, clients.Dynamic, nil
 	}}}
 	object := &backend.JobObject{Group: llmisvcGVR.Group, Version: llmisvcGVR.Version, Resource: llmisvcGVR.Resource, Namespace: "tenant", Name: "served-model", UID: "original"}
-	caller := requester.ContextWithToken(t.Context(), "current-caller")
+	caller := requester.ContextWithIDToken(t.Context(), "current-caller")
 	require.NoError(t, driver.CheckJobAccess(caller, object))
 	replacement.Store(true)
 	require.ErrorIs(t, driver.CheckJobAccess(caller, object), backend.ErrNotFound)

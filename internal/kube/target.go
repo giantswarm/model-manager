@@ -108,8 +108,8 @@ func authFailure(apiServer string, code int, message, token string, now time.Tim
 		return fmt.Sprintf("%s — %s authenticated the caller, whose RBAC there does not allow this: model-manager acts on the target as the caller, with no permissions of its own", message, apiServer)
 	}
 	c := requester.TokenClaims(token)
-	if !c.Expires.IsZero() && now.After(c.Expires) {
-		return fmt.Sprintf("%s — the caller's token expired at %s; the operation outlived it, a new request carries a fresh one", message, c.Expires.UTC().Format(time.RFC3339))
+	if !c.Expiry.IsZero() && now.After(c.Expiry) {
+		return fmt.Sprintf("%s — the caller's token expired at %s; the operation outlived it, a new request carries a fresh one", message, c.Expiry.UTC().Format(time.RFC3339))
 	}
 	issuer, audience := "the installation's Dex", "the client ID the caller's token is issued for"
 	if c.Issuer != "" {

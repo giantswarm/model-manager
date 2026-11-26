@@ -80,7 +80,7 @@ func fromRESTConfig(restCfg *rest.Config) (*Factory, error) {
 // For selects caller clients when a token is present, including after expiry.
 // Calls without a token use the explicitly configured base clients.
 func (c *Factory) For(ctx context.Context) (*toolkitk8s.Clients, error) {
-	token, ok := requester.TokenFromContext(ctx)
+	token, ok := requester.IDTokenFromContext(ctx)
 	if !ok {
 		return c.Clients, nil
 	}

@@ -24,7 +24,7 @@ func (b *Backend) StopDownload(ctx context.Context, req backend.StopDownloadRequ
 	if ref == "" {
 		return nil, fmt.Errorf("%w: model reference is required", backend.ErrInvalid)
 	}
-	if _, ok := requester.TokenFromContext(ctx); !ok {
+	if _, ok := requester.IDTokenFromContext(ctx); !ok {
 		return nil, fmt.Errorf("%w: stopping a shared download runs only with the caller's own Kubernetes credentials (--downstream-oauth); delete the download Job through the Kubernetes API instead", backend.ErrUnsupported)
 	}
 	s := b.cfg.settings(ctx)

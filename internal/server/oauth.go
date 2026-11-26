@@ -126,23 +126,24 @@ func (o *oauthRuntime) register(mux *http.ServeMux) {
 
 // protect requires a valid bearer token (mcp-oauth ValidateToken: this
 // server's own access tokens, or a forwarded IdP id_token whose audience is
-// trusted) and then attaches the caller to the request.
+// trusted), which puts the validated caller on the request, then admits only a
+// complete caller.
 func (o *oauthRuntime) protect(next http.Handler) http.Handler {
-	protected := o.attachIdentity(next)
+	protected := o.admitCaller(next)
 	if o.downstreamOAuth {
 		protected = o.handler.RequireProviderIDToken(protected)
 	}
 	return o.handler.ValidateToken(protected)
 }
 
-// attachIdentity admits a request only with a complete validated caller
+// admitCaller admits a request only with a complete validated caller
 // (issuer, subject, and both or neither actor claims) and, with
 // DownstreamOAuth, resolves the IdP token to present to the Kubernetes API: a
 // forwarded id_token is the bearer itself; for a token this server issued,
 // the provider's id_token is looked up in the store. A request that yields
 // neither is refused: the ServiceAccount holds no permissions, so there is
 // nothing else to run as.
-func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
+func (o *oauthRuntime) admitCaller(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		info, ok := requester.FromContext(ctx)
@@ -151,19 +152,15 @@ func (o *oauthRuntime) attachIdentity(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		source := "oauth"
-		if info.IsSSO() {
-			source = "sso"
-		}
 		if o.downstreamOAuth {
 			token, err := handler.ProviderIDTokenFromContext(ctx)
 			if err != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			ctx = requester.ContextWithToken(ctx, token)
+			ctx = requester.ContextWithIDToken(ctx, token)
 		}
-		o.log.Debug("authenticated request", requester.LogAttr(ctx), "source", source, "path", r.URL.Path)
+		o.log.Debug("authenticated request", requester.LogAttr(ctx), "token_source", info.TokenSource, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

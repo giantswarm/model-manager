@@ -35,7 +35,7 @@ func TestContextRoundTrip(t *testing.T) {
 	_, ok := FromContext(ctx)
 	assert.False(t, ok)
 	assert.Equal(t, "service-account", LogAttr(ctx).Value.String())
-	assert.Equal(t, "", Caller(ctx))
+	assert.Equal(t, "", RequestedBy(ctx))
 	assert.Nil(t, Scopes(ctx))
 
 	info := &providers.UserInfo{Issuer: "https://idp.example.test", ID: "sub-1", Email: "admin@lab.local", Groups: []string{"platform-admins"}, Scopes: []string{"stored"}}
@@ -43,44 +43,48 @@ func TestContextRoundTrip(t *testing.T) {
 	got, ok := FromContext(ctx)
 	require.True(t, ok)
 	assert.Same(t, info, got)
-	assert.Equal(t, "admin@lab.local", Caller(ctx))
+	assert.Equal(t, "admin@lab.local", RequestedBy(ctx))
 	assert.Equal(t, "caller", LogAttr(ctx).Key)
 	assert.Equal(t, "issuer", LogAttr(ctx).Value.Group()[0].Key)
 	assert.Equal(t, info.Issuer, LogAttr(ctx).Value.Group()[0].Value.String())
 	assert.Equal(t, []string{"stored"}, Scopes(ctx), "without validated scopes, the caller's recorded ones")
 	assert.Equal(t, []string{"mcp:access"}, Scopes(handler.ContextWithScopes(ctx, []string{"mcp:access"})), "the validated scopes win")
 
-	assert.Equal(t, "sub-1", Caller(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "sub-1"})), "email wins, subject is the fallback")
+	assert.Equal(t, "sub-1", RequestedBy(handler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "sub-1"})), "email wins, subject is the fallback")
 
-	_, ok = TokenFromContext(ctx)
+	_, ok = IDTokenFromContext(ctx)
 	assert.False(t, ok)
-	ctx = ContextWithToken(ctx, "tok")
-	tok, ok := TokenFromContext(ctx)
+	ctx = ContextWithIDToken(ctx, "tok")
+	tok, ok := IDTokenFromContext(ctx)
 	require.True(t, ok)
 	assert.Equal(t, "tok", tok)
-	assert.Same(t, ctx, ContextWithToken(ctx, ""), "an empty token adds nothing")
-}
-
-func TestTokenExpiry(t *testing.T) {
-	exp := time.Now().Add(time.Hour).Truncate(time.Second)
-	assert.Equal(t, exp, TokenExpiry(jwt(t, map[string]any{"exp": exp.Unix()})))
-	assert.True(t, TokenExpiry(jwt(t, map[string]any{"sub": "x"})).IsZero(), "no exp claim")
-	assert.True(t, TokenExpiry("opaque-token").IsZero())
-	assert.True(t, TokenExpiry("a.!!!.c").IsZero())
+	assert.Same(t, ctx, ContextWithIDToken(ctx, ""), "an empty token adds nothing")
 }
 
 func TestTokenClaims(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Truncate(time.Second)
-	c := TokenClaims(jwt(t, map[string]any{"iss": "https://dex.example", "aud": "muster", "exp": exp.Unix()}))
-	assert.Equal(t, Claims{Issuer: "https://dex.example", Audience: []string{"muster"}, Expires: exp}, c)
-	assert.Equal(t, []string{"a", "b"}, TokenClaims(jwt(t, map[string]any{"aud": []string{"a", "b"}})).Audience, "aud as an array")
+	c := TokenClaims(signedToken(t, map[string]any{"iss": "https://dex.example", "aud": "muster", "exp": exp.Unix()}))
+	assert.Equal(t, Claims{Issuer: "https://dex.example", Audience: []string{"muster"}, Expiry: exp}, c)
+	assert.Equal(t, []string{"a", "b"}, TokenClaims(signedToken(t, map[string]any{"aud": []string{"a", "b"}})).Audience, "aud as an array")
+	assert.True(t, TokenClaims(signedToken(t, map[string]any{"sub": "x"})).Expiry.IsZero(), "no exp claim")
 	assert.Equal(t, Claims{}, TokenClaims("opaque-token"))
+	assert.Equal(t, Claims{}, TokenClaims("a.!!!.c"))
+	assert.Equal(t, Claims{}, TokenClaims(unsigned(t, map[string]any{"iss": "https://dex.example"})), "alg none is not a JWS this server accepts")
 }
 
-func jwt(t *testing.T, claims map[string]any) string {
+func signedToken(t *testing.T, claims map[string]any) string {
 	t.Helper()
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	return compact(t, `{"alg":"RS256"}`, claims)
+}
+
+func unsigned(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	return compact(t, `{"alg":"none"}`, claims)
+}
+
+func compact(t *testing.T, header string, claims map[string]any) string {
+	t.Helper()
 	payload, err := json.Marshal(claims)
 	require.NoError(t, err)
-	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

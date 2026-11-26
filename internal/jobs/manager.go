@@ -242,7 +242,7 @@ func (m *Manager) Start(req StartRequest, fn RunFunc) (job Job, created bool, er
 			Preset:      req.Preset,
 			Resource:    req.Resource,
 			Object:      cloneObject(req.Object),
-			RequestedBy: requester.Caller(parent),
+			RequestedBy: requester.RequestedBy(parent),
 		},
 		cancel: cancel,
 		done:   make(chan struct{}),

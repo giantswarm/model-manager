@@ -31,7 +31,7 @@ func TestAttachIdentityRequiresCompleteValidatedClaims(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runtime := &oauthRuntime{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			called := false
-			protected := afterValidation(&test.user, runtime.attachIdentity(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			protected := afterValidation(&test.user, runtime.admitCaller(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				called = true
 				caller, ok := requester.FromContext(request.Context())
 				require.True(t, ok)

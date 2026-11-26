@@ -29,7 +29,7 @@ func callerFixture(t *testing.T) (*fixture, context.Context) {
 	f.b.opts.ClientsFor = func(context.Context) (kubernetes.Interface, dynamic.Interface, error) {
 		return f.cs, f.dyn, nil
 	}
-	return f, requester.ContextWithToken(t.Context(), "caller-token")
+	return f, requester.ContextWithIDToken(t.Context(), "caller-token")
 }
 
 // runningDownload creates the download Job for plan with a uid, as the

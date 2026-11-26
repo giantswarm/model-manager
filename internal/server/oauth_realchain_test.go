@@ -247,7 +247,7 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 	})
 	var caller string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = requester.Caller(r.Context())
+		caller = requester.RequestedBy(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)

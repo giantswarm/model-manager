@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giantswarm/mcp-oauth/handler"
 	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers/oidc"
 
@@ -94,10 +93,10 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 	grantRequired := func(reason string) error {
 		return &gitops.ErrGrantRequired{App: configuration.Audience, Reason: fmt.Sprintf(reason, configuration.Audience, configuration.Audience)}
 	}
-	return func(ctx context.Context) (*requester.GitHub, error) {
-		validatedUser, ok := handler.UserInfoFromContext(ctx)
-		subjectToken, hasToken := requester.TokenFromContext(ctx)
-		if !ok || validatedUser == nil || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken || subjectToken == "" {
+	return func(ctx context.Context) (*gitops.GitHubUserToken, error) {
+		validatedUser, ok := requester.FromContext(ctx)
+		subjectToken, hasToken := requester.IDTokenFromContext(ctx)
+		if !ok || validatedUser.Issuer == "" || validatedUser.ID == "" || !hasToken {
 			return nil, fmt.Errorf("%w: commit mode needs your verified platform identity to fetch your GitHub authorization", gitops.ErrAuthRequired)
 		}
 		// A delegated caller (an agent acting for the person) never receives
@@ -162,6 +161,6 @@ func newGitHubExchange(configuration GitHubExchangeConfig, client *http.Client, 
 		if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 16*1024)).Decode(&user) != nil || user.Login == "" {
 			return nil, fmt.Errorf("%w: GitHub user verification answered status %d", backend.ErrUnavailable, response.StatusCode)
 		}
-		return &requester.GitHub{Login: user.Login, Token: result.AccessToken}, nil
+		return &gitops.GitHubUserToken{Login: user.Login, Token: result.AccessToken}, nil
 	}
 }

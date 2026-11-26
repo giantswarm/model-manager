@@ -172,18 +172,18 @@ func TestGitHubExchange(t *testing.T) {
 			switch scenario {
 			case "delegated actor":
 				user.ActorIssuer, user.ActorSubject = "https://agents.example.test", "agent"
-				ctx = requester.ContextWithToken(ctx, personToken)
+				ctx = requester.ContextWithIDToken(ctx, personToken)
 			case "missing identity token":
 			case "missing verified identity":
-				ctx = requester.ContextWithToken(t.Context(), personToken)
+				ctx = requester.ContextWithIDToken(t.Context(), personToken)
 			default:
-				ctx = requester.ContextWithToken(ctx, personToken)
+				ctx = requester.ContextWithIDToken(ctx, personToken)
 			}
 			resolve := newGitHubExchange(configuration, client, log)
 			result, err := resolve(ctx)
 			if scenario == "success" {
 				require.NoError(t, err)
-				require.Equal(t, &requester.GitHub{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
+				require.Equal(t, &gitops.GitHubUserToken{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
 				_, err = resolve(ctx)
 				require.NoError(t, err)
 				require.Len(t, seen.on("/user"), 2, "user grants are not cached")
@@ -277,7 +277,7 @@ func TestGitHubExchangeClientID(t *testing.T) {
 	emptyFile := filepath.Join(dir, "empty")
 	require.NoError(t, os.WriteFile(emptyFile, nil, 0o600))
 	base := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientSecretFile: secretFile, Audience: "manager-app", CAFile: caFile, APIURL: localhostURL(upstream)}
-	ctx := requester.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
+	ctx := requester.ContextWithIDToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	for _, tc := range []struct {
 		name, clientID, clientIDFile, want string
@@ -317,7 +317,7 @@ func TestGitHubExchangeRefusesIPLiteralPrivateEndpoint(t *testing.T) {
 	secretFile := filepath.Join(t.TempDir(), "client-secret")
 	require.NoError(t, os.WriteFile(secretFile, []byte("fixture-secret"), 0o600))
 	configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app"}
-	ctx := requester.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
+	ctx := requester.ContextWithIDToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	result, err := newGitHubExchange(configuration, upstream.Client(), slog.New(slog.DiscardHandler))(ctx)
 	require.Error(t, err)

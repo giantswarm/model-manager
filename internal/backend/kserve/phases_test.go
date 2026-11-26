@@ -812,12 +812,12 @@ func TestListLoadedNamesACrashLoopingRuntime(t *testing.T) {
 
 	// A caller who may not read pods/log.
 	f.b.logs = func(ctx context.Context, _, name string, _ corev1.PodLogOptions) (string, error) {
-		if _, ok := requester.TokenFromContext(ctx); ok {
+		if _, ok := requester.IDTokenFromContext(ctx); ok {
 			return "", apierrors.NewForbidden(schema.GroupResource{Resource: "pods/log"}, name, errors.New(`User "viewer" cannot get resource "pods/log" in API group "" in the namespace "serving"`))
 		}
 		return vllmCrashLog, nil
 	}
-	loaded, err = f.b.ListLoaded(requester.ContextWithToken(ctx, "viewer-token"))
+	loaded, err = f.b.ListLoaded(requester.ContextWithIDToken(ctx, "viewer-token"))
 	require.NoError(t, err)
 	require.Len(t, loaded, 1)
 	assert.Contains(t, loaded[0].Message, "runtime crashed 3× (exit 1); the crashed container's log could not be read (")

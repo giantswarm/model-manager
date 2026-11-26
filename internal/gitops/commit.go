@@ -20,7 +20,6 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/requester"
 )
 
 // Directory is the directory model-manager writes its files to, under the
@@ -56,8 +55,17 @@ func (e *ErrGrantRequired) Error() string { return e.Reason }
 
 func (e *ErrGrantRequired) Unwrap() error { return ErrAuthRequired }
 
+// GitHubUserToken is the caller's GitHub identity for one commit: a GitHub
+// App user access token (GitHub's term), obtained through muster's broker,
+// and the login GET /user answered for it. Commit mode opens the pull request
+// with that token.
+type GitHubUserToken struct {
+	Login string
+	Token string
+}
+
 // GitHubUser fetches the person's GitHub grant for one commit.
-type GitHubUser func(context.Context) (*requester.GitHub, error)
+type GitHubUser func(context.Context) (*GitHubUserToken, error)
 
 // signIn is the one-time consent a commit needs.
 const signIn = "connect model-manager in muster (core_auth_login server=model-manager), then call again"
@@ -220,7 +228,7 @@ type planned struct {
 // written; a repository the App's token does not reach is one, reported per
 // part on a dry run.
 func (c *Committer) Commit(ctx context.Context, req Request) (*Result, error) {
-	var gh *requester.GitHub
+	var gh *GitHubUserToken
 	if c.user != nil {
 		var err error
 		if gh, err = c.user(ctx); err != nil {

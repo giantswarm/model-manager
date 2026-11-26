@@ -192,7 +192,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.id, seen.ok = requester.FromContext(r.Context())
-		seen.token, _ = requester.TokenFromContext(r.Context())
+		seen.token, _ = requester.IDTokenFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -220,7 +220,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 
 	// Nothing admitted, nothing attached.
 	rec = httptest.NewRecorder()
-	o.attachIdentity(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
+	o.admitCaller(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/models", nil))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
@@ -232,9 +232,9 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 
 	var caller string
 	var hasToken bool
-	h := afterValidation(verifiedUser(), o.attachIdentity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = requester.Caller(r.Context())
-		_, hasToken = requester.TokenFromContext(r.Context())
+	h := afterValidation(verifiedUser(), o.admitCaller(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caller = requester.RequestedBy(r.Context())
+		_, hasToken = requester.IDTokenFromContext(r.Context())
 	})))
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+idp.idToken(t, []string{"agent-platform"}, time.Now().Add(time.Minute)))
