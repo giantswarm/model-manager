@@ -34,8 +34,10 @@ make helm-docs      # regenerate helm/model-manager/README.md
 - `internal/service` — orchestration shared by both API surfaces.
 - `internal/api` — REST handlers and MCP tools over the service.
 - `internal/server` — HTTP listener; with `--enable-oauth` the mcp-oauth
-  resource server (Dex or Google) in front of REST and MCP. Resolved provider,
-  storage and cleanup construction belongs to `mcp-oauth/oauthconfig`. REST and
+  resource server (Dex or Google) in front of REST and MCP. Its settings come
+  from the `OAUTH_*` variables (`oauthconfig.SettingsFromEnv`, read in `cmd`,
+  which maps the deprecated flags onto them); provider, storage and cleanup
+  construction belongs to `mcp-oauth/oauthconfig`. REST and
   MCP challenges advertise their own protected-resource metadata URLs.
 - `internal/identity` — the authenticated caller on the request context and,
   with `--downstream-oauth`, the caller's IdP token the Kubernetes clients use.

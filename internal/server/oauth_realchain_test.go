@@ -227,17 +227,11 @@ func (p *privateIdP) idToken(t *testing.T, aud []string) string {
 	return tok
 }
 
-func (p *privateIdP) config(jwksHosts ...string) OAuthConfig {
-	return OAuthConfig{
-		BaseURL:                 "http://localhost:8080",
-		Provider:                ProviderDex,
-		DexIssuerURL:            p.issuer,
-		DexClientID:             "agent-platform",
-		DexClientSecret:         "lab-only",
-		DexCAFile:               p.caFile,
-		TrustedAudiences:        []string{"agent-platform"},
-		AllowPrivateIPJWKSHosts: jwksHosts,
-	}
+func (p *privateIdP) config(t *testing.T, jwksHosts ...string) OAuthConfig {
+	t.Helper()
+	environment := dexEnvironment(p.issuer, p.caFile)
+	environment["OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS"] = strings.Join(jwksHosts, ",")
+	return OAuthConfig{Settings: oauthSettings(t, environment)}
 }
 
 // callThroughChain sends one request with bearer through the production
@@ -271,14 +265,14 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 func TestForwardedTokenThroughTheProductionChain(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 
-	code, caller := callThroughChain(t, idp.config(), idp.idToken(t, []string{"agent-platform"}))
+	code, caller := callThroughChain(t, idp.config(t), idp.idToken(t, []string{"agent-platform"}))
 	require.Equal(t, http.StatusNoContent, code)
 	require.Equal(t, "admin@lab.local", caller)
 
-	code, _ = callThroughChain(t, idp.config(), idp.idToken(t, []string{"someone-else"}))
+	code, _ = callThroughChain(t, idp.config(t), idp.idToken(t, []string{"someone-else"}))
 	require.Equal(t, http.StatusUnauthorized, code, "an untrusted audience is refused")
 
-	code, _ = callThroughChain(t, idp.config(), "")
+	code, _ = callThroughChain(t, idp.config(t), "")
 	require.Equal(t, http.StatusUnauthorized, code, "no token, no API")
 }
 
@@ -289,10 +283,10 @@ func TestJWKSOnAnotherPrivateHost(t *testing.T) {
 	idp := newPrivateIdP(t, privateKeysHost)
 	token := idp.idToken(t, []string{"agent-platform"})
 
-	code, _ := callThroughChain(t, idp.config(), token)
+	code, _ := callThroughChain(t, idp.config(t), token)
 	require.Equal(t, http.StatusUnauthorized, code, "an unlisted private JWKS host is refused")
 
-	code, caller := callThroughChain(t, idp.config(privateKeysHost), token)
+	code, caller := callThroughChain(t, idp.config(t, privateKeysHost), token)
 	require.Equal(t, http.StatusNoContent, code)
 	require.Equal(t, "admin@lab.local", caller)
 }

@@ -12,7 +12,10 @@ import (
 )
 
 func TestResourceSpecificOAuthChallenges(t *testing.T) {
-	runtime, err := newOAuth(OAuthConfig{BaseURL: "https://manager.example.test", Provider: ProviderGoogle, GoogleClientID: "client", GoogleClientSecret: "test-secret"}, "/mcp", slog.New(slog.DiscardHandler))
+	runtime, err := newOAuth(OAuthConfig{Settings: oauthSettings(t, map[string]string{
+		"OAUTH_ISSUER": "https://manager.example.test", "OAUTH_PROVIDER": "google", "OAUTH_GOOGLE_CLIENT_ID": "client",
+		"OAUTH_GOOGLE_CLIENT_SECRET": "test-secret", "OAUTH_GOOGLE_REDIRECT_URL": "https://manager.example.test/oauth/callback",
+	})}, "/mcp", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	t.Cleanup(func() { runtime.shutdown(context.WithoutCancel(t.Context())) })
 	mux := http.NewServeMux()

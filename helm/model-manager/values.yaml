@@ -188,11 +188,13 @@ oauth:
     clientID: ""
     # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
     clientSecret: ""
-    # -- Deprecated, no effect: the Dex client reaches private addresses and
-    # follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it.
+    # -- Deprecated, no effect, not passed to the server: the Dex client
+    # reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and
+    # NO_PROXY without it. Remove it from your values; the key goes away in a
+    # later release.
     allowPrivateURLs: false
     # -- Secret with the CA of a Dex that serves a private certificate;
-    # mounted and passed as `--dex-ca-file`. Empty name falls back to
+    # mounted and passed as `OAUTH_DEX_CA_FILE`. Empty name falls back to
     # `global.identity.ca.secretName` / `global.identity.ca.key`.
     caSecret:
       name: ""
@@ -219,9 +221,10 @@ oauth:
   # but not the platform client — is accepted without listing its client here.
   trustedAudiences: []
   sso:
-    # -- Deprecated, no effect: the issuer host of the configured provider may
-    # resolve to a private address for its JWKS without it; list any other JWKS
-    # host in allowPrivateIPJWKSHosts.
+    # -- Deprecated, no effect, not passed to the server: the issuer host of
+    # the configured provider may resolve to a private address for its JWKS
+    # without it; list any other JWKS host in allowPrivateIPJWKSHosts. Remove
+    # it from your values; the key goes away in a later release.
     allowPrivateIPs: false
     # -- Hosts, other than the issuer's own, whose JWKS may resolve to an
     # RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +43,11 @@ func TestDexProviderFollowsProxyEnvironment(t *testing.T) {
 				"-test.run=^TestDexProviderProxyChild$", "-test.count=1", "-test.v")
 			command.Env = append(environmentWithoutProxy(),
 				dexProxyChildEnv+"=1",
+				"OAUTH_ISSUER=https://model-manager.example.com",
+				"OAUTH_PROVIDER=dex",
+				"OAUTH_DEX_ISSUER_URL=https://example.com",
+				"OAUTH_DEX_CLIENT_ID=model-manager",
+				"OAUTH_DEX_CLIENT_SECRET=secret",
 				"HTTPS_PROXY="+proxy.server.URL,
 				"NO_PROXY="+tc.noProxy,
 			)
@@ -65,13 +71,11 @@ func TestDexProviderProxyChild(t *testing.T) {
 	if os.Getenv(dexProxyChildEnv) != "1" {
 		t.Skip("child process of TestDexProviderFollowsProxyEnvironment")
 	}
-	runtime, err := newOAuth(OAuthConfig{
-		BaseURL:         "https://model-manager.example.com",
-		Provider:        ProviderDex,
-		DexIssuerURL:    "https://example.com",
-		DexClientID:     "model-manager",
-		DexClientSecret: "secret",
-	}, "/mcp", slog.New(slog.DiscardHandler))
+	settings, err := oauthconfig.SettingsFromEnv()
+	if err != nil {
+		t.Fatalf("OAuth settings: %v", err)
+	}
+	runtime, err := newOAuth(OAuthConfig{Settings: settings}, "/mcp", slog.New(slog.DiscardHandler))
 	if runtime != nil {
 		t.Cleanup(func() { runtime.shutdown(context.WithoutCancel(t.Context())) })
 	}

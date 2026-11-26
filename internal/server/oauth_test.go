@@ -21,9 +21,10 @@ import (
 	"testing"
 	"time"
 
-	oauth "github.com/giantswarm/mcp-oauth"
 	"github.com/giantswarm/mcp-oauth/handler"
+	"github.com/giantswarm/mcp-oauth/oauthconfig"
 	"github.com/giantswarm/mcp-oauth/providers"
+	oauthserver "github.com/giantswarm/mcp-oauth/server"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -125,32 +126,36 @@ func (f *fakeIdP) idToken(t *testing.T, aud []string, exp time.Time) string {
 	return tok
 }
 
-func (f *fakeIdP) config(downstream bool) OAuthConfig {
-	return OAuthConfig{
-		BaseURL:          "http://localhost:8080",
-		Provider:         ProviderDex,
-		DexIssuerURL:     f.issuer,
-		DexClientID:      "agent-platform",
-		DexClientSecret:  "lab-only",
-		DexCAFile:        f.caFile,
-		TrustedAudiences: []string{"agent-platform"},
-		DownstreamOAuth:  downstream,
+func (f *fakeIdP) config(t *testing.T, downstream bool) OAuthConfig {
+	t.Helper()
+	return OAuthConfig{Settings: oauthSettings(t, dexEnvironment(f.issuer, f.caFile)), DownstreamOAuth: downstream}
+}
+
+// dexEnvironment is the OAUTH_* configuration of a Dex at issuer whose
+// forwarded id_tokens for the platform client are accepted.
+func dexEnvironment(issuer, caFile string) map[string]string {
+	return map[string]string{
+		"OAUTH_ISSUER":                              "http://localhost:8080",
+		"OAUTH_PROVIDER":                            "dex",
+		"OAUTH_DEX_ISSUER_URL":                      issuer,
+		"OAUTH_DEX_CLIENT_ID":                       "agent-platform",
+		"OAUTH_DEX_CLIENT_SECRET":                   "lab-only",
+		"OAUTH_DEX_CA_FILE":                         caFile,
+		"OAUTH_TRUSTED_AUDIENCES":                   "agent-platform",
+		"OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS": "true",
 	}
 }
 
-func TestOAuthConfigValidation(t *testing.T) {
-	dexOK := OAuthConfig{BaseURL: "https://mm.example.com", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}
-	require.Error(t, OAuthConfig{}.Validate())
-	require.Error(t, OAuthConfig{BaseURL: "http://mm.example.com", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}.Validate(), "plain http only on loopback")
-	require.NoError(t, OAuthConfig{BaseURL: "http://localhost:8080", DexIssuerURL: "x", DexClientID: "y", DexClientSecret: "z"}.Validate())
-	require.NoError(t, dexOK.Validate())
-	require.Error(t, OAuthConfig{BaseURL: "https://mm.example.com", Provider: ProviderDex}.Validate(), "dex needs issuer + client")
-	require.Error(t, OAuthConfig{BaseURL: "https://mm.example.com", Provider: ProviderGoogle, GoogleClientID: "id"}.Validate(), "google needs the secret")
-	require.NoError(t, OAuthConfig{BaseURL: "https://mm.example.com", Provider: ProviderGoogle, GoogleClientID: "id", GoogleClientSecret: "s", TrustedAudiences: []string{"id"}}.Validate())
-	require.Error(t, OAuthConfig{BaseURL: "https://mm.example.com", Provider: "okta"}.Validate(), "unknown provider")
-	bad := dexOK
-	bad.TrustedAudiences = []string{"agent-platform", " "}
-	require.Error(t, bad.Validate(), "empty audience")
+// oauthSettings reads mcp-oauth's settings from environment the way the
+// serve command does.
+func oauthSettings(t *testing.T, environment map[string]string) oauthconfig.Settings {
+	t.Helper()
+	for name, value := range environment {
+		t.Setenv(name, value)
+	}
+	settings, err := oauthconfig.SettingsFromEnv()
+	require.NoError(t, err)
+	return settings
 }
 
 // verifiedUser is the user mcp-oauth hands on once it has validated a
@@ -173,7 +178,7 @@ func afterValidation(info *providers.UserInfo, next http.Handler) http.Handler {
 // with downstream OAuth, the caller's token.
 func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	idp := newPrivateIdP(t, "")
-	configuration := idp.config()
+	configuration := idp.config(t)
 	configuration.DownstreamOAuth = true
 	o, err := newOAuth(configuration, "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
@@ -221,7 +226,7 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 
 func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	idp := newFakeIdP(t)
-	o, err := newOAuth(idp.config(false), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o, err := newOAuth(idp.config(t, false), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { o.shutdown(context.Background()) })
 
@@ -240,24 +245,27 @@ func TestDownstreamOffKeepsTheServiceAccount(t *testing.T) {
 	assert.False(t, hasToken, "but nothing is presented to the Kubernetes API")
 }
 
-func TestServerConfig(t *testing.T) {
-	pool := x509.NewCertPool()
-	cfg := OAuthConfig{
-		BaseURL:                       "https://mm.example.com",
-		TrustedAudiences:              []string{"agent-platform", "kubernetes"},
-		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
-		AllowPublicClientRegistration: true,
-	}
-	assert.Equal(t, &oauth.ServerConfig{
-		EnableClientIDMetadataDocuments: true,
-		Issuer:                          "https://mm.example.com",
-		AllowRefreshTokenRotation:       true,
-		AllowPublicClientRegistration:   true,
-		MaxClientsPerIP:                 10,
-		TrustedAudiences:                []string{"agent-platform", "kubernetes"},
-		AllowPrivateIPJWKSHosts:         []string{"keys.internal.example"},
-		JWKSRootCAs:                     pool,
-	}, serverConfig(cfg, pool), "only the listed JWKS hosts may resolve privately; the issuer host is covered by the library")
+func TestProtectedResources(t *testing.T) {
+	advertised := []string{"https://dex.example.com"}
+	configuration := &oauthserver.Config{Issuer: "https://mm.example.com", ResourceMetadataByPath: map[string]oauthserver.ProtectedResourceConfig{
+		"/":    {ResourceIdentifier: "https://mm.example.com", AuthorizationServers: advertised},
+		"/mcp": {ResourceIdentifier: "https://mm.example.com/mcp", ScopesSupported: []string{"models"}},
+	}}
+	assert.Equal(t, map[string]oauthserver.ProtectedResourceConfig{
+		"/":        {ResourceIdentifier: "https://mm.example.com", AuthorizationServers: advertised},
+		"/mcp":     {ResourceIdentifier: "https://mm.example.com/mcp", ScopesSupported: []string{"models"}},
+		api.Prefix: {AuthorizationServers: advertised},
+	}, protectedResources(configuration, "/mcp"), "a configured path keeps its entry; an added one advertises the main resource's servers")
+	assert.Len(t, configuration.ResourceMetadataByPath, 2, "the configuration is not changed")
+
+	assert.Equal(t, map[string]oauthserver.ProtectedResourceConfig{api.Prefix: {}, "/mcp": {}},
+		protectedResources(&oauthserver.Config{Issuer: "https://mm.example.com"}, "/mcp"), "nothing advertised: the server's own issuer")
+
+	trailing := &oauthserver.Config{Issuer: "https://mm.example.com", ResourceMetadataByPath: map[string]oauthserver.ProtectedResourceConfig{
+		"/mcp/": {ResourceIdentifier: "https://mm.example.com/mcp/"},
+	}}
+	assert.Equal(t, map[string]oauthserver.ProtectedResourceConfig{"/mcp/": {ResourceIdentifier: "https://mm.example.com/mcp/"}, api.Prefix: {}},
+		protectedResources(trailing, "/mcp"), "a configured path with a trailing slash describes the MCP endpoint")
 }
 
 // TestServerGuardsRESTAndMCPButNotProbes wires OAuth through the assembled
@@ -265,7 +273,7 @@ func TestServerConfig(t *testing.T) {
 func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	idp := newFakeIdP(t)
 	svc := service.New([]backend.Backend{downBackend{}}, jobs.NewManager(jobs.WithAnonymousAccess(true)), nil, nil, service.Config{}, nil)
-	cfg := idp.config(false)
+	cfg := idp.config(t, false)
 	srv, err := New(Config{Addr: "127.0.0.1:0", MCPEnabled: true, OAuth: &cfg}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	t.Cleanup(func() { srv.oauth.shutdown(context.Background()) })

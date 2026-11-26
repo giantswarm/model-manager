@@ -742,11 +742,11 @@
                     "properties": {
                         "allowPrivateURLs": {
                             "type": "boolean",
-                            "description": "Deprecated, no effect: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it."
+                            "description": "Deprecated, no effect, not passed to the server: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it. Remove it from your values; the key goes away in a later release."
                         },
                         "caSecret": {
                             "type": "object",
-                            "description": "Secret with the CA of a Dex that serves a private certificate; mounted and passed as `--dex-ca-file`. Empty name falls back to `global.identity.ca.secretName` / `global.identity.ca.key`.",
+                            "description": "Secret with the CA of a Dex that serves a private certificate; mounted and passed as `OAUTH_DEX_CA_FILE`. Empty name falls back to `global.identity.ca.secretName` / `global.identity.ca.key`.",
                             "additionalProperties": false,
                             "properties": {
                                 "key": {
@@ -820,7 +820,7 @@
                         },
                         "allowPrivateIPs": {
                             "type": "boolean",
-                            "description": "Deprecated, no effect: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in allowPrivateIPJWKSHosts."
+                            "description": "Deprecated, no effect, not passed to the server: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in allowPrivateIPJWKSHosts. Remove it from your values; the key goes away in a later release."
                         }
                     }
                 },

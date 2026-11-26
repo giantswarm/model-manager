@@ -17,12 +17,15 @@ tests:
             - jwks.internal.example
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].args
-          content: --sso-allow-private-ip-jwks-hosts=keys.internal.example,jwks.internal.example
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS
+            value: keys.internal.example,jwks.internal.example
 
   - it: renders no JWKS host list by default
     asserts:
       - notContains:
-          path: spec.template.spec.containers[0].args
+          path: spec.template.spec.containers[0].env
           any: true
-          content: --sso-allow-private-ip-jwks-hosts
+          content:
+            name: OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS
