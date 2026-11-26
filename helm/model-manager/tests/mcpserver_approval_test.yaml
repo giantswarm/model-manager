@@ -40,7 +40,7 @@ tests:
           path: spec.approval.rule
           value: Allow
 
-  - it: renders no approval when the installation clears it (null: Helm merges an empty map into the default)
+  - it: "renders no approval when the installation clears it (null: Helm merges an empty map into the default)"
     set:
       muster:
         mcpServer:
