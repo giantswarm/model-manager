@@ -113,7 +113,7 @@ func TestLoadOAuthSettingsFromDeprecatedOptions(t *testing.T) {
 	assert.Equal(t, "https://mm.example.com", settings.Server.Issuer)
 	assert.Equal(t, []string{"agent-platform"}, settings.Server.TrustedAudiences)
 	assert.True(t, settings.Server.EnableClientIDMetadataDocuments)
-	assert.Contains(t, output.String(), "--dex-issuer-url (DEX_ISSUER_URL) is deprecated and will be removed in the next minor release: set OAUTH_DEX_ISSUER_URL")
+	assert.Contains(t, output.String(), "--dex-issuer-url (DEX_ISSUER_URL) is deprecated and remains supported throughout 1.x: set OAUTH_DEX_ISSUER_URL")
 	assert.NotContains(t, output.String(), "dex-secret-value", "no secret value is logged")
 }
 

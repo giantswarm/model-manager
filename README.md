@@ -927,7 +927,7 @@ The earlier flags and variables (`--oauth-base-url`, `--oauth-provider`,
 `--dex-*`, `--google-*`, `--oauth-trusted-audiences`,
 `--sso-allow-private-ip-jwks-hosts`, `--allow-public-client-registration` and
 their `MODEL_MANAGER_OAUTH_*`, `DEX_*`, `GOOGLE_*` and `SSO_*` variables)
-still work for one more release and log a deprecation warning naming the
+remain supported throughout 1.x and log a deprecation warning naming the
 replacement; an `OAUTH_*` variable wins over them. On the platform nobody logs in
 to model-manager itself: muster forwards the session's IdP id_token
 byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
@@ -941,8 +941,11 @@ construction and they are what the kube-apiserver trusts, so a portal session
 — whose id_token carries them but not the platform client — is accepted too.
 An id_token whose audience matches none of them is refused with 401. The chart's values follow mcp-oauth's layout for
 MCP servers (`oauth.resourceServer`, `oauth.authorizationServer`); the
-earlier `oauth.*` keys still work for one more release and the release notes
-name each one that is set. Every mutation's log line names the user as
+earlier `oauth.*` keys remain supported throughout 1.x and the release notes
+name each one that is set. The no-op values `oauth.dex.allowPrivateURLs` and
+`oauth.sso.allowPrivateIPs` remain accepted throughout 1.x. See the
+[configuration migration guide](docs/sdk-upgrade.md#oauth-configuration) for
+replacements and recovery. Every mutation's log line names the user as
 `user.issuer` and `user.subject`, plus `user.actor.issuer` and
 `user.actor.subject` for a call an agent makes for them, never profile data;
 jobs record the `email`, else the `sub`, as `requestedBy`.

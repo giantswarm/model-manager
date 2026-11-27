@@ -36,7 +36,7 @@ muster registers the server as MCPServer "{{ .Values.muster.mcpServer.name }}"; 
 {{- range $key := keys $deprecated | sortAlpha }}{{ if index $deprecated $key 0 }}{{ $set = append $set $key }}{{ end }}{{ end }}
 {{- if and $o.enabled $set }}
 
-Deprecated values, removed in a later release:
+Deprecated values remain accepted throughout 1.x:
 {{- range $set }}
   {{ . }}: use {{ index $deprecated . 1 }}
 {{- end }}
