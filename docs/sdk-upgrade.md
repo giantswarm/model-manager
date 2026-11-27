@@ -71,6 +71,8 @@ keys. A rejected credential needs fresh sign-in. If a configuration migration
 fails, restore the previous values through GitOps and retry with the same
 caller RBAC; keep OAuth and downstream authentication enabled.
 
+### Resource and task ownership
+
 | State | Key and authority | Upgrade action |
 | --- | --- | --- |
 | ModelConfig ownership | model-manager instance label and resource identity | Keep instance labels and resource names |
