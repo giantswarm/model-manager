@@ -423,7 +423,7 @@ muster:
     # platform these settings apply.
     # Muster's built-in floor asks agents in both modes for `add_backend`.
     # Needs a muster whose MCPServer CRD carries `spec.approval`. Details:
-    # https://docs.giantswarm.io/overview/agent-platform/governing-tool-calls/
+    # https://github.com/giantswarm/agent-platform/blob/main/docs/tool-approval.md
     approval:
       rule: Allow  # @schema enum: [Allow, Ask, Block]
       tools:  # @schema skipProperties: true; maxProperties: 512; additionalProperties: {type: string, enum: [Allow, Ask, Block]}
