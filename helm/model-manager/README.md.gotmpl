@@ -4,6 +4,10 @@
 CIMD is enabled by default. DCR is deprecated by MCP 2026-07-28 and remains a
 compatibility fallback; see the [OAuth registration guide](../../docs/oauth-client-registration.md).
 
+Deprecated OAuth values remain accepted throughout model-manager 1.x,
+including `oauth.dex.allowPrivateURLs` and `oauth.sso.allowPrivateIPs`.
+See the [configuration migration guide](../../docs/sdk-upgrade.md#oauth-configuration).
+
 {{ template "chart.description" . }}
 
 The chart deploys one Deployment that serves the REST/JSON API under `/api/v1`

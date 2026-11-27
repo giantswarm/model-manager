@@ -244,10 +244,10 @@ environment variable named next to it; flags win over the environment.`,
 
 func warnDeprecatedOAuthOptions(o *serveOptions, log *slog.Logger) {
 	if o.dexAllowPrivateIP {
-		log.Warn("--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect and will be removed: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
+		log.Warn("--allow-private-oauth-urls (MODEL_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect and remains accepted throughout 1.x: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
 	}
 	if o.ssoAllowPrivateIPs {
-		log.Warn("--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect and will be removed: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in --sso-allow-private-ip-jwks-hosts")
+		log.Warn("--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect and remains accepted throughout 1.x: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS")
 	}
 }
 

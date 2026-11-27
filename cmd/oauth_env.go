@@ -106,7 +106,7 @@ func loadOAuthSettings(o *serveOptions, log *slog.Logger) (oauthconfig.Settings,
 		if option.Env != "" {
 			source += " (" + option.Env + ")"
 		}
-		log.Warn(source+" is deprecated and will be removed in the next minor release: set "+option.Replacement,
+		log.Warn(source+" is deprecated and remains supported throughout 1.x: set "+option.Replacement,
 			"replacement", option.Replacement)
 	}
 	for name, v := range set {

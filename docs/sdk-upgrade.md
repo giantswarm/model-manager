@@ -27,10 +27,51 @@ even after expiry and surfaces the API's rejection.
 The product adapter in `internal/server/oauth.go` retains resolved CLI settings,
 resource-path selection, attachment of caller credentials for Kubernetes and
 application cleanup logging. `oauthconfig` owns provider/store construction and
-token-server lifecycle. `cmd/tool_policy.go` translates validated user info to
-plain toolkit identity fields. Fetching the GitHub user access token remains
+token-server lifecycle. Tool auditing logs mcp-oauth's validated
+`providers.UserInfo` under `user`. Fetching the GitHub user access token remains
 product code; it is not an OAuth configuration or generic MCP transport
 responsibility.
+
+### OAuth configuration
+
+Deprecated flags, environment variables and chart values remain supported
+throughout model-manager 1.x. The no-op values `oauth.dex.allowPrivateURLs`
+and `oauth.sso.allowPrivateIPs` remain accepted by the chart schema. Removing
+these public configuration options requires a major release; upgrading within
+1.x does not require deleting them.
+
+The chart renders mcp-oauth's `OAUTH_*` variables from
+`oauth.resourceServer` and `oauth.authorizationServer`. Prefer these values
+for new installations. New chart keys take precedence over deprecated keys,
+then `global.identity` supplies defaults. For the binary, an explicit
+`OAUTH_*` variable takes precedence over a deprecated option.
+
+| Deprecated configuration | Replacement |
+| --- | --- |
+| `oauth.baseURL` | `oauth.authorizationServer.issuer` |
+| `oauth.provider` | `oauth.authorizationServer.upstream.type` |
+| `oauth.dex.issuerURL` | `oauth.authorizationServer.upstream.issuer` |
+| `oauth.dex.clientID`, `oauth.google.clientID` | `oauth.authorizationServer.upstream.client.id` |
+| `oauth.existingSecret`, inline provider client secrets | `oauth.authorizationServer.upstream.client.secretKeyRef` |
+| `oauth.dex.caSecret` | `oauth.authorizationServer.upstream.certificateAuthority.secretKeyRef` |
+| `oauth.trustedAudiences`, `oauth.sso.allowPrivateIPJWKSHosts` | `audiences`, `allowPrivateIPJWKSHosts` on `oauth.resourceServer.trustedIssuers` entries |
+| `--oauth-base-url`, `MODEL_MANAGER_OAUTH_BASE_URL` | `OAUTH_ISSUER` |
+| `--oauth-provider`, `MODEL_MANAGER_OAUTH_PROVIDER` | `OAUTH_PROVIDER` |
+| `--dex-*`, `DEX_*` | Corresponding `OAUTH_DEX_*` variables; mounted credentials use `_FILE` |
+| `--google-*`, `GOOGLE_*` | Corresponding `OAUTH_GOOGLE_*` variables; mounted credentials use `_FILE` |
+| `--oauth-trusted-audiences` | `OAUTH_TRUSTED_AUDIENCES`, or issuer-specific audiences in `OAUTH_TRUSTED_ISSUERS` |
+| `--sso-allow-private-ip-jwks-hosts`, `SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS` | `OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS` |
+| `--allow-public-client-registration`, `MODEL_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION` | `OAUTH_ALLOW_PUBLIC_CLIENT_REGISTRATION` |
+| `OAUTH_REGISTRATION_ACCESS_TOKEN`, `OAUTH_REGISTRATION_ACCESS_TOKEN_FILE` | `OAUTH_INITIAL_ACCESS_TOKEN`, `OAUTH_INITIAL_ACCESS_TOKEN_FILE` |
+| `oauth.dex.allowPrivateURLs`, `oauth.sso.allowPrivateIPs`, and their no-op flags | No replacement needed |
+
+Keep trusted issuer lists and CAs in release values or administrator-owned
+GitOps ConfigMaps. Preserve the issuer, audiences, client and CA when moving
+keys. A rejected credential needs fresh sign-in. If a configuration migration
+fails, restore the previous values through GitOps and retry with the same
+caller RBAC; keep OAuth and downstream authentication enabled.
+
+### Resource and task ownership
 
 | State | Key and authority | Upgrade action |
 | --- | --- | --- |
