@@ -6,8 +6,8 @@ toolchain go1.27.4
 
 require (
 	github.com/giantswarm/gitops-commit v0.11.10
-	github.com/giantswarm/mcp-oauth v1.22.0
-	github.com/giantswarm/mcp-toolkit v0.7.0
+	github.com/giantswarm/mcp-oauth v1.23.0
+	github.com/giantswarm/mcp-toolkit v0.9.0
 	github.com/giantswarm/mcp-toolkit/k8s v0.1.1
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/go-containerregistry v0.22.1
@@ -21,10 +21,10 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/net v0.63.0
-	k8s.io/api v0.37.2
-	k8s.io/apiextensions-apiserver v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/client-go v0.37.2
+	k8s.io/api v0.37.3
+	k8s.io/apiextensions-apiserver v0.37.3
+	k8s.io/apimachinery v0.37.3
+	k8s.io/client-go v0.37.3
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -217,8 +217,8 @@ require (
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
-	k8s.io/apiserver v0.37.2 // indirect
-	k8s.io/component-base v0.37.2 // indirect
+	k8s.io/apiserver v0.37.3 // indirect
+	k8s.io/component-base v0.37.3 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect

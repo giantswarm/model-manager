@@ -101,7 +101,7 @@
                 },
                 "enabled": {
                     "type": "boolean",
-                    "description": "Offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). Needs `oauth.enabled` and `tokenExchange`: the MCPServer forwards the person's ID token as without commit mode and model-manager fetches their GitHub App user grant per commit. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
+                    "description": "Offer commit mode (`mode: commit` on `wire_model` and `unwire_model`: the pull request opened as the person in the repository that owns the kagent namespace). Needs `oauth.enabled` and `tokenExchange`: the MCPServer forwards the person's ID token as without commit mode and model-manager fetches their GitHub App user access token per commit. Off: muster forwards the ID token as the bearer (`muster.mcpServer.auth.forwardToken`) and commit mode is refused."
                 },
                 "tokenExchange": {
                     "type": "object",
@@ -130,7 +130,7 @@
                         },
                         "tokenEndpoint": {
                             "type": "string",
-                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user grant for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex, `oauth.downstream.enabled` and `muster.mcpServer.auth.forwardToken`. With `auth.providerApps`, muster also attaches the person's App token to every call until giantswarm/giantswarm#39227. Required with `github.enabled`."
+                            "description": "RFC 8693 token endpoint (muster's broker) that releases the person's GitHub App user access token for a commit: only commit mode asks for GitHub, and a commit without the grant answers `grant_required` naming `audience`. Needs `github.enabled`, `oauth.enabled` with Dex, `oauth.downstream.enabled` and `muster.mcpServer.auth.forwardToken`. With `auth.providerApps`, muster also attaches the person's App token to every call until giantswarm/giantswarm#39227. Required with `github.enabled`."
                         }
                     }
                 }
@@ -138,7 +138,7 @@
         },
         "global": {
             "type": "object",
-            "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a chart installed on its own sets `oauth.*` directly.",
+            "description": "Platform-wide values a parent chart (the `agent-platform` meta chart) shares with every component. `global.domain` derives the OAuth issuer. `global.identity` is the platform's sign-in, the fallback for `oauth.authorizationServer.upstream` and the derived trusted issuer: `issuerUrl`, `clientId`, `existingSecret` (`dex-client-secret`), `ca` (`secretName`, `key`), `type` (`dex` or `google`) and `kubernetes.audiences`, the audiences the Kubernetes API server accepts (its `AuthenticationConfiguration` `jwt.issuer.audiences`: a token passes when its `aud` holds at least one). Empty here; a chart installed on its own sets `oauth.*` directly.",
             "additionalProperties": true,
             "properties": {
                 "podSecurityStandards": {
@@ -636,7 +636,7 @@
                         },
                         "auth": {
                             "type": "object",
-                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP id_token byte-identical (the SSO path this chart trusts through its trusted audiences). `requiredAudiences` are extra audiences that token must carry — the Dex cross-client audience the kube-apiserver trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is `kubernetes`) so `oauth.downstream` works; muster requests them at login, so users re-login after a change. They are trusted as bearer audiences by construction, since the server's trusted audiences are `oauth.trustedAudiences` plus this list. A Google IdP has no cross-client audiences: leave the list empty.",
+                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP ID token byte-identical, accepted through the OpenID Provider's trusted issuer entry. `requiredAudiences` are extra audiences that token must carry — the Dex cross-client audience the kube-apiserver trusts (`dex-k8s-authenticator` on Giant Swarm clusters; agentlab's is `kubernetes`) so `oauth.downstream` works; muster requests them at login, so users re-login after a change. The derived trusted issuer entry accepts them, since its audiences are the platform client plus this list. Empty uses `global.identity.kubernetes.audiences`. Google adds no audiences, so muster requests none there: the API server accepts the login client id, which the trusted issuer entry already holds.",
                             "additionalProperties": false,
                             "properties": {
                                 "forwardToken": {
@@ -757,11 +757,138 @@
             "properties": {
                 "allowPublicClientRegistration": {
                     "type": "boolean",
-                    "description": "Accept unauthenticated dynamic client registration (labs only)."
+                    "description": "Deprecated, removed in a later release: accept dynamic client registration without an initial access token, public clients included (labs only). MCP clients register with client ID metadata documents."
+                },
+                "authorizationServer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "clientIDMetadataDocuments": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "description": "Accept URL client IDs (client ID metadata documents) (`OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS`)."
+                                }
+                            }
+                        },
+                        "dynamicClientRegistration": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "description": "Serve RFC 7591 dynamic client registration (`OAUTH_ENABLE_DYNAMIC_CLIENT_REGISTRATION`). MCP 2026-07-28 deprecates it in favour of client ID metadata documents; it stays on for clients that still register this way."
+                                },
+                                "initialAccessToken": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "secretKeyRef": {
+                                            "type": "object",
+                                            "description": "Secret key with the RFC 7591 initial access token a registration must present (mcp-oauth reads it from `OAUTH_INITIAL_ACCESS_TOKEN_FILE`).",
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "key": {
+                                                    "type": "string"
+                                                },
+                                                "name": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Run the authorization server. Off makes model-manager a resource server only (`OAUTH_ENABLE_AUTHORIZATION_SERVER=false`)."
+                        },
+                        "issuer": {
+                            "type": "string",
+                            "description": "Public base URL of this server, the issuer of its tokens and metadata (`OAUTH_ISSUER`; https, or http on loopback). Empty uses the deprecated `oauth.baseURL`, else `https://<fullname>.<global.domain>`."
+                        },
+                        "storage": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "description": "Token storage (`OAUTH_STORAGE_BACKEND`). Memory loses every session on restart and needs one replica.",
+                                    "enum": [
+                                        "memory"
+                                    ]
+                                }
+                            }
+                        },
+                        "upstream": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "description": "The OpenID Provider people sign in with: `dex` or `google` (`OAUTH_PROVIDER`). Empty uses the deprecated `oauth.provider`, else `dex`.",
+                                    "enum": [
+                                        "",
+                                        "dex",
+                                        "google"
+                                    ]
+                                },
+                                "certificateAuthority": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "secretKeyRef": {
+                                            "type": "object",
+                                            "description": "Secret key with the CA of a Dex that serves a private certificate (`OAUTH_DEX_CA_FILE`). Empty name uses the deprecated `oauth.dex.caSecret`, else `global.identity.ca`.",
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "key": {
+                                                    "type": "string"
+                                                },
+                                                "name": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "client": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "OAuth client ID at the provider. Empty uses the deprecated `oauth.dex.clientID` or `oauth.google.clientID`, else `global.identity.clientId` (dex)."
+                                        },
+                                        "secretKeyRef": {
+                                            "type": "object",
+                                            "description": "Secret key with the client secret, mounted as a file. Empty name uses the deprecated `oauth.existingSecret`, else `global.identity.existingSecret`, else a Secret from the deprecated inline client secret.",
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "key": {
+                                                    "type": "string"
+                                                },
+                                                "name": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "issuer": {
+                                    "type": "string",
+                                    "description": "Dex issuer URL. Empty uses the deprecated `oauth.dex.issuerURL`, else `global.identity.issuerUrl`."
+                                }
+                            }
+                        }
+                    }
                 },
                 "baseURL": {
                     "type": "string",
-                    "description": "Public base URL of this server: the issuer of its own OAuth metadata (https, or http on loopback). Empty derives `https://<fullname>.<global.domain>` when `global.domain` is set."
+                    "description": "Deprecated: use `authorizationServer.issuer`."
                 },
                 "dex": {
                     "type": "object",
@@ -769,11 +896,11 @@
                     "properties": {
                         "allowPrivateURLs": {
                             "type": "boolean",
-                            "description": "Deprecated, no effect: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it."
+                            "description": "Deprecated, no effect, not passed to the server: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it. Remove it from your values; the key goes away in a later release."
                         },
                         "caSecret": {
                             "type": "object",
-                            "description": "Secret with the CA of a Dex that serves a private certificate; mounted and passed as `--dex-ca-file`. Empty name falls back to `global.identity.ca.secretName` / `global.identity.ca.key`.",
+                            "description": "Deprecated: use `authorizationServer.upstream.certificateAuthority`.",
                             "additionalProperties": false,
                             "properties": {
                                 "key": {
@@ -786,15 +913,15 @@
                         },
                         "clientID": {
                             "type": "string",
-                            "description": "Dex OAuth client ID. Empty falls back to `global.identity.clientId`."
+                            "description": "Deprecated: use `authorizationServer.upstream.client.id`."
                         },
                         "clientSecret": {
                             "type": "string",
-                            "description": "Dex OAuth client secret (prefer `oauth.existingSecret`)."
+                            "description": "Deprecated: use `authorizationServer.upstream.client.secretKeyRef`."
                         },
                         "issuerURL": {
                             "type": "string",
-                            "description": "Dex issuer URL. Empty falls back to `global.identity.issuerUrl`."
+                            "description": "Deprecated: use `authorizationServer.upstream.issuer`."
                         }
                     }
                 },
@@ -804,17 +931,17 @@
                     "properties": {
                         "enabled": {
                             "type": "boolean",
-                            "description": "Call the Kubernetes API as the caller: everything a request does (LLMInferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's IdP token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's client id is the apiserver's `--oidc-client-id`). The ServiceAccount then holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials."
+                            "description": "Call the Kubernetes API as the caller: everything a request does (LLMInferenceServices, download Jobs, cache scans, ModelConfigs) presents the caller's ID token, so the caller's RBAC governs — the apiserver must trust the IdP and the token's audience (a Dex install lists that audience in `muster.mcpServer.auth.requiredAudiences`; a Google install's client id is the apiserver's `--oidc-client-id`). The ServiceAccount then holds no permissions: the chart renders none of its Roles and ClusterRoles (`rbac.create` is moot), work without a caller (download adoption after a restart, the wiring reconciler) is off, and a job that outlives its caller's token fails on the apiserver's 401 instead of continuing with other credentials. Presenting the forwarded token is token passthrough, which MCP forbids: a deviation until per-backend tokens (ID-JAG, giantswarm/giantswarm#39102)."
                         }
                     }
                 },
                 "enabled": {
                     "type": "boolean",
-                    "description": "Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's id_token through the gateway; both are validated against the IdP's JWKS when their audience is in `trustedAudiences`. Off: anonymous, acting as the ServiceAccount — only for a server nothing but a trusted proxy can reach."
+                    "description": "Make model-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token, and every call carries the caller's identity (logged, recorded as `requestedBy` on jobs). On the Agent Platform muster forwards the session's IdP ID token to this server (MCPServer `auth.forwardToken`, rendered below) and the portal sends the signed-in user's ID token through the gateway; both are accepted from the provider people sign in with (`resourceServer.trustedIssuers`). Off: anonymous, acting as the ServiceAccount, only for a server nothing but a trusted proxy can reach."
                 },
                 "existingSecret": {
                     "type": "string",
-                    "description": "Existing Secret with the provider credentials: `dex-client-secret` (dex) or `google-client-secret` (+ optional `google-client-id`) (google). Empty falls back to `global.identity.existingSecret`, whose `dex-client-secret` is the platform client's; without that, the chart renders a Secret from the values above."
+                    "description": "Deprecated: use `authorizationServer.upstream.client.secretKeyRef`. Existing Secret with `dex-client-secret` (dex) or `google-client-secret` (+ optional `google-client-id`) (google)."
                 },
                 "google": {
                     "type": "object",
@@ -822,17 +949,145 @@
                     "properties": {
                         "clientID": {
                             "type": "string",
-                            "description": "Google OAuth client ID (not secret; may also come from the Secret key `google-client-id` when empty)."
+                            "description": "Deprecated: use `authorizationServer.upstream.client.id`. Empty reads the Secret key `google-client-id`."
                         },
                         "clientSecret": {
                             "type": "string",
-                            "description": "Google OAuth client secret (prefer `oauth.existingSecret`)."
+                            "description": "Deprecated: use `authorizationServer.upstream.client.secretKeyRef`."
                         }
                     }
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Identity provider: `dex` or `google`."
+                    "description": "Deprecated: use `authorizationServer.upstream.type`.",
+                    "enum": [
+                        "",
+                        "dex",
+                        "google"
+                    ]
+                },
+                "resourceServer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "additionalResources": {
+                            "type": "array",
+                            "description": "Further protected resources on the same origin, each by its full URL (`OAUTH_ADDITIONAL_RESOURCES`). The REST API and the MCP endpoint are always protected resources.",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "authorizationServers": {
+                            "type": "array",
+                            "description": "Issuer identifiers the resource metadata advertises (`OAUTH_AUTHORIZATION_SERVERS`, RFC 9728 `authorization_servers`): this server's issuer or a trusted issuer. Empty advertises this server's issuer; required with `authorizationServer.enabled` false, since MCP clients find the authorization server here.",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "requireResourceAccessTokens": {
+                            "type": "boolean",
+                            "description": "Accept only tokens whose audience names this server's resource (`OAUTH_REQUIRE_RESOURCE_ACCESS_TOKENS`), as MCP requires. Off while the platform forwards ID tokens (giantswarm/giantswarm#39102)."
+                        },
+                        "resource": {
+                            "type": "string",
+                            "description": "The main protected resource, by its full URL (`OAUTH_RESOURCE`). Empty uses the issuer."
+                        },
+                        "trustedIssuers": {
+                            "type": "array",
+                            "description": "The issuers whose JWTs are accepted (`OAUTH_TRUSTED_ISSUERS`). A trust anchor: set it only from the release's own values or a GitOps-managed ConfigMap that only installation administrators write. Each entry: `issuer`, `jwksURI` and `audiences` (required), `subjectClaim` (`sub` or `email`), `acceptedTypHeaders`, `allowedClaims`, `allowPrivateIPJWKSHosts`, `openIDProvider` (true for the provider people sign in with, whose bearers are their ID tokens), and `certificateAuthority` with a `secretKeyRef` or `configMapKeyRef` (`name`, `key`). Empty trusts the provider people sign in with (`authorizationServer.upstream`) as `openIDProvider`: its ID tokens are accepted as bearer tokens, a deviation from MCP's audience rule until per-backend tokens (ID-JAG, giantswarm/giantswarm#39102). They are accepted for the client people sign in with (`authorizationServer.upstream.client.id`, or the deprecated `oauth.trustedAudiences`) and `muster.mcpServer.auth.requiredAudiences`, in that order and without duplicates.",
+                            "items": {
+                                "type": "object",
+                                "required": [
+                                    "issuer",
+                                    "jwksURI",
+                                    "audiences"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "acceptedTypHeaders": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "allowPrivateIPJWKSHosts": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "allowedClaims": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "audiences": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "minItems": 1
+                                    },
+                                    "certificateAuthority": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {
+                                            "configMapKeyRef": {
+                                                "type": "object",
+                                                "required": [
+                                                    "name",
+                                                    "key"
+                                                ],
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "key": {
+                                                        "type": "string"
+                                                    },
+                                                    "name": {
+                                                        "type": "string"
+                                                    }
+                                                }
+                                            },
+                                            "secretKeyRef": {
+                                                "type": "object",
+                                                "required": [
+                                                    "name",
+                                                    "key"
+                                                ],
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "key": {
+                                                        "type": "string"
+                                                    },
+                                                    "name": {
+                                                        "type": "string"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "issuer": {
+                                        "type": "string"
+                                    },
+                                    "jwksURI": {
+                                        "type": "string"
+                                    },
+                                    "openIDProvider": {
+                                        "type": "boolean"
+                                    },
+                                    "subjectClaim": {
+                                        "type": "string",
+                                        "enum": [
+                                            "",
+                                            "sub",
+                                            "email"
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
                 },
                 "sso": {
                     "type": "object",
@@ -840,20 +1095,23 @@
                     "properties": {
                         "allowPrivateIPJWKSHosts": {
                             "type": "array",
-                            "description": "Hosts, other than the issuer's own, whose JWKS may resolve to an RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts on another host. Exact hostnames, no port. Loopback and link-local stay refused.",
+                            "description": "Deprecated: list the provider in `resourceServer.trustedIssuers` with these `allowPrivateIPJWKSHosts`. Hosts, other than the issuer's own, whose JWKS may resolve to an RFC 1918 or RFC 4193 address.",
                             "items": {
                                 "type": "string"
                             }
                         },
                         "allowPrivateIPs": {
                             "type": "boolean",
-                            "description": "Deprecated, no effect: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in allowPrivateIPJWKSHosts."
+                            "description": "Deprecated, no effect, not passed to the server: the issuer host of the configured provider may resolve to a private address for its JWKS without it; list any other JWKS host in allowPrivateIPJWKSHosts. Remove it from your values; the key goes away in a later release."
                         }
                     }
                 },
                 "trustedAudiences": {
                     "type": "array",
-                    "description": "OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO token forwarding). Empty falls back to `[global.identity.clientId]`, the platform client MCP clients and the muster CLI log in with. The server trusts the union of this list and `muster.mcpServer.auth.requiredAudiences` (in that order, without duplicates): every token muster forwards carries the required audiences by construction and they are what the kube-apiserver trusts, so a portal session — whose id_token carries them but not the platform client — is accepted without listing its client here."
+                    "description": "Deprecated: list the provider in `resourceServer.trustedIssuers` with these `audiences`. The OAuth client IDs whose ID tokens of the provider people sign in with are accepted.",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },

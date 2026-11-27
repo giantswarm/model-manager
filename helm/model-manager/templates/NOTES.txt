@@ -16,3 +16,28 @@ Try it:
 
 muster registers the server as MCPServer "{{ .Values.muster.mcpServer.name }}"; tools appear as x_{{ .Values.muster.mcpServer.name }}_<tool>.
 {{- end }}
+{{- $o := .Values.oauth }}
+{{- $deprecated := dict
+  "oauth.baseURL" (list $o.baseURL "oauth.authorizationServer.issuer")
+  "oauth.provider" (list $o.provider "oauth.authorizationServer.upstream.type")
+  "oauth.dex.issuerURL" (list $o.dex.issuerURL "oauth.authorizationServer.upstream.issuer")
+  "oauth.dex.clientID" (list $o.dex.clientID "oauth.authorizationServer.upstream.client.id")
+  "oauth.dex.clientSecret" (list $o.dex.clientSecret "oauth.authorizationServer.upstream.client.secretKeyRef")
+  "oauth.dex.caSecret.name" (list $o.dex.caSecret.name "oauth.authorizationServer.upstream.certificateAuthority.secretKeyRef")
+  "oauth.google.clientID" (list $o.google.clientID "oauth.authorizationServer.upstream.client.id")
+  "oauth.google.clientSecret" (list $o.google.clientSecret "oauth.authorizationServer.upstream.client.secretKeyRef")
+  "oauth.existingSecret" (list $o.existingSecret "oauth.authorizationServer.upstream.client.secretKeyRef")
+  "oauth.trustedAudiences" (list $o.trustedAudiences "the audiences of an oauth.resourceServer.trustedIssuers entry")
+  "oauth.sso.allowPrivateIPJWKSHosts" (list $o.sso.allowPrivateIPJWKSHosts "the allowPrivateIPJWKSHosts of an oauth.resourceServer.trustedIssuers entry")
+  "oauth.allowPublicClientRegistration" (list $o.allowPublicClientRegistration "nothing: MCP clients register with client ID metadata documents")
+  "oauth.dex.allowPrivateURLs" (list $o.dex.allowPrivateURLs "nothing: it has no effect")
+  "oauth.sso.allowPrivateIPs" (list $o.sso.allowPrivateIPs "nothing: it has no effect") }}
+{{- $set := list }}
+{{- range $key := keys $deprecated | sortAlpha }}{{ if index $deprecated $key 0 }}{{ $set = append $set $key }}{{ end }}{{ end }}
+{{- if and $o.enabled $set }}
+
+Deprecated values, removed in a later release:
+{{- range $set }}
+  {{ . }}: use {{ index $deprecated . 1 }}
+{{- end }}
+{{- end }}

@@ -917,33 +917,46 @@ operations answer 501.
 With `--enable-oauth` model-manager is an OAuth 2.1 resource server
 ([mcp-oauth](https://github.com/giantswarm/mcp-oauth)) in front of both the
 MCP endpoint and the REST API: every call needs a bearer token the platform
-identity provider issued — Dex (`--oauth-provider dex`, the Agent Platform
-default) or Google (`--oauth-provider google`). On the platform nobody logs in
+identity provider issued — Dex (`OAUTH_PROVIDER=dex`, the default) or Google
+(`OAUTH_PROVIDER=google`). mcp-oauth's `OAUTH_*` variables configure it
+(`oauthconfig.SettingsFromEnv`: `OAUTH_ISSUER`, `OAUTH_DEX_ISSUER_URL`,
+`OAUTH_DEX_CLIENT_ID`, `OAUTH_DEX_CLIENT_SECRET_FILE`, `OAUTH_DEX_CA_FILE`,
+`OAUTH_TRUSTED_ISSUERS`, …); model-manager turns on client ID metadata
+documents unless `OAUTH_ENABLE_CLIENT_ID_METADATA_DOCUMENTS` says otherwise.
+The earlier flags and variables (`--oauth-base-url`, `--oauth-provider`,
+`--dex-*`, `--google-*`, `--oauth-trusted-audiences`,
+`--sso-allow-private-ip-jwks-hosts`, `--allow-public-client-registration` and
+their `MODEL_MANAGER_OAUTH_*`, `DEX_*`, `GOOGLE_*` and `SSO_*` variables)
+still work for one more release and log a deprecation warning naming the
+replacement; an `OAUTH_*` variable wins over them. On the platform nobody logs in
 to model-manager itself: muster forwards the session's IdP id_token
 byte-identical (MCPServer `auth.forwardToken: true`, rendered by the chart)
-and the portal sends the signed-in user's id_token through the gateway;
-model-manager validates them against the IdP's JWKS when their audience is one
-of `--oauth-trusted-audiences`. The chart passes the platform's OAuth client
-(`oauth.trustedAudiences`, else `global.identity.clientId`) plus the
-MCPServer's `requiredAudiences`: every forwarded token carries those by
+and the portal sends the signed-in user's id_token through the gateway.
+The chart lists the IdP in `OAUTH_TRUSTED_ISSUERS` as the OpenID Provider
+people sign in with (`openIDProvider`), so model-manager validates those
+id_tokens against the IdP's JWKS and presents them to the Kubernetes API. Its
+audiences are the platform's OAuth client (`global.identity.clientId`) plus
+the MCPServer's `requiredAudiences`: every forwarded token carries those by
 construction and they are what the kube-apiserver trusts, so a portal session
 — whose id_token carries them but not the platform client — is accepted too.
-An id_token whose audience matches none of them is refused with 401; the
-`Unknown JWT bearer refused` log line names the token's `token_audience` next
-to the `trusted_audiences`. The caller — the `email`,
-else the `sub` — is on every mutation's log line and recorded as
-`requestedBy` on jobs.
+An id_token whose audience matches none of them is refused with 401. The chart's values follow mcp-oauth's layout for
+MCP servers (`oauth.resourceServer`, `oauth.authorizationServer`); the
+earlier `oauth.*` keys still work for one more release and the release notes
+name each one that is set. Every mutation's log line names the user as
+`user.issuer` and `user.subject`, plus `user.actor.issuer` and
+`user.actor.subject` for a call an agent makes for them, never profile data;
+jobs record the `email`, else the `sub`, as `requestedBy`.
 
 `--downstream-oauth` goes one step further: everything a request does against
 the Kubernetes API (LLMInferenceServices, download Jobs, cache scans, kagent
-ModelConfigs, the discovery ConfigMap) presents the caller's IdP token, and
+ModelConfigs, the discovery ConfigMap) presents the caller's ID token, and
 the ServiceAccount holds no permissions at all — the chart renders none of its
 Roles and ClusterRoles; the caller's RBAC is the only RBAC. That needs an
 apiserver that trusts the IdP and the token's audience — a Dex install lists
 the cross-client audience the apiserver trusts in the MCPServer's
 `requiredAudiences` (muster requests it at login), a Google install's client
 id is the apiserver's `--oidc-client-id`. A request whose bearer yields no
-IdP token to present (one this server neither issued nor trusts as a forwarded
+ID token to present (one this server neither issued nor trusts as a forwarded
 id_token) is refused with 401 instead of running as the permissionless
 ServiceAccount. Nothing runs without a caller: the
 wiring reconciler and the re-adoption of running downloads after a restart
@@ -1001,13 +1014,13 @@ Commit mode needs the person's GitHub authority, offered with the chart's
 `github.enabled`. With `github.tokenExchange`, the MCPServer forwards the
 person's ID token as without commit mode, and only a commit asks for GitHub:
 model-manager exchanges the ID token at muster's RFC 8693 broker
-(`--github-token-exchange-endpoint`) for the person's user grant of the GitHub
+(`--github-token-exchange-endpoint`) for the person's user access token of the GitHub
 App `github.tokenExchange.audience` names, for that commit only, verifies it
 with `GET /user` and opens the pull request with it. Without the grant the MCP
 tool answers `grant_required` with `apps: [<audience>]`, and the MCPServer
 lists the audience under `auth.providerApps`, so muster turns the answer into
 that App's sign-in link. REST answers `403` with code `grant_required` and
-the same `apps`. GitHub refusing the grant with `401` answers
+the same `apps`. GitHub refusing the token with `401` answers
 `grant_required` too. The client ID comes from
 `--github-token-exchange-client-id`, else from the mounted Secret's
 `client-id` key. A call made by an agent acting for the person (an ID token
@@ -1016,7 +1029,7 @@ muster also attaches the person's App token to every call it forwards, which
 model-manager ignores, until giantswarm/giantswarm#39227 lets a server name an
 App without receiving it.
 
-Fetching the person's GitHub grant from muster is a temporary deviation from
+Fetching the person's GitHub user access token from muster is a temporary deviation from
 the MCP 2025-11-25 authorization rules (no token passthrough, no third-party
 credentials), decided in giantswarm/giantswarm#39213; the exit is
 model-manager holding its own grant through URL elicitation and ID-JAG

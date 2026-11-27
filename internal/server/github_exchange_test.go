@@ -24,7 +24,7 @@ import (
 
 	"github.com/giantswarm/model-manager/internal/backend"
 	"github.com/giantswarm/model-manager/internal/gitops"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // JWTs with a placeholder signature: the server validated the bearer before
@@ -172,21 +172,21 @@ func TestGitHubExchange(t *testing.T) {
 			switch scenario {
 			case "delegated actor":
 				user.ActorIssuer, user.ActorSubject = "https://agents.example.test", "agent"
-				ctx = identity.ContextWithToken(ctx, personToken)
+				ctx = idtoken.ContextWith(ctx, personToken)
 			case "missing identity token":
 			case "missing verified identity":
-				ctx = identity.ContextWithToken(t.Context(), personToken)
+				ctx = idtoken.ContextWith(t.Context(), personToken)
 			default:
-				ctx = identity.ContextWithToken(ctx, personToken)
+				ctx = idtoken.ContextWith(ctx, personToken)
 			}
 			resolve := newGitHubExchange(configuration, client, log)
 			result, err := resolve(ctx)
 			if scenario == "success" {
 				require.NoError(t, err)
-				require.Equal(t, &identity.GitHub{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
+				require.Equal(t, &gitops.GitHubUserAccessToken{Login: "alice", Token: "fixture-user-grant"}, result) // #nosec G101 -- synthetic broker response
 				_, err = resolve(ctx)
 				require.NoError(t, err)
-				require.Len(t, seen.on("/user"), 2, "user grants are not cached")
+				require.Len(t, seen.on("/user"), 2, "user access tokens are not cached")
 			} else {
 				require.Error(t, err)
 				require.Nil(t, result)
@@ -277,7 +277,7 @@ func TestGitHubExchangeClientID(t *testing.T) {
 	emptyFile := filepath.Join(dir, "empty")
 	require.NoError(t, os.WriteFile(emptyFile, nil, 0o600))
 	base := GitHubExchangeConfig{TokenEndpoint: localhostURL(upstream) + "/token", ClientSecretFile: secretFile, Audience: "manager-app", CAFile: caFile, APIURL: localhostURL(upstream)}
-	ctx := identity.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
+	ctx := idtoken.ContextWith(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	for _, tc := range []struct {
 		name, clientID, clientIDFile, want string
@@ -317,7 +317,7 @@ func TestGitHubExchangeRefusesIPLiteralPrivateEndpoint(t *testing.T) {
 	secretFile := filepath.Join(t.TempDir(), "client-secret")
 	require.NoError(t, os.WriteFile(secretFile, []byte("fixture-secret"), 0o600))
 	configuration := GitHubExchangeConfig{TokenEndpoint: upstream.URL + "/token", ClientID: "manager-client", ClientSecretFile: secretFile, Audience: "manager-app"}
-	ctx := identity.ContextWithToken(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
+	ctx := idtoken.ContextWith(oauthhandler.ContextWithUserInfo(t.Context(), &providers.UserInfo{ID: "alice", Issuer: "https://issuer.example.test"}), personToken)
 
 	result, err := newGitHubExchange(configuration, upstream.Client(), slog.New(slog.DiscardHandler))(ctx)
 	require.Error(t, err)

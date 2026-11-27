@@ -10,43 +10,55 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
-type principal struct{ Issuer, Subject, ActorIssuer, ActorSubject, ClientID string }
+// taskOwner is who a task belongs to: the user by issuer and subject (OpenID
+// Connect Core 5.7), the actor of a delegated call (RFC 8693 4.1) and the
+// OAuth client.
+type taskOwner struct{ Issuer, Subject, ActorIssuer, ActorSubject, ClientID string }
 type operationKey struct {
-	Owner                                                   principal
-	Type                                                    Type
-	Backend                                                 backend.Name
-	Model, Node, Preset, Resource, Parameters, Grant, Scope string
-	Wire                                                    bool
-	Object                                                  backend.JobObject
+	Owner                                                           taskOwner
+	Type                                                            Type
+	Backend                                                         backend.Name
+	Model, Node, Preset, Resource, Parameters, Authorization, Scope string
+	Wire                                                            bool
+	Object                                                          backend.JobObject
 }
 
-func callerPrincipal(ctx context.Context) (principal, error) {
-	caller, ok := identity.FromContext(ctx)
-	if !ok {
-		if _, hasToken := identity.TokenFromContext(ctx); hasToken {
-			return principal{}, ErrIdentityRequired
+// ownerFrom is the owner of a task the request starts or reads. mcp-oauth
+// guarantees the issuer and subject of a validated user. A delegated actor
+// has a subject and an optional issuer; a task also needs the client.
+// A request without a user owns nothing, unless it carries an ID token,
+// which only a validated user can.
+func ownerFrom(ctx context.Context) (taskOwner, error) {
+	user, ok := handler.UserInfoFromContext(ctx)
+	if !ok || user == nil {
+		if _, hasToken := idtoken.FromContext(ctx); hasToken {
+			return taskOwner{}, ErrIdentityRequired
 		}
-		return principal{}, nil
+		return taskOwner{}, nil
 	}
-	if caller.Issuer == "" || caller.Subject == "" || caller.ClientID == "" || (caller.ActorIssuer == "") != (caller.ActorSubject == "") {
-		return principal{}, ErrIdentityRequired
+	if user.ClientID == "" {
+		return taskOwner{}, ErrIdentityRequired
 	}
-	return principal{Issuer: caller.Issuer, Subject: caller.Subject, ActorIssuer: caller.ActorIssuer, ActorSubject: caller.ActorSubject, ClientID: caller.ClientID}, nil
+	return taskOwner{Issuer: user.Issuer, Subject: user.ID, ActorIssuer: user.ActorIssuer, ActorSubject: user.ActorSubject, ClientID: user.ClientID}, nil
 }
 
-func grantKey(ctx context.Context) string {
-	caller, ok := identity.FromContext(ctx)
-	if !ok {
+// authorizationKey digests what the request is authorized with: its scopes
+// (RFC 6749 3.3) and its ID token. Active tasks are shared only between
+// requests with the same authorization.
+func authorizationKey(ctx context.Context) string {
+	if user, ok := handler.UserInfoFromContext(ctx); !ok || user == nil {
 		return ""
 	}
-	scopes := slices.Clone(caller.Scopes)
+	scopes := slices.Clone(grantedScopes(ctx))
 	slices.Sort(scopes)
 	scopes = slices.Compact(scopes)
-	credential, _ := identity.TokenFromContext(ctx)
+	credential, _ := idtoken.FromContext(ctx)
 	credentialDigest := sha256.Sum256([]byte(credential))
 	encoded, _ := json.Marshal(struct {
 		Scopes     []string
@@ -56,30 +68,56 @@ func grantKey(ctx context.Context) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// CheckCaller requires a complete task identity or explicit anonymous mode.
-func (m *Manager) CheckCaller(ctx context.Context) error {
-	caller, err := callerPrincipal(ctx)
+// grantedScopes are the scopes mcp-oauth validated for this request, else
+// those recorded for the user.
+func grantedScopes(ctx context.Context) []string {
+	if scopes, ok := handler.ScopesFromContext(ctx); ok && len(scopes) > 0 {
+		return scopes
+	}
+	if user, ok := handler.UserInfoFromContext(ctx); ok && user != nil {
+		return user.Scopes
+	}
+	return nil
+}
+
+// requestedBy is the attribution recorded on a job: the user's email, else
+// the subject, or "" without a user.
+func requestedBy(ctx context.Context) string {
+	user, ok := handler.UserInfoFromContext(ctx)
+	switch {
+	case !ok || user == nil:
+		return ""
+	case user.Email != "":
+		return user.Email
+	default:
+		return user.ID
+	}
+}
+
+// CheckUser requires a user who can own a task, or explicit anonymous mode.
+func (m *Manager) CheckUser(ctx context.Context) error {
+	owner, err := ownerFrom(ctx)
 	if err != nil {
 		return err
 	}
-	if caller == (principal{}) && !m.allowAnonymous {
+	if owner == (taskOwner{}) && !m.allowAnonymous {
 		return ErrIdentityRequired
 	}
 	return ctx.Err()
 }
 
-// GetFor returns a caller-owned task after checking current backend access.
+// GetFor returns a task the user owns after checking current backend access.
 func (m *Manager) GetFor(ctx context.Context, id string) (Job, error) {
-	caller, err := callerPrincipal(ctx)
+	owner, err := ownerFrom(ctx)
 	if err != nil {
 		return Job{}, err
 	}
-	if caller == (principal{}) && !m.allowAnonymous {
+	if owner == (taskOwner{}) && !m.allowAnonymous {
 		return Job{}, ErrIdentityRequired
 	}
 	m.mu.Lock()
 	entry, ok := m.jobs[id]
-	if !ok || entry.owner != caller {
+	if !ok || entry.owner != owner {
 		m.mu.Unlock()
 		return Job{}, ErrNotFound
 	}
@@ -93,13 +131,13 @@ func (m *Manager) GetFor(ctx context.Context, id string) (Job, error) {
 	return job, nil
 }
 
-// ListFor omits tasks the caller does not own or cannot currently access.
+// ListFor omits tasks the user does not own or cannot currently access.
 func (m *Manager) ListFor(ctx context.Context, backendName backend.Name) ([]Job, error) {
-	caller, err := callerPrincipal(ctx)
+	owner, err := ownerFrom(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if caller == (principal{}) && !m.allowAnonymous {
+	if owner == (taskOwner{}) && !m.allowAnonymous {
 		return nil, ErrIdentityRequired
 	}
 	all := m.List()

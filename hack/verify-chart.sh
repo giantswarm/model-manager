@@ -14,11 +14,14 @@ helm() { command helm --kube-context "$CHART_KUBE_CONTEXT" "$@"; }
 
 fail() { echo "verify-chart: FAIL: $*" >&2; exit 1; }
 
-# trusted prints the value of --oauth-trusted-audiences the Deployment passes
-# for the given values, or nothing when the flag is not rendered.
+# trusted prints the audiences of the OAUTH_TRUSTED_ISSUERS entry the
+# Deployment renders for the provider people sign in with, comma-separated, or
+# nothing when no entry is rendered.
 trusted() {
   helm template mm "$CHART" --show-only templates/deployment.yaml "$@" \
-    | { grep -o -- '--oauth-trusted-audiences=[^ ]*' || true; } | cut -d= -f2-
+    | { grep -A1 -- '- name: OAUTH_TRUSTED_ISSUERS$' || true; } \
+    | { grep -o 'audiences\\":\[[^]]*' || true; } \
+    | sed 's/^[^[]*\[//; s/\\"//g'
 }
 
 # A Dex install that sets only the platform identity contract.
@@ -93,7 +96,7 @@ got=$(trusted --set oauth.enabled=true --set oauth.provider=google \
 
 # OAuth off renders no flag.
 got=$(trusted)
-[ -z "$got" ] || fail "oauth disabled: want no --oauth-trusted-audiences, got '$got'"
+[ -z "$got" ] || fail "oauth disabled: want no OAUTH_TRUSTED_ISSUERS, got '$got'"
 
 # The lemonade backend renders its own flags and none of ollama's or kserve's.
 args() {
@@ -320,8 +323,8 @@ echo "$got" | grep -A6 -- 'OTLP collector' | grep >/dev/null -- 'cidr: 0.0.0.0/0
 echo "$got" | grep -A9 -- 'OTLP collector' | grep >/dev/null -- 'port: 443$' \
   || fail "networkpolicy: the OTLP egress to an https collector without a port is not 443"
 
-# github.tokenExchange: commit mode with the person's grant fetched per
-# commit. The MCPServer forwards the ID token and lists the audience under
+# github.tokenExchange: commit mode with the person's user access token fetched
+# per commit. The MCPServer forwards the ID token and lists the audience under
 # providerApps (no App pin); the Deployment mounts the whole Secret and passes
 # the client ID file; inline clientSecret renders the chart's Secret.
 GHX=("${DEX[@]}" --set oauth.downstream.enabled=true --set github.enabled=true

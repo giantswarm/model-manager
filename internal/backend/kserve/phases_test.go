@@ -21,7 +21,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/giantswarm/model-manager/internal/backend"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // The proof-1 timeline of a fresh serve on a scale-to-zero L4 pool
@@ -812,12 +812,12 @@ func TestListLoadedNamesACrashLoopingRuntime(t *testing.T) {
 
 	// A caller who may not read pods/log.
 	f.b.logs = func(ctx context.Context, _, name string, _ corev1.PodLogOptions) (string, error) {
-		if _, ok := identity.TokenFromContext(ctx); ok {
+		if _, ok := idtoken.FromContext(ctx); ok {
 			return "", apierrors.NewForbidden(schema.GroupResource{Resource: "pods/log"}, name, errors.New(`User "viewer" cannot get resource "pods/log" in API group "" in the namespace "serving"`))
 		}
 		return vllmCrashLog, nil
 	}
-	loaded, err = f.b.ListLoaded(identity.ContextWithToken(ctx, "viewer-token"))
+	loaded, err = f.b.ListLoaded(idtoken.ContextWith(ctx, "viewer-token"))
 	require.NoError(t, err)
 	require.Len(t, loaded, 1)
 	assert.Contains(t, loaded[0].Message, "runtime crashed 3× (exit 1); the crashed container's log could not be read (")

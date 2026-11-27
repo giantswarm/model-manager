@@ -27,8 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/giantswarm/mcp-oauth/handler"
+
 	"github.com/giantswarm/model-manager/internal/api"
-	"github.com/giantswarm/model-manager/internal/identity"
+	"github.com/giantswarm/model-manager/internal/idtoken"
 )
 
 // privateIdP is an OIDC issuer the production chain reaches as it reaches
@@ -227,17 +229,11 @@ func (p *privateIdP) idToken(t *testing.T, aud []string) string {
 	return tok
 }
 
-func (p *privateIdP) config(jwksHosts ...string) OAuthConfig {
-	return OAuthConfig{
-		BaseURL:                 "http://localhost:8080",
-		Provider:                ProviderDex,
-		DexIssuerURL:            p.issuer,
-		DexClientID:             "agent-platform",
-		DexClientSecret:         "lab-only",
-		DexCAFile:               p.caFile,
-		TrustedAudiences:        []string{"agent-platform"},
-		AllowPrivateIPJWKSHosts: jwksHosts,
-	}
+func (p *privateIdP) config(t *testing.T, jwksHosts ...string) OAuthConfig {
+	t.Helper()
+	environment := dexEnvironment(p.issuer, p.caFile)
+	environment["OAUTH_ALLOW_PRIVATE_IP_JWKS_HOSTS"] = strings.Join(jwksHosts, ",")
+	return OAuthConfig{Settings: oauthSettings(t, environment)}
 }
 
 // callThroughChain sends one request with bearer through the production
@@ -253,7 +249,9 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 	})
 	var caller string
 	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller = identity.Caller(r.Context())
+		if user, ok := handler.UserInfoFromContext(r.Context()); ok {
+			caller = user.Email
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)
@@ -271,14 +269,14 @@ func callThroughChain(t *testing.T, cfg OAuthConfig, bearer string) (int, string
 func TestForwardedTokenThroughTheProductionChain(t *testing.T) {
 	idp := newPrivateIdP(t, "")
 
-	code, caller := callThroughChain(t, idp.config(), idp.idToken(t, []string{"agent-platform"}))
+	code, caller := callThroughChain(t, idp.config(t), idp.idToken(t, []string{"agent-platform"}))
 	require.Equal(t, http.StatusNoContent, code)
 	require.Equal(t, "admin@lab.local", caller)
 
-	code, _ = callThroughChain(t, idp.config(), idp.idToken(t, []string{"someone-else"}))
+	code, _ = callThroughChain(t, idp.config(t), idp.idToken(t, []string{"someone-else"}))
 	require.Equal(t, http.StatusUnauthorized, code, "an untrusted audience is refused")
 
-	code, _ = callThroughChain(t, idp.config(), "")
+	code, _ = callThroughChain(t, idp.config(t), "")
 	require.Equal(t, http.StatusUnauthorized, code, "no token, no API")
 }
 
@@ -289,10 +287,69 @@ func TestJWKSOnAnotherPrivateHost(t *testing.T) {
 	idp := newPrivateIdP(t, privateKeysHost)
 	token := idp.idToken(t, []string{"agent-platform"})
 
-	code, _ := callThroughChain(t, idp.config(), token)
+	code, _ := callThroughChain(t, idp.config(t), token)
 	require.Equal(t, http.StatusUnauthorized, code, "an unlisted private JWKS host is refused")
 
-	code, caller := callThroughChain(t, idp.config(privateKeysHost), token)
+	code, caller := callThroughChain(t, idp.config(t, privateKeysHost), token)
 	require.Equal(t, http.StatusNoContent, code)
 	require.Equal(t, "admin@lab.local", caller)
+}
+
+// trustedIssuerConfig declares the IdP as the OpenID Provider people sign in
+// with (an OAUTH_TRUSTED_ISSUERS entry with openIDProvider) instead of
+// trusting audiences of forwarded ID tokens, as the chart renders it.
+func (p *privateIdP) trustedIssuerConfig(t *testing.T, downstream bool, jwksHosts ...string) OAuthConfig {
+	t.Helper()
+	environment := dexEnvironment(p.issuer, p.caFile)
+	delete(environment, "OAUTH_TRUSTED_AUDIENCES")
+	entry, err := json.Marshal([]map[string]any{{
+		"issuer":                  p.issuer,
+		"jwksURI":                 p.issuer + "/keys",
+		"audiences":               []string{"agent-platform", "kubernetes"},
+		"acceptedTypHeaders":      []string{"", "JWT"},
+		"caFile":                  p.caFile,
+		"allowPrivateIPJWKSHosts": jwksHosts,
+		"openIDProvider":          true,
+	}})
+	require.NoError(t, err)
+	environment["OAUTH_TRUSTED_ISSUERS"] = string(entry)
+	return OAuthConfig{Settings: oauthSettings(t, environment), DownstreamOAuth: downstream}
+}
+
+// TestOpenIDProviderTrustedIssuer pins that the IdP as a trusted issuer
+// marked openIDProvider admits what audience trust admits: the same caller,
+// and with downstream OAuth the bearer itself as the token presented to the
+// Kubernetes API.
+func TestOpenIDProviderTrustedIssuer(t *testing.T) {
+	idp := newPrivateIdP(t, "")
+	token := idp.idToken(t, []string{"kubernetes"})
+
+	code, _ := callThroughChain(t, idp.trustedIssuerConfig(t, false), token)
+	require.Equal(t, http.StatusUnauthorized, code, "a private JWKS host must be listed")
+
+	code, caller := callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), token)
+	require.Equal(t, http.StatusNoContent, code)
+	require.Equal(t, "admin@lab.local", caller)
+
+	code, _ = callThroughChain(t, idp.trustedIssuerConfig(t, false, privateIssuerHost), idp.idToken(t, []string{"someone-else"}))
+	require.Equal(t, http.StatusUnauthorized, code, "an untrusted audience is refused")
+
+	o, err := newOAuth(idp.trustedIssuerConfig(t, true, privateIssuerHost), "/mcp", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		o.shutdown(ctx)
+	})
+	var presented string
+	h := o.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented, _ = idtoken.FromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, api.Prefix+"/models", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, token, presented, "the forwarded ID token is what the Kubernetes API sees")
 }
